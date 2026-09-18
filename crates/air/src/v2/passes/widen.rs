@@ -186,13 +186,13 @@ impl Pass for Widen<'_> {
         // and a value with no definition is not a function any more --
         // `verify` says so, and the pipeline runs it. This never showed while
         // the only loop the corpus widened was store-only.
-        if stats.replaced > 0 {
-            if let Err(e) = super::compact_values(f) {
-                if std::env::var_os("WIDEN_DUMP_BAD").is_some() {
-                    eprintln!("WIDEN BAD: {e}\n{}", f.dump());
-                }
-                return Err(e);
+        if stats.replaced > 0
+            && let Err(e) = super::compact_values(f)
+        {
+            if std::env::var_os("WIDEN_DUMP_BAD").is_some() {
+                eprintln!("WIDEN BAD: {e}\n{}", f.dump());
             }
+            return Err(e);
         }
         Ok(stats)
     }
@@ -318,10 +318,10 @@ fn check(
     // that closes the induction cycle a fresh constant operand. It has no
     // case for `UnOp::Incr`/`Decr`, which the analysis does accept, so refuse
     // here rather than widen a loop whose step will not move.
-    if let Some((iv, step)) = plan.induction {
-        if induction_step_site(f, plan, iv, step, info).is_none() {
-            return Err(Decline::UnscalableInductionStep(iv));
-        }
+    if let Some((iv, step)) = plan.induction
+        && induction_step_site(f, plan, iv, step, info).is_none()
+    {
+        return Err(Decline::UnscalableInductionStep(iv));
     }
     match const_trip_count(f, plan, info) {
         Some(t) => {

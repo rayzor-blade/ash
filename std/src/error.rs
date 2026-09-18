@@ -21,7 +21,7 @@ thread_local! {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-extern "C" {
+unsafe extern "C" {
     /// Keeps its own frame pointer so the walker has a place to start; see
     /// stack_boundary.c. Rust owns the primitive's name, because a cdylib
     /// exports Rust symbols and hides the rest.
@@ -81,7 +81,7 @@ impl VDynamicException {
     }
 
     pub unsafe fn from_raw(ptr: *mut vdynamic) -> Self {
-        VDynamicException(Box::from_raw(ptr))
+        unsafe { VDynamicException(Box::from_raw(ptr)) }
     }
 }
 
@@ -100,51 +100,53 @@ unsafe impl Send for VDynamicException {}
 /// guarded and anything unrecognized falls back to kind+pointer — the old
 /// output, as a floor rather than a ceiling.
 unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
-    if v.is_null() {
-        return "null".into();
-    }
-    let t = (*v).t;
-    if t.is_null() || (t as usize) < 0x10000 {
-        return format!("<corrupt type> ptr={v:p}");
-    }
-    let kind = (*t).kind;
-    let utf16z = |p: *const hl::uchar| -> String {
-        if p.is_null() {
+    unsafe {
+        if v.is_null() {
             return "null".into();
         }
-        let mut n = 0usize;
-        while n < 4096 && *p.add(n) != 0 {
-            n += 1;
+        let t = (*v).t;
+        if t.is_null() || (t as usize) < 0x10000 {
+            return format!("<corrupt type> ptr={v:p}");
         }
-        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
-    };
-    if kind == hl::hl_type_kind_HBYTES {
-        // A thrown bytes value is a message string in every case the stdlib
-        // produces (hl_error goes through here).
-        return format!("\"{}\"", utf16z((*v).v.bytes as *const hl::uchar));
-    }
-    if kind == hl::hl_type_kind_HOBJ {
-        let obj = (*t).__bindgen_anon_1.obj;
-        if !obj.is_null() && (obj as usize) >= 0x10000 {
-            let name = utf16z((*obj).name);
-            // A String object's payload is worth printing whole; for any
-            // other class the name alone locates the throw site. Exactly
-            // "String": the interpreter's old first-character truncation made
-            // an `"S"` alternative look necessary once, and matching it here
-            // would read an arbitrary S-named class's fields as bytes/length.
-            if name == "String" {
-                // Its first field, which is one pointer past the type. Not a
-                // fixed eight: a pointer is four bytes on a 32-bit target, and
-                // reading at eight there lands past the field and prints an
-                // empty message for every string ever thrown.
-                let bytes = *((v as *const u8).add(mem::size_of::<*mut hl::hl_type>())
-                    as *const *const hl::uchar);
-                return format!("String \"{}\"", utf16z(bytes));
+        let kind = (*t).kind;
+        let utf16z = |p: *const hl::uchar| -> String {
+            if p.is_null() {
+                return "null".into();
             }
-            return format!("instance of {name} ({v:p})");
+            let mut n = 0usize;
+            while n < 4096 && *p.add(n) != 0 {
+                n += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+        };
+        if kind == hl::hl_type_kind_HBYTES {
+            // A thrown bytes value is a message string in every case the stdlib
+            // produces (hl_error goes through here).
+            return format!("\"{}\"", utf16z((*v).v.bytes as *const hl::uchar));
         }
+        if kind == hl::hl_type_kind_HOBJ {
+            let obj = (*t).__bindgen_anon_1.obj;
+            if !obj.is_null() && (obj as usize) >= 0x10000 {
+                let name = utf16z((*obj).name);
+                // A String object's payload is worth printing whole; for any
+                // other class the name alone locates the throw site. Exactly
+                // "String": the interpreter's old first-character truncation made
+                // an `"S"` alternative look necessary once, and matching it here
+                // would read an arbitrary S-named class's fields as bytes/length.
+                if name == "String" {
+                    // Its first field, which is one pointer past the type. Not a
+                    // fixed eight: a pointer is four bytes on a 32-bit target, and
+                    // reading at eight there lands past the field and prints an
+                    // empty message for every string ever thrown.
+                    let bytes = *((v as *const u8).add(mem::size_of::<*mut hl::hl_type>())
+                        as *const *const hl::uchar);
+                    return format!("String \"{}\"", utf16z(bytes));
+                }
+                return format!("instance of {name} ({v:p})");
+            }
+        }
+        format!("kind={kind} ptr={v:p}")
     }
-    format!("kind={kind} ptr={v:p}")
 }
 
 /// Print an exception caught by a VM-level safe-call boundary.
@@ -155,15 +157,17 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
 /// `hlp_throw` also prevents the JIT runner from dereferencing GC objects.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_print_uncaught_exception(v: *mut hl::vdynamic) {
-    let message = describe_exception(v);
-    // Over the source when it is reachable, which is the same choice the CLI
-    // makes for an interpreted run; the flat list otherwise.
-    #[cfg(not(target_family = "wasm"))]
-    if print_exception_report(&message) {
-        return;
+    unsafe {
+        let message = describe_exception(v);
+        // Over the source when it is reachable, which is the same choice the CLI
+        // makes for an interpreted run; the flat list otherwise.
+        #[cfg(not(target_family = "wasm"))]
+        if print_exception_report(&message) {
+            return;
+        }
+        eprintln!("[ash] uncaught exception: {message}");
+        print_exception_stack();
     }
-    eprintln!("[ash] uncaught exception: {message}");
-    print_exception_stack();
 }
 
 /// Render the captured frames over the program's source. False when there is
@@ -195,21 +199,23 @@ unsafe fn print_exception_report(message: &str) -> bool {
 /// makes one per Haxe function on the stack, compiled frames included, and the
 /// resolver hands back UTF-16.
 unsafe fn frame_text(frame: usize) -> Option<String> {
-    let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
-    if callback == 0 {
-        return None;
+    unsafe {
+        let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
+        if callback == 0 {
+            return None;
+        }
+        let callback: ResolveSymbol = std::mem::transmute(callback);
+        let mut buffer = [0u8; 512];
+        let mut len: i32 = buffer.len() as i32;
+        let text = callback(frame as *mut c_void, buffer.as_mut_ptr(), &mut len);
+        if text.is_null() || len <= 0 {
+            return None;
+        }
+        // `len` counts code units, and the resolver may answer from storage of
+        // its own rather than the buffer it was handed.
+        let units = std::slice::from_raw_parts(text as *const u16, len as usize);
+        Some(String::from_utf16_lossy(units))
     }
-    let callback: ResolveSymbol = std::mem::transmute(callback);
-    let mut buffer = [0u8; 512];
-    let mut len: i32 = buffer.len() as i32;
-    let text = callback(frame as *mut c_void, buffer.as_mut_ptr(), &mut len);
-    if text.is_null() || len <= 0 {
-        return None;
-    }
-    // `len` counts code units, and the resolver may answer from storage of
-    // its own rather than the buffer it was handed.
-    let units = std::slice::from_raw_parts(text as *const u16, len as usize);
-    Some(String::from_utf16_lossy(units))
 }
 
 /// The frames the throw recorded, as far as anything can name them.
@@ -224,14 +230,16 @@ unsafe fn frame_text(frame: usize) -> Option<String> {
 /// was installed has no frames, and inventing a line for that would be worse
 /// than the silence.
 unsafe fn print_exception_stack() {
-    let frames = EXCEPTION_STACK.with(|saved| saved.borrow().clone());
-    if frames.is_empty() {
-        return;
-    }
-    for frame in frames {
-        match frame_text(frame) {
-            Some(text) => eprintln!("[ash]   at {text}"),
-            None => eprintln!("[ash]   at {frame:#x}"),
+    unsafe {
+        let frames = EXCEPTION_STACK.with(|saved| saved.borrow().clone());
+        if frames.is_empty() {
+            return;
+        }
+        for frame in frames {
+            match frame_text(frame) {
+                Some(text) => eprintln!("[ash]   at {text}"),
+                None => eprintln!("[ash]   at {frame:#x}"),
+            }
         }
     }
 }
@@ -337,62 +345,65 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
     names: *const *const std::os::raw::c_char,
     count: usize,
 ) {
-    if starts.is_null() || names.is_null() {
-        return;
-    }
-    let mut table = Vec::with_capacity(count);
-    let mut by_findex = Vec::with_capacity(count);
-    #[cfg(not(target_family = "wasm"))]
-    let mut starts_by_findex: Vec<(usize, u32)> = Vec::with_capacity(count);
-    for i in 0..count {
-        let start = *starts.add(i) as usize;
-        let name = *names.add(i);
-        let text: &'static str = if name.is_null() {
-            ""
-        } else {
-            Box::leak(
-                std::ffi::CStr::from_ptr(name)
-                    .to_string_lossy()
-                    .into_owned()
-                    .into_boxed_str(),
-            )
-        };
-        by_findex.push(text);
-        if start == 0 || name.is_null() {
-            continue;
+    unsafe {
+        if starts.is_null() || names.is_null() {
+            return;
         }
+        let mut table = Vec::with_capacity(count);
+        let mut by_findex = Vec::with_capacity(count);
         #[cfg(not(target_family = "wasm"))]
-        starts_by_findex.push((start, i as u32));
-        table.push((start, text));
-    }
-    table.sort_by_key(|(start, _)| *start);
-    table.dedup_by_key(|(start, _)| *start);
-    #[cfg(not(target_family = "wasm"))]
-    {
-        starts_by_findex.sort_by_key(|(start, _)| *start);
-        starts_by_findex.dedup_by_key(|(start, _)| *start);
-        *AOT_FINDEX_BY_START
+        let mut starts_by_findex: Vec<(usize, u32)> = Vec::with_capacity(count);
+        for i in 0..count {
+            let start = *starts.add(i) as usize;
+            let name = *names.add(i);
+            let text: &'static str = if name.is_null() {
+                ""
+            } else {
+                Box::leak(
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_boxed_str(),
+                )
+            };
+            by_findex.push(text);
+            if start == 0 || name.is_null() {
+                continue;
+            }
+            #[cfg(not(target_family = "wasm"))]
+            starts_by_findex.push((start, i as u32));
+            table.push((start, text));
+        }
+        table.sort_by_key(|(start, _)| *start);
+        table.dedup_by_key(|(start, _)| *start);
+        #[cfg(not(target_family = "wasm"))]
+        {
+            starts_by_findex.sort_by_key(|(start, _)| *start);
+            starts_by_findex.dedup_by_key(|(start, _)| *start);
+            *AOT_FINDEX_BY_START
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = starts_by_findex;
+        }
+        *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
+        *AOT_NAMES_BY_FINDEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = starts_by_findex;
-    }
-    *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
-    *AOT_NAMES_BY_FINDEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = by_findex;
-    // A wasm module has no machine stack to walk, so its pair reads the
-    // shadow stack its functions maintain; everywhere else the frame-pointer
-    // walker and the address table do. Neither displaces a pair the JIT
-    // installed first.
-    #[cfg(target_family = "wasm")]
-    let (resolve, capture): (ResolveSymbol, CaptureStack) =
-        (shadow::resolve_symbol, shadow::capture_stack);
-    #[cfg(not(target_family = "wasm"))]
-    let (resolve, capture): (ResolveSymbol, CaptureStack) = (aot_resolve_symbol, aot_capture_stack);
-    if RESOLVE_SYMBOL.load(Ordering::Acquire) == 0 {
-        RESOLVE_SYMBOL.store(resolve as usize, Ordering::Release);
-    }
-    if CAPTURE_STACK.load(Ordering::Acquire) == 0 {
-        CAPTURE_STACK.store(capture as usize, Ordering::Release);
+            .unwrap_or_else(|e| e.into_inner()) = by_findex;
+        // A wasm module has no machine stack to walk, so its pair reads the
+        // shadow stack its functions maintain; everywhere else the frame-pointer
+        // walker and the address table do. Neither displaces a pair the JIT
+        // installed first.
+        #[cfg(target_family = "wasm")]
+        let (resolve, capture): (ResolveSymbol, CaptureStack) =
+            (shadow::resolve_symbol, shadow::capture_stack);
+        #[cfg(not(target_family = "wasm"))]
+        let (resolve, capture): (ResolveSymbol, CaptureStack) =
+            (aot_resolve_symbol, aot_capture_stack);
+        if RESOLVE_SYMBOL.load(Ordering::Acquire) == 0 {
+            RESOLVE_SYMBOL.store(resolve as usize, Ordering::Release);
+        }
+        if CAPTURE_STACK.load(Ordering::Acquire) == 0 {
+            CAPTURE_STACK.store(capture as usize, Ordering::Release);
+        }
     }
 }
 
@@ -406,25 +417,27 @@ pub unsafe extern "C" fn hlp_register_aot_debug_files(
     files: *const *const std::os::raw::c_char,
     count: usize,
 ) {
-    if files.is_null() {
-        return;
+    unsafe {
+        if files.is_null() {
+            return;
+        }
+        let table: Vec<&'static str> = (0..count)
+            .map(|i| {
+                let file = *files.add(i);
+                if file.is_null() {
+                    ""
+                } else {
+                    Box::leak(
+                        std::ffi::CStr::from_ptr(file)
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_boxed_str(),
+                    )
+                }
+            })
+            .collect();
+        *AOT_DEBUG_FILES.lock().unwrap_or_else(|e| e.into_inner()) = table;
     }
-    let table: Vec<&'static str> = (0..count)
-        .map(|i| {
-            let file = *files.add(i);
-            if file.is_null() {
-                ""
-            } else {
-                Box::leak(
-                    std::ffi::CStr::from_ptr(file)
-                        .to_string_lossy()
-                        .into_owned()
-                        .into_boxed_str(),
-                )
-            }
-        })
-        .collect();
-    *AOT_DEBUG_FILES.lock().unwrap_or_else(|e| e.into_inner()) = table;
 }
 
 /// Each body's entry position, by findex, registered by an ahead-of-time
@@ -438,7 +451,7 @@ pub unsafe extern "C" fn hlp_register_aot_positions(positions: *const u64, count
     #[cfg(not(target_family = "wasm"))]
     if !positions.is_null() {
         *AOT_POSITIONS.lock().unwrap_or_else(|e| e.into_inner()) =
-            std::slice::from_raw_parts(positions, count).to_vec();
+            unsafe { std::slice::from_raw_parts(positions, count) }.to_vec();
     }
     #[cfg(target_family = "wasm")]
     let _ = (positions, count);
@@ -575,22 +588,26 @@ mod shadow {
 
     /// Open a frame for `findex`; the returned slot receives its positions.
     pub unsafe fn push(findex: u32) -> *mut u64 {
-        let depth = &mut *STACK.depth.get();
-        let at = *depth;
-        *depth = at + 1;
-        if at < CAP {
-            let frame = &mut (*STACK.frames.get())[at];
-            *frame = Frame { pos: 0, findex };
-            &mut frame.pos
-        } else {
-            STACK.scratch.get()
+        unsafe {
+            let depth = &mut *STACK.depth.get();
+            let at = *depth;
+            *depth = at + 1;
+            if at < CAP {
+                let frame = &mut (*STACK.frames.get())[at];
+                *frame = Frame { pos: 0, findex };
+                &mut frame.pos
+            } else {
+                STACK.scratch.get()
+            }
         }
     }
 
     /// Close the innermost frame.
     pub unsafe fn pop() {
-        let depth = &mut *STACK.depth.get();
-        *depth = depth.saturating_sub(1);
+        unsafe {
+            let depth = &mut *STACK.depth.get();
+            *depth = depth.saturating_sub(1);
+        }
     }
 
     pub fn depth() -> usize {
@@ -632,16 +649,18 @@ mod shadow {
     /// machine-stack walkers report them, so `haxe.NativeStackTrace`'s
     /// arithmetic holds unchanged. With a null `output` it only counts.
     pub unsafe extern "C" fn capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
-        let depth = depth().min(CAP);
-        if output.is_null() {
-            return depth as i32;
+        unsafe {
+            let depth = depth().min(CAP);
+            if output.is_null() {
+                return depth as i32;
+            }
+            let frames = &*STACK.frames.get();
+            let written = depth.min(capacity.max(0) as usize);
+            for (i, frame) in frames[..depth].iter().rev().take(written).enumerate() {
+                *output.add(i) = symbol_for(frame.findex, frame.pos);
+            }
+            written as i32
         }
-        let frames = &*STACK.frames.get();
-        let written = depth.min(capacity.max(0) as usize);
-        for (i, frame) in frames[..depth].iter().rev().take(written).enumerate() {
-            *output.add(i) = symbol_for(frame.findex, frame.pos);
-        }
-        written as i32
     }
 
     /// The `ResolveSymbol` callback: `Class.method(file:line)` for a symbol
@@ -653,20 +672,22 @@ mod shadow {
         _buffer: *mut u8,
         buffer_len: *mut i32,
     ) -> *mut u8 {
-        if symbol.is_null() {
-            return std::ptr::null_mut();
+        unsafe {
+            if symbol.is_null() {
+                return std::ptr::null_mut();
+            }
+            let mut cache = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+            let text = *cache.entry(symbol as usize).or_insert_with(|| {
+                let Symbol { findex, pos } = *(symbol as *const Symbol);
+                let mut units: Vec<u16> = super::format_frame(findex, pos).encode_utf16().collect();
+                units.push(0);
+                Box::leak(units.into_boxed_slice())
+            });
+            if !buffer_len.is_null() {
+                *buffer_len = (text.len() - 1) as i32;
+            }
+            text.as_ptr() as *mut u8
         }
-        let mut cache = TEXT.lock().unwrap_or_else(|e| e.into_inner());
-        let text = *cache.entry(symbol as usize).or_insert_with(|| {
-            let Symbol { findex, pos } = *(symbol as *const Symbol);
-            let mut units: Vec<u16> = super::format_frame(findex, pos).encode_utf16().collect();
-            units.push(0);
-            Box::leak(units.into_boxed_slice())
-        });
-        if !buffer_len.is_null() {
-            *buffer_len = (text.len() - 1) as i32;
-        }
-        text.as_ptr() as *mut u8
     }
 }
 
@@ -678,14 +699,14 @@ mod shadow {
 #[cfg(target_family = "wasm")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_shadow_push(findex: u32) -> *mut u64 {
-    shadow::push(findex)
+    unsafe { shadow::push(findex) }
 }
 
 /// Close the innermost shadow frame; every `Ret` of a wasm module calls it.
 #[cfg(target_family = "wasm")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_shadow_pop() {
-    shadow::pop()
+    unsafe { shadow::pop() }
 }
 
 /// The text of one shadow frame, in the shape Haxe's parser expects:
@@ -749,11 +770,7 @@ fn aot_symbol_for_pc(pc: usize) -> Option<&'static str> {
         .get(i + 1)
         .map(|(next, _)| *next)
         .unwrap_or(start.saturating_add(AOT_MAX_BODY_BYTES));
-    if pc < end {
-        Some(name)
-    } else {
-        None
-    }
+    if pc < end { Some(name) } else { None }
 }
 
 /// Whether the symbol `dladdr` gives a frame says it belongs to the runtime
@@ -787,26 +804,28 @@ fn aot_name_is_runtime(name: &str) -> bool {
 /// bodies would otherwise be attributed to the body before it.
 #[cfg(unix)]
 unsafe fn aot_frame_in_program(pc: usize) -> bool {
-    // Answered once per address and remembered. `dladdr` is not a lookup: it
-    // walks the containing image's symbol table linearly, and an AOT build of
-    // a game carries tens of thousands of symbols. A throw walks up to 256
-    // frames and asks about every one, so the cost is scanned-symbols x
-    // frames x throws.
-    //
-    // MBHaxe throws inside collision search on every physics tick. That put
-    // 98% of the process in dyld's findClosestSymbol and read to the player
-    // as a hard freeze -- the AOT twin of the symbol-arena freeze fixed in
-    // aa7dda2, which only ever covered the JIT walker.
-    //
-    // Caching is sound because the answer cannot change: an address either
-    // lies in program text or it does not. The table is bounded by the code
-    // actually appearing in a stack, not by the number of throws.
-    if let Some(known) = aot_frame_class_cached(pc) {
-        return known;
+    unsafe {
+        // Answered once per address and remembered. `dladdr` is not a lookup: it
+        // walks the containing image's symbol table linearly, and an AOT build of
+        // a game carries tens of thousands of symbols. A throw walks up to 256
+        // frames and asks about every one, so the cost is scanned-symbols x
+        // frames x throws.
+        //
+        // MBHaxe throws inside collision search on every physics tick. That put
+        // 98% of the process in dyld's findClosestSymbol and read to the player
+        // as a hard freeze -- the AOT twin of the symbol-arena freeze fixed in
+        // aa7dda2, which only ever covered the JIT walker.
+        //
+        // Caching is sound because the answer cannot change: an address either
+        // lies in program text or it does not. The table is bounded by the code
+        // actually appearing in a stack, not by the number of throws.
+        if let Some(known) = aot_frame_class_cached(pc) {
+            return known;
+        }
+        let verdict = aot_frame_in_program_uncached(pc);
+        aot_frame_class_remember(pc, verdict);
+        verdict
     }
-    let verdict = aot_frame_in_program_uncached(pc);
-    aot_frame_class_remember(pc, verdict);
-    verdict
 }
 
 /// Sorted by address, like [`AOT_SYMBOLS`], and read the same way.
@@ -832,26 +851,30 @@ fn aot_frame_class_remember(pc: usize, verdict: bool) {
 
 #[cfg(unix)]
 unsafe fn aot_frame_in_program_uncached(pc: usize) -> bool {
-    let mut info: libc::Dl_info = std::mem::zeroed();
-    let named = libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_sname.is_null();
-    // Borrowed, not owned: `to_string_lossy` only allocates for a name that is
-    // not valid UTF-8, and nothing here outlives the call.
-    let dl_name = if named {
-        Some(std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy())
-    } else {
-        None
-    };
-    if aot_symbol_for_pc(pc).is_some() {
-        return match &dl_name {
-            // `ash_f*` is what the sharded emitter calls a body, so the name
-            // agreeing with the table is not a veto.
-            Some(n) => n.trim_start_matches('_').starts_with("ash_f") || !aot_name_is_runtime(n),
-            None => true,
+    unsafe {
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        let named = libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_sname.is_null();
+        // Borrowed, not owned: `to_string_lossy` only allocates for a name that is
+        // not valid UTF-8, and nothing here outlives the call.
+        let dl_name = if named {
+            Some(std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy())
+        } else {
+            None
         };
-    }
-    match dl_name {
-        Some(n) => !aot_name_is_runtime(&n),
-        None => false,
+        if aot_symbol_for_pc(pc).is_some() {
+            return match &dl_name {
+                // `ash_f*` is what the sharded emitter calls a body, so the name
+                // agreeing with the table is not a veto.
+                Some(n) => {
+                    n.trim_start_matches('_').starts_with("ash_f") || !aot_name_is_runtime(n)
+                }
+                None => true,
+            };
+        }
+        match dl_name {
+            Some(n) => !aot_name_is_runtime(&n),
+            None => false,
+        }
     }
 }
 
@@ -865,31 +888,33 @@ unsafe fn aot_frame_in_program(pc: usize) -> bool {
 
 #[cfg(unix)]
 unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
-    // The table first, and by the pc itself: where dladdr is blind -- every
-    // hidden body on Linux -- it is the only thing that can name the frame.
-    if let Some(name) = aot_symbol_for_pc(pc) {
-        return Some(name.to_string());
+    unsafe {
+        // The table first, and by the pc itself: where dladdr is blind -- every
+        // hidden body on Linux -- it is the only thing that can name the frame.
+        if let Some(name) = aot_symbol_for_pc(pc) {
+            return Some(name.to_string());
+        }
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
+            return None;
+        }
+        // dladdr knows which function CONTAINS the address (inlining moves a
+        // return address into whatever body absorbed the call); the registered
+        // table knows that function's Haxe name. The emitter's own LLVM symbols
+        // are abbreviations (`t`, `o.1234`), so they are only the last resort.
+        if let Some(name) = aot_symbol_for_pc(info.dli_saddr as usize) {
+            return Some(name.to_string());
+        }
+        let raw = std::ffi::CStr::from_ptr(info.dli_sname)
+            .to_string_lossy()
+            .into_owned();
+        let name = raw.trim_start_matches('_');
+        let name = match name.rfind('.') {
+            Some(i) if name[i + 1..].chars().all(|c| c.is_ascii_digit()) => &name[..i],
+            _ => name,
+        };
+        Some(name.to_string())
     }
-    let mut info: libc::Dl_info = std::mem::zeroed();
-    if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
-        return None;
-    }
-    // dladdr knows which function CONTAINS the address (inlining moves a
-    // return address into whatever body absorbed the call); the registered
-    // table knows that function's Haxe name. The emitter's own LLVM symbols
-    // are abbreviations (`t`, `o.1234`), so they are only the last resort.
-    if let Some(name) = aot_symbol_for_pc(info.dli_saddr as usize) {
-        return Some(name.to_string());
-    }
-    let raw = std::ffi::CStr::from_ptr(info.dli_sname)
-        .to_string_lossy()
-        .into_owned();
-    let name = raw.trim_start_matches('_');
-    let name = match name.rfind('.') {
-        Some(i) if name[i + 1..].chars().all(|c| c.is_ascii_digit()) => &name[..i],
-        _ => name,
-    };
-    Some(name.to_string())
 }
 
 /// The emitter registers every program body and its Haxe name, so platforms
@@ -908,43 +933,45 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
 /// `aot_capture_stack` below.
 #[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
-    let mut fp: usize;
-    #[cfg(target_arch = "aarch64")]
-    core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
-    #[cfg(target_arch = "x86_64")]
-    core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    {
-        fp = 0;
-    }
-    let mut written = 0i32;
-    let mut depth = 0;
-    while fp != 0 && fp.is_multiple_of(8) && depth < 256 {
-        let next = *(fp as *const usize);
-        let ret = *((fp + 8) as *const usize);
-        if ret == 0 {
-            break;
+    unsafe {
+        let mut fp: usize;
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            fp = 0;
         }
-        // Keep the frames that belong to the program: dladdr says which
-        // image a return address lives in, and the runtime's own frames on
-        // the way to the throw are the ones in THIS library.
-        let known = aot_frame_in_program(ret);
-        if known {
-            if !output.is_null() {
-                if written >= capacity {
-                    break;
-                }
-                *output.add(written as usize) = ret as *mut c_void;
+        let mut written = 0i32;
+        let mut depth = 0;
+        while fp != 0 && fp.is_multiple_of(8) && depth < 256 {
+            let next = *(fp as *const usize);
+            let ret = *((fp + 8) as *const usize);
+            if ret == 0 {
+                break;
             }
-            written += 1;
+            // Keep the frames that belong to the program: dladdr says which
+            // image a return address lives in, and the runtime's own frames on
+            // the way to the throw are the ones in THIS library.
+            let known = aot_frame_in_program(ret);
+            if known {
+                if !output.is_null() {
+                    if written >= capacity {
+                        break;
+                    }
+                    *output.add(written as usize) = ret as *mut c_void;
+                }
+                written += 1;
+            }
+            if next <= fp || next - fp > (1 << 24) {
+                break;
+            }
+            fp = next;
+            depth += 1;
         }
-        if next <= fp || next - fp > (1 << 24) {
-            break;
-        }
-        fp = next;
-        depth += 1;
+        written
     }
-    written
 }
 
 /// The same walk on Linux, read from `.eh_frame` instead of the frame-pointer
@@ -972,7 +999,7 @@ unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) 
 /// take from inside a walk the loader is servicing.
 #[cfg(target_os = "linux")]
 unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
-    extern "C" {
+    unsafe extern "C" {
         fn _Unwind_Backtrace(
             trace: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
             argument: *mut c_void,
@@ -1031,46 +1058,48 @@ unsafe extern "C" fn aot_resolve_symbol(
     _buffer: *mut u8,
     buffer_len: *mut i32,
 ) -> *mut u8 {
-    let pc = symbol as usize;
-    if let Some((_, text)) = AOT_SYMBOL_TEXT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find(|(addr, _)| *addr == pc)
-    {
+    unsafe {
+        let pc = symbol as usize;
+        if let Some((_, text)) = AOT_SYMBOL_TEXT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(addr, _)| *addr == pc)
+        {
+            if !buffer_len.is_null() {
+                *buffer_len = (text.len() - 1) as i32;
+            }
+            return text.as_ptr() as *mut u8;
+        }
+        // The exact enclosing symbol first: with inlining, a return address sits
+        // in whatever body absorbed the call, which is not necessarily a table
+        // entry, and "nearest table start below" then names a neighbour. The
+        // linker's symbol table knows every body, local ones included on
+        // Darwin; the registered table is the fallback where dladdr only sees
+        // exported symbols.
+        let name: Option<String> = aot_symbol_via_dladdr(pc).or_else(|| {
+            let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+            match table.binary_search_by_key(&pc, |(start, _)| *start) {
+                Ok(i) => Some(table[i].1.to_string()),
+                Err(0) => None,
+                Err(i) => (pc - table[i - 1].0 < (1 << 22)).then(|| table[i - 1].1.to_string()),
+            }
+        });
+        let Some(name) = name else {
+            return std::ptr::null_mut();
+        };
+        let mut units: Vec<u16> = name.encode_utf16().collect();
+        units.push(0);
+        let text: &'static [u16] = Box::leak(units.into_boxed_slice());
+        AOT_SYMBOL_TEXT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((pc, text));
         if !buffer_len.is_null() {
             *buffer_len = (text.len() - 1) as i32;
         }
-        return text.as_ptr() as *mut u8;
+        text.as_ptr() as *mut u8
     }
-    // The exact enclosing symbol first: with inlining, a return address sits
-    // in whatever body absorbed the call, which is not necessarily a table
-    // entry, and "nearest table start below" then names a neighbour. The
-    // linker's symbol table knows every body, local ones included on
-    // Darwin; the registered table is the fallback where dladdr only sees
-    // exported symbols.
-    let name: Option<String> = aot_symbol_via_dladdr(pc).or_else(|| {
-        let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
-        match table.binary_search_by_key(&pc, |(start, _)| *start) {
-            Ok(i) => Some(table[i].1.to_string()),
-            Err(0) => None,
-            Err(i) => (pc - table[i - 1].0 < (1 << 22)).then(|| table[i - 1].1.to_string()),
-        }
-    });
-    let Some(name) = name else {
-        return std::ptr::null_mut();
-    };
-    let mut units: Vec<u16> = name.encode_utf16().collect();
-    units.push(0);
-    let text: &'static [u16] = Box::leak(units.into_boxed_slice());
-    AOT_SYMBOL_TEXT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((pc, text));
-    if !buffer_len.is_null() {
-        *buffer_len = (text.len() - 1) as i32;
-    }
-    text.as_ptr() as *mut u8
 }
 
 #[unsafe(no_mangle)]
@@ -1095,51 +1124,59 @@ pub unsafe extern "C" fn hlp_resolve_symbol(
     buffer: *mut u8,
     buffer_len: *mut i32,
 ) -> *mut u8 {
-    let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
-    if callback == 0 {
-        return std::ptr::null_mut();
+    unsafe {
+        let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
+        if callback == 0 {
+            return std::ptr::null_mut();
+        }
+        let callback: ResolveSymbol = std::mem::transmute(callback);
+        callback(symbol, buffer, buffer_len)
     }
-    let callback: ResolveSymbol = std::mem::transmute(callback);
-    callback(symbol, buffer, buffer_len)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_exception_stack_raw(arr: *mut varray) -> i32 {
-    EXCEPTION_STACK.with(|saved| {
-        let saved = saved.borrow();
-        if !arr.is_null() {
-            let capacity = (*arr).size.max(0) as usize;
-            let output = hl_aptr::<*mut c_void>(arr);
-            for (index, symbol) in saved.iter().take(capacity).enumerate() {
-                *output.add(index) = *symbol as *mut c_void;
+    unsafe {
+        EXCEPTION_STACK.with(|saved| {
+            let saved = saved.borrow();
+            if !arr.is_null() {
+                let capacity = (*arr).size.max(0) as usize;
+                let output = hl_aptr::<*mut c_void>(arr);
+                for (index, symbol) in saved.iter().take(capacity).enumerate() {
+                    *output.add(index) = *symbol as *mut c_void;
+                }
             }
-        }
-        saved.len() as i32
-    })
+            saved.len() as i32
+        })
+    }
 }
 
 unsafe fn call_stack_raw(arr: *mut varray) -> i32 {
-    let callback = CAPTURE_STACK.load(Ordering::Acquire);
-    if callback == 0 {
-        return 0;
-    }
-    let callback: CaptureStack = std::mem::transmute(callback);
-    if arr.is_null() {
-        callback(std::ptr::null_mut(), 0)
-    } else {
-        callback(hl_aptr::<*mut c_void>(arr), (*arr).size)
+    unsafe {
+        let callback = CAPTURE_STACK.load(Ordering::Acquire);
+        if callback == 0 {
+            return 0;
+        }
+        let callback: CaptureStack = std::mem::transmute(callback);
+        if arr.is_null() {
+            callback(std::ptr::null_mut(), 0)
+        } else {
+            callback(hl_aptr::<*mut c_void>(arr), (*arr).size)
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        ash_call_stack_boundary(arr)
-    }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    {
-        call_stack_raw(arr)
+    unsafe {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            ash_call_stack_boundary(arr)
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        {
+            call_stack_raw(arr)
+        }
     }
 }
 
@@ -1148,12 +1185,14 @@ pub unsafe extern "C" fn hlp_call_stack_raw_from_frame(
     arr: *mut varray,
     frame: *mut *mut c_void,
 ) -> i32 {
-    CALL_STACK_FRAME.with(|saved| {
-        let previous = saved.replace(frame as usize);
-        let result = call_stack_raw(arr);
-        saved.set(previous);
-        result
-    })
+    unsafe {
+        CALL_STACK_FRAME.with(|saved| {
+            let previous = saved.replace(frame as usize);
+            let result = call_stack_raw(arr);
+            saved.set(previous);
+            result
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1175,24 +1214,26 @@ pub extern "C" fn hlp_capturing_exception() -> bool {
 }
 
 unsafe fn capture_exception_stack() {
-    let callback = CAPTURE_STACK.load(Ordering::Acquire);
-    if callback == 0 {
-        return;
+    unsafe {
+        let callback = CAPTURE_STACK.load(Ordering::Acquire);
+        if callback == 0 {
+            return;
+        }
+        let callback: CaptureStack = std::mem::transmute(callback);
+        CAPTURING_EXCEPTION.with(|c| c.set(true));
+        let count = callback(std::ptr::null_mut(), 0).max(0) as usize;
+        CAPTURING_EXCEPTION.with(|c| c.set(false));
+        let mut frames = vec![std::ptr::null_mut(); count];
+        let written = if count == 0 {
+            0
+        } else {
+            callback(frames.as_mut_ptr(), count as i32).clamp(0, count as i32) as usize
+        };
+        frames.truncate(written);
+        EXCEPTION_STACK.with(|saved| {
+            *saved.borrow_mut() = frames.into_iter().map(|frame| frame as usize).collect();
+        });
     }
-    let callback: CaptureStack = std::mem::transmute(callback);
-    CAPTURING_EXCEPTION.with(|c| c.set(true));
-    let count = callback(std::ptr::null_mut(), 0).max(0) as usize;
-    CAPTURING_EXCEPTION.with(|c| c.set(false));
-    let mut frames = vec![std::ptr::null_mut(); count];
-    let written = if count == 0 {
-        0
-    } else {
-        callback(frames.as_mut_ptr(), count as i32).clamp(0, count as i32) as usize
-    };
-    frames.truncate(written);
-    EXCEPTION_STACK.with(|saved| {
-        *saved.borrow_mut() = frames.into_iter().map(|frame| frame as usize).collect();
-    });
 }
 
 /// `ASH_TRACE_THROW=1`: log every hlp_throw. Read once, gc.rs-style.
@@ -1232,19 +1273,23 @@ static THROW_SITES: std::sync::Mutex<Vec<ThrowSite>> = std::sync::Mutex::new(Vec
 /// passes the symbol token for that site itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_note_throw_site(site: usize, v: *mut vdynamic) {
-    if site != 0 {
-        note_throw_site_at(site, v);
+    unsafe {
+        if site != 0 {
+            note_throw_site_at(site, v);
+        }
     }
 }
 
 unsafe fn note_throw_site(v: *mut vdynamic) {
-    // Frame zero, which is the innermost Haxe function: a captured frame is a
-    // symbol token per Haxe function, so there are no runtime frames above it
-    // to skip.
-    let Some(pc) = EXCEPTION_STACK.with(|saved| saved.borrow().first().copied()) else {
-        return;
-    };
-    note_throw_site_at(pc, v);
+    unsafe {
+        // Frame zero, which is the innermost Haxe function: a captured frame is a
+        // symbol token per Haxe function, so there are no runtime frames above it
+        // to skip.
+        let Some(pc) = EXCEPTION_STACK.with(|saved| saved.borrow().first().copied()) else {
+            return;
+        };
+        note_throw_site_at(pc, v);
+    }
 }
 
 /// Report once when one site throws in a storm.
@@ -1254,64 +1299,66 @@ unsafe fn note_throw_site(v: *mut vdynamic) {
 ///
 /// Counts and prints only; the exception propagates unchanged.
 unsafe fn note_throw_site_at(pc: usize, v: *mut vdynamic) {
-    let threshold = throw_storm_threshold();
-    if threshold == 0 {
-        return;
-    }
-    let Ok(mut sites) = THROW_SITES.lock() else {
-        return;
-    };
-    let now = std::time::Instant::now();
-    let Some(site) = sites.iter_mut().find(|s| s.pc == pc) else {
-        // Bounded: a program with thousands of distinct throwing sites is not
-        // the shape this looks for, and the list is walked on every throw.
-        if sites.len() < 64 {
-            sites.push(ThrowSite {
-                pc,
-                count: 1,
-                since: now,
-                reported: false,
-            });
-        }
-        return;
-    };
-    if site.reported {
-        return;
-    }
-    if now.duration_since(site.since) > std::time::Duration::from_secs(1) {
-        site.count = 1;
-        site.since = now;
-        return;
-    }
-    site.count += 1;
-    if site.count < threshold {
-        return;
-    }
-    site.reported = true;
-    let count = site.count;
-    drop(sites);
-
-    let where_ = frame_text(pc).unwrap_or_else(|| format!("{pc:#x}"));
-    // One line per Haxe site, not per token. A function that storms in hybrid
-    // throws from both the interpreter and its compiled copy, which carry
-    // separate tokens for the same source position.
-    static REPORTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    if let Ok(mut reported) = REPORTED.lock() {
-        if reported.contains(&where_) {
+    unsafe {
+        let threshold = throw_storm_threshold();
+        if threshold == 0 {
             return;
         }
-        reported.push(where_.clone());
-    }
-    eprintln!(
-        "[ash] throw storm: {count} throws in under a second from {where_} -- \
+        let Ok(mut sites) = THROW_SITES.lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let Some(site) = sites.iter_mut().find(|s| s.pc == pc) else {
+            // Bounded: a program with thousands of distinct throwing sites is not
+            // the shape this looks for, and the list is walked on every throw.
+            if sites.len() < 64 {
+                sites.push(ThrowSite {
+                    pc,
+                    count: 1,
+                    since: now,
+                    reported: false,
+                });
+            }
+            return;
+        };
+        if site.reported {
+            return;
+        }
+        if now.duration_since(site.since) > std::time::Duration::from_secs(1) {
+            site.count = 1;
+            site.since = now;
+            return;
+        }
+        site.count += 1;
+        if site.count < threshold {
+            return;
+        }
+        site.reported = true;
+        let count = site.count;
+        drop(sites);
+
+        let where_ = frame_text(pc).unwrap_or_else(|| format!("{pc:#x}"));
+        // One line per Haxe site, not per token. A function that storms in hybrid
+        // throws from both the interpreter and its compiled copy, which carry
+        // separate tokens for the same source position.
+        static REPORTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        if let Ok(mut reported) = REPORTED.lock() {
+            if reported.contains(&where_) {
+                return;
+            }
+            reported.push(where_.clone());
+        }
+        eprintln!(
+            "[ash] throw storm: {count} throws in under a second from {where_} -- \
          {}. Nothing is wrong with the VM; the program is throwing and \
          retrying. ASH_THROW_STORM=0 silences this.",
-        describe_exception(v)
-    );
+            describe_exception(v)
+        );
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-extern "C" {
+unsafe extern "C" {
     fn ash_throw_stack_boundary();
 }
 
@@ -1320,161 +1367,165 @@ extern "C" {
 /// no frame pointers of its own; see `stack_boundary.c`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_capture_exception_stack_from_frame(frame: *mut *mut c_void) {
-    CALL_STACK_FRAME.with(|saved| {
-        let previous = saved.replace(frame as usize);
-        capture_exception_stack();
-        saved.set(previous);
-    });
+    unsafe {
+        CALL_STACK_FRAME.with(|saved| {
+            let previous = saved.replace(frame as usize);
+            capture_exception_stack();
+            saved.set(previous);
+        });
+    }
 }
 
 unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
-    if capture_stack {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        ash_throw_stack_boundary();
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        capture_exception_stack();
-        note_throw_site(v);
-    }
-    // Trace throws only on request: an unconditional line here differs
-    // between engines (the interpreter throws through its own machinery)
-    // and broke every jit-vs-interp output diff that exercised exceptions.
-    if throw_trace_enabled() {
-        if !v.is_null() {
-            let t = (*v).t;
-            let kind = if !t.is_null() { (*t).kind } else { 999 };
-            // A raw HBYTES throw is the runtime's own hlp_error, and the
-            // message is the only thing that says which one. Without it a
-            // storm of these is just a count.
-            if kind == hl::hl_type_kind_HBYTES && !(*v).v.bytes.is_null() {
-                let mut units = Vec::new();
-                let mut p = (*v).v.bytes as *const u16;
-                while *p != 0 && units.len() < 200 {
-                    units.push(*p);
-                    p = p.add(1);
-                }
-                eprintln!(
-                    "[ash] hlp_throw: kind={} ptr={:p} msg={:?}",
-                    kind,
-                    v,
-                    String::from_utf16_lossy(&units)
-                );
-                // The first few get a stack. A message alone says which
-                // hlp_error fired, not who called it, and a storm of these
-                // is only diagnosable from the caller.
-                #[cfg(unix)]
-                {
-                    static SHOWN: std::sync::atomic::AtomicUsize =
-                        std::sync::atomic::AtomicUsize::new(0);
-                    if SHOWN.fetch_add(1, Ordering::Relaxed) < 5 {
-                        EXCEPTION_STACK.with(|saved| {
-                            for pc in saved.borrow().iter().take(12) {
-                                match aot_symbol_via_dladdr(*pc) {
-                                    Some(name) => eprintln!("[ash]     at {name}"),
-                                    None => eprintln!("[ash]     at {pc:#x}"),
-                                }
-                            }
-                        });
+    unsafe {
+        if capture_stack {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            ash_throw_stack_boundary();
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            capture_exception_stack();
+            note_throw_site(v);
+        }
+        // Trace throws only on request: an unconditional line here differs
+        // between engines (the interpreter throws through its own machinery)
+        // and broke every jit-vs-interp output diff that exercised exceptions.
+        if throw_trace_enabled() {
+            if !v.is_null() {
+                let t = (*v).t;
+                let kind = if !t.is_null() { (*t).kind } else { 999 };
+                // A raw HBYTES throw is the runtime's own hlp_error, and the
+                // message is the only thing that says which one. Without it a
+                // storm of these is just a count.
+                if kind == hl::hl_type_kind_HBYTES && !(*v).v.bytes.is_null() {
+                    let mut units = Vec::new();
+                    let mut p = (*v).v.bytes as *const u16;
+                    while *p != 0 && units.len() < 200 {
+                        units.push(*p);
+                        p = p.add(1);
                     }
+                    eprintln!(
+                        "[ash] hlp_throw: kind={} ptr={:p} msg={:?}",
+                        kind,
+                        v,
+                        String::from_utf16_lossy(&units)
+                    );
+                    // The first few get a stack. A message alone says which
+                    // hlp_error fired, not who called it, and a storm of these
+                    // is only diagnosable from the caller.
+                    #[cfg(unix)]
+                    {
+                        static SHOWN: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        if SHOWN.fetch_add(1, Ordering::Relaxed) < 5 {
+                            EXCEPTION_STACK.with(|saved| {
+                                for pc in saved.borrow().iter().take(12) {
+                                    match aot_symbol_via_dladdr(*pc) {
+                                        Some(name) => eprintln!("[ash]     at {name}"),
+                                        None => eprintln!("[ash]     at {pc:#x}"),
+                                    }
+                                }
+                            });
+                        }
+                    }
+                } else {
+                    eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
                 }
             } else {
-                eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
+                eprintln!("[ash] hlp_throw: null");
             }
-        } else {
-            eprintln!("[ash] hlp_throw: null");
         }
-    }
-    let mut buf_copy: hl::jmp_buf = mem::zeroed();
-    // Read and pop the trap chain without the GC lock: it is this thread's
-    // state, and a longjmp cannot leave the thread that set it up.
-    let (saved_lock_depth, saved_shadow_depth) = crate::gc::with_exc(|st| {
-        let current = st.current_trap;
-        if throw_trace_enabled() {
-            let prev = if current.is_null() {
-                std::ptr::null_mut()
+        let mut buf_copy: hl::jmp_buf = mem::zeroed();
+        // Read and pop the trap chain without the GC lock: it is this thread's
+        // state, and a longjmp cannot leave the thread that set it up.
+        let (saved_lock_depth, saved_shadow_depth) = crate::gc::with_exc(|st| {
+            let current = st.current_trap;
+            if throw_trace_enabled() {
+                let prev = if current.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    (*current).prev
+                };
+                eprintln!("[ash] hlp_throw chain: current={current:p} prev={prev:p} value={v:p}");
+            }
+            if !current.is_null() && (*current).has_jmpbuf {
+                // JIT path: store exception, pop trap, longjmp back to setjmp site
+                st.exc_value = v;
+                let depth = (*current).saved_lock_depth;
+                let shadow_depth = (*current).saved_shadow_depth;
+                // Copy jmp_buf to stack BEFORE retiring the TrapContext — longjmp
+                // reads from it, and a retired context may be handed straight back
+                // out by the next setup_trap.
+                std::ptr::copy_nonoverlapping(
+                    &(*current).buf as *const hl::jmp_buf,
+                    &mut buf_copy as *mut hl::jmp_buf,
+                    1,
+                );
+                st.current_trap = (*current).prev;
+                (*current).exception_value = None;
+                retire_trap(st, current);
+                (depth, shadow_depth)
             } else {
-                (*current).prev
-            };
-            eprintln!("[ash] hlp_throw chain: current={current:p} prev={prev:p} value={v:p}");
-        }
-        if !current.is_null() && (*current).has_jmpbuf {
-            // JIT path: store exception, pop trap, longjmp back to setjmp site
-            st.exc_value = v;
-            let depth = (*current).saved_lock_depth;
-            let shadow_depth = (*current).saved_shadow_depth;
-            // Copy jmp_buf to stack BEFORE retiring the TrapContext — longjmp
-            // reads from it, and a retired context may be handed straight back
-            // out by the next setup_trap.
-            std::ptr::copy_nonoverlapping(
-                &(*current).buf as *const hl::jmp_buf,
-                &mut buf_copy as *mut hl::jmp_buf,
-                1,
-            );
-            st.current_trap = (*current).prev;
-            (*current).exception_value = None;
-            retire_trap(st, current);
-            (depth, shadow_depth)
-        } else {
-            // No active setjmp trap: this is an uncaught exception. Say WHAT
-            // was thrown before dying — the value is right here, and "kind=8
-            // ptr=0x..." sent a real bug report back for another round trip
-            // when the message string it pointed at would have named the bug.
-            st.exc_value = v;
-            eprintln!("[ash] uncaught exception: {}", describe_exception(v));
-            eprintln!("hlp_throw called without active trap; aborting");
-            std::process::abort();
-        }
-    });
+                // No active setjmp trap: this is an uncaught exception. Say WHAT
+                // was thrown before dying — the value is right here, and "kind=8
+                // ptr=0x..." sent a real bug report back for another round trip
+                // when the message string it pointed at would have named the bug.
+                st.exc_value = v;
+                eprintln!("[ash] uncaught exception: {}", describe_exception(v));
+                eprintln!("hlp_throw called without active trap; aborting");
+                std::process::abort();
+            }
+        });
 
-    // The frames between the setjmp site and this longjmp are abandoned, so
-    // any GcGuards they hold never run Drop. Restore the lock depth recorded
-    // at trap setup (= the depth held at the setjmp site).
-    crate::rt::gc_lock_unwind_to(saved_lock_depth);
-    // The same frames never reach their shadow-stack pop either.
-    shadow::unwind_to(saved_shadow_depth);
-    // Win64's `longjmp` reads the buffer's first word as the frame to unwind
-    // to with SEH, and unwinds whenever it is non-zero. The frames between
-    // the trap and here are abandoned on purpose -- the lock depth and the
-    // shadow stack were just restored by hand -- and compiled frames carry
-    // no unwind tables for it to walk anyway. Every tier arms its traps with
-    // a null frame; an HDLL's `hl_trap` is the C macro, which arms with a
-    // real one, so the word is cleared here for whoever armed it.
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    {
-        let words = buf_copy.as_mut_ptr() as *mut u64;
-        if throw_trace_enabled() {
-            eprintln!(
-                "[ash] longjmp: frame={:#x} rsp={:#x} rip={:#x}",
-                *words,
-                *words.add(2),
-                *words.add(10)
-            );
+        // The frames between the setjmp site and this longjmp are abandoned, so
+        // any GcGuards they hold never run Drop. Restore the lock depth recorded
+        // at trap setup (= the depth held at the setjmp site).
+        crate::rt::gc_lock_unwind_to(saved_lock_depth);
+        // The same frames never reach their shadow-stack pop either.
+        shadow::unwind_to(saved_shadow_depth);
+        // Win64's `longjmp` reads the buffer's first word as the frame to unwind
+        // to with SEH, and unwinds whenever it is non-zero. The frames between
+        // the trap and here are abandoned on purpose -- the lock depth and the
+        // shadow stack were just restored by hand -- and compiled frames carry
+        // no unwind tables for it to walk anyway. Every tier arms its traps with
+        // a null frame; an HDLL's `hl_trap` is the C macro, which arms with a
+        // real one, so the word is cleared here for whoever armed it.
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        {
+            let words = buf_copy.as_mut_ptr() as *mut u64;
+            if throw_trace_enabled() {
+                eprintln!(
+                    "[ash] longjmp: frame={:#x} rsp={:#x} rip={:#x}",
+                    *words,
+                    *words.add(2),
+                    *words.add(10)
+                );
+            }
+            *words = 0;
         }
-        *words = 0;
-    }
-    // darwin and glibc export `_longjmp` (the no-signal-mask variant); MSVC's
-    // setjmp.h declares only `longjmp`, so the generated bindings differ by
-    // exactly this underscore per platform. Windows longjmp never touches
-    // signal masks, so the two calls are the same operation.
-    #[cfg(all(not(windows), not(target_family = "wasm")))]
-    hl::_longjmp(buf_copy.as_mut_ptr(), 1);
-    // WASI declares both spellings, and bindgen emits neither: `setjmp` there
-    // is exception handling rather than a function, so the header's
-    // declarations do not survive into the bindings. The symbol is real and
-    // `libsetjmp` provides it, so name it directly.
-    #[cfg(all(not(windows), target_family = "wasm"))]
-    {
-        extern "C" {
-            fn longjmp(env: *mut hl::__jmp_buf_tag, val: i32) -> !;
+        // darwin and glibc export `_longjmp` (the no-signal-mask variant); MSVC's
+        // setjmp.h declares only `longjmp`, so the generated bindings differ by
+        // exactly this underscore per platform. Windows longjmp never touches
+        // signal masks, so the two calls are the same operation.
+        #[cfg(all(not(windows), not(target_family = "wasm")))]
+        hl::_longjmp(buf_copy.as_mut_ptr(), 1);
+        // WASI declares both spellings, and bindgen emits neither: `setjmp` there
+        // is exception handling rather than a function, so the header's
+        // declarations do not survive into the bindings. The symbol is real and
+        // `libsetjmp` provides it, so name it directly.
+        #[cfg(all(not(windows), target_family = "wasm"))]
+        {
+            unsafe extern "C" {
+                fn longjmp(env: *mut hl::__jmp_buf_tag, val: i32) -> !;
+            }
+            longjmp(buf_copy.as_mut_ptr(), 1);
         }
-        longjmp(buf_copy.as_mut_ptr(), 1);
+        #[cfg(windows)]
+        hl::longjmp(buf_copy.as_mut_ptr(), 1);
     }
-    #[cfg(windows)]
-    hl::longjmp(buf_copy.as_mut_ptr(), 1);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
-    throw_impl(v, true)
+    unsafe { throw_impl(v, true) }
 }
 
 /// Rethrow the current exception without changing its value. HashLink keeps a
@@ -1483,7 +1534,7 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
 /// trap unwinding is identical for both operations.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rethrow(v: *mut vdynamic) {
-    throw_impl(v, false)
+    unsafe { throw_impl(v, false) }
 }
 
 /// Arm a trap on this thread, reusing a retired context when one is available.
@@ -1523,23 +1574,25 @@ pub unsafe extern "C" fn hlp_setup_trap_in(
     size: usize,
     lock_depth: usize,
 ) -> *mut c_void {
-    if size < mem::size_of::<TrapContext>()
-        || storage.align_offset(mem::align_of::<TrapContext>()) != 0
-    {
-        return std::ptr::null_mut();
+    unsafe {
+        if size < mem::size_of::<TrapContext>()
+            || storage.align_offset(mem::align_of::<TrapContext>()) != 0
+        {
+            return std::ptr::null_mut();
+        }
+        let trap = storage as *mut TrapContext;
+        debug_assert_eq!(lock_depth, crate::rt::gc_lock_held_depth());
+        crate::gc::with_exc(|st| {
+            let prev = st.current_trap;
+            // Written field by field: the storage holds whatever it held.
+            std::ptr::addr_of_mut!((*trap).pooled).write(false);
+            std::ptr::addr_of_mut!((*trap).exception_value).write(None);
+            std::ptr::addr_of_mut!((*trap).state).write(st);
+            (*trap).arm(prev, lock_depth);
+            st.current_trap = trap;
+        });
+        (*trap).buf.as_mut_ptr().cast()
     }
-    let trap = storage as *mut TrapContext;
-    debug_assert_eq!(lock_depth, crate::rt::gc_lock_held_depth());
-    crate::gc::with_exc(|st| {
-        let prev = st.current_trap;
-        // Written field by field: the storage holds whatever it held.
-        std::ptr::addr_of_mut!((*trap).pooled).write(false);
-        std::ptr::addr_of_mut!((*trap).exception_value).write(None);
-        std::ptr::addr_of_mut!((*trap).state).write(st);
-        (*trap).arm(prev, lock_depth);
-        st.current_trap = trap;
-    });
-    (*trap).buf.as_mut_ptr().cast()
 }
 
 /// Pop the trap `hlp_setup_trap_in` armed in `storage`, after a normal
@@ -1547,14 +1600,16 @@ pub unsafe extern "C" fn hlp_setup_trap_in(
 /// that armed it; a throw pops it itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_remove_trap_in(storage: *mut c_void) {
-    let trap = storage as *mut TrapContext;
-    let st = (*trap).state;
-    if st.is_null() || (*st).current_trap != trap {
-        remove_trap();
-        return;
+    unsafe {
+        let trap = storage as *mut TrapContext;
+        let st = (*trap).state;
+        if st.is_null() || (*st).current_trap != trap {
+            remove_trap();
+            return;
+        }
+        (*st).current_trap = (*trap).prev;
+        (*trap).exception_value = None;
     }
-    (*st).current_trap = (*trap).prev;
-    (*trap).exception_value = None;
 }
 
 /// The bytes `hlp_setup_trap_in` wants, at pointer alignment.
@@ -1583,29 +1638,33 @@ pub(crate) fn remove_trap() {
 /// Return a context to the pool, or free it if the pool is full. One a
 /// caller keeps in its own storage is left to it.
 unsafe fn retire_trap(st: &mut crate::gc::ExcState, trap: *mut TrapContext) {
-    if !(*trap).pooled {
-        return;
-    }
-    if st.trap_pool.len() < 64 {
-        st.trap_pool.push(trap);
-    } else {
-        drop(Box::from_raw(trap));
+    unsafe {
+        if !(*trap).pooled {
+            return;
+        }
+        if st.trap_pool.len() < 64 {
+            st.trap_pool.push(trap);
+        } else {
+            drop(Box::from_raw(trap));
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
-    // The depth held by this thread outside this call, at the setjmp site
-    // the caller is about to establish, is what `setup_trap` records.
-    let trap = setup_trap();
-    if throw_trace_enabled() {
-        eprintln!(
-            "[ash] setup_trap: ctx={trap:p} buf={:p} prev={:p}",
-            (*trap).buf.as_ptr(),
-            (*trap).prev
-        );
+    unsafe {
+        // The depth held by this thread outside this call, at the setjmp site
+        // the caller is about to establish, is what `setup_trap` records.
+        let trap = setup_trap();
+        if throw_trace_enabled() {
+            eprintln!(
+                "[ash] setup_trap: ctx={trap:p} buf={:p} prev={:p}",
+                (*trap).buf.as_ptr(),
+                (*trap).prev
+            );
+        }
+        (*trap).buf.as_mut_ptr().cast()
     }
-    (*trap).buf.as_mut_ptr().cast()
 }
 
 #[unsafe(no_mangle)]
@@ -1659,15 +1718,17 @@ thread_local! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
-    let room = crate::rt::alloc_locked(mem::size_of::<hl::vdynamic>());
-    let d = match room {
-        Some(value) => value.as_ptr() as *mut vdynamic,
-        None => ERROR_RESERVE.with(|reserve| reserve.get()),
-    };
-    (*d).v.bytes = msg as *mut u8;
-    (*d).t = crate::types::hlt_bytes();
+    unsafe {
+        let room = crate::rt::alloc_locked(mem::size_of::<hl::vdynamic>());
+        let d = match room {
+            Some(value) => value.as_ptr() as *mut vdynamic,
+            None => ERROR_RESERVE.with(|reserve| reserve.get()),
+        };
+        (*d).v.bytes = msg as *mut u8;
+        (*d).t = crate::types::hlt_bytes();
 
-    hlp_throw(d)
+        hlp_throw(d)
+    }
 }
 
 /// The registered error handler. Stored and never invoked: nothing raises an

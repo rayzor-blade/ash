@@ -20,7 +20,7 @@ use super::ir::*;
 use super::module::{ModuleInfo, NativeTable, NoModuleInfo};
 use crate::dominance::DominatorTree;
 use crate::opcodes::{Opcode, Reg};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Per-block phi state during the renaming walk: (base reg, dst value,
@@ -334,14 +334,14 @@ pub fn lower_with_positions(
     // Per-block innermost handler (as a block id).
     let mut handlers: Vec<Option<BlockId>> = vec![None; n_blocks];
     for (k, &(start, _)) in runs.iter().enumerate() {
-        if let Some(stack) = &stack_at[start] {
-            if let Some(&trap_op) = stack.last() {
-                let h_target = match &ops[trap_op] {
-                    Opcode::Trap { offset, .. } => op_target(trap_op, *offset)?,
-                    _ => unreachable!(),
-                };
-                handlers[k + 1] = Some(blk_of(h_target)?);
-            }
+        if let Some(stack) = &stack_at[start]
+            && let Some(&trap_op) = stack.last()
+        {
+            let h_target = match &ops[trap_op] {
+                Opcode::Trap { offset, .. } => op_target(trap_op, *offset)?,
+                _ => unreachable!(),
+            };
+            handlers[k + 1] = Some(blk_of(h_target)?);
         }
     }
 
@@ -894,15 +894,15 @@ fn convert_ops(
     #[allow(clippy::needless_range_loop)]
     for i in start..=end {
         let is_last = i == end;
-        if let Some((file, line)) = pos_of(i) {
-            if last_pos != Some((file, line)) {
-                instrs.push(Instr::Pos {
-                    file,
-                    line,
-                    site: None,
-                });
-                last_pos = Some((file, line));
-            }
+        if let Some((file, line)) = pos_of(i)
+            && last_pos != Some((file, line))
+        {
+            instrs.push(Instr::Pos {
+                file,
+                line,
+                site: None,
+            });
+            last_pos = Some((file, line));
         }
         match &ops[i] {
             // ---- terminators (always last op of a block) ----
@@ -913,46 +913,46 @@ fn convert_ops(
                 });
             }
             Opcode::JTrue { cond, offset } => {
-                return Ok(cond!(CondKind::True, *cond, None::<Reg>, i, *offset))
+                return Ok(cond!(CondKind::True, *cond, None::<Reg>, i, *offset));
             }
             Opcode::JFalse { cond, offset } => {
-                return Ok(cond!(CondKind::False, *cond, None::<Reg>, i, *offset))
+                return Ok(cond!(CondKind::False, *cond, None::<Reg>, i, *offset));
             }
             Opcode::JNull { reg, offset } => {
-                return Ok(cond!(CondKind::Null, *reg, None::<Reg>, i, *offset))
+                return Ok(cond!(CondKind::Null, *reg, None::<Reg>, i, *offset));
             }
             Opcode::JNotNull { reg, offset } => {
-                return Ok(cond!(CondKind::NotNull, *reg, None::<Reg>, i, *offset))
+                return Ok(cond!(CondKind::NotNull, *reg, None::<Reg>, i, *offset));
             }
             Opcode::JSLt { a, b, offset } => {
-                return Ok(cond!(CondKind::SLt, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::SLt, *a, Some(*b), i, *offset));
             }
             Opcode::JSGte { a, b, offset } => {
-                return Ok(cond!(CondKind::SGte, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::SGte, *a, Some(*b), i, *offset));
             }
             Opcode::JSGt { a, b, offset } => {
-                return Ok(cond!(CondKind::SGt, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::SGt, *a, Some(*b), i, *offset));
             }
             Opcode::JSLte { a, b, offset } => {
-                return Ok(cond!(CondKind::SLte, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::SLte, *a, Some(*b), i, *offset));
             }
             Opcode::JULt { a, b, offset } => {
-                return Ok(cond!(CondKind::ULt, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::ULt, *a, Some(*b), i, *offset));
             }
             Opcode::JUGte { a, b, offset } => {
-                return Ok(cond!(CondKind::UGte, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::UGte, *a, Some(*b), i, *offset));
             }
             Opcode::JNotLt { a, b, offset } => {
-                return Ok(cond!(CondKind::NotLt, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::NotLt, *a, Some(*b), i, *offset));
             }
             Opcode::JNotGte { a, b, offset } => {
-                return Ok(cond!(CondKind::NotGte, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::NotGte, *a, Some(*b), i, *offset));
             }
             Opcode::JEq { a, b, offset } => {
-                return Ok(cond!(CondKind::Eq, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::Eq, *a, Some(*b), i, *offset));
             }
             Opcode::JNotEq { a, b, offset } => {
-                return Ok(cond!(CondKind::NotEq, *a, Some(*b), i, *offset))
+                return Ok(cond!(CondKind::NotEq, *a, Some(*b), i, *offset));
             }
             Opcode::Switch { reg, offsets, .. } => {
                 let value = use_reg!(*reg);

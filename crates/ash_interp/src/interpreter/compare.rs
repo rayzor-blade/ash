@@ -83,16 +83,15 @@ impl HLInterpreter {
             op,
             CmpOp::SLt | CmpOp::SGt | CmpOp::SLte | CmpOp::SGte | CmpOp::ULt | CmpOp::UGte
         ) && (ak == hl::hl_type_kind_HDYN || bk == hl::hl_type_kind_HDYN)
+            && let Some(ord) = unsafe { self.dynamic_value_cmp(va, vb) }
         {
-            if let Some(ord) = unsafe { self.dynamic_value_cmp(va, vb) } {
-                return match op {
-                    CmpOp::SLt | CmpOp::ULt => ord.is_lt(),
-                    CmpOp::SGt => ord.is_gt(),
-                    CmpOp::SLte => ord.is_le(),
-                    CmpOp::SGte | CmpOp::UGte => ord.is_ge(),
-                    _ => unreachable!(),
-                };
-            }
+            return match op {
+                CmpOp::SLt | CmpOp::ULt => ord.is_lt(),
+                CmpOp::SGt => ord.is_gt(),
+                CmpOp::SLte => ord.is_le(),
+                CmpOp::SGte | CmpOp::UGte => ord.is_ge(),
+                _ => unreachable!(),
+            };
         }
         // Ordering between strings. Without this the operands fall through to
         // NanBoxedValue::compare, which has no ordering for pointers and
@@ -323,37 +322,39 @@ impl HLInterpreter {
         bk: hl::hl_type_kind,
         op: CmpOp,
     ) -> Option<bool> {
-        if ak != hl::hl_type_kind_HNULL && bk != hl::hl_type_kind_HNULL {
-            return None;
-        }
+        unsafe {
+            if ak != hl::hl_type_kind_HNULL && bk != hl::hl_type_kind_HNULL {
+                return None;
+            }
 
-        let (av, ak_eff) =
-            self.normalize_nullable_compare_operand(bytecode, func, a_idx, ak, va)?;
-        let (bv, bk_eff) =
-            self.normalize_nullable_compare_operand(bytecode, func, b_idx, bk, vb)?;
+            let (av, ak_eff) =
+                self.normalize_nullable_compare_operand(bytecode, func, a_idx, ak, va)?;
+            let (bv, bk_eff) =
+                self.normalize_nullable_compare_operand(bytecode, func, b_idx, bk, vb)?;
 
-        if av.is_none() || bv.is_none() {
-            let eq = av.is_none() && bv.is_none();
-            return Some(match op {
-                CmpOp::Eq => eq,
-                CmpOp::NotEq => !eq,
-                _ => false,
-            });
-        }
+            if av.is_none() || bv.is_none() {
+                let eq = av.is_none() && bv.is_none();
+                return Some(match op {
+                    CmpOp::Eq => eq,
+                    CmpOp::NotEq => !eq,
+                    _ => false,
+                });
+            }
 
-        let av = av.unwrap();
-        let bv = bv.unwrap();
-        if let Some(result) = Self::compare_numeric_values(av, ak_eff, bv, bk_eff, op) {
-            return Some(result);
-        }
-
-        if op == CmpOp::Eq || op == CmpOp::NotEq {
-            if let Some(result) = av.compare(bv, op) {
+            let av = av.unwrap();
+            let bv = bv.unwrap();
+            if let Some(result) = Self::compare_numeric_values(av, ak_eff, bv, bk_eff, op) {
                 return Some(result);
             }
-        }
 
-        None
+            if (op == CmpOp::Eq || op == CmpOp::NotEq)
+                && let Some(result) = av.compare(bv, op)
+            {
+                return Some(result);
+            }
+
+            None
+        }
     }
 
     unsafe fn normalize_nullable_compare_operand(
@@ -364,49 +365,51 @@ impl HLInterpreter {
         reg_kind: hl::hl_type_kind,
         val: NanBoxedValue,
     ) -> Option<(Option<NanBoxedValue>, hl::hl_type_kind)> {
-        if reg_kind != hl::hl_type_kind_HNULL {
-            return Some((Some(val), reg_kind));
-        }
-        if val.is_null() || val.is_void() || (val.is_ptr() && val.as_ptr() == 0) {
-            return Some((None, reg_kind));
-        }
-        if !val.is_ptr() {
-            return Some((Some(val), reg_kind));
-        }
+        unsafe {
+            if reg_kind != hl::hl_type_kind_HNULL {
+                return Some((Some(val), reg_kind));
+            }
+            if val.is_null() || val.is_void() || (val.is_ptr() && val.as_ptr() == 0) {
+                return Some((None, reg_kind));
+            }
+            if !val.is_ptr() {
+                return Some((Some(val), reg_kind));
+            }
 
-        let reg_type_idx = match func.regs.get(reg_idx) {
-            Some(r) => r.0,
-            None => return Some((Some(val), reg_kind)),
-        };
-        let reg_type = match bytecode.types.get(reg_type_idx) {
-            Some(t) => t,
-            None => return Some((Some(val), reg_kind)),
-        };
-        let tparam_idx = match reg_type.tparam.as_ref() {
-            Some(tp) => tp.0,
-            None => return Some((Some(val), reg_kind)),
-        };
-        let inner_kind = match bytecode.types.get(tparam_idx) {
-            Some(t) => t.kind,
-            None => return Some((Some(val), reg_kind)),
-        };
+            let reg_type_idx = match func.regs.get(reg_idx) {
+                Some(r) => r.0,
+                None => return Some((Some(val), reg_kind)),
+            };
+            let reg_type = match bytecode.types.get(reg_type_idx) {
+                Some(t) => t,
+                None => return Some((Some(val), reg_kind)),
+            };
+            let tparam_idx = match reg_type.tparam.as_ref() {
+                Some(tp) => tp.0,
+                None => return Some((Some(val), reg_kind)),
+            };
+            let inner_kind = match bytecode.types.get(tparam_idx) {
+                Some(t) => t.kind,
+                None => return Some((Some(val), reg_kind)),
+            };
 
-        if !Self::is_primitive_or_bytes_kind(inner_kind) {
-            return Some((Some(val), reg_kind));
-        }
+            if !Self::is_primitive_or_bytes_kind(inner_kind) {
+                return Some((Some(val), reg_kind));
+            }
 
-        let d = val.as_ptr() as *mut hl::vdynamic;
-        if d.is_null() {
-            return Some((None, inner_kind));
-        }
-        if let Some(unboxed) = Self::unbox_dynamic_to_kind(d, inner_kind) {
-            if unboxed.is_null() || unboxed.is_void() {
+            let d = val.as_ptr() as *mut hl::vdynamic;
+            if d.is_null() {
                 return Some((None, inner_kind));
             }
-            return Some((Some(unboxed), inner_kind));
-        }
+            if let Some(unboxed) = Self::unbox_dynamic_to_kind(d, inner_kind) {
+                if unboxed.is_null() || unboxed.is_void() {
+                    return Some((None, inner_kind));
+                }
+                return Some((Some(unboxed), inner_kind));
+            }
 
-        Some((Some(val), reg_kind))
+            Some((Some(val), reg_kind))
+        }
     }
 
     fn compare_numeric_values(
@@ -499,23 +502,25 @@ impl HLInterpreter {
     }
 
     unsafe fn utf16z_eq(a: *const u16, b: *const u16) -> bool {
-        if a == b {
-            return true;
-        }
-        if a.is_null() || b.is_null() {
-            return false;
-        }
-        let mut i = 0usize;
-        loop {
-            let ca = *a.add(i);
-            let cb = *b.add(i);
-            if ca != cb {
-                return false;
-            }
-            if ca == 0 {
+        unsafe {
+            if a == b {
                 return true;
             }
-            i += 1;
+            if a.is_null() || b.is_null() {
+                return false;
+            }
+            let mut i = 0usize;
+            loop {
+                let ca = *a.add(i);
+                let cb = *b.add(i);
+                if ca != cb {
+                    return false;
+                }
+                if ca == 0 {
+                    return true;
+                }
+                i += 1;
+            }
         }
     }
 
@@ -527,236 +532,249 @@ impl HLInterpreter {
         v: NanBoxedValue,
         kind: hl::hl_type_kind,
     ) -> Option<(*const u16, i32)> {
-        if v.is_null() || v.is_void() {
-            return None;
-        }
-        if kind == hl::hl_type_kind_HBYTES {
-            let p = v.as_ptr() as *const u16;
-            if p.is_null() {
+        unsafe {
+            if v.is_null() || v.is_void() {
                 return None;
             }
-            let mut n = 0i32;
-            while *p.add(n as usize) != 0 {
-                n += 1;
+            if kind == hl::hl_type_kind_HBYTES {
+                let p = v.as_ptr() as *const u16;
+                if p.is_null() {
+                    return None;
+                }
+                let mut n = 0i32;
+                while *p.add(n as usize) != 0 {
+                    n += 1;
+                }
+                return Some((p, n));
             }
-            return Some((p, n));
-        }
-        if kind == hl::hl_type_kind_HOBJ {
-            let name = self.dynamic_type_name(v.as_ptr() as *mut hl::vdynamic);
-            if !matches!(name.as_deref(), Some("String")) {
-                return None;
+            if kind == hl::hl_type_kind_HOBJ {
+                let name = self.dynamic_type_name(v.as_ptr() as *mut hl::vdynamic);
+                if !matches!(name.as_deref(), Some("String")) {
+                    return None;
+                }
+                return self.try_extract_string_object_raw(v.as_ptr() as *mut c_void);
             }
-            return self.try_extract_string_object_raw(v.as_ptr() as *mut c_void);
+            None
         }
-        None
     }
 
     /// Lexicographic order over UTF-16 code units, shorter-is-less on a
     /// common prefix — the ordering `hl_dyn_compare` gives strings, and the
     /// one Haxe's `<` on String is defined to produce.
     unsafe fn utf16_cmp(a: *const u16, alen: i32, b: *const u16, blen: i32) -> std::cmp::Ordering {
-        let n = alen.min(blen).max(0) as usize;
-        for i in 0..n {
-            let (x, y) = (*a.add(i), *b.add(i));
-            if x != y {
-                return x.cmp(&y);
+        unsafe {
+            let n = alen.min(blen).max(0) as usize;
+            for i in 0..n {
+                let (x, y) = (*a.add(i), *b.add(i));
+                if x != y {
+                    return x.cmp(&y);
+                }
             }
+            alen.cmp(&blen)
         }
-        alen.cmp(&blen)
     }
 
     unsafe fn utf16_len_eq(a: *const u16, b: *const u16, len: usize) -> bool {
-        if a.is_null() || b.is_null() {
-            return false;
-        }
-        for i in 0..len {
-            if *a.add(i) != *b.add(i) {
+        unsafe {
+            if a.is_null() || b.is_null() {
                 return false;
             }
+            for i in 0..len {
+                if *a.add(i) != *b.add(i) {
+                    return false;
+                }
+            }
+            true
         }
-        true
     }
 
     unsafe fn try_extract_string_object_raw(
         &self,
         obj_ptr: *mut c_void,
     ) -> Option<(*const u16, i32)> {
-        if obj_ptr.is_null() || self.fn_get_obj_rt.is_null() {
-            return None;
+        unsafe {
+            if obj_ptr.is_null() || self.fn_get_obj_rt.is_null() {
+                return None;
+            }
+            let type_ptr = *(obj_ptr as *const *mut hl::hl_type);
+            if type_ptr.is_null() || (*type_ptr).kind != hl::hl_type_kind_HOBJ {
+                return None;
+            }
+            let bytes_val = Self::read_obj_field(
+                obj_ptr as *mut u8,
+                0,
+                hl::hl_type_kind_HBYTES,
+                type_ptr as *mut c_void,
+                hl::hl_type_kind_HOBJ,
+                self.fn_get_obj_rt,
+            );
+            let len_val = Self::read_obj_field(
+                obj_ptr as *mut u8,
+                1,
+                hl::hl_type_kind_HI32,
+                type_ptr as *mut c_void,
+                hl::hl_type_kind_HOBJ,
+                self.fn_get_obj_rt,
+            );
+            if bytes_val.is_null() || len_val.is_null() || len_val.is_void() {
+                return None;
+            }
+            let bytes = bytes_val.as_ptr() as *const u16;
+            let len = len_val.as_i32();
+            if bytes.is_null() || len < 0 {
+                return None;
+            }
+            Some((bytes, len))
         }
-        let type_ptr = *(obj_ptr as *const *mut hl::hl_type);
-        if type_ptr.is_null() || (*type_ptr).kind != hl::hl_type_kind_HOBJ {
-            return None;
-        }
-        let bytes_val = Self::read_obj_field(
-            obj_ptr as *mut u8,
-            0,
-            hl::hl_type_kind_HBYTES,
-            type_ptr as *mut c_void,
-            hl::hl_type_kind_HOBJ,
-            self.fn_get_obj_rt,
-        );
-        let len_val = Self::read_obj_field(
-            obj_ptr as *mut u8,
-            1,
-            hl::hl_type_kind_HI32,
-            type_ptr as *mut c_void,
-            hl::hl_type_kind_HOBJ,
-            self.fn_get_obj_rt,
-        );
-        if bytes_val.is_null() || len_val.is_null() || len_val.is_void() {
-            return None;
-        }
-        let bytes = bytes_val.as_ptr() as *const u16;
-        let len = len_val.as_i32();
-        if bytes.is_null() || len < 0 {
-            return None;
-        }
-        Some((bytes, len))
     }
 
     unsafe fn dynamic_eq(&self, a: *mut hl::vdynamic, b: *mut hl::vdynamic) -> bool {
-        if a == b {
-            return true;
-        }
-        if a.is_null() || b.is_null() {
-            return false;
-        }
-        // Unboxed payloads in Dynamic slots are not boxes — see
-        // is_derefable_dynamic. Distinct non-box words are simply unequal
-        // (the identity case above already answered equal ones).
-        if !Self::is_derefable_dynamic(a) || !Self::is_derefable_dynamic(b) {
-            return false;
-        }
-        let ta = (*a).t;
-        let tb = (*b).t;
-        if ta.is_null() || tb.is_null() {
-            return false;
-        }
-        let ka = (*ta).kind;
-        let kb = (*tb).kind;
-        match (ka, kb) {
-            (ka, kb)
-                if matches!(ka, hl::hl_type_kind_HOBJ | hl::hl_type_kind_HDYNOBJ)
-                    && kb == hl::hl_type_kind_HVIRTUAL =>
-            {
-                let value = (*(b as *mut hl::vvirtual)).value;
-                return !value.is_null() && self.dynamic_eq(a, value);
+        unsafe {
+            if a == b {
+                return true;
             }
-            (ka, kb)
-                if ka == hl::hl_type_kind_HVIRTUAL
-                    && matches!(kb, hl::hl_type_kind_HOBJ | hl::hl_type_kind_HDYNOBJ) =>
-            {
-                let value = (*(a as *mut hl::vvirtual)).value;
-                return !value.is_null() && self.dynamic_eq(value, b);
+            if a.is_null() || b.is_null() {
+                return false;
             }
-            (ka, kb) if ka == hl::hl_type_kind_HVIRTUAL && kb == hl::hl_type_kind_HVIRTUAL => {
-                let av = (*(a as *mut hl::vvirtual)).value;
-                let bv = (*(b as *mut hl::vvirtual)).value;
-                // HashLink reports an invalid comparison for two distinct
-                // self-backed virtual records. For equality that means false,
-                // not "compare their null value slots as equal".
-                return !av.is_null() && !bv.is_null() && self.dynamic_eq(av, bv);
+            // Unboxed payloads in Dynamic slots are not boxes — see
+            // is_derefable_dynamic. Distinct non-box words are simply unequal
+            // (the identity case above already answered equal ones).
+            if !Self::is_derefable_dynamic(a) || !Self::is_derefable_dynamic(b) {
+                return false;
             }
-            _ => {}
-        }
-        if ka == kb {
-            return match ka {
-                k if k == hl::hl_type_kind_HI32 => (*a).v.i == (*b).v.i,
-                k if k == hl::hl_type_kind_HUI8 => (*a).v.ui8 == (*b).v.ui8,
-                k if k == hl::hl_type_kind_HUI16 => (*a).v.ui16 == (*b).v.ui16,
-                k if k == hl::hl_type_kind_HI64 => (*a).v.i64_ == (*b).v.i64_,
-                k if k == hl::hl_type_kind_HF32 => (*a).v.f == (*b).v.f,
-                k if k == hl::hl_type_kind_HF64 => (*a).v.d == (*b).v.d,
-                k if k == hl::hl_type_kind_HBOOL => (*a).v.b == (*b).v.b,
-                k if k == hl::hl_type_kind_HBYTES => {
-                    Self::utf16z_eq((*a).v.bytes as *const u16, (*b).v.bytes as *const u16)
+            let ta = (*a).t;
+            let tb = (*b).t;
+            if ta.is_null() || tb.is_null() {
+                return false;
+            }
+            let ka = (*ta).kind;
+            let kb = (*tb).kind;
+            match (ka, kb) {
+                (ka, kb)
+                    if matches!(ka, hl::hl_type_kind_HOBJ | hl::hl_type_kind_HDYNOBJ)
+                        && kb == hl::hl_type_kind_HVIRTUAL =>
+                {
+                    let value = (*(b as *mut hl::vvirtual)).value;
+                    return !value.is_null() && self.dynamic_eq(a, value);
                 }
-                _ => {
-                    if ka == hl::hl_type_kind_HOBJ {
-                        let ta_name = self.dynamic_type_name(a);
-                        let tb_name = self.dynamic_type_name(b);
-                        if ta_name == tb_name && matches!(ta_name.as_deref(), Some("String")) {
-                            if let (Some((ab, al)), Some((bb, bl))) = (
-                                self.try_extract_string_object_raw(a.cast()),
-                                self.try_extract_string_object_raw(b.cast()),
-                            ) {
+                (ka, kb)
+                    if ka == hl::hl_type_kind_HVIRTUAL
+                        && matches!(kb, hl::hl_type_kind_HOBJ | hl::hl_type_kind_HDYNOBJ) =>
+                {
+                    let value = (*(a as *mut hl::vvirtual)).value;
+                    return !value.is_null() && self.dynamic_eq(value, b);
+                }
+                (ka, kb) if ka == hl::hl_type_kind_HVIRTUAL && kb == hl::hl_type_kind_HVIRTUAL => {
+                    let av = (*(a as *mut hl::vvirtual)).value;
+                    let bv = (*(b as *mut hl::vvirtual)).value;
+                    // HashLink reports an invalid comparison for two distinct
+                    // self-backed virtual records. For equality that means false,
+                    // not "compare their null value slots as equal".
+                    return !av.is_null() && !bv.is_null() && self.dynamic_eq(av, bv);
+                }
+                _ => {}
+            }
+            if ka == kb {
+                return match ka {
+                    k if k == hl::hl_type_kind_HI32 => (*a).v.i == (*b).v.i,
+                    k if k == hl::hl_type_kind_HUI8 => (*a).v.ui8 == (*b).v.ui8,
+                    k if k == hl::hl_type_kind_HUI16 => (*a).v.ui16 == (*b).v.ui16,
+                    k if k == hl::hl_type_kind_HI64 => (*a).v.i64_ == (*b).v.i64_,
+                    k if k == hl::hl_type_kind_HF32 => (*a).v.f == (*b).v.f,
+                    k if k == hl::hl_type_kind_HF64 => (*a).v.d == (*b).v.d,
+                    k if k == hl::hl_type_kind_HBOOL => (*a).v.b == (*b).v.b,
+                    k if k == hl::hl_type_kind_HBYTES => {
+                        Self::utf16z_eq((*a).v.bytes as *const u16, (*b).v.bytes as *const u16)
+                    }
+                    _ => {
+                        if ka == hl::hl_type_kind_HOBJ {
+                            let ta_name = self.dynamic_type_name(a);
+                            let tb_name = self.dynamic_type_name(b);
+                            if ta_name == tb_name
+                                && matches!(ta_name.as_deref(), Some("String"))
+                                && let (Some((ab, al)), Some((bb, bl))) = (
+                                    self.try_extract_string_object_raw(a.cast()),
+                                    self.try_extract_string_object_raw(b.cast()),
+                                )
+                            {
                                 return al == bl && Self::utf16_len_eq(ab, bb, al as usize);
                             }
-                        }
 
-                        // `a` and `b` are the objects themselves, not boxes
-                        // whose payload starts at `v.ptr`.  Reading that union
-                        // member therefore reads offset 8 of the object -- its
-                        // first field.  Distinct objects with the same first
-                        // field consequently compared equal (two IntWrap(1)
-                        // instances made Array.remove remove the wrong one).
-                        // Strings are the content-equality exception handled
-                        // above; every other object uses identity, matching
-                        // hlp_dyn_compare's HOBJ fallback.
-                        return false;
+                            // `a` and `b` are the objects themselves, not boxes
+                            // whose payload starts at `v.ptr`.  Reading that union
+                            // member therefore reads offset 8 of the object -- its
+                            // first field.  Distinct objects with the same first
+                            // field consequently compared equal (two IntWrap(1)
+                            // instances made Array.remove remove the wrong one).
+                            // Strings are the content-equality exception handled
+                            // above; every other object uses identity, matching
+                            // hlp_dyn_compare's HOBJ fallback.
+                            return false;
+                        }
+                        if ka == hl::hl_type_kind_HENUM {
+                            // Enum values are heap objects whose first word is
+                            // their hl_type*.  They are not vdynamic boxes, so
+                            // reading `v.ptr` observes the constructor index at
+                            // offset 8.  That made any two zero-argument enum
+                            // values with the same constructor index compare
+                            // equal, even when they belonged to different enum
+                            // types.  HashLink's HENUM/HENUM comparison is pointer
+                            // identity; the equal-pointer case was handled above.
+                            return false;
+                        }
+                        (*a).v.ptr == (*b).v.ptr
                     }
-                    if ka == hl::hl_type_kind_HENUM {
-                        // Enum values are heap objects whose first word is
-                        // their hl_type*.  They are not vdynamic boxes, so
-                        // reading `v.ptr` observes the constructor index at
-                        // offset 8.  That made any two zero-argument enum
-                        // values with the same constructor index compare
-                        // equal, even when they belonged to different enum
-                        // types.  HashLink's HENUM/HENUM comparison is pointer
-                        // identity; the equal-pointer case was handled above.
-                        return false;
-                    }
-                    (*a).v.ptr == (*b).v.ptr
-                }
+                };
+            }
+            // Cross-kind numeric equality (e.g. Int dynamic vs Float dynamic)
+            let a_num = match ka {
+                k if k == hl::hl_type_kind_HI32 => Some((*a).v.i as f64),
+                k if k == hl::hl_type_kind_HUI8 => Some((*a).v.ui8 as f64),
+                k if k == hl::hl_type_kind_HUI16 => Some((*a).v.ui16 as f64),
+                k if k == hl::hl_type_kind_HI64 => Some((*a).v.i64_ as f64),
+                k if k == hl::hl_type_kind_HF32 => Some((*a).v.f as f64),
+                k if k == hl::hl_type_kind_HF64 => Some((*a).v.d),
+                _ => None,
             };
-        }
-        // Cross-kind numeric equality (e.g. Int dynamic vs Float dynamic)
-        let a_num = match ka {
-            k if k == hl::hl_type_kind_HI32 => Some((*a).v.i as f64),
-            k if k == hl::hl_type_kind_HUI8 => Some((*a).v.ui8 as f64),
-            k if k == hl::hl_type_kind_HUI16 => Some((*a).v.ui16 as f64),
-            k if k == hl::hl_type_kind_HI64 => Some((*a).v.i64_ as f64),
-            k if k == hl::hl_type_kind_HF32 => Some((*a).v.f as f64),
-            k if k == hl::hl_type_kind_HF64 => Some((*a).v.d),
-            _ => None,
-        };
-        let b_num = match kb {
-            k if k == hl::hl_type_kind_HI32 => Some((*b).v.i as f64),
-            k if k == hl::hl_type_kind_HUI8 => Some((*b).v.ui8 as f64),
-            k if k == hl::hl_type_kind_HUI16 => Some((*b).v.ui16 as f64),
-            k if k == hl::hl_type_kind_HI64 => Some((*b).v.i64_ as f64),
-            k if k == hl::hl_type_kind_HF32 => Some((*b).v.f as f64),
-            k if k == hl::hl_type_kind_HF64 => Some((*b).v.d),
-            _ => None,
-        };
-        match (a_num, b_num) {
-            (Some(x), Some(y)) => x == y,
-            _ => false,
+            let b_num = match kb {
+                k if k == hl::hl_type_kind_HI32 => Some((*b).v.i as f64),
+                k if k == hl::hl_type_kind_HUI8 => Some((*b).v.ui8 as f64),
+                k if k == hl::hl_type_kind_HUI16 => Some((*b).v.ui16 as f64),
+                k if k == hl::hl_type_kind_HI64 => Some((*b).v.i64_ as f64),
+                k if k == hl::hl_type_kind_HF32 => Some((*b).v.f as f64),
+                k if k == hl::hl_type_kind_HF64 => Some((*b).v.d),
+                _ => None,
+            };
+            match (a_num, b_num) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            }
         }
     }
 
     unsafe fn dynamic_value_eq(&self, a: NanBoxedValue, b: NanBoxedValue) -> bool {
-        if a.is_null() || a.is_void() || b.is_null() || b.is_void() {
-            return (a.is_null() || a.is_void()) && (b.is_null() || b.is_void());
-        }
-        if a.is_ptr() && b.is_ptr() {
-            return self.dynamic_eq(
-                a.as_ptr() as *mut hl::vdynamic,
-                b.as_ptr() as *mut hl::vdynamic,
-            );
-        }
-        if a.raw_bits() == b.raw_bits() {
-            return true;
-        }
+        unsafe {
+            if a.is_null() || a.is_void() || b.is_null() || b.is_void() {
+                return (a.is_null() || a.is_void()) && (b.is_null() || b.is_void());
+            }
+            if a.is_ptr() && b.is_ptr() {
+                return self.dynamic_eq(
+                    a.as_ptr() as *mut hl::vdynamic,
+                    b.as_ptr() as *mut hl::vdynamic,
+                );
+            }
+            if a.raw_bits() == b.raw_bits() {
+                return true;
+            }
 
-        match (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
-            (Some(DynamicScalar::Int(x)), Some(DynamicScalar::Int(y))) => x == y,
-            (Some(DynamicScalar::Float(x)), Some(DynamicScalar::Float(y))) => x == y,
-            (Some(DynamicScalar::Int(x)), Some(DynamicScalar::Float(y))) => x as f64 == y,
-            (Some(DynamicScalar::Float(x)), Some(DynamicScalar::Int(y))) => x == y as f64,
-            (Some(DynamicScalar::Bool(x)), Some(DynamicScalar::Bool(y))) => x == y,
-            _ => false,
+            match (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
+                (Some(DynamicScalar::Int(x)), Some(DynamicScalar::Int(y))) => x == y,
+                (Some(DynamicScalar::Float(x)), Some(DynamicScalar::Float(y))) => x == y,
+                (Some(DynamicScalar::Int(x)), Some(DynamicScalar::Float(y))) => x as f64 == y,
+                (Some(DynamicScalar::Float(x)), Some(DynamicScalar::Int(y))) => x == y as f64,
+                (Some(DynamicScalar::Bool(x)), Some(DynamicScalar::Bool(y))) => x == y,
+                _ => false,
+            }
         }
     }
 
@@ -765,114 +783,119 @@ impl HLInterpreter {
         a: NanBoxedValue,
         b: NanBoxedValue,
     ) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering;
+        unsafe {
+            use std::cmp::Ordering;
 
-        let a_null = a.is_null() || a.is_void();
-        let b_null = b.is_null() || b.is_void();
-        if a_null || b_null {
-            return Some(match (a_null, b_null) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Less,
-                (false, true) => Ordering::Greater,
-                _ => unreachable!(),
-            });
-        }
-        if a.raw_bits() == b.raw_bits() {
-            return Some(Ordering::Equal);
-        }
-
-        let scalar_number = |v| match v {
-            DynamicScalar::Int(x) => x as f64,
-            DynamicScalar::Float(x) => x,
-            DynamicScalar::Bool(x) => {
-                if x {
-                    1.0
-                } else {
-                    0.0
-                }
+            let a_null = a.is_null() || a.is_void();
+            let b_null = b.is_null() || b.is_void();
+            if a_null || b_null {
+                return Some(match (a_null, b_null) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    _ => unreachable!(),
+                });
             }
-        };
-        if let (Some(x), Some(y)) = (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
-            // Match hl_dyn_compare: NaN is neither less nor greater, so it
-            // compares equal for ordering purposes.
-            let (x, y) = (scalar_number(x), scalar_number(y));
-            return Some(if x < y {
-                Ordering::Less
-            } else if x > y {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            });
-        }
+            if a.raw_bits() == b.raw_bits() {
+                return Some(Ordering::Equal);
+            }
 
-        if a.is_ptr() && b.is_ptr() {
-            let (ap, bp) = (
-                a.as_ptr() as *mut hl::vdynamic,
-                b.as_ptr() as *mut hl::vdynamic,
-            );
-            if Self::is_derefable_dynamic(ap)
-                && Self::is_derefable_dynamic(bp)
-                && !(*ap).t.is_null()
-                && !(*bp).t.is_null()
-            {
-                let (ak, bk) = ((*(*ap).t).kind, (*(*bp).t).kind);
-                if ak == hl::hl_type_kind_HBYTES && bk == hl::hl_type_kind_HBYTES {
-                    let (ab, bb) = ((*ap).v.bytes as *const u16, (*bp).v.bytes as *const u16);
-                    let mut al = 0i32;
-                    let mut bl = 0i32;
-                    while !ab.is_null() && *ab.add(al as usize) != 0 {
-                        al += 1;
+            let scalar_number = |v| match v {
+                DynamicScalar::Int(x) => x as f64,
+                DynamicScalar::Float(x) => x,
+                DynamicScalar::Bool(x) => {
+                    if x {
+                        1.0
+                    } else {
+                        0.0
                     }
-                    while !bb.is_null() && *bb.add(bl as usize) != 0 {
-                        bl += 1;
-                    }
-                    return Some(Self::utf16_cmp(ab, al, bb, bl));
                 }
-                if ak == hl::hl_type_kind_HOBJ && bk == hl::hl_type_kind_HOBJ {
-                    if let (Some((ab, al)), Some((bb, bl))) = (
-                        self.try_extract_string_object_raw(ap.cast()),
-                        self.try_extract_string_object_raw(bp.cast()),
-                    ) {
+            };
+            if let (Some(x), Some(y)) = (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
+                // Match hl_dyn_compare: NaN is neither less nor greater, so it
+                // compares equal for ordering purposes.
+                let (x, y) = (scalar_number(x), scalar_number(y));
+                return Some(if x < y {
+                    Ordering::Less
+                } else if x > y {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                });
+            }
+
+            if a.is_ptr() && b.is_ptr() {
+                let (ap, bp) = (
+                    a.as_ptr() as *mut hl::vdynamic,
+                    b.as_ptr() as *mut hl::vdynamic,
+                );
+                if Self::is_derefable_dynamic(ap)
+                    && Self::is_derefable_dynamic(bp)
+                    && !(*ap).t.is_null()
+                    && !(*bp).t.is_null()
+                {
+                    let (ak, bk) = ((*(*ap).t).kind, (*(*bp).t).kind);
+                    if ak == hl::hl_type_kind_HBYTES && bk == hl::hl_type_kind_HBYTES {
+                        let (ab, bb) = ((*ap).v.bytes as *const u16, (*bp).v.bytes as *const u16);
+                        let mut al = 0i32;
+                        let mut bl = 0i32;
+                        while !ab.is_null() && *ab.add(al as usize) != 0 {
+                            al += 1;
+                        }
+                        while !bb.is_null() && *bb.add(bl as usize) != 0 {
+                            bl += 1;
+                        }
+                        return Some(Self::utf16_cmp(ab, al, bb, bl));
+                    }
+                    if ak == hl::hl_type_kind_HOBJ
+                        && bk == hl::hl_type_kind_HOBJ
+                        && let (Some((ab, al)), Some((bb, bl))) = (
+                            self.try_extract_string_object_raw(ap.cast()),
+                            self.try_extract_string_object_raw(bp.cast()),
+                        )
+                    {
                         return Some(Self::utf16_cmp(ab, al, bb, bl));
                     }
                 }
+                return Some(a.as_ptr().cmp(&b.as_ptr()));
             }
-            return Some(a.as_ptr().cmp(&b.as_ptr()));
-        }
 
-        None
+            None
+        }
     }
 
     unsafe fn dynamic_scalar(v: NanBoxedValue) -> Option<DynamicScalar> {
-        if v.is_i32() {
-            return Some(DynamicScalar::Int(v.as_i32() as i64));
-        }
-        if v.is_i64() {
-            return Some(DynamicScalar::Int(v.as_i64_lossy()));
-        }
-        if v.is_f64() {
-            return Some(DynamicScalar::Float(v.as_f64()));
-        }
-        if v.is_bool() {
-            return Some(DynamicScalar::Bool(v.as_bool()));
-        }
-        if !v.is_ptr() {
-            return None;
-        }
+        unsafe {
+            if v.is_i32() {
+                return Some(DynamicScalar::Int(v.as_i32() as i64));
+            }
+            if v.is_i64() {
+                return Some(DynamicScalar::Int(v.as_i64_lossy()));
+            }
+            if v.is_f64() {
+                return Some(DynamicScalar::Float(v.as_f64()));
+            }
+            if v.is_bool() {
+                return Some(DynamicScalar::Bool(v.as_bool()));
+            }
+            if !v.is_ptr() {
+                return None;
+            }
 
-        let d = v.as_ptr() as *mut hl::vdynamic;
-        if !Self::is_derefable_dynamic(d) || (*d).t.is_null() {
-            return None;
-        }
-        match (*(*d).t).kind {
-            hl::hl_type_kind_HI32 => Some(DynamicScalar::Int((*d).v.i as i64)),
-            hl::hl_type_kind_HUI8 => Some(DynamicScalar::Int((*d).v.ui8 as i64)),
-            hl::hl_type_kind_HUI16 => Some(DynamicScalar::Int((*d).v.ui16 as i64)),
-            hl::hl_type_kind_HI64 => Some(DynamicScalar::Int((*d).v.i64_)),
-            hl::hl_type_kind_HF32 => Some(DynamicScalar::Float((*d).v.f as f64)),
-            hl::hl_type_kind_HF64 => Some(DynamicScalar::Float((*d).v.d)),
-            hl::hl_type_kind_HBOOL => Some(DynamicScalar::Bool((*d).v.b)),
-            _ => None,
+            let d = v.as_ptr() as *mut hl::vdynamic;
+            if !Self::is_derefable_dynamic(d) || (*d).t.is_null() {
+                return None;
+            }
+            match (*(*d).t).kind {
+                hl::hl_type_kind_HI32 => Some(DynamicScalar::Int((*d).v.i as i64)),
+                hl::hl_type_kind_HUI8 => Some(DynamicScalar::Int((*d).v.ui8 as i64)),
+                hl::hl_type_kind_HUI16 => Some(DynamicScalar::Int((*d).v.ui16 as i64)),
+                hl::hl_type_kind_HI64 => Some(DynamicScalar::Int((*d).v.i64_)),
+                hl::hl_type_kind_HF32 => Some(DynamicScalar::Float((*d).v.f as f64)),
+                hl::hl_type_kind_HF64 => Some(DynamicScalar::Float((*d).v.d)),
+                hl::hl_type_kind_HBOOL => Some(DynamicScalar::Bool((*d).v.b)),
+                _ => None,
+            }
         }
     }
 }

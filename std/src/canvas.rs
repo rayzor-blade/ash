@@ -32,15 +32,17 @@ use crate::hl::vbyte;
 /// `data` must point at `width * height * 4` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_canvas_present(data: *mut vbyte, width: i32, height: i32) -> bool {
-    if data.is_null() || width <= 0 || height <= 0 {
-        return false;
+    unsafe {
+        if data.is_null() || width <= 0 || height <= 0 {
+            return false;
+        }
+        present(data, width, height)
     }
-    present(data, width, height)
 }
 
 #[cfg(target_family = "wasm")]
 unsafe fn present(data: *mut vbyte, width: i32, height: i32) -> bool {
-    ash_host_canvas_present(data as *const u8, width, height) != 0
+    unsafe { ash_host_canvas_present(data as *const u8, width, height) != 0 }
 }
 
 /// Nowhere to present to. A native build of a program that draws its own
@@ -52,7 +54,7 @@ unsafe fn present(_data: *mut vbyte, _width: i32, _height: i32) -> bool {
 
 #[cfg(target_family = "wasm")]
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     /// Show a rectangle of RGBA pixels from the module's memory. Non-zero if
     /// the host had a display for them.
     fn ash_host_canvas_present(data: *const u8, width: i32, height: i32) -> i32;

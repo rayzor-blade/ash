@@ -28,7 +28,7 @@
 //! Integer operands only. `!(a < b)` is `a >= b` for integers and is not for
 //! floats, where a NaN makes both false, so a float guard is never a fact.
 
-use super::{def_sites, DefSite, Pass, PassOptions, PassStats};
+use super::{DefSite, Pass, PassOptions, PassStats, def_sites};
 use crate::v2::analysis::CfgInfo;
 use crate::v2::ir::*;
 use anyhow::Result;
@@ -155,14 +155,14 @@ impl Pass for RedundantGuardElim {
                 b: Some(rhs),
                 ..
             } = &f.blocks[b].term
+                && !f.is_float(f.value_ty(*a))
+                && !f.is_float(f.value_ty(*rhs))
             {
-                if !f.is_float(f.value_ty(*a)) && !f.is_float(f.value_ty(*rhs)) {
-                    let (ra, rb) = (copy_root(f, &defs, *a), copy_root(f, &defs, *rhs));
-                    if known.contains(&(*cond, ra, rb)) {
-                        decided.push((b, true));
-                    } else if negate(*cond).is_some_and(|n| known.contains(&(n, ra, rb))) {
-                        decided.push((b, false));
-                    }
+                let (ra, rb) = (copy_root(f, &defs, *a), copy_root(f, &defs, *rhs));
+                if known.contains(&(*cond, ra, rb)) {
+                    decided.push((b, true));
+                } else if negate(*cond).is_some_and(|n| known.contains(&(n, ra, rb))) {
+                    decided.push((b, false));
                 }
             }
 

@@ -15,18 +15,20 @@ pub unsafe extern "C" fn hlp_bytes_blit(
     spos: c_int,
     len: c_int,
 ) {
-    if len <= 0 || dst.is_null() || src.is_null() {
-        return;
+    unsafe {
+        if len <= 0 || dst.is_null() || src.is_null() {
+            return;
+        }
+        // HashLink implements this with `memmove`: `Bytes.blit` and the typed
+        // vector helpers are allowed to copy overlapping ranges within the same
+        // allocation. `copy_nonoverlapping` made those valid calls undefined
+        // behaviour (and an immediate abort under Rust's debug UB checks).
+        std::ptr::copy(
+            src.add(spos as usize) as *const u8,
+            dst.add(dpos as usize) as *mut u8,
+            len as usize,
+        );
     }
-    // HashLink implements this with `memmove`: `Bytes.blit` and the typed
-    // vector helpers are allowed to copy overlapping ranges within the same
-    // allocation. `copy_nonoverlapping` made those valid calls undefined
-    // behaviour (and an immediate abort under Rust's debug UB checks).
-    std::ptr::copy(
-        src.add(spos as usize) as *const u8,
-        dst.add(dpos as usize) as *mut u8,
-        len as usize,
-    );
 }
 
 #[unsafe(no_mangle)]
@@ -49,22 +51,24 @@ pub unsafe extern "C" fn hlp_bytes_compare(
     bpos: c_int,
     len: c_int,
 ) -> c_int {
-    if a.is_null() || b.is_null() || apos < 0 || bpos < 0 || len < 0 {
-        return 0;
-    }
-    let a_ptr = a.add(apos as usize);
-    let b_ptr = b.add(bpos as usize);
-    for i in 0..(len as usize) {
-        let xa = *a_ptr.add(i);
-        let xb = *b_ptr.add(i);
-        if xa < xb {
-            return -1;
+    unsafe {
+        if a.is_null() || b.is_null() || apos < 0 || bpos < 0 || len < 0 {
+            return 0;
         }
-        if xa > xb {
-            return 1;
+        let a_ptr = a.add(apos as usize);
+        let b_ptr = b.add(bpos as usize);
+        for i in 0..(len as usize) {
+            let xa = *a_ptr.add(i);
+            let xb = *b_ptr.add(i);
+            if xa < xb {
+                return -1;
+            }
+            if xa > xb {
+                return 1;
+            }
         }
+        0
     }
-    0
 }
 
 #[unsafe(no_mangle)]
@@ -73,22 +77,24 @@ pub unsafe extern "C" fn hlp_bytes_compare16(
     b: *const hl::vbyte,
     len: c_int,
 ) -> c_int {
-    if a.is_null() || b.is_null() || len < 0 {
-        return 0;
-    }
-    let a16 = a as *const c_ushort;
-    let b16 = b as *const c_ushort;
-    for i in 0..(len as usize) {
-        let xa = *a16.add(i);
-        let xb = *b16.add(i);
-        if xa < xb {
-            return -1;
+    unsafe {
+        if a.is_null() || b.is_null() || len < 0 {
+            return 0;
         }
-        if xa > xb {
-            return 1;
+        let a16 = a as *const c_ushort;
+        let b16 = b as *const c_ushort;
+        for i in 0..(len as usize) {
+            let xa = *a16.add(i);
+            let xb = *b16.add(i);
+            if xa < xb {
+                return -1;
+            }
+            if xa > xb {
+                return 1;
+            }
         }
+        0
     }
-    0
 }
 
 /// Upstream hl_string_compare (bytes.c): memcmp over len UTF-16 chars.
@@ -99,22 +105,26 @@ pub unsafe extern "C" fn hlp_string_compare(
     b: *const hl::vbyte,
     len: c_int,
 ) -> c_int {
-    if a.is_null() || b.is_null() || len <= 0 {
-        return 0;
+    unsafe {
+        if a.is_null() || b.is_null() || len <= 0 {
+            return 0;
+        }
+        libc::memcmp(
+            a as *const std::ffi::c_void,
+            b as *const std::ffi::c_void,
+            (len as usize) * 2,
+        )
     }
-    libc::memcmp(
-        a as *const std::ffi::c_void,
-        b as *const std::ffi::c_void,
-        (len as usize) * 2,
-    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_offset(bytes: *mut hl::vbyte, offset: c_int) -> *mut hl::vbyte {
-    if bytes.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        if bytes.is_null() {
+            return std::ptr::null_mut();
+        }
+        bytes.add(offset as usize)
     }
-    bytes.add(offset as usize)
 }
 
 /// Upstream hl_bytes_subtract (bytes.c): `(int)(a - b)`.
@@ -143,20 +153,22 @@ pub unsafe extern "C" fn hlp_bytes_address64(a: *const hl::vbyte) -> i64 {
 /// low returned, high written through the `_REF(_I32)` out-parameter.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_address(a: *const hl::vbyte, high: *mut c_int) -> c_int {
-    let addr = a as usize as u64;
-    if !high.is_null() {
-        // The C is `#ifdef HL_64`: 64-bit hosts publish the top 32 bits,
-        // 32-bit hosts store 0 because the whole address already fits in the
-        // low word. Keyed off the target pointer width rather than assuming
-        // a 64-bit host, so the two halves stay a faithful round-trip pair
-        // with hlp_bytes_from_address on either.
-        *high = if cfg!(target_pointer_width = "64") {
-            (addr >> 32) as c_int
-        } else {
-            0
-        };
+    unsafe {
+        let addr = a as usize as u64;
+        if !high.is_null() {
+            // The C is `#ifdef HL_64`: 64-bit hosts publish the top 32 bits,
+            // 32-bit hosts store 0 because the whole address already fits in the
+            // low word. Keyed off the target pointer width rather than assuming
+            // a 64-bit host, so the two halves stay a faithful round-trip pair
+            // with hlp_bytes_from_address on either.
+            *high = if cfg!(target_pointer_width = "64") {
+                (addr >> 32) as c_int
+            } else {
+                0
+            };
+        }
+        addr as u32 as c_int
     }
-    addr as u32 as c_int
 }
 
 /// Upstream hl_bytes_from_address (bytes.c): rebuild a pointer from the two
@@ -262,19 +274,21 @@ pub unsafe extern "C" fn hlp_bytes_find(
     wpos: c_int,
     wlen: c_int,
 ) -> c_int {
-    // Check for null pointers and invalid parameters
-    if r#where.is_null() || which.is_null() || pos < 0 || len < 0 || wpos < 0 || wlen < 0 {
-        return -1;
-    }
+    unsafe {
+        // Check for null pointers and invalid parameters
+        if r#where.is_null() || which.is_null() || pos < 0 || len < 0 || wpos < 0 || wlen < 0 {
+            return -1;
+        }
 
-    let where_slice = std::slice::from_raw_parts(r#where.offset(pos as isize), len as usize);
-    let which_slice = std::slice::from_raw_parts(which.offset(wpos as isize), wlen as usize);
+        let where_slice = std::slice::from_raw_parts(r#where.offset(pos as isize), len as usize);
+        let which_slice = std::slice::from_raw_parts(which.offset(wpos as isize), wlen as usize);
 
-    let mut repeat_find = false;
+        let mut repeat_find = false;
 
-    match memfind_rb(where_slice, which_slice, &mut repeat_find) {
-        Some(found_index) => (found_index + pos as usize) as c_int,
-        None => -1,
+        match memfind_rb(where_slice, which_slice, &mut repeat_find) {
+            Some(found_index) => (found_index + pos as usize) as c_int,
+            None => -1,
+        }
     }
 }
 
@@ -289,43 +303,45 @@ pub unsafe extern "C" fn hlp_bytes_rfind(
     which: *const hl::vbyte,
     wlen: c_int,
 ) -> c_int {
-    // Upstream has no negative guard, so a negative `wlen` reaches memcmp as a
-    // huge size_t. The siblings in this file all reject negatives up front,
-    // and for the negative case C does handle (wlen > len) the answer is the
-    // same -1, so nothing observable changes.
-    if len < 0 || wlen < 0 {
-        return -1;
-    }
-    // These two boundary cases are upstream's, in upstream's order: a needle
-    // longer than the haystack loses before anything else, and an empty needle
-    // then matches "at end" — `len`, not 0, which is what makes this the
-    // mirror of hl_bytes_find rather than its duplicate. Note len == wlen == 0
-    // therefore yields 0. Neither path touches memory, so both stay reachable
-    // with null pointers exactly as in C; the null guard goes after them and
-    // covers only the paths that actually dereference.
-    if wlen > len {
-        return -1;
-    }
-    if wlen == 0 {
-        return len;
-    }
-    if r#where.is_null() || which.is_null() {
-        return -1;
-    }
-
-    let haystack = std::slice::from_raw_parts(r#where, len as usize);
-    let needle = std::slice::from_raw_parts(which, wlen as usize);
-    let mut pos = (len - wlen) as usize;
-    loop {
-        if haystack[pos..pos + needle.len()] == *needle {
-            return pos as c_int;
-        }
-        // `pos` is unsigned here, so C's `pos--` / `while (pos >= 0)` has to
-        // terminate before the decrement wraps.
-        if pos == 0 {
+    unsafe {
+        // Upstream has no negative guard, so a negative `wlen` reaches memcmp as a
+        // huge size_t. The siblings in this file all reject negatives up front,
+        // and for the negative case C does handle (wlen > len) the answer is the
+        // same -1, so nothing observable changes.
+        if len < 0 || wlen < 0 {
             return -1;
         }
-        pos -= 1;
+        // These two boundary cases are upstream's, in upstream's order: a needle
+        // longer than the haystack loses before anything else, and an empty needle
+        // then matches "at end" — `len`, not 0, which is what makes this the
+        // mirror of hl_bytes_find rather than its duplicate. Note len == wlen == 0
+        // therefore yields 0. Neither path touches memory, so both stay reachable
+        // with null pointers exactly as in C; the null guard goes after them and
+        // covers only the paths that actually dereference.
+        if wlen > len {
+            return -1;
+        }
+        if wlen == 0 {
+            return len;
+        }
+        if r#where.is_null() || which.is_null() {
+            return -1;
+        }
+
+        let haystack = std::slice::from_raw_parts(r#where, len as usize);
+        let needle = std::slice::from_raw_parts(which, wlen as usize);
+        let mut pos = (len - wlen) as usize;
+        loop {
+            if haystack[pos..pos + needle.len()] == *needle {
+                return pos as c_int;
+            }
+            // `pos` is unsigned here, so C's `pos--` / `while (pos >= 0)` has to
+            // terminate before the decrement wraps.
+            if pos == 0 {
+                return -1;
+            }
+            pos -= 1;
+        }
     }
 }
 
@@ -336,16 +352,18 @@ pub unsafe extern "C" fn hlp_bytes_fill(
     len: c_int,
     value: c_int,
 ) {
-    // Check for null pointer and invalid parameters
-    if bytes.is_null() || pos < 0 || len < 0 {
-        return; // Early return for invalid input
+    unsafe {
+        // Check for null pointer and invalid parameters
+        if bytes.is_null() || pos < 0 || len < 0 {
+            return; // Early return for invalid input
+        }
+
+        // Create a mutable slice from the input pointer
+        let slice = std::slice::from_raw_parts_mut(bytes.offset(pos as isize), len as usize);
+
+        // Fill the slice with the specified value
+        slice.fill(value as u8);
     }
-
-    // Create a mutable slice from the input pointer
-    let slice = std::slice::from_raw_parts_mut(bytes.offset(pos as isize), len as usize);
-
-    // Fill the slice with the specified value
-    slice.fill(value as u8);
 }
 
 #[unsafe(no_mangle)]
@@ -355,7 +373,9 @@ pub unsafe extern "C" fn hlp_bsort_i32(
     len: i32,
     cmp: *mut hl::vclosure,
 ) {
-    hl_bsort::<i32>(bytes, pos, len, cmp);
+    unsafe {
+        hl_bsort::<i32>(bytes, pos, len, cmp);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -365,7 +385,9 @@ pub unsafe extern "C" fn hlp_bsort_i64(
     len: i32,
     cmp: *mut hl::vclosure,
 ) {
-    hl_bsort::<i64>(bytes, pos, len, cmp);
+    unsafe {
+        hl_bsort::<i64>(bytes, pos, len, cmp);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -375,7 +397,9 @@ pub unsafe extern "C" fn hlp_bsort_f32(
     len: i32,
     cmp: *mut hl::vclosure,
 ) {
-    hl_bsort::<f32>(bytes, pos, len, cmp);
+    unsafe {
+        hl_bsort::<f32>(bytes, pos, len, cmp);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -385,7 +409,9 @@ pub unsafe extern "C" fn hlp_bsort_f64(
     len: i32,
     cmp: *mut hl::vclosure,
 ) {
-    hl_bsort::<f64>(bytes, pos, len, cmp);
+    unsafe {
+        hl_bsort::<f64>(bytes, pos, len, cmp);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -395,32 +421,38 @@ pub unsafe extern "C" fn hlp_bsort_bool(
     len: i32,
     cmp: *mut hl::vclosure,
 ) {
-    hl_bsort::<bool>(bytes, pos, len, cmp);
+    unsafe {
+        hl_bsort::<bool>(bytes, pos, len, cmp);
+    }
 }
 
 unsafe fn read_utf16z(bytes: *const hl::vbyte) -> Vec<u16> {
-    if bytes.is_null() {
-        return Vec::new();
+    unsafe {
+        if bytes.is_null() {
+            return Vec::new();
+        }
+        let mut len = 0usize;
+        let ptr = bytes as *const u16;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(ptr, len).to_vec()
     }
-    let mut len = 0usize;
-    let ptr = bytes as *const u16;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-    std::slice::from_raw_parts(ptr, len).to_vec()
 }
 
 unsafe fn alloc_utf16_bytes(units: &[u16], out_size: *mut c_int) -> *mut hl::vbyte {
-    if !out_size.is_null() {
-        *out_size = units.len() as c_int;
+    unsafe {
+        if !out_size.is_null() {
+            *out_size = units.len() as c_int;
+        }
+        let out = hlp_alloc_bytes(((units.len() + 1) * 2) as c_int) as *mut u16;
+        if out.is_null() {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(units.as_ptr(), out, units.len());
+        *out.add(units.len()) = 0;
+        out as *mut hl::vbyte
     }
-    let out = hlp_alloc_bytes(((units.len() + 1) * 2) as c_int) as *mut u16;
-    if out.is_null() {
-        return std::ptr::null_mut();
-    }
-    std::ptr::copy_nonoverlapping(units.as_ptr(), out, units.len());
-    *out.add(units.len()) = 0;
-    out as *mut hl::vbyte
 }
 
 fn url_encode_utf8(input: &[u8]) -> Vec<u8> {
@@ -451,14 +483,14 @@ fn url_decode_utf8(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0usize;
     while i < input.len() {
-        if input[i] == b'%' && i + 2 < input.len() {
-            if let (Some(h1), Some(h2)) =
+        if input[i] == b'%'
+            && i + 2 < input.len()
+            && let (Some(h1), Some(h2)) =
                 (from_hex_digit(input[i + 1]), from_hex_digit(input[i + 2]))
-            {
-                out.push((h1 << 4) | h2);
-                i += 3;
-                continue;
-            }
+        {
+            out.push((h1 << 4) | h2);
+            i += 3;
+            continue;
         }
         out.push(input[i]);
         i += 1;
@@ -471,12 +503,14 @@ pub unsafe extern "C" fn hlp_url_encode(
     bytes: *const hl::vbyte,
     out_size: *mut c_int,
 ) -> *mut hl::vbyte {
-    let units = read_utf16z(bytes);
-    let input = String::from_utf16_lossy(&units);
-    let encoded = url_encode_utf8(input.as_bytes());
-    let encoded_ascii = String::from_utf8_lossy(&encoded);
-    let out_units: Vec<u16> = encoded_ascii.encode_utf16().collect();
-    alloc_utf16_bytes(&out_units, out_size)
+    unsafe {
+        let units = read_utf16z(bytes);
+        let input = String::from_utf16_lossy(&units);
+        let encoded = url_encode_utf8(input.as_bytes());
+        let encoded_ascii = String::from_utf8_lossy(&encoded);
+        let out_units: Vec<u16> = encoded_ascii.encode_utf16().collect();
+        alloc_utf16_bytes(&out_units, out_size)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -484,13 +518,15 @@ pub unsafe extern "C" fn hlp_url_decode(
     bytes: *const hl::vbyte,
     out_size: *mut c_int,
 ) -> *mut hl::vbyte {
-    let units = read_utf16z(bytes);
-    let input = String::from_utf16_lossy(&units);
-    let decoded = url_decode_utf8(input.as_bytes());
-    let decoded_str = String::from_utf8(decoded)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-    let out_units: Vec<u16> = decoded_str.encode_utf16().collect();
-    alloc_utf16_bytes(&out_units, out_size)
+    unsafe {
+        let units = read_utf16z(bytes);
+        let input = String::from_utf16_lossy(&units);
+        let decoded = url_decode_utf8(input.as_bytes());
+        let decoded_str = String::from_utf8(decoded)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        let out_units: Vec<u16> = decoded_str.encode_utf16().collect();
+        alloc_utf16_bytes(&out_units, out_size)
+    }
 }
 
 #[cfg(test)]
@@ -538,12 +574,14 @@ mod bytes_tests {
     /// over: a base pointer plus an explicit length. Tests that need a length
     /// which disagrees with the buffer call the prim directly.
     unsafe fn rfind(hay: &[u8], needle: &[u8]) -> c_int {
-        prim::hlp_bytes_rfind(
-            hay.as_ptr(),
-            hay.len() as c_int,
-            needle.as_ptr(),
-            needle.len() as c_int,
-        )
+        unsafe {
+            prim::hlp_bytes_rfind(
+                hay.as_ptr(),
+                hay.len() as c_int,
+                needle.as_ptr(),
+                needle.len() as c_int,
+            )
+        }
     }
 
     // ---- hl_bytes_rfind -------------------------------------------------
@@ -976,10 +1014,12 @@ mod bytes_tests {
 /// Bytes the collector reserved for this block, as `hl_gc_get_memsize` does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_get_memsize(ptr: *mut hl::vbyte) -> i32 {
-    if ptr.is_null() {
-        return 0;
+    unsafe {
+        if ptr.is_null() {
+            return 0;
+        }
+        crate::rt::allocation_size(ptr as *const std::ffi::c_void) as i32
     }
-    crate::rt::allocation_size(ptr as *const std::ffi::c_void) as i32
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //! exports `hlp_` prefixed symbols. This module re-exports ash functions
 //! under their `hl_` names so HDLLs can link against ash_std directly.
 
-use std::ffi::{c_void, CString};
+use std::ffi::{CString, c_void};
 use std::ptr;
 
 // ============================================================================
@@ -55,32 +55,38 @@ use crate::hl::{self, hl_buffer, hl_type, hl_type__bindgen_ty_1, varray, vdynami
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_array(t: *mut hl_type, size: i32) -> *mut varray {
-    crate::array::hlp_alloc_array(t, size)
+    unsafe { crate::array::hlp_alloc_array(t, size) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
-    let result = crate::obj::hlp_alloc_dynamic(t);
-    if env_flag!("ASH_DBG_ALLOC") {
-        let kind = if !t.is_null() { (*t).kind } else { 999 };
-        eprintln!("[hl_alloc_dynamic] t={:p} kind={} -> {:p}", t, kind, result);
+    unsafe {
+        let result = crate::obj::hlp_alloc_dynamic(t);
+        if env_flag!("ASH_DBG_ALLOC") {
+            let kind = if !t.is_null() { (*t).kind } else { 999 };
+            eprintln!("[hl_alloc_dynamic] t={:p} kind={} -> {:p}", t, kind, result);
+        }
+        result
     }
-    result
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_dynobj() -> *mut vdynamic {
-    crate::obj::hlp_alloc_dynobj() as *mut vdynamic
+    unsafe { crate::obj::hlp_alloc_dynobj() as *mut vdynamic }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64) {
-    crate::obj::hlp_dyn_setd(d, hfield, value);
+    unsafe {
+        crate::obj::hlp_dyn_setd(d, hfield, value);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_type, value: i32) {
-    crate::obj::hlp_dyn_seti(d, hfield, t, value);
+    unsafe {
+        crate::obj::hlp_dyn_seti(d, hfield, t, value);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -90,17 +96,23 @@ pub unsafe extern "C" fn hl_dyn_setp(
     t: *mut hl_type,
     value: *mut c_void,
 ) {
-    crate::obj::hlp_dyn_setp(d, hfield, t, value);
+    unsafe {
+        crate::obj::hlp_dyn_setp(d, hfield, t, value);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32) {
-    crate::obj::hlp_dyn_setf(d, hfield, value);
+    unsafe {
+        crate::obj::hlp_dyn_setf(d, hfield, value);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64) {
-    crate::obj::hlp_dyn_seti64(d, hfield, value);
+    unsafe {
+        crate::obj::hlp_dyn_seti64(d, hfield, value);
+    }
 }
 
 // The reading half of the same family. A Windows loader resolves every import
@@ -109,22 +121,22 @@ pub unsafe extern "C" fn hl_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_type) -> i32 {
-    crate::obj::hlp_dyn_geti(d, hfield, t)
+    unsafe { crate::obj::hlp_dyn_geti(d, hfield, t) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
-    crate::obj::hlp_dyn_geti64(d, hfield)
+    unsafe { crate::obj::hlp_dyn_geti64(d, hfield) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
-    crate::obj::hlp_dyn_getf(d, hfield)
+    unsafe { crate::obj::hlp_dyn_getf(d, hfield) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
-    crate::obj::hlp_dyn_getd(d, hfield)
+    unsafe { crate::obj::hlp_dyn_getd(d, hfield) }
 }
 
 #[unsafe(no_mangle)]
@@ -133,7 +145,7 @@ pub unsafe extern "C" fn hl_dyn_getp(
     hfield: i32,
     t: *mut hl_type,
 ) -> *mut c_void {
-    crate::obj::hlp_dyn_getp(d, hfield, t)
+    unsafe { crate::obj::hlp_dyn_getp(d, hfield, t) }
 }
 
 /// Upstream hands back this thread's `hl_thread_info`. ash keeps no such
@@ -142,27 +154,31 @@ pub unsafe extern "C" fn hl_dyn_getp(
 /// program ever builds a `ui.Sentinel`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_get_thread() -> *mut c_void {
-    crate::sys::hlp_get_thread_info()
+    unsafe { crate::sys::hlp_get_thread_info() }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_hash_gen(name: *const hl::uchar, cache_name: bool) -> i32 {
-    crate::obj::hlp_hash_gen(name, cache_name)
+    unsafe { crate::obj::hlp_hash_gen(name, cache_name) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
-    crate::cast::hlp_make_dyn(data, t)
+    unsafe { crate::cast::hlp_make_dyn(data, t) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_throw(v: *mut vdynamic) {
-    crate::error::hlp_throw(v);
+    unsafe {
+        crate::error::hlp_throw(v);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_rethrow(v: *mut vdynamic) {
-    crate::error::hlp_rethrow(v);
+    unsafe {
+        crate::error::hlp_rethrow(v);
+    }
 }
 
 /// Upstream `hl.h:678`: `vdynamic *hl_dyn_call( vclosure *c, vdynamic **args, int nargs )`.
@@ -187,7 +203,7 @@ pub unsafe extern "C" fn hl_dyn_call(
     args: *mut *mut vdynamic,
     nargs: i32,
 ) -> *mut vdynamic {
-    crate::fun::hlp_dyn_call(c, args, nargs)
+    unsafe { crate::fun::hlp_dyn_call(c, args, nargs) }
 }
 
 // ============================================================================
@@ -196,39 +212,47 @@ pub unsafe extern "C" fn hl_dyn_call(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_buffer(_init: *const hl::uchar) -> *mut c_void {
-    crate::buffer::hlp_alloc_buffer() as *mut c_void
+    unsafe { crate::buffer::hlp_alloc_buffer() as *mut c_void }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_char(b: *mut c_void, c: u16) {
-    crate::buffer::hlp_buffer_char(b as *mut hl_buffer, c);
+    unsafe {
+        crate::buffer::hlp_buffer_char(b as *mut hl_buffer, c);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_str(b: *mut c_void, s: *const hl::uchar) {
-    crate::buffer::hlp_buffer_str(b as *mut hl_buffer, s);
+    unsafe {
+        crate::buffer::hlp_buffer_str(b as *mut hl_buffer, s);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_cstr(b: *mut c_void, s: *const u8) {
-    if s.is_null() {
-        return;
-    }
-    let cstr = std::ffi::CStr::from_ptr(s as *const std::ffi::c_char);
-    if let Ok(st) = cstr.to_str() {
-        let utf16 = crate::strings::str_to_uchar_ptr(st);
-        crate::buffer::hlp_buffer_str(b as *mut hl_buffer, utf16);
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        let cstr = std::ffi::CStr::from_ptr(s as *const std::ffi::c_char);
+        if let Ok(st) = cstr.to_str() {
+            let utf16 = crate::strings::str_to_uchar_ptr(st);
+            crate::buffer::hlp_buffer_str(b as *mut hl_buffer, utf16);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_content(b: *mut c_void, len: *mut i32) -> *const hl::uchar {
-    crate::buffer::hlp_buffer_content(b as *mut hl_buffer, len)
+    unsafe { crate::buffer::hlp_buffer_content(b as *mut hl_buffer, len) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
-    crate::buffer::hlp_buffer_val(b as *mut hl_buffer, v);
+    unsafe {
+        crate::buffer::hlp_buffer_val(b as *mut hl_buffer, v);
+    }
 }
 
 // ============================================================================
@@ -237,51 +261,53 @@ pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32) -> *mut c_void {
-    // A Mach-O HDLL binds these `hl_*` imports to its `libhl.dylib`
-    // dependency by install-name ordinal, even when ash exports the same ABI
-    // from the main executable. That compatibility image can therefore see
-    // its first allocation before ash's ordinary stdlib initializer reaches
-    // it. HashLink treats allocation as an initialization boundary; do the
-    // same here instead of aborting an otherwise valid fmt/ssl call with
-    // "GC not initialized".
-    const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
-    const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
-    const MEM_KIND_FINALIZER: i32 = 3; // hl.h:748
-    let p = match flags & PAGE_KIND_MASK {
-        // The kind bits reach no further than this function, so a block that
-        // wants a finalizer has to be recorded here or the collector will
-        // never know it from any other block. The caller writes its callback
-        // into word zero on return.
-        MEM_KIND_FINALIZER => crate::rt::alloc_finalizable(size as usize) as *mut u8,
-        _ => crate::rt::alloc_locked(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr()),
-    };
-    if p.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        // A Mach-O HDLL binds these `hl_*` imports to its `libhl.dylib`
+        // dependency by install-name ordinal, even when ash exports the same ABI
+        // from the main executable. That compatibility image can therefore see
+        // its first allocation before ash's ordinary stdlib initializer reaches
+        // it. HashLink treats allocation as an initialization boundary; do the
+        // same here instead of aborting an otherwise valid fmt/ssl call with
+        // "GC not initialized".
+        const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
+        const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
+        const MEM_KIND_FINALIZER: i32 = 3; // hl.h:748
+        let p = match flags & PAGE_KIND_MASK {
+            // The kind bits reach no further than this function, so a block that
+            // wants a finalizer has to be recorded here or the collector will
+            // never know it from any other block. The caller writes its callback
+            // into word zero on return.
+            MEM_KIND_FINALIZER => crate::rt::alloc_finalizable(size as usize) as *mut u8,
+            _ => crate::rt::alloc_locked(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr()),
+        };
+        if p.is_null() {
+            return ptr::null_mut();
+        }
 
-    // Word zero belongs to the CALLER for every kind but one.
-    //
-    // Upstream's hl_gc_alloc_gen hands the block back untouched (gc.c:495-560
-    // ends in a bare `return ptr`); anything that wants a type there writes it
-    // itself, the way hl_alloc_dynamic does at gc.c:1255-1257. ash wrote the
-    // type into word zero unconditionally, which silently overwrote the first
-    // eight bytes of every block whose kind reserves them for something else:
-    // the payload of an hl_gc_alloc_noptr byte buffer (MEM_KIND_NOPTR), an
-    // hl_gc_alloc_raw struct's first field (MEM_KIND_RAW), and -- the reason
-    // this was found -- the finalizer pointer that MEM_KIND_FINALIZER puts
-    // there, which a collector would later call.
-    //
-    // `gc.allocate` zeroes, so leaving it alone gives upstream's semantics: a
-    // null finalizer slot, and a buffer that starts as the caller expects.
-    //
-    // The write is kept for MEM_KIND_DYNAMIC, whose blocks are the only ones
-    // conventionally shaped like a vdynamic. Upstream does not write even
-    // there; narrowing it further is a separate change with its own blast
-    // radius, and no reported defect turns on it.
-    if flags & PAGE_KIND_MASK == MEM_KIND_DYNAMIC {
-        (*(p as *mut vdynamic)).t = t;
+        // Word zero belongs to the CALLER for every kind but one.
+        //
+        // Upstream's hl_gc_alloc_gen hands the block back untouched (gc.c:495-560
+        // ends in a bare `return ptr`); anything that wants a type there writes it
+        // itself, the way hl_alloc_dynamic does at gc.c:1255-1257. ash wrote the
+        // type into word zero unconditionally, which silently overwrote the first
+        // eight bytes of every block whose kind reserves them for something else:
+        // the payload of an hl_gc_alloc_noptr byte buffer (MEM_KIND_NOPTR), an
+        // hl_gc_alloc_raw struct's first field (MEM_KIND_RAW), and -- the reason
+        // this was found -- the finalizer pointer that MEM_KIND_FINALIZER puts
+        // there, which a collector would later call.
+        //
+        // `gc.allocate` zeroes, so leaving it alone gives upstream's semantics: a
+        // null finalizer slot, and a buffer that starts as the caller expects.
+        //
+        // The write is kept for MEM_KIND_DYNAMIC, whose blocks are the only ones
+        // conventionally shaped like a vdynamic. Upstream does not write even
+        // there; narrowing it further is a separate change with its own blast
+        // radius, and no reported defect turns on it.
+        if flags & PAGE_KIND_MASK == MEM_KIND_DYNAMIC {
+            (*(p as *mut vdynamic)).t = t;
+        }
+        p as *mut c_void
     }
-    p as *mut c_void
 }
 
 /// Upstream `hl_add_root` takes the address of a POINTER SLOT, not an object.
@@ -322,18 +348,22 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
 /// the collector's conservative read ignores those exactly as upstream does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
-    if ptr.is_null() {
-        return;
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+        crate::rt::add_root_slot(ptr as usize);
     }
-    crate::rt::add_root_slot(ptr as usize);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
-    if ptr.is_null() {
-        return;
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+        crate::rt::remove_root_slot(ptr as usize);
     }
-    crate::rt::remove_root_slot(ptr as usize);
 }
 
 // ============================================================================
@@ -342,58 +372,64 @@ pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
-    if str.is_null() {
-        return ptr::null();
+    unsafe {
+        if str.is_null() {
+            return ptr::null();
+        }
+        let cstr = std::ffi::CStr::from_ptr(str as *const std::ffi::c_char);
+        if let Ok(s) = cstr.to_str() {
+            let ptr = crate::strings::str_to_uchar_ptr(s);
+            return ptr;
+        }
+        ptr::null()
     }
-    let cstr = std::ffi::CStr::from_ptr(str as *const std::ffi::c_char);
-    if let Ok(s) = cstr.to_str() {
-        let ptr = crate::strings::str_to_uchar_ptr(s);
-        return ptr;
-    }
-    ptr::null()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
-    if env_flag!("ASH_DBG_SHADER") {
-        if !str.is_null() && (str as usize) > 0x10000 {
-            let mut len = 0;
-            while *str.add(len) != 0 && len < 200 {
-                len += 1;
+    unsafe {
+        if env_flag!("ASH_DBG_SHADER") {
+            if !str.is_null() && (str as usize) > 0x10000 {
+                let mut len = 0;
+                while *str.add(len) != 0 && len < 200 {
+                    len += 1;
+                }
+                let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
+                eprintln!(
+                    "[hl_to_utf8] len={} first100={:?}",
+                    len,
+                    &s[..s.len().min(100)]
+                );
+            } else {
+                eprintln!("[hl_to_utf8] str={:p} (null or invalid)", str);
             }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
-            eprintln!(
-                "[hl_to_utf8] len={} first100={:?}",
-                len,
-                &s[..s.len().min(100)]
-            );
-        } else {
-            eprintln!("[hl_to_utf8] str={:p} (null or invalid)", str);
         }
+        if str.is_null() {
+            return ptr::null();
+        }
+        let mut len = 0;
+        while *str.add(len) != 0 {
+            len += 1;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
+        let cstr = std::ffi::CString::new(s).unwrap_or_default();
+        let ptr = cstr.as_ptr() as *const u8;
+        std::mem::forget(cstr);
+        ptr
     }
-    if str.is_null() {
-        return ptr::null();
-    }
-    let mut len = 0;
-    while *str.add(len) != 0 {
-        len += 1;
-    }
-    let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
-    let cstr = std::ffi::CString::new(s).unwrap_or_default();
-    let ptr = cstr.as_ptr() as *const u8;
-    std::mem::forget(cstr);
-    ptr
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uchar {
-    if str.is_null() {
-        return ptr::null();
-    }
-    let bytes = std::slice::from_raw_parts(str, len as usize);
-    let s = String::from_utf8_lossy(bytes);
+    unsafe {
+        if str.is_null() {
+            return ptr::null();
+        }
+        let bytes = std::slice::from_raw_parts(str, len as usize);
+        let s = String::from_utf8_lossy(bytes);
 
-    crate::strings::str_to_uchar_ptr(&s)
+        crate::strings::str_to_uchar_ptr(&s)
+    }
 }
 
 /// Format an HDLL `hl_error(...)` message and box it as HashLink `bytes`.
@@ -404,130 +440,134 @@ pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uc
 /// return type turns an ordinary catchable exception into memory corruption.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_strbytes(fmt: *const hl::uchar, mut args: ...) -> *mut vdynamic {
-    if fmt.is_null() {
-        return ptr::null_mut();
-    }
-
-    let mut units = Vec::<u16>::new();
-    let mut pos = 0usize;
-    while *fmt.add(pos) != 0 {
-        let ch = *fmt.add(pos);
-        pos += 1;
-        if ch != b'%' as u16 {
-            units.push(ch);
-            continue;
+    unsafe {
+        if fmt.is_null() {
+            return ptr::null_mut();
         }
 
-        let mut cfmt = String::from("%");
-        let conversion = loop {
-            let spec = *fmt.add(pos);
+        let mut units = Vec::<u16>::new();
+        let mut pos = 0usize;
+        while *fmt.add(pos) != 0 {
+            let ch = *fmt.add(pos);
             pos += 1;
-            if spec == 0 {
-                break '\0';
+            if ch != b'%' as u16 {
+                units.push(ch);
+                continue;
             }
-            let spec = char::from_u32(spec as u32).unwrap_or('\0');
-            cfmt.push(spec);
-            if matches!(spec, 'd' | 'f' | 'g' | 'x' | 'X' | 's' | '%') {
-                break spec;
-            }
-        };
 
-        if conversion == 's' {
-            let value = args.next_arg::<*const hl::uchar>();
-            if value.is_null() {
-                units.extend("null".encode_utf16());
-            } else {
-                let mut i = 0usize;
-                while *value.add(i) != 0 {
-                    units.push(*value.add(i));
-                    i += 1;
+            let mut cfmt = String::from("%");
+            let conversion = loop {
+                let spec = *fmt.add(pos);
+                pos += 1;
+                if spec == 0 {
+                    break '\0';
                 }
+                let spec = char::from_u32(spec as u32).unwrap_or('\0');
+                cfmt.push(spec);
+                if matches!(spec, 'd' | 'f' | 'g' | 'x' | 'X' | 's' | '%') {
+                    break spec;
+                }
+            };
+
+            if conversion == 's' {
+                let value = args.next_arg::<*const hl::uchar>();
+                if value.is_null() {
+                    units.extend("null".encode_utf16());
+                } else {
+                    let mut i = 0usize;
+                    while *value.add(i) != 0 {
+                        units.push(*value.add(i));
+                        i += 1;
+                    }
+                }
+                continue;
             }
-            continue;
-        }
-        if conversion == '%' {
-            units.push(b'%' as u16);
-            continue;
-        }
-        if conversion == '\0' {
-            break;
+            if conversion == '%' {
+                units.push(b'%' as u16);
+                continue;
+            }
+            if conversion == '\0' {
+                break;
+            }
+
+            let cfmt = CString::new(cfmt).expect("printf format contains NUL");
+            let mut rendered = [0 as std::ffi::c_char; 128];
+            let written = match conversion {
+                'd' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
+                    rendered.as_mut_ptr(),
+                    rendered.len(),
+                    cfmt.as_ptr(),
+                    args.next_arg::<i64>(),
+                ),
+                'd' => libc::snprintf(
+                    rendered.as_mut_ptr(),
+                    rendered.len(),
+                    cfmt.as_ptr(),
+                    args.next_arg::<i32>(),
+                ),
+                'f' | 'g' => libc::snprintf(
+                    rendered.as_mut_ptr(),
+                    rendered.len(),
+                    cfmt.as_ptr(),
+                    args.next_arg::<f64>(),
+                ),
+                'x' | 'X' if cfmt.as_bytes().contains(&b'I') => libc::snprintf(
+                    rendered.as_mut_ptr(),
+                    rendered.len(),
+                    cfmt.as_ptr(),
+                    args.next_arg::<usize>(),
+                ),
+                'x' | 'X' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
+                    rendered.as_mut_ptr(),
+                    rendered.len(),
+                    cfmt.as_ptr(),
+                    args.next_arg::<*const c_void>(),
+                ),
+                'x' | 'X' => libc::snprintf(
+                    rendered.as_mut_ptr(),
+                    rendered.len(),
+                    cfmt.as_ptr(),
+                    args.next_arg::<i32>(),
+                ),
+                _ => 0,
+            };
+            let count = written.max(0) as usize;
+            units.extend(
+                rendered[..count.min(rendered.len().saturating_sub(1))]
+                    .iter()
+                    .map(|&byte| byte as u8 as u16),
+            );
         }
 
-        let cfmt = CString::new(cfmt).expect("printf format contains NUL");
-        let mut rendered = [0 as std::ffi::c_char; 128];
-        let written = match conversion {
-            'd' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
-                rendered.as_mut_ptr(),
-                rendered.len(),
-                cfmt.as_ptr(),
-                args.next_arg::<i64>(),
-            ),
-            'd' => libc::snprintf(
-                rendered.as_mut_ptr(),
-                rendered.len(),
-                cfmt.as_ptr(),
-                args.next_arg::<i32>(),
-            ),
-            'f' | 'g' => libc::snprintf(
-                rendered.as_mut_ptr(),
-                rendered.len(),
-                cfmt.as_ptr(),
-                args.next_arg::<f64>(),
-            ),
-            'x' | 'X' if cfmt.as_bytes().contains(&b'I') => libc::snprintf(
-                rendered.as_mut_ptr(),
-                rendered.len(),
-                cfmt.as_ptr(),
-                args.next_arg::<usize>(),
-            ),
-            'x' | 'X' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
-                rendered.as_mut_ptr(),
-                rendered.len(),
-                cfmt.as_ptr(),
-                args.next_arg::<*const c_void>(),
-            ),
-            'x' | 'X' => libc::snprintf(
-                rendered.as_mut_ptr(),
-                rendered.len(),
-                cfmt.as_ptr(),
-                args.next_arg::<i32>(),
-            ),
-            _ => 0,
-        };
-        let count = written.max(0) as usize;
-        units.extend(
-            rendered[..count.min(rendered.len().saturating_sub(1))]
-                .iter()
-                .map(|&byte| byte as u8 as u16),
-        );
+        units.push(0);
+        let d = crate::obj::hlp_alloc_dynamic(crate::types::hlt_bytes());
+        if d.is_null() {
+            return ptr::null_mut();
+        }
+        let bytes = crate::bytes::hlp_alloc_bytes((units.len() * 2) as i32);
+        if bytes.is_null() {
+            return ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), bytes, units.len() * 2);
+        (*d).v.ptr = bytes.cast();
+        d
     }
-
-    units.push(0);
-    let d = crate::obj::hlp_alloc_dynamic(crate::types::hlt_bytes());
-    if d.is_null() {
-        return ptr::null_mut();
-    }
-    let bytes = crate::bytes::hlp_alloc_bytes((units.len() * 2) as i32);
-    if bytes.is_null() {
-        return ptr::null_mut();
-    }
-    std::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), bytes, units.len() * 2);
-    (*d).v.ptr = bytes.cast();
-    d
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
-    // Hash UTF-8 bytes by first converting to UTF-16
-    if name.is_null() {
-        return 0;
-    }
-    let cstr = std::ffi::CStr::from_ptr(name as *const std::ffi::c_char);
-    if let Ok(s) = cstr.to_str() {
-        let utf16 = crate::strings::str_to_uchar_ptr(s);
-        crate::obj::hlp_hash_gen(utf16, true)
-    } else {
-        0
+    unsafe {
+        // Hash UTF-8 bytes by first converting to UTF-16
+        if name.is_null() {
+            return 0;
+        }
+        let cstr = std::ffi::CStr::from_ptr(name as *const std::ffi::c_char);
+        if let Ok(s) = cstr.to_str() {
+            let utf16 = crate::strings::str_to_uchar_ptr(s);
+            crate::obj::hlp_hash_gen(utf16, true)
+        } else {
+            0
+        }
     }
 }
 
@@ -537,36 +577,42 @@ pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_bytes(size: i32) -> *mut u8 {
-    crate::bytes::hlp_alloc_bytes(size)
+    unsafe { crate::bytes::hlp_alloc_bytes(size) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_copy_bytes(src: *const u8, size: i32) -> *mut u8 {
-    let dst = hl_alloc_bytes(size);
-    if size > 0 {
-        std::ptr::copy_nonoverlapping(src, dst, size as usize);
+    unsafe {
+        let dst = hl_alloc_bytes(size);
+        if size > 0 {
+            std::ptr::copy_nonoverlapping(src, dst, size as usize);
+        }
+        dst
     }
-    dst
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
-    // Convert buffer content to a string and throw as exception
-    let mut len: i32 = 0;
-    let content = crate::buffer::hlp_buffer_content(buf as *mut hl_buffer, &mut len);
-    if !content.is_null() {
-        let d = crate::rt::alloc_locked(std::mem::size_of::<vdynamic>())
-            .expect("alloc")
-            .as_ptr() as *mut vdynamic;
-        (*d).t = crate::types::hlt_bytes();
-        (*d).v.ptr = content as *mut c_void;
-        hl_throw(d);
+    unsafe {
+        // Convert buffer content to a string and throw as exception
+        let mut len: i32 = 0;
+        let content = crate::buffer::hlp_buffer_content(buf as *mut hl_buffer, &mut len);
+        if !content.is_null() {
+            let d = crate::rt::alloc_locked(std::mem::size_of::<vdynamic>())
+                .expect("alloc")
+                .as_ptr() as *mut vdynamic;
+            (*d).t = crate::types::hlt_bytes();
+            (*d).v.ptr = content as *mut c_void;
+            hl_throw(d);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_blocking(enter: bool) {
-    crate::thread::hlp_blocking(enter);
+    unsafe {
+        crate::thread::hlp_blocking(enter);
+    }
 }
 
 // ============================================================================
@@ -577,14 +623,16 @@ pub unsafe extern "C" fn hl_blocking(enter: bool) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ustrlen(s: *const u16) -> usize {
-    if s.is_null() {
-        return 0;
+    unsafe {
+        if s.is_null() {
+            return 0;
+        }
+        let mut len = 0;
+        while *s.add(len) != 0 {
+            len += 1;
+        }
+        len
     }
-    let mut len = 0;
-    while *s.add(len) != 0 {
-        len += 1;
-    }
-    len
 }
 
 #[unsafe(no_mangle)]

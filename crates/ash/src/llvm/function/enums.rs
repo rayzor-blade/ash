@@ -7,13 +7,13 @@
 //! Payload offsets come from the loader's `tenum.constructs[c].offsets`.
 
 use air::v2::ir::ValueId;
+use inkwell::AddressSpace;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::PointerValue;
-use inkwell::AddressSpace;
 
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 impl<'ctx> JITModule<'ctx> {
     pub(super) fn emit_air_enum_alloc(

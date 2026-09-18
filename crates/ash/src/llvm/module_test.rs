@@ -1,5 +1,5 @@
 use super::module::*;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use inkwell::context::Context;
 use std::path::PathBuf;
 use std::str::FromStr;

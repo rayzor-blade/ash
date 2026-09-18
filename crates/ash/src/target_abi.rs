@@ -4,7 +4,7 @@
 //! process.  Keeping them here prevents a cross build from quietly inheriting
 //! the host's pointer width through `size_of` or `offset_of`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 #[cfg(feature = "llvm")]
 use inkwell::context::Context;
 #[cfg(feature = "llvm")]
@@ -185,19 +185,11 @@ impl TargetAbi {
     }
 
     pub fn vclosure_value_offset(&self) -> u64 {
-        if self.pointer_bytes == 8 {
-            24
-        } else {
-            12
-        }
+        if self.pointer_bytes == 8 { 24 } else { 12 }
     }
 
     pub fn vclosure_size(&self) -> u64 {
-        if self.pointer_bytes == 8 {
-            32
-        } else {
-            16
-        }
+        if self.pointer_bytes == 8 { 32 } else { 16 }
     }
 
     pub fn vclosure_wrapper_fun_offset(&self) -> u64 {
@@ -217,11 +209,7 @@ impl TargetAbi {
     }
 
     pub fn hl_runtime_obj_methods_offset(&self) -> u64 {
-        if self.pointer_bytes == 8 {
-            32
-        } else {
-            28
-        }
+        if self.pointer_bytes == 8 { 32 } else { 28 }
     }
 
     pub fn hl_runtime_obj_fields_indexes_offset(&self) -> u64 {
@@ -229,11 +217,7 @@ impl TargetAbi {
     }
 
     pub fn hl_runtime_obj_size(&self) -> u64 {
-        if self.pointer_bytes == 8 {
-            112
-        } else {
-            76
-        }
+        if self.pointer_bytes == 8 { 112 } else { 76 }
     }
 }
 
@@ -320,7 +304,7 @@ fn enable_wasm_sjlj() {
 #[cfg(feature = "llvm")]
 #[cfg(not(no_wasm_exception_shim))]
 fn force_wasm_exception_model(machine: &TargetMachine) -> Result<()> {
-    extern "C" {
+    unsafe extern "C" {
         fn ash_force_wasm_exception_model(
             machine: inkwell::llvm_sys::target_machine::LLVMTargetMachineRef,
         );

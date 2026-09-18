@@ -1,5 +1,5 @@
 use crate::types::HLNative;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -116,15 +116,15 @@ pub fn std_symbol_addr(name: &str) -> Option<usize> {
     if std_is_static() {
         return std_symbols::std_symbol_table().get(name).copied();
     }
+    let lib = STD_LIBRARY.get()?;
     unsafe {
-        let lib = STD_LIBRARY.as_ref()?;
         let sym: Symbol<*mut c_void> = lib.get(name.as_bytes()).ok()?;
         Some(*sym as usize)
     }
 }
 
 static STD_INIT: Once = Once::new();
-pub static mut STD_LIBRARY: Option<Library> = None;
+pub static STD_LIBRARY: std::sync::OnceLock<Library> = std::sync::OnceLock::new();
 
 /// A symbol ash's runtime exports and upstream HashLink does not.
 ///
@@ -397,7 +397,7 @@ pub fn init_std_library() -> Result<()> {
                 .expect("Failed to find hlp_gc_init in std library");
             gc_init();
 
-            STD_LIBRARY = Some(lib);
+            let _ = STD_LIBRARY.set(lib);
         }
     });
 
@@ -754,7 +754,7 @@ impl NativeLibraryManager {
         // path, hence the join.
         #[cfg(not(unix))]
         let library = {
-            use libloading::os::windows::{Library as WinLibrary, LOAD_WITH_ALTERED_SEARCH_PATH};
+            use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library as WinLibrary};
             let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
             let loaded =
                 unsafe { WinLibrary::load_with_flags(&absolute, LOAD_WITH_ALTERED_SEARCH_PATH) }

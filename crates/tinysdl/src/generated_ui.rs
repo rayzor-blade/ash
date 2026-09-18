@@ -17,7 +17,7 @@ use std::ffi::c_void;
 use hl_abi::*;
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_button_new(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -26,7 +26,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_button_new(
     a0: *mut c_void,
     a1: *mut vbyte,
@@ -41,7 +41,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_choose_file(a0: i32, a1: i32) -> i32;
 }
 
@@ -50,14 +50,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_choose_file(a0: bool, a1: *mut vdynamic) -> *mut vbyte {
     ash_host_ui_ui_choose_file(a0 as i32, a1 as i32) as *mut vbyte
 }
 define_prim!(hlp_ui_choose_file, sdl_ui_choose_file, "PbD_B");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_dialog(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -66,14 +66,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_dialog(a0: *mut vbyte, a1: *mut vbyte, a2: i32) -> i32 {
     ash_host_ui_ui_dialog(a0 as i32, a1 as i32, a2)
 }
 define_prim!(hlp_ui_dialog, sdl_ui_dialog, "PBBi_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_init();
 }
 
@@ -82,14 +82,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_init() {
     ash_host_ui_ui_init();
 }
 define_prim!(hlp_ui_init, sdl_ui_init, "P_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_loop(a0: i32) -> i32;
 }
 
@@ -98,14 +98,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_loop(a0: bool) -> i32 {
     ash_host_ui_ui_loop(a0 as i32)
 }
 define_prim!(hlp_ui_loop, sdl_ui_loop, "Pb_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_sentinel_is_paused(a0: i32) -> i32;
 }
 
@@ -114,7 +114,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_sentinel_is_paused(a0: *mut c_void) -> bool {
     ash_host_ui_ui_sentinel_is_paused(a0 as i32) != 0
 }
@@ -125,7 +125,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_sentinel_pause(a0: i32, a1: i32);
 }
 
@@ -134,7 +134,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_sentinel_pause(a0: *mut c_void, a1: bool) {
     ash_host_ui_ui_sentinel_pause(a0 as i32, a1 as i32);
 }
@@ -145,7 +145,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_sentinel_tick(a0: i32);
 }
 
@@ -154,7 +154,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_sentinel_tick(a0: *mut c_void) {
     ash_host_ui_ui_sentinel_tick(a0 as i32);
 }
@@ -165,7 +165,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_start_sentinel(a0: f64, a1: i32) -> i32;
 }
 
@@ -174,7 +174,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_start_sentinel(a0: f64, a1: *mut c_void) -> *mut c_void {
     ash_host_ui_ui_start_sentinel(a0, a1 as i32) as *mut c_void
 }
@@ -185,7 +185,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_stop_loop();
 }
 
@@ -194,14 +194,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_stop_loop() {
     ash_host_ui_ui_stop_loop();
 }
 define_prim!(hlp_ui_stop_loop, sdl_ui_stop_loop, "P_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_win_destroy(a0: i32);
 }
 
@@ -210,14 +210,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_win_destroy(a0: *mut c_void) {
     ash_host_ui_ui_win_destroy(a0 as i32);
 }
 define_prim!(hlp_ui_win_destroy, sdl_ui_win_destroy, "PXui_window__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_winlog_new(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -226,14 +226,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_winlog_new(a0: *mut vbyte, a1: i32, a2: i32) -> *mut c_void {
     ash_host_ui_ui_winlog_new(a0 as i32, a1, a2) as *mut c_void
 }
 define_prim!(hlp_ui_winlog_new, sdl_ui_winlog_new, "PBii_Xui_window_");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_ui_ui_winlog_set_text(a0: i32, a1: i32, a2: i32);
 }
 
@@ -242,7 +242,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_ui_winlog_set_text(a0: *mut c_void, a1: *mut vbyte, a2: bool) {
     ash_host_ui_ui_winlog_set_text(a0 as i32, a1 as i32, a2 as i32);
 }

@@ -11,7 +11,7 @@
 //! slot within the function.
 
 use air::v2::ir::{ValueId, VecArg, VecElem, VecIntrinsic, VecOp, VecOut};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use inkwell::intrinsics::Intrinsic;
 use inkwell::types::{BasicType, BasicTypeEnum, VectorType};
 use inkwell::values::{BasicValue, BasicValueEnum, IntValue, PointerValue, VectorValue};

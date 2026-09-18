@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut rows: Vec<_> = agg.into_iter().collect();
-    rows.sort_by_key(|r| std::cmp::Reverse((r.1 .1, r.1 .2, r.1 .0)));
+    rows.sort_by_key(|r| std::cmp::Reverse((r.1.1, r.1.2, r.1.0)));
     println!(
         "{:<40} {:>6} {:>9} {:>10}",
         "native", "sites", "in-loop", "max-depth"

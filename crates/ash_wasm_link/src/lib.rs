@@ -59,9 +59,9 @@ pub mod object;
 pub mod suspend;
 pub mod waits;
 
-pub use dylink::{looks_like_side_module, read_side_module, SideModule, SIDE_MODULE_PREFIX};
-pub use link::{link, LinkOptions};
-pub use object::{read, Object, Symbol, SymbolTarget};
+pub use dylink::{SIDE_MODULE_PREFIX, SideModule, looks_like_side_module, read_side_module};
+pub use link::{LinkOptions, link};
+pub use object::{Object, Symbol, SymbolTarget, read};
 
 /// What a patch site held before the linker touched it, and what the symbol
 /// table says it should have held.

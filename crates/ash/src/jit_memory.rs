@@ -105,13 +105,14 @@ impl OrderedJitMemory {
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod imp {
-    use super::{region_bytes, OrderedJitMemory, Protect, MIN_REGION_BYTES, PAGE};
+    use super::{MIN_REGION_BYTES, OrderedJitMemory, PAGE, Protect, region_bytes};
     #[cfg(feature = "llvm")]
     use inkwell::memory_manager::McjitMemoryManager;
     use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
     use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-        PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_NOACCESS,
+        PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        VirtualProtect,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 

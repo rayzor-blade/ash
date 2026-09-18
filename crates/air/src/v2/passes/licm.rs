@@ -1,12 +1,12 @@
 //! Loop-invariant code motion.
 
 use super::{
-    def_sites, feeds_handler_phi, handler_blocks, param_values, privatize, Pass, PassOptions,
-    PassStats, RegClaims,
+    Pass, PassOptions, PassStats, RegClaims, def_sites, feeds_handler_phi, handler_blocks,
+    param_values, privatize,
 };
-use crate::v2::analysis::{clobbers_all, read_class, write_class, CfgInfo, LoopForest, LoopId};
+use crate::v2::analysis::{CfgInfo, LoopForest, LoopId, clobbers_all, read_class, write_class};
 use crate::v2::ir::*;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashSet;
 
 /// Incoming phi sources: `(predecessor block, value)` pairs.
@@ -107,10 +107,10 @@ fn movable(
                     if clobbers_all(other) {
                         return false;
                     }
-                    if let Some(w) = write_class(other) {
-                        if w.may_alias(class) {
-                            return false;
-                        }
+                    if let Some(w) = write_class(other)
+                        && w.may_alias(class)
+                    {
+                        return false;
                     }
                 }
             }
@@ -423,11 +423,7 @@ pub(super) fn create_preheader(
     });
     for &p in &entries {
         f.blocks[p.idx()].term.map_targets(&mut |t| {
-            if t == header {
-                ph
-            } else {
-                t
-            }
+            if t == header { ph } else { t }
         });
     }
     Ok(Some(ph))

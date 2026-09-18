@@ -47,50 +47,49 @@ impl<'a, T: Sortable> MSort<'a, T> {
     }
 
     unsafe fn compare(&self, a: usize, b: usize) -> Ordering {
-        let cmp = &*self.cmp;
-        let address = cmp.fun as usize;
-        let resolved = crate::fiber::resolve_stub_sentinel(address);
-        let fun = if resolved.is_null() {
-            cmp.fun
-        } else {
-            resolved
-        };
-        let result = if crate::fiber::is_stub_sentinel(address) && resolved.is_null() {
-            // Interpreter/hybrid fallback. Worker execution is forbidden from
-            // sharing the main interpreter; a compiled-only resolver failure
-            // therefore fails closed instead of calling a sentinel or racing
-            // `HLInterpreter`.
-            if crate::rt::is_worker_lane() {
-                eprintln!(
-                    "[ash] sort comparator findex {} could not be compiled for a VM worker",
-                    address.wrapping_sub(1)
-                );
-                std::process::abort();
-            }
-            let Some(runner) = crate::fiber::closure_runner() else {
-                return Ordering::Equal;
-            };
-            let mut lhs = self.arr[a].clone();
-            let mut rhs = self.arr[b].clone();
-            let lhs =
-                crate::cast::hlp_make_dyn((&mut lhs as *mut T).cast::<c_void>(), T::hl_type());
-            let rhs =
-                crate::cast::hlp_make_dyn((&mut rhs as *mut T).cast::<c_void>(), T::hl_type());
-            let mut args = [lhs, rhs];
-            let result = runner(self.cmp.cast_mut(), args.as_mut_ptr(), 2);
-            if result.is_null() {
-                0
+        unsafe {
+            let cmp = &*self.cmp;
+            let address = cmp.fun as usize;
+            let resolved = crate::fiber::resolve_stub_sentinel(address);
+            let fun = if resolved.is_null() {
+                cmp.fun
             } else {
-                (*result).v.i
-            }
-        } else if cmp.hasValue != 0 {
-            let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 = mem::transmute(fun);
-            fun(cmp.value, self.arr[a].clone(), self.arr[b].clone())
-        } else {
-            let fun: unsafe extern "C" fn(T, T) -> i32 = mem::transmute(fun);
-            fun(self.arr[a].clone(), self.arr[b].clone())
-        };
-        result.cmp(&0)
+                resolved
+            };
+            let result = if crate::fiber::is_stub_sentinel(address) && resolved.is_null() {
+                // Interpreter/hybrid fallback. Worker execution is forbidden from
+                // sharing the main interpreter; a compiled-only resolver failure
+                // therefore fails closed instead of calling a sentinel or racing
+                // `HLInterpreter`.
+                if crate::rt::is_worker_lane() {
+                    eprintln!(
+                        "[ash] sort comparator findex {} could not be compiled for a VM worker",
+                        address.wrapping_sub(1)
+                    );
+                    std::process::abort();
+                }
+                let Some(runner) = crate::fiber::closure_runner() else {
+                    return Ordering::Equal;
+                };
+                let mut lhs = self.arr[a].clone();
+                let mut rhs = self.arr[b].clone();
+                let lhs =
+                    crate::cast::hlp_make_dyn((&mut lhs as *mut T).cast::<c_void>(), T::hl_type());
+                let rhs =
+                    crate::cast::hlp_make_dyn((&mut rhs as *mut T).cast::<c_void>(), T::hl_type());
+                let mut args = [lhs, rhs];
+                let result = runner(self.cmp.cast_mut(), args.as_mut_ptr(), 2);
+                if result.is_null() { 0 } else { (*result).v.i }
+            } else if cmp.hasValue != 0 {
+                let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 =
+                    mem::transmute(fun);
+                fun(cmp.value, self.arr[a].clone(), self.arr[b].clone())
+            } else {
+                let fun: unsafe extern "C" fn(T, T) -> i32 = mem::transmute(fun);
+                fun(self.arr[a].clone(), self.arr[b].clone())
+            };
+            result.cmp(&0)
+        }
     }
 
     fn swap(&mut self, a: usize, b: usize) {
@@ -130,11 +129,7 @@ impl<'a, T: Sortable> MSort<'a, T> {
     }
 
     fn gcd(a: usize, b: usize) -> usize {
-        if b == 0 {
-            a
-        } else {
-            Self::gcd(b, a % b)
-        }
+        if b == 0 { a } else { Self::gcd(b, a % b) }
     }
 
     fn rotate(&mut self, from: usize, mid: usize, to: usize) {
@@ -219,8 +214,10 @@ impl<'a, T: Sortable> MSort<'a, T> {
 
 // Function to sort different HashLink types
 pub unsafe fn hl_bsort<T: Sortable>(bytes: *mut vbyte, pos: i32, len: i32, cmp: *mut vclosure) {
-    let slice =
-        std::slice::from_raw_parts_mut((bytes as *mut T).offset(pos as isize), len as usize);
-    let mut sorter = MSort::new(slice, cmp);
-    sorter.sort();
+    unsafe {
+        let slice =
+            std::slice::from_raw_parts_mut((bytes as *mut T).offset(pos as isize), len as usize);
+        let mut sorter = MSort::new(slice, cmp);
+        sorter.sort();
+    }
 }

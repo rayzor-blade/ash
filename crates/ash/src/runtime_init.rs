@@ -1,7 +1,7 @@
 //! Process-global runtime setup shared by every tier: choose and initialize
 //! the std runtime, dlopen the HDLLs, register the dynamic-call hook.
 
-use crate::native_lib::{init_std_library, NativeFunctionResolver};
+use crate::native_lib::{NativeFunctionResolver, init_std_library};
 use anyhow::Result;
 use std::ffi::c_void;
 use std::path::Path;

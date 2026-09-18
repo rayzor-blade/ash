@@ -17,7 +17,7 @@ use ash_core::types::HLFunction;
 
 use crate::values::NanBoxedValue;
 
-use super::{func_of, HLInterpreter};
+use super::{HLInterpreter, func_of};
 
 /// One symbolicated frame, with its pieces kept apart.
 ///
@@ -449,10 +449,10 @@ impl HLInterpreter {
     /// names the right function and the line it opens on.
     fn push_jit_frames(&self, functions: &mut Vec<(usize, Option<(i32, i32)>)>, pc: usize) {
         let mut push = |findex: u32, position: Option<(i32, i32)>| {
-            if let Some(function_index) = func_of(&self.targets, findex as usize) {
-                if functions.last().map(|(f, _)| *f) != Some(function_index) {
-                    functions.push((function_index, position));
-                }
+            if let Some(function_index) = func_of(&self.targets, findex as usize)
+                && functions.last().map(|(f, _)| *f) != Some(function_index)
+            {
+                functions.push((function_index, position));
             }
         };
         if let Some(frames) = ash_core::jit_map::position_of(pc) {
@@ -528,17 +528,19 @@ impl HLInterpreter {
         output: *mut *mut c_void,
         capacity: i32,
     ) -> i32 {
-        if !output.is_null() {
-            for (index, symbol) in self
-                .call_stack_symbols
-                .iter()
-                .take(capacity.max(0) as usize)
-                .enumerate()
-            {
-                *output.add(index) = *symbol as *mut c_void;
+        unsafe {
+            if !output.is_null() {
+                for (index, symbol) in self
+                    .call_stack_symbols
+                    .iter()
+                    .take(capacity.max(0) as usize)
+                    .enumerate()
+                {
+                    *output.add(index) = *symbol as *mut c_void;
+                }
             }
+            self.call_stack_symbols.len() as i32
         }
-        self.call_stack_symbols.len() as i32
     }
 
     pub(super) fn capture_exception_stack(&mut self, bytecode: &DecodedBytecode) {

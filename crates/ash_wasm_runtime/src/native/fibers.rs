@@ -8,7 +8,7 @@
 //! what makes a fiber work on an engine with no suspension of its own. The
 //! imports here drive both.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasmtime::{Caller, Linker};
 
 use super::Host;

@@ -1,6 +1,6 @@
 //! The fused-multiply-add peephole.
 
-use super::{compact_values, Pass, PassOptions, PassStats};
+use super::{Pass, PassOptions, PassStats, compact_values};
 use crate::v2::ir::*;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -176,10 +176,10 @@ impl Pass for FmaPeephole {
 /// True when nothing between the two instruction indices writes `reg`.
 fn reg_untouched_between(f: &Function, b: usize, from: usize, to: usize, reg: u32) -> bool {
     for ins in &f.blocks[b].instrs[from + 1..to] {
-        if let Some(d) = ins.dst() {
-            if f.value_reg(d) == reg {
-                return false;
-            }
+        if let Some(d) = ins.dst()
+            && f.value_reg(d) == reg
+        {
+            return false;
         }
         match ins {
             Instr::CellSet { cell, .. } | Instr::CellIncr { cell } | Instr::CellDecr { cell }
@@ -205,10 +205,10 @@ fn plan_block(f: &Function, counts: &[usize], b: usize) -> Vec<Plan> {
             a,
             b: mb,
         } = ins
+            && counts[dst.idx()] == 1
+            && f.value_is_float(*dst)
         {
-            if counts[dst.idx()] == 1 && f.value_is_float(*dst) {
-                product.insert(*dst, (k, *a, *mb));
-            }
+            product.insert(*dst, (k, *a, *mb));
         }
     }
     if product.is_empty() {

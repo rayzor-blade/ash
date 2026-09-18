@@ -2,7 +2,7 @@ use ash_macro::to_llvm;
 use inkwell::context::Context;
 
 #[to_llvm]
-extern "C" {
+unsafe extern "C" {
     fn test_function(x: i32) -> i32;
 }
 

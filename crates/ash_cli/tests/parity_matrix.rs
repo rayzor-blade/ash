@@ -1,10 +1,10 @@
 mod common;
 
 use common::{
-    ash_cli_bin, compile_haxe_case, extract_checksum, load_parity_cases, normalize_text,
-    parity_cases_file, parse_bool_env, parse_u64_env, render_output, repo_root, run_ash,
-    run_hashlink, run_haxe_interp, tests_dir, unified_diff, AshMode, ExpectationKind,
-    NormalizeKind, ParityCase, RunResult,
+    AshMode, ExpectationKind, NormalizeKind, ParityCase, RunResult, ash_cli_bin, compile_haxe_case,
+    extract_checksum, load_parity_cases, normalize_text, parity_cases_file, parse_bool_env,
+    parse_u64_env, render_output, repo_root, run_ash, run_hashlink, run_haxe_interp, tests_dir,
+    unified_diff,
 };
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -202,11 +202,7 @@ fn run_parity_matrix(mode: AshMode) {
         })
         .or_else(|| {
             let d = repo_root().join("target/parity-oracle");
-            if d.exists() {
-                Some(d)
-            } else {
-                None
-            }
+            if d.exists() { Some(d) } else { None }
         })
         .and_then(resolve_oracle_dir);
 
@@ -230,16 +226,16 @@ fn run_parity_matrix(mode: AshMode) {
         }
 
         let sanity = run_haxe_interp(&tests_dir, &case);
-        if let Some(sanity_out) = &sanity {
-            if !sanity_out.status.success() {
-                failures.push(format!(
-                    "[HAXE INTERP FAIL][{}][{}]\n{}",
-                    mode_name,
-                    case.name,
-                    render_output(sanity_out)
-                ));
-                continue;
-            }
+        if let Some(sanity_out) = &sanity
+            && !sanity_out.status.success()
+        {
+            failures.push(format!(
+                "[HAXE INTERP FAIL][{}][{}]\n{}",
+                mode_name,
+                case.name,
+                render_output(sanity_out)
+            ));
+            continue;
         }
 
         let hl_path = tests_dir.join(&case.hl);
@@ -332,15 +328,15 @@ fn run_parity_matrix(mode: AshMode) {
             continue;
         }
 
-        if oracle.is_none() {
-            if let Some(sanity_out) = sanity {
-                oracle = Some(OracleRecord {
-                    source: "haxe-interp".to_string(),
-                    stdout: String::from_utf8_lossy(&sanity_out.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&sanity_out.stderr).to_string(),
-                    exit_code: status_code(&sanity_out),
-                });
-            }
+        if oracle.is_none()
+            && let Some(sanity_out) = sanity
+        {
+            oracle = Some(OracleRecord {
+                source: "haxe-interp".to_string(),
+                stdout: String::from_utf8_lossy(&sanity_out.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&sanity_out.stderr).to_string(),
+                exit_code: status_code(&sanity_out),
+            });
         }
 
         if let Some(oracle_record) = oracle {

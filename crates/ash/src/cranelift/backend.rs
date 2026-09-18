@@ -5,7 +5,7 @@
 //! happens lazily on the broker thread at the first promotion, so nothing is
 //! added to process startup — the LLVM tier's pre-warm keeps that slot.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,13 +19,13 @@ use crate::air_pipeline::AshModule;
 use crate::bytecode::DecodedBytecode;
 use crate::hl_bindings as hl;
 use crate::native_lib::{
-    host_native_context as ash_core_native_context, host_native_record as ash_core_native_record,
-    NativeFunctionResolver,
+    NativeFunctionResolver, host_native_context as ash_core_native_context,
+    host_native_record as ash_core_native_record,
 };
 use crate::opcodes::Reg;
 use crate::types::TypeRef;
 
-use super::lower::{lower_function, LoweredFunction};
+use super::lower::{LoweredFunction, lower_function};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Backend

@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use ash_wasm_link::suspend::{program_from_module, Policy, Program};
+use ash_wasm_link::suspend::{Policy, Program, program_from_module};
 
 /// Imports a fiber can be suspended inside.
 ///

@@ -882,7 +882,7 @@ impl<'b> Encoder<'b> {
             // written out -- and one never should be, since `--hot-reload` and
             // emitting a file are different jobs.
             Opcode::IndirectCall { .. } => {
-                return Err(bad("IndirectCall has no HashLink encoding"))
+                return Err(bad("IndirectCall has no HashLink encoding"));
             }
         })
     }

@@ -38,37 +38,41 @@ pub unsafe extern "C" fn hlp_rnd_alloc() -> *mut hl::rnd {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {
-    let r = hlp_rnd_alloc();
-    let pid = crate::sys::process_id();
-    // Upstream mixes gettimeofday's microsecond clock with the pid; SystemTime
-    // is the portable spelling of that same wall clock. A clock reading before
-    // the epoch seeds with 0 rather than raising: every value is a legal seed,
-    // and this call has no failure channel back to the VM.
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| {
-            (d.as_secs() as u32)
-                .wrapping_mul(1_000_000)
-                .wrapping_add(d.subsec_micros())
-        })
-        .unwrap_or(0);
-    hlp_rnd_set_seed(r, (time ^ (pid | (pid << 16))) as i32);
-    r
+    unsafe {
+        let r = hlp_rnd_alloc();
+        let pid = crate::sys::process_id();
+        // Upstream mixes gettimeofday's microsecond clock with the pid; SystemTime
+        // is the portable spelling of that same wall clock. A clock reading before
+        // the epoch seeds with 0 rather than raising: every value is a legal seed,
+        // and this call has no failure channel back to the VM.
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| {
+                (d.as_secs() as u32)
+                    .wrapping_mul(1_000_000)
+                    .wrapping_add(d.subsec_micros())
+            })
+            .unwrap_or(0);
+        hlp_rnd_set_seed(r, (time ^ (pid | (pid << 16))) as i32);
+        r
+    }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
-    if r.is_null() {
-        return;
-    }
+    unsafe {
+        if r.is_null() {
+            return;
+        }
 
-    let _r = &mut *r;
-    _r.cur = 0;
-    _r.seeds.copy_from_slice(INIT_SEEDS);
-    for i in 0..hl::NSEEDS {
-        // seeds is `unsigned long`, which is 32-bit on MSVC and 64-bit on unix;
-        // widen through c_ulong so the seed mixes at the platform's width like
-        // the C `r->seeds[i] ^= s` does, instead of a hardcoded u64.
-        _r.seeds[i as usize] ^= s as ::std::os::raw::c_ulong;
+        let _r = &mut *r;
+        _r.cur = 0;
+        _r.seeds.copy_from_slice(INIT_SEEDS);
+        for i in 0..hl::NSEEDS {
+            // seeds is `unsigned long`, which is 32-bit on MSVC and 64-bit on unix;
+            // widen through c_ulong so the seed mixes at the platform's width like
+            // the C `r->seeds[i] ^= s` does, instead of a hardcoded u64.
+            _r.seeds[i as usize] ^= s as ::std::os::raw::c_ulong;
+        }
     }
 }
 
@@ -78,45 +82,49 @@ pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
 /// as upstream does; only the tempering is fixed at 32 bits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_int(r: *mut hl::rnd) -> c_uint {
-    if r.is_null() {
-        return 0;
-    }
-    const N: usize = hl::NSEEDS as usize;
-    const M: usize = hl::MAX as usize;
-
-    let _r = &mut *r;
-    let mut pos = _r.cur as usize;
-    _r.cur = _r.cur.wrapping_add(1);
-    if pos >= N {
-        let mut kk = 0;
-        while kk < N - M {
-            _r.seeds[kk] =
-                _r.seeds[kk + M] ^ (_r.seeds[kk] >> 1) ^ MAG01[(_r.seeds[kk] % 2) as usize];
-            kk += 1;
+    unsafe {
+        if r.is_null() {
+            return 0;
         }
-        while kk < N {
-            _r.seeds[kk] =
-                _r.seeds[kk + M - N] ^ (_r.seeds[kk] >> 1) ^ MAG01[(_r.seeds[kk] % 2) as usize];
-            kk += 1;
-        }
-        _r.cur = 1;
-        pos = 0;
-    }
+        const N: usize = hl::NSEEDS as usize;
+        const M: usize = hl::MAX as usize;
 
-    let mut y = _r.seeds[pos] as c_uint;
-    y ^= (y << 7) & 0x2b5b_2500;
-    y ^= (y << 15) & 0xdb8b_0000;
-    y ^= y >> 16;
-    y
+        let _r = &mut *r;
+        let mut pos = _r.cur as usize;
+        _r.cur = _r.cur.wrapping_add(1);
+        if pos >= N {
+            let mut kk = 0;
+            while kk < N - M {
+                _r.seeds[kk] =
+                    _r.seeds[kk + M] ^ (_r.seeds[kk] >> 1) ^ MAG01[(_r.seeds[kk] % 2) as usize];
+                kk += 1;
+            }
+            while kk < N {
+                _r.seeds[kk] =
+                    _r.seeds[kk + M - N] ^ (_r.seeds[kk] >> 1) ^ MAG01[(_r.seeds[kk] % 2) as usize];
+                kk += 1;
+            }
+            _r.cur = 1;
+            pos = 0;
+        }
+
+        let mut y = _r.seeds[pos] as c_uint;
+        y ^= (y << 7) & 0x2b5b_2500;
+        y ^= (y << 15) & 0xdb8b_0000;
+        y ^= y >> 16;
+        y
+    }
 }
 
 /// Upstream hl_rnd_float (random.c): three 32-bit draws folded into the
 /// [0,1) mantissa, most significant draw last.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_float(r: *mut hl::rnd) -> f64 {
-    const BIG: f64 = 4294967296.0;
-    let a = hlp_rnd_int(r) as f64;
-    let b = hlp_rnd_int(r) as f64;
-    let c = hlp_rnd_int(r) as f64;
-    ((a / BIG + b) / BIG + c) / BIG
+    unsafe {
+        const BIG: f64 = 4294967296.0;
+        let a = hlp_rnd_int(r) as f64;
+        let b = hlp_rnd_int(r) as f64;
+        let c = hlp_rnd_int(r) as f64;
+        ((a / BIG + b) / BIG + c) / BIG
+    }
 }

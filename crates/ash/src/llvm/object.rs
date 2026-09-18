@@ -1,9 +1,9 @@
 use crate::types::{HLObjField, HLObjProto, HLTypeObj};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use inkwell::{
+    AddressSpace,
     types::StructType,
     values::{PointerValue, StructValue},
-    AddressSpace,
 };
 
 use super::module::JITModule;

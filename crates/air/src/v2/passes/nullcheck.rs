@@ -1,7 +1,7 @@
 //! Dominance-based null-check elimination.
 
-use super::{compact_values, def_sites, DefSite, Pass, PassOptions, PassStats};
-use crate::v2::analysis::{is_non_null_result, CfgInfo};
+use super::{DefSite, Pass, PassOptions, PassStats, compact_values, def_sites};
+use crate::v2::analysis::{CfgInfo, is_non_null_result};
 use crate::v2::ir::*;
 use anyhow::Result;
 use std::collections::HashSet;

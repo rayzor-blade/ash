@@ -7,14 +7,14 @@
 //! as decoded: a call into a host method is a typed native call in ash's own
 //! tables, resolved from the registration rather than from a library on disk.
 
-use crate::bytecode::{field_hash, DecodedBytecode};
+use crate::bytecode::{DecodedBytecode, field_hash};
 use crate::hl;
 use crate::native_lib::HostNative;
 use crate::types::{HLNative, HLObjField, HLObjProto, HLType, HLTypeFun, HLTypeObj, TypeRef};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{CString, c_char, c_void};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostModule {
@@ -549,7 +549,7 @@ impl DecodedBytecode {
 /// # Safety
 /// `bc` must point to a live `DecodedBytecode` that nothing else is using,
 /// and `json` must be readable for `len` bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_register_module(
     bc: *mut c_void,
     json: *const u8,

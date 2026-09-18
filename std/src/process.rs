@@ -26,7 +26,7 @@
 //! callback that does it here. Both leak the zombie of a child nobody waited
 //! for -- upstream forks without ever waiting either.
 
-use std::ffi::{c_int, c_void, OsString};
+use std::ffi::{OsString, c_int, c_void};
 use std::io::{self, Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::ptr;
@@ -89,11 +89,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Bytes of a NUL-terminated `vbyte*`, excluding the terminator.
 unsafe fn pchar_slice<'a>(p: *const vbyte) -> &'a [u8] {
-    let mut len = 0usize;
-    while *p.add(len) != 0 {
-        len += 1;
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(p, len)
     }
-    std::slice::from_raw_parts(p, len)
 }
 
 /// Commands and arguments cross this boundary in whatever encoding
@@ -101,36 +103,40 @@ unsafe fn pchar_slice<'a>(p: *const vbyte) -> &'a [u8] {
 /// `Sys.getPath` therefore hands over NUL-terminated UTF-8 even on Windows,
 /// where upstream would have sent UTF-16 straight to `CreateProcessW`.
 unsafe fn pchar_to_os(p: *const vbyte) -> Option<OsString> {
-    if p.is_null() {
-        return None;
-    }
-    let bytes = pchar_slice(p);
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        Some(OsString::from_vec(bytes.to_vec()))
-    }
-    #[cfg(windows)]
-    {
-        Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
-    }
-    // WASI paths are UTF-8, so the lossy conversion loses nothing the host
-    // would have accepted. Nothing on this target spawns anything anyway.
-    #[cfg(not(any(unix, windows)))]
-    {
-        Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+    unsafe {
+        if p.is_null() {
+            return None;
+        }
+        let bytes = pchar_slice(p);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            Some(OsString::from_vec(bytes.to_vec()))
+        }
+        #[cfg(windows)]
+        {
+            Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+        }
+        // WASI paths are UTF-8, so the lossy conversion loses nothing the host
+        // would have accepted. Nothing on this target spawns anything anyway.
+        #[cfg(not(any(unix, windows)))]
+        {
+            Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+        }
     }
 }
 
 unsafe fn state_of<'a>(p: *mut c_void) -> Option<&'a ProcState> {
-    if p.is_null() {
-        return None;
+    unsafe {
+        if p.is_null() {
+            return None;
+        }
+        let h = p as *const VProcess;
+        if (*h).magic != PROC_MAGIC || (*h).state.is_null() {
+            return None;
+        }
+        Some(&*(*h).state)
     }
-    let h = p as *const VProcess;
-    if (*h).magic != PROC_MAGIC || (*h).state.is_null() {
-        return None;
-    }
-    Some(&*(*h).state)
 }
 
 /// `read` reaching end-of-file is an error to this API, not a short count:
@@ -237,148 +243,150 @@ pub unsafe extern "C" fn hlp_process_run(
     vargs: *mut varray,
     detached: bool,
 ) -> *mut c_void {
-    let Some(cmdline) = pchar_to_os(cmd) else {
-        return ptr::null_mut();
-    };
-    let raw_cmd = pchar_slice(cmd).to_vec();
-
-    let mut args: Option<Vec<OsString>> = None;
-    if !vargs.is_null() {
-        let at = (*vargs).at;
-        if at.is_null() || (*at).kind != hl_type_kind_HBYTES {
-            return ptr::null_mut();
-        }
-        let n = (*vargs).size;
-        if n < 0 {
-            return ptr::null_mut();
-        }
-        let slots = hl_aptr::<*mut vbyte>(vargs);
-        let mut v: Vec<OsString> = Vec::with_capacity(n as usize);
-        for i in 0..n as usize {
-            // A NULL entry lands in upstream's argv, where execvp reads it as
-            // the terminator and drops everything after it.
-            match pchar_to_os(*slots.add(i)) {
-                Some(s) => v.push(s),
-                None => break,
-            }
-        }
-        args = Some(v);
-    }
-
-    // Only the Windows half of hl_process_run reads `detached`; the unix half
-    // never mentions it and pipes and forks either way.
-    let detached = detached && cfg!(windows);
-
-    #[cfg(unix)]
-    let mut command = match &args {
-        // No argv means the command is a shell line, exactly as upstream's
-        // hand-built { "/bin/sh", "-c", cmd, NULL }.
-        None => {
-            let mut c = Command::new("/bin/sh");
-            c.arg("-c").arg(&cmdline);
-            c
-        }
-        // With argv, cmd is both the program and argv[0], which is what
-        // execvp(argv[0], argv) does upstream.
-        Some(a) => {
-            let mut c = Command::new(&cmdline);
-            c.args(a);
-            c
-        }
-    };
-
-    // A sandbox has no subprocesses. The natives still exist and still link;
-    // this one reports the failure upstream reports when a spawn is refused,
-    // and the read/write prims below already answer -1 with no child.
-    #[cfg(not(any(unix, windows)))]
-    let mut command = {
-        let _ = (&args, detached);
-        Command::new("")
-    };
-
-    #[cfg(windows)]
-    let mut command = {
-        if args.is_some() {
-            // Upstream: "should have been pre-processed by toplevel".
-            // sys.io.Process folds argv into the command line on Windows.
-            return ptr::null_mut();
-        }
-        let line = cmdline.to_string_lossy().into_owned();
-        let Some((program, rest)) = split_command_line(&line) else {
+    unsafe {
+        let Some(cmdline) = pchar_to_os(cmd) else {
             return ptr::null_mut();
         };
-        let mut c = Command::new(program);
-        if !rest.is_empty() {
-            // raw_arg, not arg: the line was already quoted by the Haxe side
-            // for CreateProcess, and Command::arg would quote it again.
-            use std::os::windows::process::CommandExt;
-            c.raw_arg(rest);
-        }
-        c
-    };
+        let raw_cmd = pchar_slice(cmd).to_vec();
 
-    if detached {
-        // Upstream gives a detached child no inherited handles at all and a
-        // console of its own. Stdio::null is the nearest std offers; the
-        // difference is the child's std handles being NUL rather than its
-        // new console. Either way this process holds no pipe to it, so the
-        // read/write prims below report -1 as upstream's NULL handles do.
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE);
-        }
-    } else {
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-    }
-
-    let (slot, sin, sout, serr) = match command.spawn() {
-        Ok(mut c) => {
-            // Taken out of the Child so Child::wait has no stdin left to
-            // close. See the module header.
-            let sin = c.stdin.take();
-            let sout = c.stdout.take();
-            let serr = c.stderr.take().map_or(StderrSrc::Closed, StderrSrc::Pipe);
-            (ChildSlot::Live(c), sin, sout, serr)
-        }
-        Err(e) => {
-            if spawn_setup_failed(&e) {
+        let mut args: Option<Vec<OsString>> = None;
+        if !vargs.is_null() {
+            let at = (*vargs).at;
+            if at.is_null() || (*at).kind != hl_type_kind_HBYTES {
                 return ptr::null_mut();
             }
-            let mut msg = b"Command not found : ".to_vec();
-            msg.extend_from_slice(&raw_cmd);
-            msg.push(b'\n');
-            (
-                ChildSlot::ExecFailed,
-                None,
-                None,
-                StderrSrc::Message(io::Cursor::new(msg)),
-            )
+            let n = (*vargs).size;
+            if n < 0 {
+                return ptr::null_mut();
+            }
+            let slots = hl_aptr::<*mut vbyte>(vargs);
+            let mut v: Vec<OsString> = Vec::with_capacity(n as usize);
+            for i in 0..n as usize {
+                // A NULL entry lands in upstream's argv, where execvp reads it as
+                // the terminator and drops everything after it.
+                match pchar_to_os(*slots.add(i)) {
+                    Some(s) => v.push(s),
+                    None => break,
+                }
+            }
+            args = Some(v);
         }
-    };
 
-    let state = Box::into_raw(Box::new(ProcState {
-        child: Mutex::new(slot),
-        stdin: Mutex::new(sin),
-        stdout: Mutex::new(sout),
-        stderr: Mutex::new(serr),
-    }));
-    let h = crate::rt::alloc_with_finalizer(std::mem::size_of::<VProcess>(), finalize_process)
-        as *mut VProcess;
-    if h.is_null() {
-        drop(Box::from_raw(state));
-        return ptr::null_mut();
+        // Only the Windows half of hl_process_run reads `detached`; the unix half
+        // never mentions it and pipes and forks either way.
+        let detached = detached && cfg!(windows);
+
+        #[cfg(unix)]
+        let mut command = match &args {
+            // No argv means the command is a shell line, exactly as upstream's
+            // hand-built { "/bin/sh", "-c", cmd, NULL }.
+            None => {
+                let mut c = Command::new("/bin/sh");
+                c.arg("-c").arg(&cmdline);
+                c
+            }
+            // With argv, cmd is both the program and argv[0], which is what
+            // execvp(argv[0], argv) does upstream.
+            Some(a) => {
+                let mut c = Command::new(&cmdline);
+                c.args(a);
+                c
+            }
+        };
+
+        // A sandbox has no subprocesses. The natives still exist and still link;
+        // this one reports the failure upstream reports when a spawn is refused,
+        // and the read/write prims below already answer -1 with no child.
+        #[cfg(not(any(unix, windows)))]
+        let mut command = {
+            let _ = (&args, detached);
+            Command::new("")
+        };
+
+        #[cfg(windows)]
+        let mut command = {
+            if args.is_some() {
+                // Upstream: "should have been pre-processed by toplevel".
+                // sys.io.Process folds argv into the command line on Windows.
+                return ptr::null_mut();
+            }
+            let line = cmdline.to_string_lossy().into_owned();
+            let Some((program, rest)) = split_command_line(&line) else {
+                return ptr::null_mut();
+            };
+            let mut c = Command::new(program);
+            if !rest.is_empty() {
+                // raw_arg, not arg: the line was already quoted by the Haxe side
+                // for CreateProcess, and Command::arg would quote it again.
+                use std::os::windows::process::CommandExt;
+                c.raw_arg(rest);
+            }
+            c
+        };
+
+        if detached {
+            // Upstream gives a detached child no inherited handles at all and a
+            // console of its own. Stdio::null is the nearest std offers; the
+            // difference is the child's std handles being NUL rather than its
+            // new console. Either way this process holds no pipe to it, so the
+            // read/write prims below report -1 as upstream's NULL handles do.
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE);
+            }
+        } else {
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        }
+
+        let (slot, sin, sout, serr) = match command.spawn() {
+            Ok(mut c) => {
+                // Taken out of the Child so Child::wait has no stdin left to
+                // close. See the module header.
+                let sin = c.stdin.take();
+                let sout = c.stdout.take();
+                let serr = c.stderr.take().map_or(StderrSrc::Closed, StderrSrc::Pipe);
+                (ChildSlot::Live(c), sin, sout, serr)
+            }
+            Err(e) => {
+                if spawn_setup_failed(&e) {
+                    return ptr::null_mut();
+                }
+                let mut msg = b"Command not found : ".to_vec();
+                msg.extend_from_slice(&raw_cmd);
+                msg.push(b'\n');
+                (
+                    ChildSlot::ExecFailed,
+                    None,
+                    None,
+                    StderrSrc::Message(io::Cursor::new(msg)),
+                )
+            }
+        };
+
+        let state = Box::into_raw(Box::new(ProcState {
+            child: Mutex::new(slot),
+            stdin: Mutex::new(sin),
+            stdout: Mutex::new(sout),
+            stderr: Mutex::new(serr),
+        }));
+        let h = crate::rt::alloc_with_finalizer(std::mem::size_of::<VProcess>(), finalize_process)
+            as *mut VProcess;
+        if h.is_null() {
+            drop(Box::from_raw(state));
+            return ptr::null_mut();
+        }
+        (*h).magic = PROC_MAGIC;
+        (*h).state = state;
+        h as *mut c_void
     }
-    (*h).magic = PROC_MAGIC;
-    (*h).state = state;
-    h as *mut c_void
 }
 
 // DEFINE_PRIM(_I32, process_stdout_read, _PROCESS _BYTES _I32 _I32)
@@ -389,17 +397,19 @@ pub unsafe extern "C" fn hlp_process_stdout_read(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    let Some(st) = state_of(p) else {
-        return -1;
-    };
-    if str.is_null() || pos < 0 || len <= 0 {
-        return -1;
-    }
-    let out = std::slice::from_raw_parts_mut(str.add(pos as usize), len as usize);
-    let mut g = lock(&st.stdout);
-    match g.as_mut() {
-        Some(r) => read_pipe(r, out),
-        None => -1,
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return -1;
+        };
+        if str.is_null() || pos < 0 || len <= 0 {
+            return -1;
+        }
+        let out = std::slice::from_raw_parts_mut(str.add(pos as usize), len as usize);
+        let mut g = lock(&st.stdout);
+        match g.as_mut() {
+            Some(r) => read_pipe(r, out),
+            None => -1,
+        }
     }
 }
 
@@ -411,18 +421,20 @@ pub unsafe extern "C" fn hlp_process_stderr_read(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    let Some(st) = state_of(p) else {
-        return -1;
-    };
-    if str.is_null() || pos < 0 || len <= 0 {
-        return -1;
-    }
-    let out = std::slice::from_raw_parts_mut(str.add(pos as usize), len as usize);
-    let mut g = lock(&st.stderr);
-    match &mut *g {
-        StderrSrc::Pipe(r) => read_pipe(r, out),
-        StderrSrc::Message(c) => read_pipe(c, out),
-        StderrSrc::Closed => -1,
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return -1;
+        };
+        if str.is_null() || pos < 0 || len <= 0 {
+            return -1;
+        }
+        let out = std::slice::from_raw_parts_mut(str.add(pos as usize), len as usize);
+        let mut g = lock(&st.stderr);
+        match &mut *g {
+            StderrSrc::Pipe(r) => read_pipe(r, out),
+            StderrSrc::Message(c) => read_pipe(c, out),
+            StderrSrc::Closed => -1,
+        }
     }
 }
 
@@ -434,27 +446,29 @@ pub unsafe extern "C" fn hlp_process_stdin_write(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    let Some(st) = state_of(p) else {
-        return -1;
-    };
-    if str.is_null() || pos < 0 || len < 0 {
-        return -1;
-    }
-    let mut g = lock(&st.stdin);
-    // A closed or absent write end is upstream's fd -1, where write() fails
-    // with EBADF whatever the length.
-    let Some(w) = g.as_mut() else {
-        return -1;
-    };
-    if len == 0 {
-        return 0;
-    }
-    let data = std::slice::from_raw_parts(str.add(pos as usize), len as usize);
-    loop {
-        match w.write(data) {
-            Ok(n) => return n as c_int,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return -1,
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return -1;
+        };
+        if str.is_null() || pos < 0 || len < 0 {
+            return -1;
+        }
+        let mut g = lock(&st.stdin);
+        // A closed or absent write end is upstream's fd -1, where write() fails
+        // with EBADF whatever the length.
+        let Some(w) = g.as_mut() else {
+            return -1;
+        };
+        if len == 0 {
+            return 0;
+        }
+        let data = std::slice::from_raw_parts(str.add(pos as usize), len as usize);
+        loop {
+            match w.write(data) {
+                Ok(n) => return n as c_int,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return -1,
+            }
         }
     }
 }
@@ -462,43 +476,47 @@ pub unsafe extern "C" fn hlp_process_stdin_write(
 // DEFINE_PRIM(_BOOL, process_stdin_close, _PROCESS)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdin_close(p: *mut c_void) -> bool {
-    let Some(st) = state_of(p) else {
-        return false;
-    };
-    // Upstream reports the return of close(), so a second call - which lands
-    // on the fd -1 it left behind - answers false.
-    lock(&st.stdin).take().is_some()
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return false;
+        };
+        // Upstream reports the return of close(), so a second call - which lands
+        // on the fd -1 it left behind - answers false.
+        lock(&st.stdin).take().is_some()
+    }
 }
 
 // DEFINE_PRIM(_I32, process_exit, _PROCESS _REF(_BOOL))
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_exit(p: *mut c_void, running: *mut bool) -> c_int {
-    if !running.is_null() {
-        *running = false;
-    }
-    let Some(st) = state_of(p) else {
-        return -1;
-    };
-    let mut slot = lock(&st.child);
-    let ChildSlot::Live(child) = &mut *slot else {
-        // Upstream's doomed child called exit(1) before this could be asked.
-        return 1;
-    };
-    if running.is_null() {
-        match child.wait() {
-            Ok(s) => status_code(s),
-            Err(_) => -1,
+    unsafe {
+        if !running.is_null() {
+            *running = false;
         }
-    } else {
-        match child.try_wait() {
-            Ok(Some(s)) => status_code(s),
-            Ok(None) => {
-                *running = true;
-                0
+        let Some(st) = state_of(p) else {
+            return -1;
+        };
+        let mut slot = lock(&st.child);
+        let ChildSlot::Live(child) = &mut *slot else {
+            // Upstream's doomed child called exit(1) before this could be asked.
+            return 1;
+        };
+        if running.is_null() {
+            match child.wait() {
+                Ok(s) => status_code(s),
+                Err(_) => -1,
             }
-            // waitpid failing while `running` was asked for reports 0 with
-            // *running left false, not -1.
-            Err(_) => 0,
+        } else {
+            match child.try_wait() {
+                Ok(Some(s)) => status_code(s),
+                Ok(None) => {
+                    *running = true;
+                    0
+                }
+                // waitpid failing while `running` was asked for reports 0 with
+                // *running left false, not -1.
+                Err(_) => 0,
+            }
         }
     }
 }
@@ -506,32 +524,36 @@ pub unsafe extern "C" fn hlp_process_exit(p: *mut c_void, running: *mut bool) ->
 // DEFINE_PRIM(_I32, process_pid, _PROCESS)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_pid(p: *mut c_void) -> c_int {
-    let Some(st) = state_of(p) else {
-        return -1;
-    };
-    match &*lock(&st.child) {
-        ChildSlot::Live(c) => c.id() as c_int,
-        // Upstream would report the pid of the fork that failed to exec.
-        // There is no fork here to name, and inventing one would be worse
-        // than the -1 a caller can at least test.
-        ChildSlot::ExecFailed => -1,
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return -1;
+        };
+        match &*lock(&st.child) {
+            ChildSlot::Live(c) => c.id() as c_int,
+            // Upstream would report the pid of the fork that failed to exec.
+            // There is no fork here to name, and inventing one would be worse
+            // than the -1 a caller can at least test.
+            ChildSlot::ExecFailed => -1,
+        }
     }
 }
 
 // DEFINE_PRIM(_VOID, process_close, _PROCESS)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_close(p: *mut c_void) {
-    let Some(st) = state_of(p) else {
-        return;
-    };
-    // Upstream's finalizer body: the three pipe ends, nothing else. Idempotent
-    // because a second call finds them already taken. Windows additionally
-    // closes hProcess/hThread here, which makes a later process_exit fail
-    // there but not on unix; ash keeps the child handle so both behave like
-    // the unix side.
-    drop(lock(&st.stdin).take());
-    drop(lock(&st.stdout).take());
-    drop(std::mem::replace(&mut *lock(&st.stderr), StderrSrc::Closed));
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return;
+        };
+        // Upstream's finalizer body: the three pipe ends, nothing else. Idempotent
+        // because a second call finds them already taken. Windows additionally
+        // closes hProcess/hThread here, which makes a later process_exit fail
+        // there but not on unix; ash keeps the child handle so both behave like
+        // the unix side.
+        drop(lock(&st.stdin).take());
+        drop(lock(&st.stdout).take());
+        drop(std::mem::replace(&mut *lock(&st.stderr), StderrSrc::Closed));
+    }
 }
 
 /// Called by the collector once nothing can reach the handle.
@@ -542,41 +564,45 @@ pub unsafe extern "C" fn hlp_process_close(p: *mut c_void) {
 /// reap it, so the zombie outlives this exactly as it outlives upstream's
 /// finalizer -- upstream forks without ever waiting either.
 unsafe extern "C" fn finalize_process(block: *mut c_void) {
-    hlp_process_close(block);
-    let h = block as *mut VProcess;
-    if (*h).magic != PROC_MAGIC {
-        return;
-    }
-    let state = std::mem::replace(&mut (*h).state, ptr::null_mut());
-    if !state.is_null() {
-        drop(Box::from_raw(state));
+    unsafe {
+        hlp_process_close(block);
+        let h = block as *mut VProcess;
+        if (*h).magic != PROC_MAGIC {
+            return;
+        }
+        let state = std::mem::replace(&mut (*h).state, ptr::null_mut());
+        if !state.is_null() {
+            drop(Box::from_raw(state));
+        }
     }
 }
 
 // DEFINE_PRIM(_VOID, process_kill, _PROCESS)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_kill(p: *mut c_void) {
-    let Some(st) = state_of(p) else {
-        return;
-    };
-    let slot = lock(&st.child);
-    let ChildSlot::Live(child) = &*slot else {
-        return;
-    };
-    #[cfg(unix)]
-    {
-        // libc::kill, not Child::kill: the latter refuses once the child has
-        // been reaped, where upstream's kill() just returns ESRCH.
-        libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        // 0xCDCDCDCD, not Child::kill's 1: it is the exit code a later
-        // process_exit reports, and upstream picked this one.
-        windows_sys::Win32::System::Threading::TerminateProcess(
-            child.as_raw_handle() as _,
-            0xCDCD_CDCD,
-        );
+    unsafe {
+        let Some(st) = state_of(p) else {
+            return;
+        };
+        let slot = lock(&st.child);
+        let ChildSlot::Live(child) = &*slot else {
+            return;
+        };
+        #[cfg(unix)]
+        {
+            // libc::kill, not Child::kill: the latter refuses once the child has
+            // been reaped, where upstream's kill() just returns ESRCH.
+            libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // 0xCDCDCDCD, not Child::kill's 1: it is the exit code a later
+            // process_exit reports, and upstream picked this one.
+            windows_sys::Win32::System::Threading::TerminateProcess(
+                child.as_raw_handle() as _,
+                0xCDCD_CDCD,
+            );
+        }
     }
 }

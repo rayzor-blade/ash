@@ -1,6 +1,6 @@
 //! Dead-code elimination.
 
-use super::{compact_values, Pass, PassOptions, PassStats};
+use super::{Pass, PassOptions, PassStats, compact_values};
 use crate::v2::ir::*;
 use anyhow::Result;
 

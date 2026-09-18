@@ -33,10 +33,10 @@
 //! allocation escapes until that call has been inlined, and escape analysis
 //! run before inlining finds nothing at all.
 
-use super::analysis::{clobbers_all, write_class, AliasClass, CfgInfo};
+use super::analysis::{AliasClass, CfgInfo, clobbers_all, write_class};
 use super::ir::*;
 use super::module::{ModuleInfo, NO_MODULE_INFO};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub mod celldse;
 pub mod cellfwd;
@@ -815,10 +815,10 @@ pub fn clobber_free(
             if clobbers_all(ins) {
                 return false;
             }
-            if let Some(w) = write_class(ins) {
-                if w.may_alias(class) {
-                    return false;
-                }
+            if let Some(w) = write_class(ins)
+                && w.may_alias(class)
+            {
+                return false;
             }
         }
     }

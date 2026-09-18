@@ -28,24 +28,28 @@ const _: () = assert!(std::mem::align_of::<RegexpState>() <= 16);
 /// Guards on word zero and clears it, which is upstream's idiom for making a
 /// free run once however it is reached.
 unsafe extern "C" fn regexp_finalize(block: *mut c_void) {
-    let state = block as *mut RegexpState;
-    if (*state).finalize.take().is_none() {
-        return;
+    unsafe {
+        let state = block as *mut RegexpState;
+        if (*state).finalize.take().is_none() {
+            return;
+        }
+        std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).regex));
+        std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).last_groups));
     }
-    std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).regex));
-    std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).last_groups));
 }
 
 unsafe fn read_utf16z(bytes: *const vbyte) -> Vec<u16> {
-    if bytes.is_null() {
-        return Vec::new();
+    unsafe {
+        if bytes.is_null() {
+            return Vec::new();
+        }
+        let mut len = 0usize;
+        let ptr = bytes as *const u16;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(ptr, len).to_vec()
     }
-    let mut len = 0usize;
-    let ptr = bytes as *const u16;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-    std::slice::from_raw_parts(ptr, len).to_vec()
 }
 
 fn utf8_byte_to_utf16_units(s: &str, byte_idx: usize) -> i32 {
@@ -97,21 +101,24 @@ pub unsafe extern "C" fn hlp_regexp_new_options(
     bytes: *const vbyte,
     options: *const vbyte,
 ) -> *mut c_void {
-    let pattern = String::from_utf16_lossy(&read_utf16z(bytes));
-    let opts = String::from_utf16_lossy(&read_utf16z(options));
-    let Some(regex) = build_regex(&pattern, &opts) else {
-        return std::ptr::null_mut();
-    };
-    let state = crate::rt::alloc_with_finalizer(std::mem::size_of::<RegexpState>(), regexp_finalize)
-        as *mut RegexpState;
-    if state.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let pattern = String::from_utf16_lossy(&read_utf16z(bytes));
+        let opts = String::from_utf16_lossy(&read_utf16z(options));
+        let Some(regex) = build_regex(&pattern, &opts) else {
+            return std::ptr::null_mut();
+        };
+        let state =
+            crate::rt::alloc_with_finalizer(std::mem::size_of::<RegexpState>(), regexp_finalize)
+                as *mut RegexpState;
+        if state.is_null() {
+            return std::ptr::null_mut();
+        }
+        // Raw memory, so write the fields rather than assigning: an assignment
+        // would drop whatever the previous occupant's bytes look like.
+        std::ptr::addr_of_mut!((*state).regex).write(regex);
+        std::ptr::addr_of_mut!((*state).last_groups).write(None);
+        state as *mut c_void
     }
-    // Raw memory, so write the fields rather than assigning: an assignment
-    // would drop whatever the previous occupant's bytes look like.
-    std::ptr::addr_of_mut!((*state).regex).write(regex);
-    std::ptr::addr_of_mut!((*state).last_groups).write(None);
-    state as *mut c_void
 }
 
 #[unsafe(no_mangle)]
@@ -121,100 +128,106 @@ pub unsafe extern "C" fn hlp_regexp_match(
     pos: i32,
     size: i32,
 ) -> i32 {
-    if r.is_null() || str_bytes.is_null() {
-        return 0;
-    }
-    let state = &mut *(r as *mut RegexpState);
-    let full_units = read_utf16z(str_bytes);
-    let total_len = full_units.len() as i32;
-    let start = pos.clamp(0, total_len) as usize;
-    let avail = total_len - start as i32;
-    let run_len = if size < 0 {
-        avail
-    } else {
-        size.min(avail).max(0)
-    } as usize;
-    let subject = String::from_utf16_lossy(&full_units);
-    let start_byte = utf16_units_to_utf8_byte(&subject, start);
-    let end_byte = utf16_units_to_utf8_byte(&subject, start + run_len);
-    let visible_subject = &subject[..end_byte];
-
-    // Search the original subject at an offset instead of slicing it at
-    // `pos`.  Anchors are relative to the subject in PCRE2: slicing made `^`
-    // spuriously match after every zero-width global match, because each new
-    // offset appeared to be the start of a fresh string.
-    if let Ok(Some(caps)) = state.regex.captures_from_pos(visible_subject, start_byte) {
-        let mut groups = Vec::with_capacity(caps.len());
-        for i in 0..caps.len() {
-            if let Some(m) = caps.get(i) {
-                let s = utf8_byte_to_utf16_units(&subject, m.start());
-                let e = utf8_byte_to_utf16_units(&subject, m.end());
-                groups.push(Some((s, e - s)));
-            } else {
-                groups.push(None);
-            }
+    unsafe {
+        if r.is_null() || str_bytes.is_null() {
+            return 0;
         }
-        state.last_groups = Some(groups);
-        1
-    } else {
-        state.last_groups = None;
-        0
+        let state = &mut *(r as *mut RegexpState);
+        let full_units = read_utf16z(str_bytes);
+        let total_len = full_units.len() as i32;
+        let start = pos.clamp(0, total_len) as usize;
+        let avail = total_len - start as i32;
+        let run_len = if size < 0 {
+            avail
+        } else {
+            size.min(avail).max(0)
+        } as usize;
+        let subject = String::from_utf16_lossy(&full_units);
+        let start_byte = utf16_units_to_utf8_byte(&subject, start);
+        let end_byte = utf16_units_to_utf8_byte(&subject, start + run_len);
+        let visible_subject = &subject[..end_byte];
+
+        // Search the original subject at an offset instead of slicing it at
+        // `pos`.  Anchors are relative to the subject in PCRE2: slicing made `^`
+        // spuriously match after every zero-width global match, because each new
+        // offset appeared to be the start of a fresh string.
+        if let Ok(Some(caps)) = state.regex.captures_from_pos(visible_subject, start_byte) {
+            let mut groups = Vec::with_capacity(caps.len());
+            for i in 0..caps.len() {
+                if let Some(m) = caps.get(i) {
+                    let s = utf8_byte_to_utf16_units(&subject, m.start());
+                    let e = utf8_byte_to_utf16_units(&subject, m.end());
+                    groups.push(Some((s, e - s)));
+                } else {
+                    groups.push(None);
+                }
+            }
+            state.last_groups = Some(groups);
+            1
+        } else {
+            state.last_groups = None;
+            0
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_regexp_matched_pos(r: *mut c_void, n: i32, size: *mut i32) -> i32 {
-    if r.is_null() || n < 0 {
-        if !size.is_null() {
-            *size = 0;
+    unsafe {
+        if r.is_null() || n < 0 {
+            if !size.is_null() {
+                *size = 0;
+            }
+            return -1;
         }
-        return -1;
+        let state = &mut *(r as *mut RegexpState);
+        let Some(groups) = &state.last_groups else {
+            if !size.is_null() {
+                *size = 0;
+            }
+            hlp_error(str_to_uchar_ptr(
+                "Calling regexp_matched_pos() on an unmatched regexp",
+            ));
+            return -1;
+        };
+        let Some(group) = groups.get(n as usize) else {
+            if !size.is_null() {
+                *size = 0;
+            }
+            hlp_error(str_to_uchar_ptr(&format!(
+                "Matched index {n} outside bounds"
+            )));
+            return -1;
+        };
+        let Some((pos, len)) = group else {
+            if !size.is_null() {
+                *size = 0;
+            }
+            return -1;
+        };
+        if !size.is_null() {
+            *size = *len;
+        }
+        *pos
     }
-    let state = &mut *(r as *mut RegexpState);
-    let Some(groups) = &state.last_groups else {
-        if !size.is_null() {
-            *size = 0;
-        }
-        hlp_error(str_to_uchar_ptr(
-            "Calling regexp_matched_pos() on an unmatched regexp",
-        ));
-        return -1;
-    };
-    let Some(group) = groups.get(n as usize) else {
-        if !size.is_null() {
-            *size = 0;
-        }
-        hlp_error(str_to_uchar_ptr(&format!(
-            "Matched index {n} outside bounds"
-        )));
-        return -1;
-    };
-    let Some((pos, len)) = group else {
-        if !size.is_null() {
-            *size = 0;
-        }
-        return -1;
-    };
-    if !size.is_null() {
-        *size = *len;
-    }
-    *pos
 }
 
 // DEFINE_PRIM(_I32, regexp_matched_num, _EREG)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_regexp_matched_num(r: *mut c_void) -> i32 {
-    if r.is_null() {
-        return -1;
-    }
-    let state = &*(r as *mut RegexpState);
-    // -1 is upstream's "no match on this regexp yet", and Haxe's EReg.matched
-    // relies on it to tell that apart from a pattern with no groups. A
-    // successful match stored one row per group including group 0, which is
-    // the count pcre2 reports as `n_groups`.
-    match &state.last_groups {
-        Some(groups) => groups.len() as i32,
-        None => -1,
+    unsafe {
+        if r.is_null() {
+            return -1;
+        }
+        let state = &*(r as *mut RegexpState);
+        // -1 is upstream's "no match on this regexp yet", and Haxe's EReg.matched
+        // relies on it to tell that apart from a pattern with no groups. A
+        // successful match stored one row per group including group 0, which is
+        // the count pcre2 reports as `n_groups`.
+        match &state.last_groups {
+            Some(groups) => groups.len() as i32,
+            None => -1,
+        }
     }
 }
 
@@ -231,16 +244,20 @@ mod regexp_matched_num_tests {
     }
 
     unsafe fn new_regexp(pattern: &str) -> *mut c_void {
-        let p = u16z(pattern);
-        let o = u16z("");
-        let r = hlp_regexp_new_options(p.as_ptr() as *const vbyte, o.as_ptr() as *const vbyte);
-        assert!(!r.is_null(), "failed to build /{pattern}/");
-        r
+        unsafe {
+            let p = u16z(pattern);
+            let o = u16z("");
+            let r = hlp_regexp_new_options(p.as_ptr() as *const vbyte, o.as_ptr() as *const vbyte);
+            assert!(!r.is_null(), "failed to build /{pattern}/");
+            r
+        }
     }
 
     unsafe fn run_match(r: *mut c_void, subject: &str) -> i32 {
-        let s = u16z(subject);
-        hlp_regexp_match(r, s.as_ptr() as *const vbyte, 0, -1)
+        unsafe {
+            let s = u16z(subject);
+            hlp_regexp_match(r, s.as_ptr() as *const vbyte, 0, -1)
+        }
     }
 
     #[test]

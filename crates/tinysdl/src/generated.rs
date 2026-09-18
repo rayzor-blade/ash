@@ -17,7 +17,7 @@ use std::ffi::c_void;
 use hl_abi::*;
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_cursor_create(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -26,7 +26,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_cursor_create(a0: *mut c_void, a1: i32, a2: i32) -> *mut c_void {
     ash_host_sdl_cursor_create(a0 as i32, a1, a2) as *mut c_void
 }
@@ -37,7 +37,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_cursor_create_system(a0: i32) -> i32;
 }
 
@@ -46,7 +46,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_cursor_create_system(a0: i32) -> *mut c_void {
     ash_host_sdl_cursor_create_system(a0) as *mut c_void
 }
@@ -57,7 +57,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_delay(a0: i32);
 }
 
@@ -66,14 +66,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_delay(a0: i32) {
     ash_host_sdl_delay(a0);
 }
 define_prim!(hlp_delay, sdl_delay, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_detect_keyboard_layout() -> i32;
 }
 
@@ -82,7 +82,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_detect_keyboard_layout() -> *mut vbyte {
     ash_host_sdl_detect_keyboard_layout() as *mut vbyte
 }
@@ -93,7 +93,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_detect_win32() -> i32;
 }
 
@@ -102,14 +102,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_detect_win32() -> bool {
     ash_host_sdl_detect_win32() != 0
 }
 define_prim!(hlp_detect_win32, sdl_detect_win32, "P_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_event_loop(a0: i32) -> i32;
 }
 
@@ -118,14 +118,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_event_loop(a0: *mut vdynamic) -> bool {
     ash_host_sdl_event_loop(a0 as i32) != 0
 }
 define_prim!(hlp_event_loop, sdl_event_loop, "PD_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_free_cursor(a0: i32);
 }
 
@@ -134,14 +134,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_free_cursor(a0: *mut c_void) {
     ash_host_sdl_free_cursor(a0 as i32);
 }
 define_prim!(hlp_free_cursor, sdl_free_cursor, "PXsdl_cursor__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_free_surface(a0: i32);
 }
 
@@ -150,14 +150,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_free_surface(a0: *mut c_void) {
     ash_host_sdl_free_surface(a0 as i32);
 }
 define_prim!(hlp_free_surface, sdl_free_surface, "PXsdl_surface__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_close(a0: i32);
 }
 
@@ -166,14 +166,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_close(a0: *mut c_void) {
     ash_host_sdl_gctrl_close(a0 as i32);
 }
 define_prim!(hlp_gctrl_close, sdl_gctrl_close, "PXsdl_gamecontroller__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_count() -> i32;
 }
 
@@ -182,14 +182,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_count() -> i32 {
     ash_host_sdl_gctrl_count()
 }
 define_prim!(hlp_gctrl_count, sdl_gctrl_count, "P_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_get_axis(a0: i32, a1: i32) -> i32;
 }
 
@@ -198,7 +198,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_get_axis(a0: *mut c_void, a1: i32) -> i32 {
     ash_host_sdl_gctrl_get_axis(a0 as i32, a1)
 }
@@ -209,7 +209,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_get_button(a0: i32, a1: i32) -> i32;
 }
 
@@ -218,7 +218,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_get_button(a0: *mut c_void, a1: i32) -> bool {
     ash_host_sdl_gctrl_get_button(a0 as i32, a1) != 0
 }
@@ -229,7 +229,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_get_id(a0: i32) -> i32;
 }
 
@@ -238,7 +238,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_get_id(a0: *mut c_void) -> i32 {
     ash_host_sdl_gctrl_get_id(a0 as i32)
 }
@@ -249,7 +249,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_get_name(a0: i32) -> i32;
 }
 
@@ -258,7 +258,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_get_name(a0: *mut c_void) -> *mut vbyte {
     ash_host_sdl_gctrl_get_name(a0 as i32) as *mut vbyte
 }
@@ -269,7 +269,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gctrl_open(a0: i32) -> i32;
 }
 
@@ -278,14 +278,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gctrl_open(a0: i32) -> *mut c_void {
     ash_host_sdl_gctrl_open(a0) as *mut c_void
 }
 define_prim!(hlp_gctrl_open, sdl_gctrl_open, "Pi_Xsdl_gamecontroller_");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_clipboard_text() -> i32;
 }
 
@@ -294,14 +294,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_clipboard_text() -> *mut vbyte {
     ash_host_sdl_get_clipboard_text() as *mut vbyte
 }
 define_prim!(hlp_get_clipboard_text, sdl_get_clipboard_text, "P_B");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_current_display_mode(a0: i32, a1: i32) -> i32;
 }
 
@@ -310,7 +310,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_current_display_mode(a0: i32, a1: bool) -> *mut vdynamic {
     box_i32(ash_host_sdl_get_current_display_mode(a0, a1 as i32))
 }
@@ -321,7 +321,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_devices() -> i32;
 }
 
@@ -330,7 +330,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_devices() -> *mut varray {
     {
         let _ = ash_host_sdl_get_devices();
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn sdl_get_devices() -> *mut varray {
 define_prim!(hlp_get_devices, sdl_get_devices, "P_A");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_display_modes(a0: i32) -> i32;
 }
 
@@ -349,7 +349,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_display_modes(a0: i32) -> *mut varray {
     {
         let _ = ash_host_sdl_get_display_modes(a0);
@@ -359,7 +359,7 @@ pub unsafe extern "C" fn sdl_get_display_modes(a0: i32) -> *mut varray {
 define_prim!(hlp_get_display_modes, sdl_get_display_modes, "Pi_A");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_displays() -> i32;
 }
 
@@ -368,7 +368,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_displays() -> *mut varray {
     {
         let _ = ash_host_sdl_get_displays();
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn sdl_get_displays() -> *mut varray {
 define_prim!(hlp_get_displays, sdl_get_displays, "P_A");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_drag_and_drop_enabled() -> i32;
 }
 
@@ -387,7 +387,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_drag_and_drop_enabled() -> bool {
     ash_host_sdl_get_drag_and_drop_enabled() != 0
 }
@@ -398,7 +398,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_framerate(a0: i32) -> i32;
 }
 
@@ -407,14 +407,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_framerate(a0: *mut c_void) -> i32 {
     ash_host_sdl_get_framerate(a0 as i32)
 }
 define_prim!(hlp_get_framerate, sdl_get_framerate, "PXsdl_window__i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_global_mouse_state(a0: i32, a1: i32) -> i32;
 }
 
@@ -423,7 +423,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_global_mouse_state(a0: *mut i32, a1: *mut i32) -> i32 {
     ash_host_sdl_get_global_mouse_state(a0 as i32, a1 as i32)
 }
@@ -434,7 +434,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_relative_mouse_mode() -> i32;
 }
 
@@ -443,7 +443,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_relative_mouse_mode() -> bool {
     ash_host_sdl_get_relative_mouse_mode() != 0
 }
@@ -454,7 +454,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_screen_height() -> i32;
 }
 
@@ -463,14 +463,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_screen_height() -> i32 {
     ash_host_sdl_get_screen_height()
 }
 define_prim!(hlp_get_screen_height, sdl_get_screen_height, "P_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_screen_height_of_window(a0: i32) -> i32;
 }
 
@@ -479,7 +479,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_screen_height_of_window(a0: *mut c_void) -> i32 {
     ash_host_sdl_get_screen_height_of_window(a0 as i32)
 }
@@ -490,7 +490,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_screen_width() -> i32;
 }
 
@@ -499,14 +499,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_screen_width() -> i32 {
     ash_host_sdl_get_screen_width()
 }
 define_prim!(hlp_get_screen_width, sdl_get_screen_width, "P_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_screen_width_of_window(a0: i32) -> i32;
 }
 
@@ -515,7 +515,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_screen_width_of_window(a0: *mut c_void) -> i32 {
     ash_host_sdl_get_screen_width_of_window(a0 as i32)
 }
@@ -526,7 +526,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_get_window_grab(a0: i32) -> i32;
 }
 
@@ -535,14 +535,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_get_window_grab(a0: *mut c_void) -> bool {
     ash_host_sdl_get_window_grab(a0 as i32) != 0
 }
 define_prim!(hlp_get_window_grab, sdl_get_window_grab, "PXsdl_window__b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_active_texture(a0: i32);
 }
 
@@ -551,14 +551,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_active_texture(a0: i32) {
     ash_host_sdl_gl_active_texture(a0);
 }
 define_prim!(hlp_gl_active_texture, sdl_gl_active_texture, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_attach_shader(a0: i32, a1: i32);
 }
 
@@ -567,14 +567,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_attach_shader(a0: *mut vdynamic, a1: *mut vdynamic) {
     ash_host_sdl_gl_attach_shader(unbox_i32(a0), unbox_i32(a1));
 }
 define_prim!(hlp_gl_attach_shader, sdl_gl_attach_shader, "PNiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_begin_query(a0: i32, a1: i32);
 }
 
@@ -583,14 +583,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_begin_query(a0: i32, a1: *mut vdynamic) {
     ash_host_sdl_gl_begin_query(a0, unbox_i32(a1));
 }
 define_prim!(hlp_gl_begin_query, sdl_gl_begin_query, "PiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_buffer(a0: i32, a1: i32);
 }
 
@@ -599,14 +599,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_buffer(a0: i32, a1: *mut vdynamic) {
     ash_host_sdl_gl_bind_buffer(a0, unbox_i32(a1));
 }
 define_prim!(hlp_gl_bind_buffer, sdl_gl_bind_buffer, "PiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_buffer_base(a0: i32, a1: i32, a2: i32);
 }
 
@@ -615,14 +615,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_buffer_base(a0: i32, a1: i32, a2: *mut vdynamic) {
     ash_host_sdl_gl_bind_buffer_base(a0, a1, unbox_i32(a2));
 }
 define_prim!(hlp_gl_bind_buffer_base, sdl_gl_bind_buffer_base, "PiiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_frag_data_location(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -631,7 +631,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_frag_data_location(
     a0: *mut vdynamic,
     a1: i32,
@@ -646,7 +646,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_framebuffer(a0: i32, a1: i32);
 }
 
@@ -655,14 +655,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_framebuffer(a0: i32, a1: *mut vdynamic) {
     ash_host_sdl_gl_bind_framebuffer(a0, unbox_i32(a1));
 }
 define_prim!(hlp_gl_bind_framebuffer, sdl_gl_bind_framebuffer, "PiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_image_texture(
         a0: i32,
         a1: i32,
@@ -679,7 +679,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_image_texture(
     a0: i32,
     a1: i32,
@@ -698,7 +698,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_renderbuffer(a0: i32, a1: i32);
 }
 
@@ -707,14 +707,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_renderbuffer(a0: i32, a1: *mut vdynamic) {
     ash_host_sdl_gl_bind_renderbuffer(a0, unbox_i32(a1));
 }
 define_prim!(hlp_gl_bind_renderbuffer, sdl_gl_bind_renderbuffer, "PiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_texture(a0: i32, a1: i32);
 }
 
@@ -723,14 +723,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_texture(a0: i32, a1: *mut vdynamic) {
     ash_host_sdl_gl_bind_texture(a0, unbox_i32(a1));
 }
 define_prim!(hlp_gl_bind_texture, sdl_gl_bind_texture, "PiNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_bind_vertex_array(a0: i32);
 }
 
@@ -739,14 +739,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_bind_vertex_array(a0: *mut vdynamic) {
     ash_host_sdl_gl_bind_vertex_array(unbox_i32(a0));
 }
 define_prim!(hlp_gl_bind_vertex_array, sdl_gl_bind_vertex_array, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_blend_equation(a0: i32);
 }
 
@@ -755,14 +755,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_blend_equation(a0: i32) {
     ash_host_sdl_gl_blend_equation(a0);
 }
 define_prim!(hlp_gl_blend_equation, sdl_gl_blend_equation, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_blend_equation_separate(a0: i32, a1: i32);
 }
 
@@ -771,7 +771,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_blend_equation_separate(a0: i32, a1: i32) {
     ash_host_sdl_gl_blend_equation_separate(a0, a1);
 }
@@ -782,7 +782,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_blend_func(a0: i32, a1: i32);
 }
 
@@ -791,14 +791,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_blend_func(a0: i32, a1: i32) {
     ash_host_sdl_gl_blend_func(a0, a1);
 }
 define_prim!(hlp_gl_blend_func, sdl_gl_blend_func, "Pii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_blend_func_separate(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -807,7 +807,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_blend_func_separate(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_blend_func_separate(a0, a1, a2, a3);
 }
@@ -818,7 +818,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_blit_framebuffer(
         a0: i32,
         a1: i32,
@@ -838,7 +838,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_blit_framebuffer(
     a0: i32,
     a1: i32,
@@ -860,7 +860,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_buffer_data(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -869,14 +869,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_buffer_data(a0: i32, a1: i32, a2: *mut vbyte, a3: i32) {
     ash_host_sdl_gl_buffer_data(a0, a1, a2 as i32, a3);
 }
 define_prim!(hlp_gl_buffer_data, sdl_gl_buffer_data, "PiiBi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_buffer_data_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -885,14 +885,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_buffer_data_size(a0: i32, a1: i32, a2: i32) {
     ash_host_sdl_gl_buffer_data_size(a0, a1, a2);
 }
 define_prim!(hlp_gl_buffer_data_size, sdl_gl_buffer_data_size, "Piii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_buffer_sub_data(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -901,7 +901,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_buffer_sub_data(
     a0: i32,
     a1: i32,
@@ -914,7 +914,7 @@ pub unsafe extern "C" fn sdl_gl_buffer_sub_data(
 define_prim!(hlp_gl_buffer_sub_data, sdl_gl_buffer_sub_data, "PiiBii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_clear(a0: i32);
 }
 
@@ -923,14 +923,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_clear(a0: i32) {
     ash_host_sdl_gl_clear(a0);
 }
 define_prim!(hlp_gl_clear, sdl_gl_clear, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_clear_color(a0: f64, a1: f64, a2: f64, a3: f64);
 }
 
@@ -939,14 +939,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_clear_color(a0: f64, a1: f64, a2: f64, a3: f64) {
     ash_host_sdl_gl_clear_color(a0, a1, a2, a3);
 }
 define_prim!(hlp_gl_clear_color, sdl_gl_clear_color, "Pdddd_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_clear_depth(a0: f64);
 }
 
@@ -955,14 +955,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_clear_depth(a0: f64) {
     ash_host_sdl_gl_clear_depth(a0);
 }
 define_prim!(hlp_gl_clear_depth, sdl_gl_clear_depth, "Pd_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_clear_stencil(a0: i32);
 }
 
@@ -971,14 +971,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_clear_stencil(a0: i32) {
     ash_host_sdl_gl_clear_stencil(a0);
 }
 define_prim!(hlp_gl_clear_stencil, sdl_gl_clear_stencil, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_color_mask(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -987,14 +987,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_color_mask(a0: bool, a1: bool, a2: bool, a3: bool) {
     ash_host_sdl_gl_color_mask(a0 as i32, a1 as i32, a2 as i32, a3 as i32);
 }
 define_prim!(hlp_gl_color_mask, sdl_gl_color_mask, "Pbbbb_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_color_maski(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -1003,14 +1003,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_color_maski(a0: i32, a1: bool, a2: bool, a3: bool, a4: bool) {
     ash_host_sdl_gl_color_maski(a0, a1 as i32, a2 as i32, a3 as i32, a4 as i32);
 }
 define_prim!(hlp_gl_color_maski, sdl_gl_color_maski, "Pibbbb_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_compile_shader(a0: i32);
 }
 
@@ -1019,14 +1019,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_compile_shader(a0: *mut vdynamic) {
     ash_host_sdl_gl_compile_shader(unbox_i32(a0));
 }
 define_prim!(hlp_gl_compile_shader, sdl_gl_compile_shader, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_compressed_tex_image2d(
         a0: i32,
         a1: i32,
@@ -1044,7 +1044,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_compressed_tex_image2d(
     a0: i32,
     a1: i32,
@@ -1064,7 +1064,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_compressed_tex_image3d(
         a0: i32,
         a1: i32,
@@ -1083,7 +1083,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_compressed_tex_image3d(
     a0: i32,
     a1: i32,
@@ -1104,7 +1104,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_compressed_tex_sub_image2d(
         a0: i32,
         a1: i32,
@@ -1123,7 +1123,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_compressed_tex_sub_image2d(
     a0: i32,
     a1: i32,
@@ -1144,7 +1144,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_compressed_tex_sub_image3d(
         a0: i32,
         a1: i32,
@@ -1165,7 +1165,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_compressed_tex_sub_image3d(
     a0: i32,
     a1: i32,
@@ -1188,7 +1188,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_buffer() -> i32;
 }
 
@@ -1197,14 +1197,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_buffer() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_buffer())
 }
 define_prim!(hlp_gl_create_buffer, sdl_gl_create_buffer, "P_Ni");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_framebuffer() -> i32;
 }
 
@@ -1213,14 +1213,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_framebuffer() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_framebuffer())
 }
 define_prim!(hlp_gl_create_framebuffer, sdl_gl_create_framebuffer, "P_Ni");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_program() -> i32;
 }
 
@@ -1229,14 +1229,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_program() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_program())
 }
 define_prim!(hlp_gl_create_program, sdl_gl_create_program, "P_Ni");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_query() -> i32;
 }
 
@@ -1245,14 +1245,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_query() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_query())
 }
 define_prim!(hlp_gl_create_query, sdl_gl_create_query, "P_Ni");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_renderbuffer() -> i32;
 }
 
@@ -1261,7 +1261,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_renderbuffer() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_renderbuffer())
 }
@@ -1272,7 +1272,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_shader(a0: i32) -> i32;
 }
 
@@ -1281,14 +1281,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_shader(a0: i32) -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_shader(a0))
 }
 define_prim!(hlp_gl_create_shader, sdl_gl_create_shader, "Pi_Ni");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_texture() -> i32;
 }
 
@@ -1297,14 +1297,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_texture() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_texture())
 }
 define_prim!(hlp_gl_create_texture, sdl_gl_create_texture, "P_Ni");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_create_vertex_array() -> i32;
 }
 
@@ -1313,7 +1313,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_create_vertex_array() -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_create_vertex_array())
 }
@@ -1324,7 +1324,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_cull_face(a0: i32);
 }
 
@@ -1333,14 +1333,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_cull_face(a0: i32) {
     ash_host_sdl_gl_cull_face(a0);
 }
 define_prim!(hlp_gl_cull_face, sdl_gl_cull_face, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_buffer(a0: i32);
 }
 
@@ -1349,14 +1349,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_buffer(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_buffer(unbox_i32(a0));
 }
 define_prim!(hlp_gl_delete_buffer, sdl_gl_delete_buffer, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_framebuffer(a0: i32);
 }
 
@@ -1365,7 +1365,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_framebuffer(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_framebuffer(unbox_i32(a0));
 }
@@ -1376,7 +1376,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_query(a0: i32);
 }
 
@@ -1385,14 +1385,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_query(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_query(unbox_i32(a0));
 }
 define_prim!(hlp_gl_delete_query, sdl_gl_delete_query, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_renderbuffer(a0: i32);
 }
 
@@ -1401,7 +1401,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_renderbuffer(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_renderbuffer(unbox_i32(a0));
 }
@@ -1412,7 +1412,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_shader(a0: i32);
 }
 
@@ -1421,14 +1421,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_shader(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_shader(unbox_i32(a0));
 }
 define_prim!(hlp_gl_delete_shader, sdl_gl_delete_shader, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_texture(a0: i32);
 }
 
@@ -1437,14 +1437,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_texture(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_texture(unbox_i32(a0));
 }
 define_prim!(hlp_gl_delete_texture, sdl_gl_delete_texture, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_delete_vertex_array(a0: i32);
 }
 
@@ -1453,7 +1453,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_delete_vertex_array(a0: *mut vdynamic) {
     ash_host_sdl_gl_delete_vertex_array(unbox_i32(a0));
 }
@@ -1464,7 +1464,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_depth_func(a0: i32);
 }
 
@@ -1473,14 +1473,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_depth_func(a0: i32) {
     ash_host_sdl_gl_depth_func(a0);
 }
 define_prim!(hlp_gl_depth_func, sdl_gl_depth_func, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_depth_mask(a0: i32);
 }
 
@@ -1489,14 +1489,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_depth_mask(a0: bool) {
     ash_host_sdl_gl_depth_mask(a0 as i32);
 }
 define_prim!(hlp_gl_depth_mask, sdl_gl_depth_mask, "Pb_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_disable(a0: i32);
 }
 
@@ -1505,14 +1505,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_disable(a0: i32) {
     ash_host_sdl_gl_disable(a0);
 }
 define_prim!(hlp_gl_disable, sdl_gl_disable, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_disable_vertex_attrib_array(a0: i32);
 }
 
@@ -1521,7 +1521,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_disable_vertex_attrib_array(a0: i32) {
     ash_host_sdl_gl_disable_vertex_attrib_array(a0);
 }
@@ -1532,7 +1532,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_dispatch_compute(a0: i32, a1: i32, a2: i32);
 }
 
@@ -1541,14 +1541,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_dispatch_compute(a0: i32, a1: i32, a2: i32) {
     ash_host_sdl_gl_dispatch_compute(a0, a1, a2);
 }
 define_prim!(hlp_gl_dispatch_compute, sdl_gl_dispatch_compute, "Piii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_draw_arrays(a0: i32, a1: i32, a2: i32);
 }
 
@@ -1557,14 +1557,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_draw_arrays(a0: i32, a1: i32, a2: i32) {
     ash_host_sdl_gl_draw_arrays(a0, a1, a2);
 }
 define_prim!(hlp_gl_draw_arrays, sdl_gl_draw_arrays, "Piii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_draw_arrays_instanced(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -1573,7 +1573,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_draw_arrays_instanced(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_draw_arrays_instanced(a0, a1, a2, a3);
 }
@@ -1584,7 +1584,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_draw_buffers(a0: i32, a1: i32);
 }
 
@@ -1593,14 +1593,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_draw_buffers(a0: i32, a1: *mut vbyte) {
     ash_host_sdl_gl_draw_buffers(a0, a1 as i32);
 }
 define_prim!(hlp_gl_draw_buffers, sdl_gl_draw_buffers, "PiB_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_draw_elements(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -1609,14 +1609,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_draw_elements(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_draw_elements(a0, a1, a2, a3);
 }
 define_prim!(hlp_gl_draw_elements, sdl_gl_draw_elements, "Piiii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_draw_elements_instanced(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -1625,7 +1625,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_draw_elements_instanced(
     a0: i32,
     a1: i32,
@@ -1642,7 +1642,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_enable(a0: i32);
 }
 
@@ -1651,14 +1651,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_enable(a0: i32) {
     ash_host_sdl_gl_enable(a0);
 }
 define_prim!(hlp_gl_enable, sdl_gl_enable, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_enable_vertex_attrib_array(a0: i32);
 }
 
@@ -1667,7 +1667,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_enable_vertex_attrib_array(a0: i32) {
     ash_host_sdl_gl_enable_vertex_attrib_array(a0);
 }
@@ -1678,7 +1678,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_end_query(a0: i32);
 }
 
@@ -1687,14 +1687,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_end_query(a0: i32) {
     ash_host_sdl_gl_end_query(a0);
 }
 define_prim!(hlp_gl_end_query, sdl_gl_end_query, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_finish();
 }
 
@@ -1703,14 +1703,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_finish() {
     ash_host_sdl_gl_finish();
 }
 define_prim!(hlp_gl_finish, sdl_gl_finish, "P_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_framebuffer_renderbuffer(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -1719,7 +1719,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_framebuffer_renderbuffer(
     a0: i32,
     a1: i32,
@@ -1735,7 +1735,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_framebuffer_texture(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -1744,7 +1744,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_framebuffer_texture(a0: i32, a1: i32, a2: *mut vdynamic, a3: i32) {
     ash_host_sdl_gl_framebuffer_texture(a0, a1, unbox_i32(a2), a3);
 }
@@ -1755,7 +1755,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_framebuffer_texture2d(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -1764,7 +1764,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_framebuffer_texture2d(
     a0: i32,
     a1: i32,
@@ -1781,7 +1781,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_framebuffer_texture_layer(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -1790,7 +1790,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_framebuffer_texture_layer(
     a0: i32,
     a1: i32,
@@ -1807,7 +1807,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_generate_mipmap(a0: i32);
 }
 
@@ -1816,14 +1816,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_generate_mipmap(a0: i32) {
     ash_host_sdl_gl_generate_mipmap(a0);
 }
 define_prim!(hlp_gl_generate_mipmap, sdl_gl_generate_mipmap, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_attrib_location(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -1832,7 +1832,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_attrib_location(a0: *mut vdynamic, a1: *mut vstring) -> i32 {
     ash_host_sdl_gl_get_attrib_location(unbox_i32(a0), string_bytes(a1), string_length(a1))
 }
@@ -1843,7 +1843,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_config_parameter(a0: i32) -> i32;
 }
 
@@ -1852,7 +1852,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_config_parameter(a0: i32) -> i32 {
     ash_host_sdl_gl_get_config_parameter(a0)
 }
@@ -1863,7 +1863,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_error() -> i32;
 }
 
@@ -1872,14 +1872,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_error() -> i32 {
     ash_host_sdl_gl_get_error()
 }
 define_prim!(hlp_gl_get_error, sdl_gl_get_error, "P_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_program_info_bytes(a0: i32) -> i32;
 }
 
@@ -1888,7 +1888,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_program_info_bytes(a0: *mut vdynamic) -> *mut vbyte {
     ash_host_sdl_gl_get_program_info_bytes(unbox_i32(a0)) as *mut vbyte
 }
@@ -1899,7 +1899,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_program_parameter(a0: i32, a1: i32) -> i32;
 }
 
@@ -1908,7 +1908,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_program_parameter(a0: *mut vdynamic, a1: i32) -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_get_program_parameter(unbox_i32(a0), a1))
 }
@@ -1919,7 +1919,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_program_resource_index(a0: i32, a1: i32, a2: i32, a3: i32) -> i32;
 }
 
@@ -1928,7 +1928,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_program_resource_index(
     a0: *mut vdynamic,
     a1: i32,
@@ -1948,7 +1948,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_shader_info_bytes(a0: i32) -> i32;
 }
 
@@ -1957,7 +1957,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_shader_info_bytes(a0: *mut vdynamic) -> *mut vbyte {
     ash_host_sdl_gl_get_shader_info_bytes(unbox_i32(a0)) as *mut vbyte
 }
@@ -1968,7 +1968,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_shader_parameter(a0: i32, a1: i32) -> i32;
 }
 
@@ -1977,7 +1977,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_shader_parameter(a0: *mut vdynamic, a1: i32) -> *mut vdynamic {
     box_i32(ash_host_sdl_gl_get_shader_parameter(unbox_i32(a0), a1))
 }
@@ -1988,7 +1988,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_uniform_block_index(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -1997,7 +1997,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_uniform_block_index(
     a0: *mut vdynamic,
     a1: *mut vstring,
@@ -2011,7 +2011,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_get_uniform_location(a0: i32, a1: i32, a2: i32) -> i32;
 }
 
@@ -2020,7 +2020,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_uniform_location(
     a0: *mut vdynamic,
     a1: *mut vstring,
@@ -2038,7 +2038,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_has_extension(a0: i32, a1: i32) -> i32;
 }
 
@@ -2047,14 +2047,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_has_extension(a0: *mut vstring) -> bool {
     ash_host_sdl_gl_has_extension(string_bytes(a0), string_length(a0)) != 0
 }
 define_prim!(hlp_gl_has_extension, sdl_gl_has_extension, "POBi__b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_init() -> i32;
 }
 
@@ -2063,14 +2063,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_init() -> bool {
     ash_host_sdl_gl_init() != 0
 }
 define_prim!(hlp_gl_init, sdl_gl_init, "P_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_is_context_lost() -> i32;
 }
 
@@ -2079,14 +2079,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_is_context_lost() -> bool {
     ash_host_sdl_gl_is_context_lost() != 0
 }
 define_prim!(hlp_gl_is_context_lost, sdl_gl_is_context_lost, "P_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_link_program(a0: i32);
 }
 
@@ -2095,14 +2095,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_link_program(a0: *mut vdynamic) {
     ash_host_sdl_gl_link_program(unbox_i32(a0));
 }
 define_prim!(hlp_gl_link_program, sdl_gl_link_program, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_memory_barrier(a0: i32);
 }
 
@@ -2111,14 +2111,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_memory_barrier(a0: i32) {
     ash_host_sdl_gl_memory_barrier(a0);
 }
 define_prim!(hlp_gl_memory_barrier, sdl_gl_memory_barrier, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_multi_draw_elements_indirect(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -2127,7 +2127,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_multi_draw_elements_indirect(
     a0: i32,
     a1: i32,
@@ -2144,7 +2144,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_multi_draw_elements_indirect_count(
         a0: i32,
         a1: i32,
@@ -2160,7 +2160,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_multi_draw_elements_indirect_count(
     a0: i32,
     a1: i32,
@@ -2178,7 +2178,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_options(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32);
 }
 
@@ -2187,14 +2187,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_options(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32) {
     ash_host_sdl_gl_options(a0, a1, a2, a3, a4, a5);
 }
 define_prim!(hlp_gl_options, sdl_gl_options, "Piiiiii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_pixel_storei(a0: i32, a1: i32);
 }
 
@@ -2203,14 +2203,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_pixel_storei(a0: i32, a1: i32) {
     ash_host_sdl_gl_pixel_storei(a0, a1);
 }
 define_prim!(hlp_gl_pixel_storei, sdl_gl_pixel_storei, "Pii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_polygon_mode(a0: i32, a1: i32);
 }
 
@@ -2219,14 +2219,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_polygon_mode(a0: i32, a1: i32) {
     ash_host_sdl_gl_polygon_mode(a0, a1);
 }
 define_prim!(hlp_gl_polygon_mode, sdl_gl_polygon_mode, "Pii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_polygon_offset(a0: f64, a1: f64);
 }
 
@@ -2235,14 +2235,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_polygon_offset(a0: f32, a1: f32) {
     ash_host_sdl_gl_polygon_offset(a0 as f64, a1 as f64);
 }
 define_prim!(hlp_gl_polygon_offset, sdl_gl_polygon_offset, "Pff_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_query_counter(a0: i32, a1: i32);
 }
 
@@ -2251,14 +2251,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_query_counter(a0: *mut vdynamic, a1: i32) {
     ash_host_sdl_gl_query_counter(unbox_i32(a0), a1);
 }
 define_prim!(hlp_gl_query_counter, sdl_gl_query_counter, "PNii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_query_result(a0: i32) -> f64;
 }
 
@@ -2267,14 +2267,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_query_result(a0: *mut vdynamic) -> f64 {
     ash_host_sdl_gl_query_result(unbox_i32(a0))
 }
 define_prim!(hlp_gl_query_result, sdl_gl_query_result, "PNi_d");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_query_result_available(a0: i32) -> i32;
 }
 
@@ -2283,7 +2283,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_query_result_available(a0: *mut vdynamic) -> bool {
     ash_host_sdl_gl_query_result_available(unbox_i32(a0)) != 0
 }
@@ -2294,7 +2294,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_read_buffer(a0: i32);
 }
 
@@ -2303,14 +2303,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_read_buffer(a0: i32) {
     ash_host_sdl_gl_read_buffer(a0);
 }
 define_prim!(hlp_gl_read_buffer, sdl_gl_read_buffer, "Pi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_read_pixels(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32, a6: i32);
 }
 
@@ -2319,7 +2319,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_read_pixels(
     a0: i32,
     a1: i32,
@@ -2334,7 +2334,7 @@ pub unsafe extern "C" fn sdl_gl_read_pixels(
 define_prim!(hlp_gl_read_pixels, sdl_gl_read_pixels, "PiiiiiiB_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_renderbuffer_storage(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -2343,7 +2343,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_renderbuffer_storage(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_renderbuffer_storage(a0, a1, a2, a3);
 }
@@ -2354,7 +2354,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_renderbuffer_storage_multisample(
         a0: i32,
         a1: i32,
@@ -2369,7 +2369,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_renderbuffer_storage_multisample(
     a0: i32,
     a1: i32,
@@ -2386,7 +2386,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_scissor(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -2395,14 +2395,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_scissor(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_scissor(a0, a1, a2, a3);
 }
 define_prim!(hlp_gl_scissor, sdl_gl_scissor, "Piiii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_shader_source(a0: i32, a1: i32, a2: i32);
 }
 
@@ -2411,14 +2411,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_shader_source(a0: *mut vdynamic, a1: *mut vstring) {
     ash_host_sdl_gl_shader_source(unbox_i32(a0), string_bytes(a1), string_length(a1));
 }
 define_prim!(hlp_gl_shader_source, sdl_gl_shader_source, "PNiOBi__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_shader_storage_block_binding(a0: i32, a1: i32, a2: i32);
 }
 
@@ -2427,7 +2427,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_shader_storage_block_binding(a0: *mut vdynamic, a1: i32, a2: i32) {
     ash_host_sdl_gl_shader_storage_block_binding(unbox_i32(a0), a1, a2);
 }
@@ -2438,7 +2438,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_stencil_func_separate(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -2447,7 +2447,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_stencil_func_separate(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_stencil_func_separate(a0, a1, a2, a3);
 }
@@ -2458,7 +2458,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_stencil_mask_separate(a0: i32, a1: i32);
 }
 
@@ -2467,7 +2467,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_stencil_mask_separate(a0: i32, a1: i32) {
     ash_host_sdl_gl_stencil_mask_separate(a0, a1);
 }
@@ -2478,7 +2478,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_stencil_op_separate(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -2487,7 +2487,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_stencil_op_separate(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_stencil_op_separate(a0, a1, a2, a3);
 }
@@ -2498,7 +2498,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_image2d(
         a0: i32,
         a1: i32,
@@ -2517,7 +2517,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_image2d(
     a0: i32,
     a1: i32,
@@ -2534,7 +2534,7 @@ pub unsafe extern "C" fn sdl_gl_tex_image2d(
 define_prim!(hlp_gl_tex_image2d, sdl_gl_tex_image2d, "PiiiiiiiiB_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_image2d_multisample(
         a0: i32,
         a1: i32,
@@ -2550,7 +2550,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_image2d_multisample(
     a0: i32,
     a1: i32,
@@ -2568,7 +2568,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_image3d(
         a0: i32,
         a1: i32,
@@ -2588,7 +2588,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_image3d(
     a0: i32,
     a1: i32,
@@ -2606,7 +2606,7 @@ pub unsafe extern "C" fn sdl_gl_tex_image3d(
 define_prim!(hlp_gl_tex_image3d, sdl_gl_tex_image3d, "PiiiiiiiiiB_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_parameterf(a0: i32, a1: i32, a2: f64);
 }
 
@@ -2615,14 +2615,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_parameterf(a0: i32, a1: i32, a2: f32) {
     ash_host_sdl_gl_tex_parameterf(a0, a1, a2 as f64);
 }
 define_prim!(hlp_gl_tex_parameterf, sdl_gl_tex_parameterf, "Piif_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_parameteri(a0: i32, a1: i32, a2: i32);
 }
 
@@ -2631,14 +2631,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_parameteri(a0: i32, a1: i32, a2: i32) {
     ash_host_sdl_gl_tex_parameteri(a0, a1, a2);
 }
 define_prim!(hlp_gl_tex_parameteri, sdl_gl_tex_parameteri, "Piii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_storage2d(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -2647,14 +2647,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_storage2d(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) {
     ash_host_sdl_gl_tex_storage2d(a0, a1, a2, a3, a4);
 }
 define_prim!(hlp_gl_tex_storage2d, sdl_gl_tex_storage2d, "Piiiii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_storage3d(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32);
 }
 
@@ -2663,7 +2663,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_storage3d(
     a0: i32,
     a1: i32,
@@ -2677,7 +2677,7 @@ pub unsafe extern "C" fn sdl_gl_tex_storage3d(
 define_prim!(hlp_gl_tex_storage3d, sdl_gl_tex_storage3d, "Piiiiii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_sub_image2d(
         a0: i32,
         a1: i32,
@@ -2696,7 +2696,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_sub_image2d(
     a0: i32,
     a1: i32,
@@ -2717,7 +2717,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_tex_sub_image3d(
         a0: i32,
         a1: i32,
@@ -2738,7 +2738,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_tex_sub_image3d(
     a0: i32,
     a1: i32,
@@ -2761,7 +2761,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_uniform1i(a0: i32, a1: i32);
 }
 
@@ -2770,14 +2770,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_uniform1i(a0: *mut vdynamic, a1: i32) {
     ash_host_sdl_gl_uniform1i(unbox_i32(a0), a1);
 }
 define_prim!(hlp_gl_uniform1i, sdl_gl_uniform1i, "PNii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_uniform4fv(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -2786,14 +2786,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_uniform4fv(a0: *mut vdynamic, a1: *mut vbyte, a2: i32, a3: i32) {
     ash_host_sdl_gl_uniform4fv(unbox_i32(a0), a1 as i32, a2, a3);
 }
 define_prim!(hlp_gl_uniform4fv, sdl_gl_uniform4fv, "PNiBii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_uniform_block_binding(a0: i32, a1: i32, a2: i32);
 }
 
@@ -2802,7 +2802,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_uniform_block_binding(a0: *mut vdynamic, a1: i32, a2: i32) {
     ash_host_sdl_gl_uniform_block_binding(unbox_i32(a0), a1, a2);
 }
@@ -2813,7 +2813,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_uniform_matrix4fv(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -2822,7 +2822,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_uniform_matrix4fv(
     a0: *mut vdynamic,
     a1: bool,
@@ -2839,7 +2839,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_use_program(a0: i32);
 }
 
@@ -2848,14 +2848,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_use_program(a0: *mut vdynamic) {
     ash_host_sdl_gl_use_program(unbox_i32(a0));
 }
 define_prim!(hlp_gl_use_program, sdl_gl_use_program, "PNi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_vertex_attrib_divisor(a0: i32, a1: i32);
 }
 
@@ -2864,7 +2864,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_vertex_attrib_divisor(a0: i32, a1: i32) {
     ash_host_sdl_gl_vertex_attrib_divisor(a0, a1);
 }
@@ -2875,7 +2875,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_vertex_attrib_ipointer(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32);
 }
 
@@ -2884,7 +2884,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_vertex_attrib_ipointer(
     a0: i32,
     a1: i32,
@@ -2901,7 +2901,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_vertex_attrib_pointer(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32);
 }
 
@@ -2910,7 +2910,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_vertex_attrib_pointer(
     a0: i32,
     a1: i32,
@@ -2928,7 +2928,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_gl_viewport(a0: i32, a1: i32, a2: i32, a3: i32);
 }
 
@@ -2937,14 +2937,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_viewport(a0: i32, a1: i32, a2: i32, a3: i32) {
     ash_host_sdl_gl_viewport(a0, a1, a2, a3);
 }
 define_prim!(hlp_gl_viewport, sdl_gl_viewport, "Piiii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_haptic_close(a0: i32);
 }
 
@@ -2953,14 +2953,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_haptic_close(a0: *mut c_void) {
     ash_host_sdl_haptic_close(a0 as i32);
 }
 define_prim!(hlp_haptic_close, sdl_haptic_close, "PXsdl_haptic__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_haptic_open(a0: i32) -> i32;
 }
 
@@ -2969,7 +2969,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_haptic_open(a0: *mut c_void) -> *mut c_void {
     ash_host_sdl_haptic_open(a0 as i32) as *mut c_void
 }
@@ -2980,7 +2980,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_haptic_rumble_init(a0: i32) -> i32;
 }
 
@@ -2989,7 +2989,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_haptic_rumble_init(a0: *mut c_void) -> i32 {
     ash_host_sdl_haptic_rumble_init(a0 as i32)
 }
@@ -3000,7 +3000,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_haptic_rumble_play(a0: i32, a1: f64, a2: i32) -> i32;
 }
 
@@ -3009,7 +3009,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_haptic_rumble_play(a0: *mut c_void, a1: f64, a2: i32) -> i32 {
     ash_host_sdl_haptic_rumble_play(a0 as i32, a1, a2)
 }
@@ -3020,7 +3020,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_hint_value(a0: i32, a1: i32) -> i32;
 }
 
@@ -3029,14 +3029,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_hint_value(a0: *mut vbyte, a1: *mut vbyte) -> bool {
     ash_host_sdl_hint_value(a0 as i32, a1 as i32) != 0
 }
 define_prim!(hlp_hint_value, sdl_hint_value, "PBB_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_init_once() -> i32;
 }
 
@@ -3045,14 +3045,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_init_once() -> bool {
     ash_host_sdl_init_once() != 0
 }
 define_prim!(hlp_init_once, sdl_init_once, "P_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_is_cursor_visible() -> i32;
 }
 
@@ -3061,14 +3061,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_is_cursor_visible() -> bool {
     ash_host_sdl_is_cursor_visible() != 0
 }
 define_prim!(hlp_is_cursor_visible, sdl_is_cursor_visible, "P_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_message_box(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3077,14 +3077,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_message_box(a0: *mut vbyte, a1: *mut vbyte, a2: bool) {
     ash_host_sdl_message_box(a0 as i32, a1 as i32, a2 as i32);
 }
 define_prim!(hlp_message_box, sdl_message_box, "PBBb_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_quit();
 }
 
@@ -3093,14 +3093,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_quit() {
     ash_host_sdl_quit();
 }
 define_prim!(hlp_quit, sdl_quit, "P_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_set_clipboard_text(a0: i32) -> i32;
 }
 
@@ -3109,14 +3109,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_set_clipboard_text(a0: *mut vbyte) -> bool {
     ash_host_sdl_set_clipboard_text(a0 as i32) != 0
 }
 define_prim!(hlp_set_clipboard_text, sdl_set_clipboard_text, "PB_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_set_cursor(a0: i32);
 }
 
@@ -3125,14 +3125,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_set_cursor(a0: *mut c_void) {
     ash_host_sdl_set_cursor(a0 as i32);
 }
 define_prim!(hlp_set_cursor, sdl_set_cursor, "PXsdl_cursor__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_set_drag_and_drop_enabled(a0: i32);
 }
 
@@ -3141,7 +3141,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_set_drag_and_drop_enabled(a0: bool) {
     ash_host_sdl_set_drag_and_drop_enabled(a0 as i32);
 }
@@ -3152,7 +3152,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_set_relative_mouse_mode(a0: i32) -> i32;
 }
 
@@ -3161,7 +3161,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_set_relative_mouse_mode(a0: bool) -> i32 {
     ash_host_sdl_set_relative_mouse_mode(a0 as i32)
 }
@@ -3172,7 +3172,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_set_vsync(a0: i32);
 }
 
@@ -3181,14 +3181,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_set_vsync(a0: bool) {
     ash_host_sdl_set_vsync(a0 as i32);
 }
 define_prim!(hlp_set_vsync, sdl_set_vsync, "Pb_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_set_window_grab(a0: i32, a1: i32);
 }
 
@@ -3197,14 +3197,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_set_window_grab(a0: *mut c_void, a1: bool) {
     ash_host_sdl_set_window_grab(a0 as i32, a1 as i32);
 }
 define_prim!(hlp_set_window_grab, sdl_set_window_grab, "PXsdl_window_b_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_show_cursor(a0: i32);
 }
 
@@ -3213,14 +3213,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_show_cursor(a0: bool) {
     ash_host_sdl_show_cursor(a0 as i32);
 }
 define_prim!(hlp_show_cursor, sdl_show_cursor, "Pb_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_surface_from(
         a0: i32,
         a1: i32,
@@ -3239,7 +3239,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_surface_from(
     a0: *mut vbyte,
     a1: i32,
@@ -3260,7 +3260,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_warp_mouse_global(a0: i32, a1: i32) -> i32;
 }
 
@@ -3269,14 +3269,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_warp_mouse_global(a0: i32, a1: i32) -> i32 {
     ash_host_sdl_warp_mouse_global(a0, a1)
 }
 define_prim!(hlp_warp_mouse_global, sdl_warp_mouse_global, "Pii_i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_warp_mouse_in_window(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3285,7 +3285,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_warp_mouse_in_window(a0: *mut c_void, a1: i32, a2: i32) {
     ash_host_sdl_warp_mouse_in_window(a0 as i32, a1, a2);
 }
@@ -3296,7 +3296,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_create(a0: i32, a1: i32) -> i32;
 }
 
@@ -3305,14 +3305,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_create(a0: i32, a1: i32) -> *mut c_void {
     ash_host_sdl_win_create(a0, a1) as *mut c_void
 }
 define_prim!(hlp_win_create, sdl_win_create, "Pii_Xsdl_window_");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_create_ex(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) -> i32;
 }
 
@@ -3321,7 +3321,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_create_ex(
     a0: i32,
     a1: i32,
@@ -3334,7 +3334,7 @@ pub unsafe extern "C" fn sdl_win_create_ex(
 define_prim!(hlp_win_create_ex, sdl_win_create_ex, "Piiiii_Xsdl_window_");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_destroy(a0: i32, a1: i32);
 }
 
@@ -3343,14 +3343,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_destroy(a0: *mut c_void, a1: *mut c_void) {
     ash_host_sdl_win_destroy(a0 as i32, a1 as i32);
 }
 define_prim!(hlp_win_destroy, sdl_win_destroy, "PXsdl_window_Xsdl_gl__v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_display_handle(a0: i32) -> i32;
 }
 
@@ -3359,7 +3359,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_display_handle(a0: *mut c_void) -> i32 {
     ash_host_sdl_win_display_handle(a0 as i32)
 }
@@ -3370,7 +3370,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_glcontext(a0: i32) -> i32;
 }
 
@@ -3379,7 +3379,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_glcontext(a0: *mut c_void) -> *mut c_void {
     ash_host_sdl_win_get_glcontext(a0 as i32) as *mut c_void
 }
@@ -3390,7 +3390,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_id(a0: i32) -> i32;
 }
 
@@ -3399,14 +3399,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_id(a0: *mut c_void) -> i32 {
     ash_host_sdl_win_get_id(a0 as i32)
 }
 define_prim!(hlp_win_get_id, sdl_win_get_id, "PXsdl_window__i");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_max_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3415,7 +3415,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_max_size(a0: *mut c_void, a1: *mut i32, a2: *mut i32) {
     ash_host_sdl_win_get_max_size(a0 as i32, a1 as i32, a2 as i32);
 }
@@ -3426,7 +3426,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_min_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3435,7 +3435,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_min_size(a0: *mut c_void, a1: *mut i32, a2: *mut i32) {
     ash_host_sdl_win_get_min_size(a0 as i32, a1 as i32, a2 as i32);
 }
@@ -3446,7 +3446,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_opacity(a0: i32) -> f64;
 }
 
@@ -3455,14 +3455,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_opacity(a0: *mut c_void) -> f64 {
     ash_host_sdl_win_get_opacity(a0 as i32)
 }
 define_prim!(hlp_win_get_opacity, sdl_win_get_opacity, "PXsdl_window__d");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_position(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3471,7 +3471,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_position(a0: *mut c_void, a1: *mut i32, a2: *mut i32) {
     ash_host_sdl_win_get_position(a0 as i32, a1 as i32, a2 as i32);
 }
@@ -3482,7 +3482,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_get_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3491,14 +3491,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_get_size(a0: *mut c_void, a1: *mut i32, a2: *mut i32) {
     ash_host_sdl_win_get_size(a0 as i32, a1 as i32, a2 as i32);
 }
 define_prim!(hlp_win_get_size, sdl_win_get_size, "PXsdl_window_RiRi_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_render_to(a0: i32, a1: i32);
 }
 
@@ -3507,7 +3507,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_render_to(a0: *mut c_void, a1: *mut c_void) {
     ash_host_sdl_win_render_to(a0 as i32, a1 as i32);
 }
@@ -3518,7 +3518,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_resize(a0: i32, a1: i32);
 }
 
@@ -3527,14 +3527,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_resize(a0: *mut c_void, a1: i32) {
     ash_host_sdl_win_resize(a0 as i32, a1);
 }
 define_prim!(hlp_win_resize, sdl_win_resize, "PXsdl_window_i_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_display_mode(a0: i32, a1: i32, a2: i32, a3: i32) -> i32;
 }
 
@@ -3543,7 +3543,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_display_mode(
     a0: *mut c_void,
     a1: i32,
@@ -3559,7 +3559,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_fullscreen(a0: i32, a1: i32) -> i32;
 }
 
@@ -3568,7 +3568,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_fullscreen(a0: *mut c_void, a1: i32) -> bool {
     ash_host_sdl_win_set_fullscreen(a0 as i32, a1) != 0
 }
@@ -3579,7 +3579,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_max_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3588,7 +3588,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_max_size(a0: *mut c_void, a1: i32, a2: i32) {
     ash_host_sdl_win_set_max_size(a0 as i32, a1, a2);
 }
@@ -3599,7 +3599,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_min_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3608,7 +3608,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_min_size(a0: *mut c_void, a1: i32, a2: i32) {
     ash_host_sdl_win_set_min_size(a0 as i32, a1, a2);
 }
@@ -3619,7 +3619,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_opacity(a0: i32, a1: f64) -> i32;
 }
 
@@ -3628,14 +3628,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_opacity(a0: *mut c_void, a1: f64) -> bool {
     ash_host_sdl_win_set_opacity(a0 as i32, a1) != 0
 }
 define_prim!(hlp_win_set_opacity, sdl_win_set_opacity, "PXsdl_window_d_b");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_position(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3644,7 +3644,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_position(a0: *mut c_void, a1: i32, a2: i32) {
     ash_host_sdl_win_set_position(a0 as i32, a1, a2);
 }
@@ -3655,7 +3655,7 @@ define_prim!(
 );
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_size(a0: i32, a1: i32, a2: i32);
 }
 
@@ -3664,14 +3664,14 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_size(a0: *mut c_void, a1: i32, a2: i32) {
     ash_host_sdl_win_set_size(a0 as i32, a1, a2);
 }
 define_prim!(hlp_win_set_size, sdl_win_set_size, "PXsdl_window_ii_v");
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_sdl_win_set_title(a0: i32, a1: i32);
 }
 
@@ -3680,7 +3680,7 @@ extern "C" {
 /// # Safety
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_set_title(a0: *mut c_void, a1: *mut vbyte) {
     ash_host_sdl_win_set_title(a0 as i32, a1 as i32);
 }

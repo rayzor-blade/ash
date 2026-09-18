@@ -26,4 +26,4 @@
 // native target has any use for.
 #![cfg(target_family = "wasm")]
 
-pub use ash_wasm_runtime::browser::run::{run, run_thread, Outcome};
+pub use ash_wasm_runtime::browser::run::{Outcome, run, run_thread};

@@ -26,10 +26,10 @@
 //! bindings and closure allocation reach the same tables they do under the
 //! JIT.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use inkwell::AddressSpace;
 use inkwell::module::Linkage;
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
-use inkwell::AddressSpace;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;

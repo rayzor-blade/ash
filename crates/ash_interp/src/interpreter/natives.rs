@@ -6,7 +6,7 @@
 //! A child module of `interpreter` so it reaches `HLInterpreter`'s private
 //! fields without widening them.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::ffi::c_void;
 
 use ash_core::bytecode::DecodedBytecode;
@@ -19,7 +19,7 @@ use ash_core::types::{HLFunction, ValueTypeKind};
 use crate::tiering::env_flag;
 use crate::values::NanBoxedValue;
 
-use super::{func_of, kind_u32, native_of, run_with_hl_trap, FnGetObjRt, HLInterpreter, HlpName};
+use super::{FnGetObjRt, HLInterpreter, HlpName, func_of, kind_u32, native_of, run_with_hl_trap};
 
 impl HLInterpreter {
     /// Call a native function via FFI.
@@ -1277,63 +1277,65 @@ impl HLInterpreter {
         obj_kind: hl::hl_type_kind,
         fn_get_obj_rt: *mut c_void,
     ) -> NanBoxedValue {
-        if fn_get_obj_rt.is_null() {
-            return NanBoxedValue::null();
-        }
+        unsafe {
+            if fn_get_obj_rt.is_null() {
+                return NanBoxedValue::null();
+            }
 
-        // For HOBJ, prefer the object's own header type (supports polymorphism).
-        // For HSTRUCT, use the register's declared type (structs have no header).
-        let type_ptr = if obj_kind != hl_type_kind_HSTRUCT {
-            let header = *(obj_ptr as *const *mut c_void);
-            if !header.is_null() {
-                header
+            // For HOBJ, prefer the object's own header type (supports polymorphism).
+            // For HSTRUCT, use the register's declared type (structs have no header).
+            let type_ptr = if obj_kind != hl_type_kind_HSTRUCT {
+                let header = *(obj_ptr as *const *mut c_void);
+                if !header.is_null() {
+                    header
+                } else {
+                    obj_c_type
+                }
             } else {
                 obj_c_type
-            }
-        } else {
-            obj_c_type
-        };
-
-        if type_ptr.is_null() {
-            return NanBoxedValue::null();
-        }
-
-        // Corruption tripwire: a type pointer must be 8-aligned; a NaN-boxed
-        // double here means the object's memory was reclaimed and reused.
-        // Print the evidence (cross-reference with ASH_GC_TRACE_FREED) before
-        // the misaligned deref aborts without it.
-        {
-            let bad_align = (type_ptr as usize) & 7 != 0;
-            // An aligned-but-garbage header (a reused line of doubles) passes
-            // the alignment check; the type's kind field gives it away.
-            let bad_kind = !bad_align && {
-                let k = *(type_ptr as *const i32);
-                !(0..=22).contains(&k)
             };
-            if bad_align || bad_kind {
-                eprintln!(
-                    "[gc-corrupt] FieldGet obj={:#x} header={:#x} field={field_idx}",
-                    obj_ptr as usize, type_ptr as usize
-                );
+
+            if type_ptr.is_null() {
+                return NanBoxedValue::null();
             }
-        }
-        let get_rt: FnGetObjRt = std::mem::transmute(fn_get_obj_rt);
-        let rt = get_rt(type_ptr) as *const hl_runtime_obj;
-        if rt.is_null() || (*rt).fields_indexes.is_null() {
-            return NanBoxedValue::null();
-        }
 
-        if field_idx >= (*rt).nfields as usize {
-            return NanBoxedValue::null();
+            // Corruption tripwire: a type pointer must be 8-aligned; a NaN-boxed
+            // double here means the object's memory was reclaimed and reused.
+            // Print the evidence (cross-reference with ASH_GC_TRACE_FREED) before
+            // the misaligned deref aborts without it.
+            {
+                let bad_align = (type_ptr as usize) & 7 != 0;
+                // An aligned-but-garbage header (a reused line of doubles) passes
+                // the alignment check; the type's kind field gives it away.
+                let bad_kind = !bad_align && {
+                    let k = *(type_ptr as *const i32);
+                    !(0..=22).contains(&k)
+                };
+                if bad_align || bad_kind {
+                    eprintln!(
+                        "[gc-corrupt] FieldGet obj={:#x} header={:#x} field={field_idx}",
+                        obj_ptr as usize, type_ptr as usize
+                    );
+                }
+            }
+            let get_rt: FnGetObjRt = std::mem::transmute(fn_get_obj_rt);
+            let rt = get_rt(type_ptr) as *const hl_runtime_obj;
+            if rt.is_null() || (*rt).fields_indexes.is_null() {
+                return NanBoxedValue::null();
+            }
+
+            if field_idx >= (*rt).nfields as usize {
+                return NanBoxedValue::null();
+            }
+
+            let offset = *(*rt).fields_indexes.add(field_idx);
+            let field_addr = obj_ptr.add(offset as usize);
+
+            // Use dst_kind (register type) for reading — the compiler knows the correct
+            // read width. The field's declared type is only used for WRITING to prevent
+            // 8-byte NanBox spill into adjacent fields.
+            Self::read_value_at(field_addr, dst_kind)
         }
-
-        let offset = *(*rt).fields_indexes.add(field_idx);
-        let field_addr = obj_ptr.add(offset as usize);
-
-        // Use dst_kind (register type) for reading — the compiler knows the correct
-        // read width. The field's declared type is only used for WRITING to prevent
-        // 8-byte NanBox spill into adjacent fields.
-        Self::read_value_at(field_addr, dst_kind)
     }
 
     /// Write a value to an object field at the given field index.
@@ -1346,39 +1348,41 @@ impl HLInterpreter {
         obj_kind: hl::hl_type_kind,
         fn_get_obj_rt: *mut c_void,
     ) {
-        if fn_get_obj_rt.is_null() {
-            return;
-        }
+        unsafe {
+            if fn_get_obj_rt.is_null() {
+                return;
+            }
 
-        let type_ptr = if obj_kind != hl_type_kind_HSTRUCT {
-            let header = *(obj_ptr as *const *mut c_void);
-            if !header.is_null() {
-                header
+            let type_ptr = if obj_kind != hl_type_kind_HSTRUCT {
+                let header = *(obj_ptr as *const *mut c_void);
+                if !header.is_null() {
+                    header
+                } else {
+                    obj_c_type
+                }
             } else {
                 obj_c_type
+            };
+
+            if type_ptr.is_null() {
+                return;
             }
-        } else {
-            obj_c_type
-        };
 
-        if type_ptr.is_null() {
-            return;
+            let get_rt: FnGetObjRt = std::mem::transmute(fn_get_obj_rt);
+            let rt = get_rt(type_ptr) as *const hl_runtime_obj;
+            if rt.is_null() || (*rt).fields_indexes.is_null() {
+                return;
+            }
+
+            if field_idx >= (*rt).nfields as usize {
+                return;
+            }
+
+            let offset = *(*rt).fields_indexes.add(field_idx);
+            let field_addr = obj_ptr.add(offset as usize);
+
+            Self::write_value_at(field_addr, src_kind, val);
         }
-
-        let get_rt: FnGetObjRt = std::mem::transmute(fn_get_obj_rt);
-        let rt = get_rt(type_ptr) as *const hl_runtime_obj;
-        if rt.is_null() || (*rt).fields_indexes.is_null() {
-            return;
-        }
-
-        if field_idx >= (*rt).nfields as usize {
-            return;
-        }
-
-        let offset = *(*rt).fields_indexes.add(field_idx);
-        let field_addr = obj_ptr.add(offset as usize);
-
-        Self::write_value_at(field_addr, src_kind, val);
     }
 
     /// Read a value from a raw memory address based on the HL type kind.
@@ -1386,24 +1390,26 @@ impl HLInterpreter {
     /// Unaligned: `hl.Bytes` accessors take any byte offset, so the address
     /// is whatever the program computed.
     pub(super) unsafe fn read_value_at(addr: *const u8, kind: hl::hl_type_kind) -> NanBoxedValue {
-        use std::ptr::read_unaligned as rd;
-        use ValueTypeKind::*;
-        match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
-            HVOID => NanBoxedValue::void(),
-            HUI8 => NanBoxedValue::from_i32(*addr as i32),
-            HUI16 => NanBoxedValue::from_i32(rd(addr as *const u16) as i32),
-            HI32 => NanBoxedValue::from_i32(rd(addr as *const i32)),
-            HI64 => NanBoxedValue::from_i64(rd(addr as *const i64)),
-            HF32 => NanBoxedValue::from_f64(rd(addr as *const f32) as f64),
-            HF64 => NanBoxedValue::from_f64(rd(addr as *const f64)),
-            HBOOL => NanBoxedValue::from_bool(*addr != 0),
-            _ => {
-                // Pointer types (OBJ, DYN, FUN, ARRAY, BYTES, ENUM, etc.)
-                let ptr = rd(addr as *const usize);
-                if ptr == 0 {
-                    NanBoxedValue::null()
-                } else {
-                    NanBoxedValue::from_ptr(ptr)
+        unsafe {
+            use ValueTypeKind::*;
+            use std::ptr::read_unaligned as rd;
+            match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
+                HVOID => NanBoxedValue::void(),
+                HUI8 => NanBoxedValue::from_i32(*addr as i32),
+                HUI16 => NanBoxedValue::from_i32(rd(addr as *const u16) as i32),
+                HI32 => NanBoxedValue::from_i32(rd(addr as *const i32)),
+                HI64 => NanBoxedValue::from_i64(rd(addr as *const i64)),
+                HF32 => NanBoxedValue::from_f64(rd(addr as *const f32) as f64),
+                HF64 => NanBoxedValue::from_f64(rd(addr as *const f64)),
+                HBOOL => NanBoxedValue::from_bool(*addr != 0),
+                _ => {
+                    // Pointer types (OBJ, DYN, FUN, ARRAY, BYTES, ENUM, etc.)
+                    let ptr = rd(addr as *const usize);
+                    if ptr == 0 {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(ptr)
+                    }
                 }
             }
         }
@@ -1468,23 +1474,25 @@ impl HLInterpreter {
         type_ptr: *mut hl_type,
         pindex: usize,
     ) -> Option<usize> {
-        let mut t = type_ptr;
-        while !t.is_null()
-            && ((*t).kind == hl::hl_type_kind_HOBJ || (*t).kind == hl::hl_type_kind_HSTRUCT)
-        {
-            let obj = (*t).__bindgen_anon_1.obj;
-            if obj.is_null() {
-                break;
-            }
-            for i in 0..(*obj).nproto as usize {
-                let pr = &*(*obj).proto.add(i);
-                if pr.pindex >= 0 && pr.pindex as usize == pindex {
-                    return Some(pr.findex as usize);
+        unsafe {
+            let mut t = type_ptr;
+            while !t.is_null()
+                && ((*t).kind == hl::hl_type_kind_HOBJ || (*t).kind == hl::hl_type_kind_HSTRUCT)
+            {
+                let obj = (*t).__bindgen_anon_1.obj;
+                if obj.is_null() {
+                    break;
                 }
+                for i in 0..(*obj).nproto as usize {
+                    let pr = &*(*obj).proto.add(i);
+                    if pr.pindex >= 0 && pr.pindex as usize == pindex {
+                        return Some(pr.findex as usize);
+                    }
+                }
+                t = (*obj).super_;
             }
-            t = (*obj).super_;
+            None
         }
-        None
     }
 
     /// Resolve a method findex from bytecode type proto (fallback when vobj_proto unavailable).
@@ -1523,28 +1531,30 @@ impl HLInterpreter {
 
     /// Write a value to a raw memory address based on the HL type kind.
     pub(super) unsafe fn write_value_at(addr: *mut u8, kind: hl::hl_type_kind, val: NanBoxedValue) {
-        use std::ptr::write_unaligned as wr;
-        use ValueTypeKind::*;
-        match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
-            HVOID => {}
-            HUI8 => *addr = val.as_i32() as u8,
-            HUI16 => wr(addr as *mut u16, val.as_i32() as u16),
-            HI32 => wr(addr as *mut i32, val.as_i32()),
-            HI64 => wr(addr as *mut i64, val.as_i64_lossy()),
-            HF32 => wr(addr as *mut f32, val.as_f64() as f32),
-            HF64 => wr(addr as *mut f64, val.as_f64()),
-            HBOOL => *addr = val.as_bool() as u8,
-            _ => {
-                // Pointer types — but the NanBoxed value might actually
-                // be a primitive (e.g., HDYN register holding an I32).
-                if val.is_null() || val.is_void() {
-                    wr(addr as *mut usize, 0);
-                } else if val.is_i32() {
-                    wr(addr as *mut i32, val.as_i32());
-                } else if val.is_f64() {
-                    wr(addr as *mut f64, val.as_f64());
-                } else {
-                    wr(addr as *mut usize, val.as_ptr());
+        unsafe {
+            use ValueTypeKind::*;
+            use std::ptr::write_unaligned as wr;
+            match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
+                HVOID => {}
+                HUI8 => *addr = val.as_i32() as u8,
+                HUI16 => wr(addr as *mut u16, val.as_i32() as u16),
+                HI32 => wr(addr as *mut i32, val.as_i32()),
+                HI64 => wr(addr as *mut i64, val.as_i64_lossy()),
+                HF32 => wr(addr as *mut f32, val.as_f64() as f32),
+                HF64 => wr(addr as *mut f64, val.as_f64()),
+                HBOOL => *addr = val.as_bool() as u8,
+                _ => {
+                    // Pointer types — but the NanBoxed value might actually
+                    // be a primitive (e.g., HDYN register holding an I32).
+                    if val.is_null() || val.is_void() {
+                        wr(addr as *mut usize, 0);
+                    } else if val.is_i32() {
+                        wr(addr as *mut i32, val.as_i32());
+                    } else if val.is_f64() {
+                        wr(addr as *mut f64, val.as_f64());
+                    } else {
+                        wr(addr as *mut usize, val.as_ptr());
+                    }
                 }
             }
         }

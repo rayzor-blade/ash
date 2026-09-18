@@ -48,123 +48,141 @@ struct MutexState {
 }
 
 unsafe fn mutex_try_acquire_inner(mutex: *mut HlMutex) -> bool {
-    let current = crate::rt::current_owner();
-    let mut state = (*mutex).state.lock().unwrap();
-    match state.owner {
-        None => {
-            state.owner = Some(current);
-            state.depth = 1;
-            true
+    unsafe {
+        let current = crate::rt::current_owner();
+        let mut state = (*mutex).state.lock().unwrap();
+        match state.owner {
+            None => {
+                state.owner = Some(current);
+                state.depth = 1;
+                true
+            }
+            Some(owner) if owner == current => {
+                state.depth = state.depth.saturating_add(1);
+                true
+            }
+            Some(_) => false,
         }
-        Some(owner) if owner == current => {
-            state.depth = state.depth.saturating_add(1);
-            true
-        }
-        Some(_) => false,
     }
 }
 
 unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
-    loop {
-        let waiter = {
-            let current = crate::rt::current_owner();
+    unsafe {
+        loop {
+            let waiter = {
+                let current = crate::rt::current_owner();
+                let mut state = (*mutex).state.lock().unwrap();
+                match state.owner {
+                    None => {
+                        state.owner = Some(current);
+                        state.depth = 1;
+                        return;
+                    }
+                    Some(owner) if owner == current => {
+                        state.depth = state.depth.saturating_add(1);
+                        return;
+                    }
+                    Some(_) => {
+                        let waiter = crate::rt::new_waiter();
+                        state.waiters.push_back(waiter);
+                        waiter
+                    }
+                }
+            };
+            let _ = crate::rt::park(waiter, None);
             let mut state = (*mutex).state.lock().unwrap();
-            match state.owner {
-                None => {
-                    state.owner = Some(current);
-                    state.depth = 1;
-                    return;
-                }
-                Some(owner) if owner == current => {
-                    state.depth = state.depth.saturating_add(1);
-                    return;
-                }
-                Some(_) => {
-                    let waiter = crate::rt::new_waiter();
-                    state.waiters.push_back(waiter);
-                    waiter
-                }
+            remove_waiter(&mut state.waiters, waiter);
+            if state.owner.is_none() {
+                state.owner = Some(crate::rt::current_owner());
+                state.depth = 1;
+                return;
             }
-        };
-        let _ = crate::rt::park(waiter, None);
-        let mut state = (*mutex).state.lock().unwrap();
-        remove_waiter(&mut state.waiters, waiter);
-        if state.owner.is_none() {
-            state.owner = Some(crate::rt::current_owner());
-            state.depth = 1;
-            return;
         }
     }
 }
 
 unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
-    let mut state = (*mutex).state.lock().unwrap();
-    if state.owner != Some(crate::rt::current_owner()) || state.depth == 0 {
-        return;
-    }
-    state.depth -= 1;
-    if state.depth == 0 {
-        state.owner = None;
-        wake_one(&mut state.waiters);
+    unsafe {
+        let mut state = (*mutex).state.lock().unwrap();
+        if state.owner != Some(crate::rt::current_owner()) || state.depth == 0 {
+            return;
+        }
+        state.depth -= 1;
+        if state.depth == 0 {
+            state.owner = None;
+            wake_one(&mut state.waiters);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
-    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlMutex>(), finalize_mutex)
-        as *mut HlMutex;
-    if p.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlMutex>(), finalize_mutex)
+            as *mut HlMutex;
+        if p.is_null() {
+            return ptr::null_mut();
+        }
+        // Raw memory: write the field rather than assigning, which would drop
+        // whatever the previous occupant's bytes look like.
+        ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(MutexState {
+            owner: None,
+            depth: 0,
+            waiters: VecDeque::new(),
+        }));
+        p as *mut c_void
     }
-    // Raw memory: write the field rather than assigning, which would drop
-    // whatever the previous occupant's bytes look like.
-    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(MutexState {
-        owner: None,
-        depth: 0,
-        waiters: VecDeque::new(),
-    }));
-    p as *mut c_void
 }
 
 unsafe extern "C" fn finalize_mutex(block: *mut c_void) {
-    hlp_mutex_free(block);
+    unsafe {
+        hlp_mutex_free(block);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_acquire(m: *mut c_void) {
-    if !m.is_null() {
-        mutex_acquire_inner(m as *mut HlMutex);
+    unsafe {
+        if !m.is_null() {
+            mutex_acquire_inner(m as *mut HlMutex);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_try_acquire(m: *mut c_void) -> bool {
-    if m.is_null() {
-        return false;
+    unsafe {
+        if m.is_null() {
+            return false;
+        }
+        mutex_try_acquire_inner(m as *mut HlMutex)
     }
-    mutex_try_acquire_inner(m as *mut HlMutex)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_release(m: *mut c_void) {
-    if !m.is_null() {
-        mutex_release_inner(m as *mut HlMutex);
+    unsafe {
+        if !m.is_null() {
+            mutex_release_inner(m as *mut HlMutex);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
-    if m.is_null() {
-        return;
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        let p = m as *mut HlMutex;
+        // Upstream's `if( l->free ) { destroy; l->free = NULL; }`. The slot is
+        // the flag, so an explicit free and a later collection cannot both run
+        // this, and a block freed here is one the collector then skips.
+        if (*p).free.take().is_none() {
+            return;
+        }
+        ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
     }
-    let p = m as *mut HlMutex;
-    // Upstream's `if( l->free ) { destroy; l->free = NULL; }`. The slot is
-    // the flag, so an explicit free and a later collection cannot both run
-    // this, and a block freed here is one the collector then skips.
-    if (*p).free.take().is_none() {
-        return;
-    }
-    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 // HDLLs call HashLink's public C API names directly, while Haxe bytecode
@@ -172,27 +190,33 @@ pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
 // extensions and bytecode share the same synchronization objects.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_alloc(gc_thread: bool) -> *mut c_void {
-    hlp_mutex_alloc(gc_thread)
+    unsafe { hlp_mutex_alloc(gc_thread) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_acquire(m: *mut c_void) {
-    hlp_mutex_acquire(m);
+    unsafe {
+        hlp_mutex_acquire(m);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_try_acquire(m: *mut c_void) -> bool {
-    hlp_mutex_try_acquire(m)
+    unsafe { hlp_mutex_try_acquire(m) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_release(m: *mut c_void) {
-    hlp_mutex_release(m);
+    unsafe {
+        hlp_mutex_release(m);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_free(m: *mut c_void) {
-    hlp_mutex_free(m);
+    unsafe {
+        hlp_mutex_free(m);
+    }
 }
 
 // ============================================================================
@@ -215,85 +239,98 @@ struct SemaphoreState {
 }
 
 unsafe fn semaphore_take(s: *mut HlSemaphore) -> bool {
-    let mut state = (*s).state.lock().unwrap();
-    let acquired = state.value > 0;
-    if acquired {
-        state.value -= 1;
+    unsafe {
+        let mut state = (*s).state.lock().unwrap();
+        let acquired = state.value > 0;
+        if acquired {
+            state.value -= 1;
+        }
+        acquired
     }
-    acquired
 }
 
 unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant> {
-    if timeout.is_null() {
-        return None;
+    unsafe {
+        if timeout.is_null() {
+            return None;
+        }
+        let kind = if !(*timeout).t.is_null() {
+            (*(*timeout).t).kind
+        } else {
+            0
+        };
+        let secs = if kind == 6 {
+            (*timeout).v.d
+        } else if kind == 5 {
+            (*timeout).v.f as f64
+        } else {
+            0.0
+        };
+        (secs > 0.0).then(|| std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
     }
-    let kind = if !(*timeout).t.is_null() {
-        (*(*timeout).t).kind
-    } else {
-        0
-    };
-    let secs = if kind == 6 {
-        (*timeout).v.d
-    } else if kind == 5 {
-        (*timeout).v.f as f64
-    } else {
-        0.0
-    };
-    (secs > 0.0).then(|| std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
-    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlSemaphore>(), finalize_semaphore)
-        as *mut HlSemaphore;
-    if p.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let p =
+            crate::rt::alloc_with_finalizer(std::mem::size_of::<HlSemaphore>(), finalize_semaphore)
+                as *mut HlSemaphore;
+        if p.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(SemaphoreState {
+            value,
+            waiters: VecDeque::new(),
+        }));
+        p as *mut c_void
     }
-    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(SemaphoreState {
-        value,
-        waiters: VecDeque::new(),
-    }));
-    p as *mut c_void
 }
 
 unsafe extern "C" fn finalize_semaphore(block: *mut c_void) {
-    hlp_semaphore_free(block);
+    unsafe {
+        hlp_semaphore_free(block);
+    }
 }
 
 unsafe fn semaphore_wait(s: *mut HlSemaphore, deadline: Option<Instant>) -> bool {
-    let waiter = {
-        let mut state = (*s).state.lock().unwrap();
-        if state.value > 0 {
-            state.value -= 1;
-            return true;
-        }
-        // A program with no fibers at all has nothing that could release the
-        // permit while the main context waits, so it still declines rather
-        // than hanging. A thread the runtime did not create is a different
-        // case: something else is running and will release, so it waits.
-        if deadline.is_some_and(|limit| Instant::now() >= limit)
-            || (!crate::rt::fibers_active()
-                && crate::rt::is_main_thread()
-                && !crate::rt::foreign_threads_seen())
-        {
-            return false;
-        }
-        let waiter = crate::rt::new_waiter();
-        state.waiters.push_back(waiter);
-        waiter
-    };
-    let notified = crate::rt::park(waiter, deadline);
-    remove_waiter(&mut (*s).state.lock().unwrap().waiters, waiter);
-    notified
+    unsafe {
+        let waiter = {
+            let mut state = (*s).state.lock().unwrap();
+            if state.value > 0 {
+                state.value -= 1;
+                return true;
+            }
+            // A program with no fibers at all has nothing that could release the
+            // permit while the main context waits, so it still declines rather
+            // than hanging. A thread the runtime did not create is a different
+            // case: something else is running and will release, so it waits.
+            if deadline.is_some_and(|limit| Instant::now() >= limit)
+                || (!crate::rt::fibers_active()
+                    && crate::rt::is_main_thread()
+                    && !crate::rt::foreign_threads_seen())
+            {
+                return false;
+            }
+            let waiter = crate::rt::new_waiter();
+            state.waiters.push_back(waiter);
+            waiter
+        };
+        let notified = crate::rt::park(waiter, deadline);
+        remove_waiter(&mut (*s).state.lock().unwrap().waiters, waiter);
+        notified
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
-    if sem.is_null() {
-        return;
+    unsafe {
+        if sem.is_null() {
+            return;
+        }
+        let s = sem as *mut HlSemaphore;
+        let _ = semaphore_wait(s, None);
     }
-    let s = sem as *mut HlSemaphore;
-    let _ = semaphore_wait(s, None);
 }
 
 #[unsafe(no_mangle)]
@@ -301,51 +338,59 @@ pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     sem: *mut c_void,
     timeout: *mut vdynamic,
 ) -> bool {
-    if sem.is_null() {
-        return false;
+    unsafe {
+        if sem.is_null() {
+            return false;
+        }
+        let s = sem as *mut HlSemaphore;
+        if semaphore_take(s) {
+            return true;
+        }
+        let Some(deadline) = timeout_deadline(timeout) else {
+            return false;
+        };
+        semaphore_wait(s, Some(deadline))
     }
-    let s = sem as *mut HlSemaphore;
-    if semaphore_take(s) {
-        return true;
-    }
-    let Some(deadline) = timeout_deadline(timeout) else {
-        return false;
-    };
-    semaphore_wait(s, Some(deadline))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_release(sem: *mut c_void) {
-    if sem.is_null() {
-        return;
-    }
-    let s = sem as *mut HlSemaphore;
-    let mut state = (*s).state.lock().unwrap();
-    if !wake_one(&mut state.waiters) {
-        state.value = state.value.saturating_add(1);
+    unsafe {
+        if sem.is_null() {
+            return;
+        }
+        let s = sem as *mut HlSemaphore;
+        let mut state = (*s).state.lock().unwrap();
+        if !wake_one(&mut state.waiters) {
+            state.value = state.value.saturating_add(1);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
-    if sem.is_null() {
-        return;
+    unsafe {
+        if sem.is_null() {
+            return;
+        }
+        let p = sem as *mut HlSemaphore;
+        if (*p).free.take().is_none() {
+            return;
+        }
+        ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
     }
-    let p = sem as *mut HlSemaphore;
-    if (*p).free.take().is_none() {
-        return;
-    }
-    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_alloc(value: i32) -> *mut c_void {
-    hlp_semaphore_alloc(value)
+    unsafe { hlp_semaphore_alloc(value) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_acquire(sem: *mut c_void) {
-    hlp_semaphore_acquire(sem);
+    unsafe {
+        hlp_semaphore_acquire(sem);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -353,17 +398,21 @@ pub unsafe extern "C" fn hl_semaphore_try_acquire(
     sem: *mut c_void,
     timeout: *mut vdynamic,
 ) -> bool {
-    hlp_semaphore_try_acquire(sem, timeout)
+    unsafe { hlp_semaphore_try_acquire(sem, timeout) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_release(sem: *mut c_void) {
-    hlp_semaphore_release(sem);
+    unsafe {
+        hlp_semaphore_release(sem);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_free(sem: *mut c_void) {
-    hlp_semaphore_free(sem);
+    unsafe {
+        hlp_semaphore_free(sem);
+    }
 }
 
 // ============================================================================
@@ -388,218 +437,259 @@ struct ConditionState {
 }
 
 unsafe fn condition_mutex_acquire(c: *mut HlCondition) {
-    loop {
-        let waiter = {
-            let current = crate::rt::current_owner();
+    unsafe {
+        loop {
+            let waiter = {
+                let current = crate::rt::current_owner();
+                let mut state = (*c).state.lock().unwrap();
+                match state.owner {
+                    None => {
+                        state.owner = Some(current);
+                        state.depth = 1;
+                        return;
+                    }
+                    Some(owner) if owner == current => {
+                        state.depth = state.depth.saturating_add(1);
+                        return;
+                    }
+                    Some(_) => {
+                        let waiter = crate::rt::new_waiter();
+                        state.mutex_waiters.push_back(waiter);
+                        waiter
+                    }
+                }
+            };
+            let _ = crate::rt::park(waiter, None);
             let mut state = (*c).state.lock().unwrap();
-            match state.owner {
-                None => {
-                    state.owner = Some(current);
-                    state.depth = 1;
-                    return;
-                }
-                Some(owner) if owner == current => {
-                    state.depth = state.depth.saturating_add(1);
-                    return;
-                }
-                Some(_) => {
-                    let waiter = crate::rt::new_waiter();
-                    state.mutex_waiters.push_back(waiter);
-                    waiter
-                }
-            }
-        };
-        let _ = crate::rt::park(waiter, None);
-        let mut state = (*c).state.lock().unwrap();
-        remove_waiter(&mut state.mutex_waiters, waiter);
+            remove_waiter(&mut state.mutex_waiters, waiter);
+        }
     }
 }
 
 unsafe fn condition_mutex_try_acquire(c: *mut HlCondition) -> bool {
-    let current = crate::rt::current_owner();
-    let mut state = (*c).state.lock().unwrap();
-    match state.owner {
-        None => {
-            state.owner = Some(current);
-            state.depth = 1;
-            true
+    unsafe {
+        let current = crate::rt::current_owner();
+        let mut state = (*c).state.lock().unwrap();
+        match state.owner {
+            None => {
+                state.owner = Some(current);
+                state.depth = 1;
+                true
+            }
+            Some(owner) if owner == current => {
+                state.depth = state.depth.saturating_add(1);
+                true
+            }
+            Some(_) => false,
         }
-        Some(owner) if owner == current => {
-            state.depth = state.depth.saturating_add(1);
-            true
-        }
-        Some(_) => false,
     }
 }
 
 unsafe fn condition_mutex_release(c: *mut HlCondition) {
-    let mut state = (*c).state.lock().unwrap();
-    if state.owner != Some(crate::rt::current_owner()) || state.depth == 0 {
-        return;
-    }
-    state.depth -= 1;
-    if state.depth == 0 {
-        state.owner = None;
-        wake_one(&mut state.mutex_waiters);
+    unsafe {
+        let mut state = (*c).state.lock().unwrap();
+        if state.owner != Some(crate::rt::current_owner()) || state.depth == 0 {
+            return;
+        }
+        state.depth -= 1;
+        if state.depth == 0 {
+            state.owner = None;
+            wake_one(&mut state.mutex_waiters);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
-    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlCondition>(), finalize_condition)
-        as *mut HlCondition;
-    if p.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let p =
+            crate::rt::alloc_with_finalizer(std::mem::size_of::<HlCondition>(), finalize_condition)
+                as *mut HlCondition;
+        if p.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(ConditionState {
+            owner: None,
+            depth: 0,
+            mutex_waiters: VecDeque::new(),
+            waiters: VecDeque::new(),
+        }));
+        p as *mut c_void
     }
-    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(ConditionState {
-        owner: None,
-        depth: 0,
-        mutex_waiters: VecDeque::new(),
-        waiters: VecDeque::new(),
-    }));
-    p as *mut c_void
 }
 
 unsafe extern "C" fn finalize_condition(block: *mut c_void) {
-    hlp_condition_free(block);
+    unsafe {
+        hlp_condition_free(block);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_acquire(c: *mut c_void) {
-    if !c.is_null() {
-        condition_mutex_acquire(c as *mut HlCondition);
+    unsafe {
+        if !c.is_null() {
+            condition_mutex_acquire(c as *mut HlCondition);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_try_acquire(c: *mut c_void) -> bool {
-    if c.is_null() {
-        return false;
+    unsafe {
+        if c.is_null() {
+            return false;
+        }
+        condition_mutex_try_acquire(c as *mut HlCondition)
     }
-    condition_mutex_try_acquire(c as *mut HlCondition)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
-    if !c.is_null() {
-        condition_mutex_release(c as *mut HlCondition);
+    unsafe {
+        if !c.is_null() {
+            condition_mutex_release(c as *mut HlCondition);
+        }
     }
 }
 
 unsafe fn condition_wait_inner(c: *mut HlCondition, deadline: Option<Instant>) -> bool {
-    if !crate::rt::fibers_active()
-        && crate::rt::is_main_thread()
-        && !crate::rt::foreign_threads_seen()
-    {
-        return true;
-    }
-    let (waiter, depth) = {
-        let current = crate::rt::current_owner();
-        let mut state = (*c).state.lock().unwrap();
-        if state.owner != Some(current) {
-            return false;
+    unsafe {
+        if !crate::rt::fibers_active()
+            && crate::rt::is_main_thread()
+            && !crate::rt::foreign_threads_seen()
+        {
+            return true;
         }
-        let waiter = crate::rt::new_waiter();
-        state.waiters.push_back(waiter);
-        let depth = state.depth;
-        state.owner = None;
-        state.depth = 0;
-        wake_one(&mut state.mutex_waiters);
-        (waiter, depth)
-    };
-    let notified = crate::rt::park(waiter, deadline);
-    remove_waiter(&mut (*c).state.lock().unwrap().waiters, waiter);
-    condition_mutex_acquire(c);
-    (*c).state.lock().unwrap().depth = depth;
-    notified
+        let (waiter, depth) = {
+            let current = crate::rt::current_owner();
+            let mut state = (*c).state.lock().unwrap();
+            if state.owner != Some(current) {
+                return false;
+            }
+            let waiter = crate::rt::new_waiter();
+            state.waiters.push_back(waiter);
+            let depth = state.depth;
+            state.owner = None;
+            state.depth = 0;
+            wake_one(&mut state.mutex_waiters);
+            (waiter, depth)
+        };
+        let notified = crate::rt::park(waiter, deadline);
+        remove_waiter(&mut (*c).state.lock().unwrap().waiters, waiter);
+        condition_mutex_acquire(c);
+        (*c).state.lock().unwrap().depth = depth;
+        notified
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_wait(c: *mut c_void) {
-    if !c.is_null() {
-        let _ = condition_wait_inner(c as *mut HlCondition, None);
+    unsafe {
+        if !c.is_null() {
+            let _ = condition_wait_inner(c as *mut HlCondition, None);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
-    if c.is_null() {
-        return false;
+    unsafe {
+        if c.is_null() {
+            return false;
+        }
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
+        condition_wait_inner(c as *mut HlCondition, Some(deadline))
     }
-    let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
-    condition_wait_inner(c as *mut HlCondition, Some(deadline))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_signal(c: *mut c_void) {
-    if !c.is_null() {
-        wake_one(&mut (*(c as *mut HlCondition)).state.lock().unwrap().waiters);
+    unsafe {
+        if !c.is_null() {
+            wake_one(&mut (*(c as *mut HlCondition)).state.lock().unwrap().waiters);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
-    if !c.is_null() {
-        let mut state = (*(c as *mut HlCondition)).state.lock().unwrap();
-        while wake_one(&mut state.waiters) {}
+    unsafe {
+        if !c.is_null() {
+            let mut state = (*(c as *mut HlCondition)).state.lock().unwrap();
+            while wake_one(&mut state.waiters) {}
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
-    if c.is_null() {
-        return;
+    unsafe {
+        if c.is_null() {
+            return;
+        }
+        let p = c as *mut HlCondition;
+        if (*p).free.take().is_none() {
+            return;
+        }
+        ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
     }
-    let p = c as *mut HlCondition;
-    if (*p).free.take().is_none() {
-        return;
-    }
-    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_alloc() -> *mut c_void {
-    hlp_condition_alloc()
+    unsafe { hlp_condition_alloc() }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_acquire(c: *mut c_void) {
-    hlp_condition_acquire(c);
+    unsafe {
+        hlp_condition_acquire(c);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_try_acquire(c: *mut c_void) -> bool {
-    hlp_condition_try_acquire(c)
+    unsafe { hlp_condition_try_acquire(c) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_release(c: *mut c_void) {
-    hlp_condition_release(c);
+    unsafe {
+        hlp_condition_release(c);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_wait(c: *mut c_void) {
-    hlp_condition_wait(c);
+    unsafe {
+        hlp_condition_wait(c);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
-    hlp_condition_timed_wait(c, timeout)
+    unsafe { hlp_condition_timed_wait(c, timeout) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_signal(c: *mut c_void) {
-    hlp_condition_signal(c);
+    unsafe {
+        hlp_condition_signal(c);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_broadcast(c: *mut c_void) {
-    hlp_condition_broadcast(c);
+    unsafe {
+        hlp_condition_broadcast(c);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_free(c: *mut c_void) {
-    hlp_condition_free(c);
+    unsafe {
+        hlp_condition_free(c);
+    }
 }
 
 // ============================================================================
@@ -608,47 +698,51 @@ pub unsafe extern "C" fn hl_condition_free(c: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_create() -> *mut c_void {
-    hlp_semaphore_alloc(0)
+    unsafe { hlp_semaphore_alloc(0) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_release(lock: *mut c_void) {
-    hlp_semaphore_release(lock);
+    unsafe {
+        hlp_semaphore_release(lock);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic) -> bool {
-    if lock.is_null() {
-        return false;
-    }
-    let s = lock as *mut HlSemaphore;
-    if semaphore_take(s) {
-        return true;
-    }
-    // No fibers: exact HashLink !HL_THREADS semantics — never block.
-    if !crate::rt::fibers_active() {
-        return false;
-    }
-    // Fibers exist: HL_THREADS semantics — wait for a release, cooperatively.
-    // Timeout arrives as a boxed Null<Float> (seconds); null = wait forever.
-    let deadline = if timeout.is_null() {
-        None
-    } else {
-        let t = timeout as *const vdynamic;
-        let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
-        let secs = if kind == 6 {
-            (*t).v.d
-        } else if kind == 5 {
-            (*t).v.f as f64
-        } else {
-            0.0
-        };
-        if secs <= 0.0 {
-            return false; // wait(0.0): pure poll, e.g. EventLoop's drain
+    unsafe {
+        if lock.is_null() {
+            return false;
         }
-        Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
-    };
-    semaphore_wait(s, deadline)
+        let s = lock as *mut HlSemaphore;
+        if semaphore_take(s) {
+            return true;
+        }
+        // No fibers: exact HashLink !HL_THREADS semantics — never block.
+        if !crate::rt::fibers_active() {
+            return false;
+        }
+        // Fibers exist: HL_THREADS semantics — wait for a release, cooperatively.
+        // Timeout arrives as a boxed Null<Float> (seconds); null = wait forever.
+        let deadline = if timeout.is_null() {
+            None
+        } else {
+            let t = timeout as *const vdynamic;
+            let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
+            let secs = if kind == 6 {
+                (*t).v.d
+            } else if kind == 5 {
+                (*t).v.f as f64
+            } else {
+                0.0
+            };
+            if secs <= 0.0 {
+                return false; // wait(0.0): pure poll, e.g. EventLoop's drain
+            }
+            Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
+        };
+        semaphore_wait(s, deadline)
+    }
 }
 
 // Compatibility primitive retained for bytecode that references it. Event
@@ -656,13 +750,17 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
 // pacing and never consumes native events itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_pump_and_sleep() {
-    // The frame's idle time is the runtime's to spend, as `Sys.sleep` is.
-    crate::rt::sleep_for(std::time::Duration::from_millis(16));
+    unsafe {
+        // The frame's idle time is the runtime's to spend, as `Sys.sleep` is.
+        crate::rt::sleep_for(std::time::Duration::from_millis(16));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_free(lock: *mut c_void) {
-    hlp_semaphore_free(lock);
+    unsafe {
+        hlp_semaphore_free(lock);
+    }
 }
 
 // ============================================================================
@@ -685,16 +783,18 @@ const _: () = assert!(std::mem::offset_of!(HlDeque, free) == 0);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
-    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlDeque>(), finalize_deque)
-        as *mut HlDeque;
-    if p.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlDeque>(), finalize_deque)
+            as *mut HlDeque;
+        if p.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(DequeState {
+            queue: VecDeque::new(),
+            waiters: VecDeque::new(),
+        }));
+        p as *mut c_void
     }
-    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(DequeState {
-        queue: VecDeque::new(),
-        waiters: VecDeque::new(),
-    }));
-    p as *mut c_void
 }
 
 /// Releases a deque nothing can reach any more.
@@ -705,25 +805,27 @@ pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
 /// program can name. A pointer queued twice roots once, so this unroots once
 /// per distinct pointer, as `hlp_deque_pop` does.
 unsafe extern "C" fn finalize_deque(block: *mut c_void) {
-    let p = block as *mut HlDeque;
-    if (*p).free.take().is_none() {
-        return;
+    unsafe {
+        let p = block as *mut HlDeque;
+        if (*p).free.take().is_none() {
+            return;
+        }
+        // Collect under the deque lock, unroot after releasing it: the GC lock is
+        // only ever taken after the deque lock, never the other way round.
+        let queued: HashSet<usize> = match (*p).state.lock() {
+            Ok(state) => state
+                .queue
+                .iter()
+                .filter(|msg| !msg.is_null())
+                .map(|msg| *msg as usize)
+                .collect(),
+            Err(_) => HashSet::new(),
+        };
+        for msg in queued {
+            crate::rt::gc_remove_persistent(msg as *mut vdynamic);
+        }
+        ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
     }
-    // Collect under the deque lock, unroot after releasing it: the GC lock is
-    // only ever taken after the deque lock, never the other way round.
-    let queued: HashSet<usize> = match (*p).state.lock() {
-        Ok(state) => state
-            .queue
-            .iter()
-            .filter(|msg| !msg.is_null())
-            .map(|msg| *msg as usize)
-            .collect(),
-        Err(_) => HashSet::new(),
-    };
-    for msg in queued {
-        crate::rt::gc_remove_persistent(msg as *mut vdynamic);
-    }
-    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 /// A queued message is a GC object whose only reference is the Vec above,
@@ -738,78 +840,86 @@ unsafe extern "C" fn finalize_deque(block: *mut c_void) {
 /// set, so a pointer queued twice roots once -- pop therefore only unroots when
 /// no copy remains.
 unsafe fn deque_root(msg: *mut vdynamic) {
-    if !msg.is_null() {
-        crate::rt::gc_add_persistent(msg);
+    unsafe {
+        if !msg.is_null() {
+            crate::rt::gc_add_persistent(msg);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_add(d: *mut c_void, msg: *mut vdynamic) {
-    if d.is_null() {
-        return;
-    }
-    deque_root(msg);
-    let deque = &*(d as *const HlDeque);
-    if let Ok(mut state) = deque.state.lock() {
-        state.queue.push_back(msg as *mut c_void);
-        wake_one(&mut state.waiters);
+    unsafe {
+        if d.is_null() {
+            return;
+        }
+        deque_root(msg);
+        let deque = &*(d as *const HlDeque);
+        if let Ok(mut state) = deque.state.lock() {
+            state.queue.push_back(msg as *mut c_void);
+            wake_one(&mut state.waiters);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_push(d: *mut c_void, msg: *mut vdynamic) {
-    if d.is_null() {
-        return;
-    }
-    deque_root(msg);
-    let deque = &*(d as *const HlDeque);
-    if let Ok(mut state) = deque.state.lock() {
-        state.queue.push_front(msg as *mut c_void);
-        wake_one(&mut state.waiters);
+    unsafe {
+        if d.is_null() {
+            return;
+        }
+        deque_root(msg);
+        let deque = &*(d as *const HlDeque);
+        if let Ok(mut state) = deque.state.lock() {
+            state.queue.push_front(msg as *mut c_void);
+            wake_one(&mut state.waiters);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdynamic {
-    if d.is_null() {
-        return ptr::null_mut();
-    }
-    let deque = &*(d as *const HlDeque);
-    loop {
-        let popped;
-        if let Ok(mut state) = deque.state.lock() {
-            popped = if state.queue.is_empty() {
-                None
+    unsafe {
+        if d.is_null() {
+            return ptr::null_mut();
+        }
+        let deque = &*(d as *const HlDeque);
+        loop {
+            let popped;
+            if let Ok(mut state) = deque.state.lock() {
+                popped = if state.queue.is_empty() {
+                    None
+                } else {
+                    let m = state.queue.pop_front().unwrap() as *mut vdynamic;
+                    Some((m, state.queue.contains(&(m as *mut c_void))))
+                };
             } else {
-                let m = state.queue.pop_front().unwrap() as *mut vdynamic;
-                Some((m, state.queue.contains(&(m as *mut c_void))))
-            };
-        } else {
-            return ptr::null_mut();
-        }
-        // The deque lock is released here; the GC lock is only ever taken
-        // after it, never the other way round.
-        if let Some((m, still_queued)) = popped {
-            if !still_queued && !m.is_null() {
-                crate::rt::gc_remove_persistent(m);
+                return ptr::null_mut();
             }
-            return m;
-        }
-        // Empty: blocking pop waits cooperatively while fibers exist;
-        // otherwise keep the non-blocking null return (single-threaded,
-        // nothing can ever push).
-        if !block || !crate::rt::fibers_active() {
-            return ptr::null_mut();
-        }
-        let waiter = crate::rt::new_waiter();
-        if let Ok(mut state) = deque.state.lock() {
-            state.waiters.push_back(waiter);
-        } else {
-            return ptr::null_mut();
-        }
-        let _ = crate::rt::park(waiter, None);
-        if let Ok(mut state) = deque.state.lock() {
-            remove_waiter(&mut state.waiters, waiter);
+            // The deque lock is released here; the GC lock is only ever taken
+            // after it, never the other way round.
+            if let Some((m, still_queued)) = popped {
+                if !still_queued && !m.is_null() {
+                    crate::rt::gc_remove_persistent(m);
+                }
+                return m;
+            }
+            // Empty: blocking pop waits cooperatively while fibers exist;
+            // otherwise keep the non-blocking null return (single-threaded,
+            // nothing can ever push).
+            if !block || !crate::rt::fibers_active() {
+                return ptr::null_mut();
+            }
+            let waiter = crate::rt::new_waiter();
+            if let Ok(mut state) = deque.state.lock() {
+                state.waiters.push_back(waiter);
+            } else {
+                return ptr::null_mut();
+            }
+            let _ = crate::rt::park(waiter, None);
+            if let Ok(mut state) = deque.state.lock() {
+                remove_waiter(&mut state.waiters, waiter);
+            }
         }
     }
 }
@@ -830,106 +940,120 @@ const _: () = assert!(std::mem::offset_of!(HlTls, free) == 0);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_alloc(gc_value: bool) -> *mut c_void {
-    let p =
-        crate::rt::alloc_with_finalizer(std::mem::size_of::<HlTls>(), finalize_tls) as *mut HlTls;
-    if p.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlTls>(), finalize_tls)
+            as *mut HlTls;
+        if p.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::addr_of_mut!((*p).gc_value).write(gc_value);
+        ptr::addr_of_mut!((*p).values).write(std::sync::Mutex::new(HashMap::new()));
+        p as *mut c_void
     }
-    ptr::addr_of_mut!((*p).gc_value).write(gc_value);
-    ptr::addr_of_mut!((*p).values).write(std::sync::Mutex::new(HashMap::new()));
-    p as *mut c_void
 }
 
 unsafe extern "C" fn finalize_tls(block: *mut c_void) {
-    hlp_tls_free(block);
+    unsafe {
+        hlp_tls_free(block);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
-    if tls.is_null() {
-        return;
-    }
-    let tls = tls as *mut HlTls;
-    let id = crate::rt::current_owner();
-    if (*tls).gc_value && !value.is_null() {
-        crate::rt::gc_add_persistent(value as *mut vdynamic);
-    }
-    let mut values = (*tls).values.lock().unwrap();
-    let old = if value.is_null() {
-        values.remove(&id)
-    } else {
-        values.insert(id, value)
-    };
-    if (*tls).gc_value {
-        if let Some(old) = old {
-            if !old.is_null() && !values.values().any(|candidate| *candidate == old) {
-                crate::rt::gc_remove_persistent(old as *mut vdynamic);
-            }
+    unsafe {
+        if tls.is_null() {
+            return;
+        }
+        let tls = tls as *mut HlTls;
+        let id = crate::rt::current_owner();
+        if (*tls).gc_value && !value.is_null() {
+            crate::rt::gc_add_persistent(value as *mut vdynamic);
+        }
+        let mut values = (*tls).values.lock().unwrap();
+        let old = if value.is_null() {
+            values.remove(&id)
+        } else {
+            values.insert(id, value)
+        };
+        if (*tls).gc_value
+            && let Some(old) = old
+            && !old.is_null()
+            && !values.values().any(|candidate| *candidate == old)
+        {
+            crate::rt::gc_remove_persistent(old as *mut vdynamic);
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
-    if tls.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if tls.is_null() {
+            return ptr::null_mut();
+        }
+        let tls = tls as *mut HlTls;
+        (*tls)
+            .values
+            .lock()
+            .unwrap()
+            .get(&crate::rt::current_owner())
+            .copied()
+            .unwrap_or(ptr::null_mut())
     }
-    let tls = tls as *mut HlTls;
-    (*tls)
-        .values
-        .lock()
-        .unwrap()
-        .get(&crate::rt::current_owner())
-        .copied()
-        .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
-    if tls.is_null() {
-        return;
-    }
-    let p = tls as *mut HlTls;
-    if (*p).free.take().is_none() {
-        return;
-    }
-    if (*p).gc_value {
-        // Collected under the values lock and unrooted after it is released,
-        // to keep the deque's lock order: the GC lock is taken after, never
-        // before.
-        let unique: HashSet<usize> = match (*p).values.lock() {
-            Ok(values) => values
-                .values()
-                .filter(|value| !value.is_null())
-                .map(|value| *value as usize)
-                .collect(),
-            Err(_) => HashSet::new(),
-        };
-        for value in unique {
-            crate::rt::gc_remove_persistent(value as *mut vdynamic);
+    unsafe {
+        if tls.is_null() {
+            return;
         }
+        let p = tls as *mut HlTls;
+        if (*p).free.take().is_none() {
+            return;
+        }
+        if (*p).gc_value {
+            // Collected under the values lock and unrooted after it is released,
+            // to keep the deque's lock order: the GC lock is taken after, never
+            // before.
+            let unique: HashSet<usize> = match (*p).values.lock() {
+                Ok(values) => values
+                    .values()
+                    .filter(|value| !value.is_null())
+                    .map(|value| *value as usize)
+                    .collect(),
+                Err(_) => HashSet::new(),
+            };
+            for value in unique {
+                crate::rt::gc_remove_persistent(value as *mut vdynamic);
+            }
+        }
+        ptr::drop_in_place(ptr::addr_of_mut!((*p).values));
     }
-    ptr::drop_in_place(ptr::addr_of_mut!((*p).values));
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_alloc(gc_value: bool) -> *mut c_void {
-    hlp_tls_alloc(gc_value)
+    unsafe { hlp_tls_alloc(gc_value) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_set(tls: *mut c_void, value: *mut c_void) {
-    hlp_tls_set(tls, value);
+    unsafe {
+        hlp_tls_set(tls, value);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_get(tls: *mut c_void) -> *mut c_void {
-    hlp_tls_get(tls)
+    unsafe { hlp_tls_get(tls) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_free(tls: *mut c_void) {
-    hlp_tls_free(tls);
+    unsafe {
+        hlp_tls_free(tls);
+    }
 }
 
 // ============================================================================
@@ -938,51 +1062,55 @@ pub unsafe extern "C" fn hl_tls_free(tls: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
-    let handle = crate::rt::current_handle();
-    if !handle.is_null() {
-        return handle;
-    }
-    // Compared, never dereferenced: the identity has only to be stable for
-    // the thread's life, distinct per thread, and non-null. On wasm the
-    // address of a thread-local is exactly that -- each thread has its own TLS
-    // block, so each gets its own address -- and it costs one add to read.
-    //
-    // This was the constant 1 from before the target had threads, and with
-    // threads it told every Haxe thread it was the same one: `Thread.current()`
-    // agreed everywhere, and anything keyed on it -- a mutex's owner, a lock's
-    // waiter -- excluded nothing. The same constant sat in the collector's
-    // `thread_self_fast`, with the same consequence for its bookkeeping.
-    #[cfg(target_family = "wasm")]
-    {
-        thread_local! {
-            static IDENTITY: u8 = const { 0 };
+    unsafe {
+        let handle = crate::rt::current_handle();
+        if !handle.is_null() {
+            return handle;
         }
-        IDENTITY.with(|slot| slot as *const u8 as *mut c_void)
-    }
-    // One agent, one identity, on a target with no threads.
-    #[cfg(not(any(unix, windows, target_family = "wasm")))]
-    {
-        std::ptr::without_provenance_mut(1)
-    }
-    #[cfg(unix)]
-    {
-        libc::pthread_self() as usize as *mut c_void
-    }
-    // Only ever compared for identity, so the thread id stands in for the
-    // pthread_t handle.
-    #[cfg(windows)]
-    {
-        windows_sys::Win32::System::Threading::GetCurrentThreadId() as usize as *mut c_void
+        // Compared, never dereferenced: the identity has only to be stable for
+        // the thread's life, distinct per thread, and non-null. On wasm the
+        // address of a thread-local is exactly that -- each thread has its own TLS
+        // block, so each gets its own address -- and it costs one add to read.
+        //
+        // This was the constant 1 from before the target had threads, and with
+        // threads it told every Haxe thread it was the same one: `Thread.current()`
+        // agreed everywhere, and anything keyed on it -- a mutex's owner, a lock's
+        // waiter -- excluded nothing. The same constant sat in the collector's
+        // `thread_self_fast`, with the same consequence for its bookkeeping.
+        #[cfg(target_family = "wasm")]
+        {
+            thread_local! {
+                static IDENTITY: u8 = const { 0 };
+            }
+            IDENTITY.with(|slot| slot as *const u8 as *mut c_void)
+        }
+        // One agent, one identity, on a target with no threads.
+        #[cfg(not(any(unix, windows, target_family = "wasm")))]
+        {
+            std::ptr::without_provenance_mut(1)
+        }
+        #[cfg(unix)]
+        {
+            libc::pthread_self() as usize as *mut c_void
+        }
+        // Only ever compared for identity, so the thread id stands in for the
+        // pthread_t handle.
+        #[cfg(windows)]
+        {
+            windows_sys::Win32::System::Threading::GetCurrentThreadId() as usize as *mut c_void
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_thread_create(callback: *mut c_void) -> *mut c_void {
-    // Haxe threads run as cooperative stackful fibers (krio). AIR V2 bodies
-    // that the host resolves to native code are distributed over worker OS
-    // threads; pure-interpreter bodies remain on the main scheduler. Upstream
-    // prim is _FUN(_VOID,_NO_ARG): callback is a vclosure*.
-    crate::fiber::thread_create(callback as *mut crate::hl::vclosure)
+    unsafe {
+        // Haxe threads run as cooperative stackful fibers (krio). AIR V2 bodies
+        // that the host resolves to native code are distributed over worker OS
+        // threads; pure-interpreter bodies remain on the main scheduler. Upstream
+        // prim is _FUN(_VOID,_NO_ARG): callback is a vclosure*.
+        crate::fiber::thread_create(callback as *mut crate::hl::vclosure)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -997,7 +1125,7 @@ pub unsafe extern "C" fn hlp_thread_get_name(_thread: *mut c_void) -> *const u8 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_thread_current() -> *mut c_void {
-    hlp_thread_current()
+    unsafe { hlp_thread_current() }
 }
 
 /// Upstream starts an OS thread running `callback(param)`. ash has none to
@@ -1027,10 +1155,12 @@ pub unsafe extern "C" fn hl_thread_start(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_thread_yield() {
-    if crate::rt::fibers_active() {
-        crate::rt::fiber_poll();
-    } else {
-        std::thread::yield_now();
+    unsafe {
+        if crate::rt::fibers_active() {
+            crate::rt::fiber_poll();
+        } else {
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -1040,27 +1170,27 @@ pub unsafe extern "C" fn hl_thread_yield() {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_add32(a: *mut i32, b: i32) -> i32 {
-    (*(a as *const AtomicI32)).fetch_add(b, Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).fetch_add(b, Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_sub32(a: *mut i32, b: i32) -> i32 {
-    (*(a as *const AtomicI32)).fetch_sub(b, Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).fetch_sub(b, Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_and32(a: *mut i32, b: i32) -> i32 {
-    (*(a as *const AtomicI32)).fetch_and(b, Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).fetch_and(b, Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_or32(a: *mut i32, b: i32) -> i32 {
-    (*(a as *const AtomicI32)).fetch_or(b, Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).fetch_or(b, Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_xor32(a: *mut i32, b: i32) -> i32 {
-    (*(a as *const AtomicI32)).fetch_xor(b, Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).fetch_xor(b, Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
@@ -1069,21 +1199,23 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange32(
     expected: i32,
     replacement: i32,
 ) -> i32 {
-    match (*(a as *const AtomicI32)).compare_exchange(
-        expected,
-        replacement,
-        Ordering::SeqCst,
-        Ordering::SeqCst,
-    ) {
-        Ok(v) => v,
-        Err(v) => {
-            // A failed CAS is the polling primitive used by Haxe's atomic
-            // spin loops. Cooperative threads cannot make progress unless
-            // the losing fiber gives the owner a turn.
-            if crate::rt::fibers_active() {
-                crate::rt::block_yield();
+    unsafe {
+        match (*(a as *const AtomicI32)).compare_exchange(
+            expected,
+            replacement,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(v) => v,
+            Err(v) => {
+                // A failed CAS is the polling primitive used by Haxe's atomic
+                // spin loops. Cooperative threads cannot make progress unless
+                // the losing fiber gives the owner a turn.
+                if crate::rt::fibers_active() {
+                    crate::rt::block_yield();
+                }
+                v
             }
-            v
         }
     }
 }
@@ -1094,26 +1226,28 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange_ptr(
     expected: *mut c_void,
     replacement: *mut c_void,
 ) -> *mut c_void {
-    use std::sync::atomic::AtomicPtr;
-    match (*(a as *const AtomicPtr<c_void>)).compare_exchange(
-        expected,
-        replacement,
-        Ordering::SeqCst,
-        Ordering::SeqCst,
-    ) {
-        Ok(v) => v,
-        Err(v) => {
-            if crate::rt::fibers_active() {
-                crate::rt::block_yield();
+    unsafe {
+        use std::sync::atomic::AtomicPtr;
+        match (*(a as *const AtomicPtr<c_void>)).compare_exchange(
+            expected,
+            replacement,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(v) => v,
+            Err(v) => {
+                if crate::rt::fibers_active() {
+                    crate::rt::block_yield();
+                }
+                v
             }
-            v
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_exchange32(a: *mut i32, replacement: i32) -> i32 {
-    (*(a as *const AtomicI32)).swap(replacement, Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).swap(replacement, Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
@@ -1121,25 +1255,31 @@ pub unsafe extern "C" fn hlp_atomic_exchange_ptr(
     a: *mut *mut c_void,
     replacement: *mut c_void,
 ) -> *mut c_void {
-    use std::sync::atomic::AtomicPtr;
-    (*(a as *const AtomicPtr<c_void>)).swap(replacement, Ordering::SeqCst)
+    unsafe {
+        use std::sync::atomic::AtomicPtr;
+        (*(a as *const AtomicPtr<c_void>)).swap(replacement, Ordering::SeqCst)
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_load32(a: *const i32) -> i32 {
-    (*(a as *const AtomicI32)).load(Ordering::SeqCst)
+    unsafe { (*(a as *const AtomicI32)).load(Ordering::SeqCst) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_load_ptr(a: *const *mut c_void) -> *mut c_void {
-    use std::sync::atomic::AtomicPtr;
-    (*(a as *const AtomicPtr<c_void>)).load(Ordering::SeqCst)
+    unsafe {
+        use std::sync::atomic::AtomicPtr;
+        (*(a as *const AtomicPtr<c_void>)).load(Ordering::SeqCst)
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_store32(a: *mut i32, value: i32) -> i32 {
-    (*(a as *const AtomicI32)).store(value, Ordering::SeqCst);
-    value
+    unsafe {
+        (*(a as *const AtomicI32)).store(value, Ordering::SeqCst);
+        value
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1147,9 +1287,11 @@ pub unsafe extern "C" fn hlp_atomic_store_ptr(
     a: *mut *mut c_void,
     value: *mut c_void,
 ) -> *mut c_void {
-    use std::sync::atomic::AtomicPtr;
-    (*(a as *const AtomicPtr<c_void>)).store(value, Ordering::SeqCst);
-    value
+    unsafe {
+        use std::sync::atomic::AtomicPtr;
+        (*(a as *const AtomicPtr<c_void>)).store(value, Ordering::SeqCst);
+        value
+    }
 }
 
 // ============================================================================
@@ -1235,16 +1377,18 @@ fn current_os_thread_id() -> usize {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_blocking(b: bool) {
-    if crate::rt::update_gc_blocking_depth(b) {
-        let _ = crate::rt::gc_set_blocking(b);
+    unsafe {
+        if crate::rt::update_gc_blocking_depth(b) {
+            let _ = crate::rt::gc_set_blocking(b);
+        }
+        // Published for anyone holding this thread's record -- see ThreadInfo.
+        (*thread_info()).gc_blocking = i32::from(crate::rt::is_gc_blocking());
     }
-    // Published for anyone holding this thread's record -- see ThreadInfo.
-    (*thread_info()).gc_blocking = i32::from(crate::rt::is_gc_blocking());
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_is_blocking() -> bool {
-    crate::rt::is_gc_blocking()
+    unsafe { crate::rt::is_gc_blocking() }
 }
 
 /// Upstream `hl_set_thread_flags` (gc.c): a read-modify-write of this
@@ -1259,8 +1403,10 @@ pub unsafe extern "C" fn hl_is_blocking() -> bool {
 /// observable contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_thread_flags(flags: i32, mask: i32) {
-    let t = thread_info();
-    (*t).flags = ((*t).flags & !mask) | flags;
+    unsafe {
+        let t = thread_info();
+        (*t).flags = ((*t).flags & !mask) | flags;
+    }
 }
 
 // ============================================================================
@@ -1289,8 +1435,8 @@ pub unsafe extern "C" fn hlp_sys_exit(code: i32) {
 
 #[cfg(test)]
 mod foreign_thread_tests {
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     /// Threads the runtime did not create — the ones a native library spawns
     /// for its own callbacks — must still exclude each other on an HL mutex.
@@ -1712,7 +1858,7 @@ mod datachannel_queue_tests {
 /// misses is a failure rather than a silently ignored flag.
 #[cfg(test)]
 mod thread_flags_tests {
-    use super::{hlp_set_thread_flags, thread_info, ThreadInfo};
+    use super::{ThreadInfo, hlp_set_thread_flags, thread_info};
 
     /// Upstream's offset for `hl_thread_info.flags`, spelled as a raw byte
     /// count rather than as the field, because the field is what is on
@@ -1721,15 +1867,19 @@ mod thread_flags_tests {
 
     /// The hdll's view: `((char*)hl_get_thread())[56]` read as an int.
     unsafe fn flags_at_upstream_offset() -> i32 {
-        let t = thread_info();
-        assert!(!t.is_null(), "thread_info() handed back nothing");
-        (t as *const u8).add(FLAGS_OFFSET).cast::<i32>().read()
+        unsafe {
+            let t = thread_info();
+            assert!(!t.is_null(), "thread_info() handed back nothing");
+            (t as *const u8).add(FLAGS_OFFSET).cast::<i32>().read()
+        }
     }
 
     /// Restore whatever this thread's word held, so a test that runs after
     /// another on the same thread starts from the same place.
     unsafe fn set_raw(v: i32) {
-        (*thread_info()).flags = v;
+        unsafe {
+            (*thread_info()).flags = v;
+        }
     }
 
     #[test]

@@ -13,8 +13,8 @@
 
 mod common;
 
-use ash_wasm_link::{link, LinkOptions};
-use common::{object, read, sleb5, FIRST_SLOT, SECOND_SLOT};
+use ash_wasm_link::{LinkOptions, link};
+use common::{FIRST_SLOT, SECOND_SLOT, object, read, sleb5};
 use wasmparser::{RelocationType, SymbolFlags};
 
 #[test]

@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     ptr,
 };
 
@@ -13,7 +13,7 @@ use crate::{
         hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
         hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32,
         hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HREF,
-        hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
+        hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI8, hl_type_kind_HUI16,
         hl_type_kind_HVIRTUAL, uchar, vclosure, vdynamic, vvirtual,
     },
     obj::hl_to_virtual,
@@ -22,100 +22,107 @@ use crate::{
 };
 
 pub unsafe extern "C" fn invalid_cast(from: *mut hl_type, to: *mut hl_type) {
-    // hlp_type_str returns UTF-16; reading it as a C string stops at the
-    // first NUL — the high byte of the first ASCII char — so every message
-    // was one character ("Can't cast ( to (" for function types).
-    let utf16 = |p: *const uchar| -> String {
-        if p.is_null() {
-            return "?".into();
-        }
-        let mut n = 0usize;
-        while n < 4096 && *p.add(n) != 0 {
-            n += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
-    };
-    hlp_error(str_to_uchar_ptr(&format!(
-        "Can't cast {} to {}",
-        utf16(hlp_type_str(from)),
-        utf16(hlp_type_str(to))
-    )));
+    unsafe {
+        // hlp_type_str returns UTF-16; reading it as a C string stops at the
+        // first NUL — the high byte of the first ASCII char — so every message
+        // was one character ("Can't cast ( to (" for function types).
+        let utf16 = |p: *const uchar| -> String {
+            if p.is_null() {
+                return "?".into();
+            }
+            let mut n = 0usize;
+            while n < 4096 && *p.add(n) != 0 {
+                n += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+        };
+        hlp_error(str_to_uchar_ptr(&format!(
+            "Can't cast {} to {}",
+            utf16(hlp_type_str(from)),
+            utf16(hlp_type_str(to))
+        )));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
-    let kind = (*t).kind;
-    match kind {
-        hl_type_kind_HUI8 => {
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.ui8 = *(data as *mut u8);
-            v
-        }
-        hl_type_kind_HUI16 => {
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.ui16 = *(data as *mut uchar);
-            v
-        }
-        hl_type_kind_HI32 => {
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.i = *(data as *mut i32);
-            v
-        }
-        hl_type_kind_HI64 => {
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.i64_ = *(data as *mut hl::int64);
-            v
-        }
-        hl_type_kind_HF32 => {
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.f = *(data as *mut f32);
-            v
-        }
-        hl_type_kind_HF64 => {
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.d = *(data as *mut f64);
-            v
-        }
-        hl_type_kind_HBOOL => {
-            let b = *(data as *mut bool);
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*t).kind = hl_type_kind_HBOOL;
-            (*v).t = t;
-            (*v).v.b = b;
-            v
-        }
-        hl_type_kind_HBYTES | hl_type_kind_HTYPE | hl_type_kind_HREF | hl_type_kind_HABSTRACT => {
-            if data.is_null() {
-                return std::ptr::null_mut();
+    unsafe {
+        let kind = (*t).kind;
+        match kind {
+            hl_type_kind_HUI8 => {
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.ui8 = *(data as *mut u8);
+                v
             }
-            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-                .expect("Failed to allocate vdynamic")
-                .as_ptr() as *mut vdynamic;
-            (*v).t = t;
-            (*v).v.ptr = *(data as *mut *mut c_void);
-            v
+            hl_type_kind_HUI16 => {
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.ui16 = *(data as *mut uchar);
+                v
+            }
+            hl_type_kind_HI32 => {
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.i = *(data as *mut i32);
+                v
+            }
+            hl_type_kind_HI64 => {
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.i64_ = *(data as *mut hl::int64);
+                v
+            }
+            hl_type_kind_HF32 => {
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.f = *(data as *mut f32);
+                v
+            }
+            hl_type_kind_HF64 => {
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.d = *(data as *mut f64);
+                v
+            }
+            hl_type_kind_HBOOL => {
+                let b = *(data as *mut bool);
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*t).kind = hl_type_kind_HBOOL;
+                (*v).t = t;
+                (*v).v.b = b;
+                v
+            }
+            hl_type_kind_HBYTES
+            | hl_type_kind_HTYPE
+            | hl_type_kind_HREF
+            | hl_type_kind_HABSTRACT => {
+                if data.is_null() {
+                    return std::ptr::null_mut();
+                }
+                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                    .expect("Failed to allocate vdynamic")
+                    .as_ptr() as *mut vdynamic;
+                (*v).t = t;
+                (*v).v.ptr = *(data as *mut *mut c_void);
+                v
+            }
+            _ => *(data as *mut *mut vdynamic),
         }
-        _ => *(data as *mut *mut vdynamic),
     }
 }
 
@@ -125,215 +132,223 @@ pub unsafe extern "C" fn hlp_dyn_casti(
     t: *mut hl_type,
     to: *mut hl_type,
 ) -> i32 {
-    // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
-    let mut t = t;
-    let mut data = data;
+    unsafe {
+        // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
+        let mut t = t;
+        let mut data = data;
 
-    if (*t).kind == hl::hl_type_kind_HDYN {
-        let v = *(data as *mut *mut vdynamic);
-        if v.is_null() {
-            return 0;
-        }
-        t = (*v).t;
-        if !hlp_is_dynamic(t) {
-            data = &mut (*v).v as *mut _ as *mut c_void;
-        }
-    }
-
-    match (*t).kind {
-        hl::hl_type_kind_HUI8 => *(data as *mut u8) as i32,
-        hl::hl_type_kind_HUI16 => *(data as *mut u16) as i32,
-        hl::hl_type_kind_HI32 => *(data as *mut i32),
-        hl::hl_type_kind_HI64 => *(data as *mut i64) as i32,
-        hl::hl_type_kind_HF32 => *(data as *mut f32) as i32,
-        hl::hl_type_kind_HF64 => *(data as *mut f64) as i32,
-        hl::hl_type_kind_HBOOL => *(data as *mut bool) as i32,
-        hl::hl_type_kind_HNULL => {
+        if (*t).kind == hl::hl_type_kind_HDYN {
             let v = *(data as *mut *mut vdynamic);
             if v.is_null() {
-                0
-            } else {
-                hlp_dyn_casti(
-                    &mut (*v).v as *mut _ as *mut c_void,
-                    (*t).__bindgen_anon_1.tparam,
-                    to,
-                )
+                return 0;
+            }
+            t = (*v).t;
+            if !hlp_is_dynamic(t) {
+                data = &mut (*v).v as *mut _ as *mut c_void;
             }
         }
-        _ => {
-            invalid_cast(t, to);
-            0
+
+        match (*t).kind {
+            hl::hl_type_kind_HUI8 => *(data as *mut u8) as i32,
+            hl::hl_type_kind_HUI16 => *(data as *mut u16) as i32,
+            hl::hl_type_kind_HI32 => *(data as *mut i32),
+            hl::hl_type_kind_HI64 => *(data as *mut i64) as i32,
+            hl::hl_type_kind_HF32 => *(data as *mut f32) as i32,
+            hl::hl_type_kind_HF64 => *(data as *mut f64) as i32,
+            hl::hl_type_kind_HBOOL => *(data as *mut bool) as i32,
+            hl::hl_type_kind_HNULL => {
+                let v = *(data as *mut *mut vdynamic);
+                if v.is_null() {
+                    0
+                } else {
+                    hlp_dyn_casti(
+                        &mut (*v).v as *mut _ as *mut c_void,
+                        (*t).__bindgen_anon_1.tparam,
+                        to,
+                    )
+                }
+            }
+            _ => {
+                invalid_cast(t, to);
+                0
+            }
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_castf(data: *mut c_void, t: *mut hl_type) -> f32 {
-    // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
-    let mut t = t;
-    let mut data = data;
+    unsafe {
+        // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
+        let mut t = t;
+        let mut data = data;
 
-    if (*t).kind == hl::hl_type_kind_HDYN {
-        let v = *(data as *mut *mut vdynamic);
-        if v.is_null() {
-            return 0.0;
-        }
-        t = (*v).t;
-        if !hlp_is_dynamic(t) {
-            data = &mut (*v).v as *mut _ as *mut c_void;
-        }
-    }
-
-    match (*t).kind {
-        hl::hl_type_kind_HUI8 => *(data as *mut u8) as f32,
-        hl::hl_type_kind_HUI16 => *(data as *mut u16) as f32,
-        hl::hl_type_kind_HI32 => *(data as *mut i32) as f32,
-        hl::hl_type_kind_HI64 => *(data as *mut i64) as f32,
-        hl::hl_type_kind_HF32 => *(data as *mut f32),
-        hl::hl_type_kind_HF64 => *(data as *mut f64) as f32,
-        hl::hl_type_kind_HBOOL => {
-            if *(data as *mut bool) {
-                1_f32
-            } else {
-                0_f32
-            }
-        }
-        hl::hl_type_kind_HNULL => {
+        if (*t).kind == hl::hl_type_kind_HDYN {
             let v = *(data as *mut *mut vdynamic);
             if v.is_null() {
-                0.0
-            } else {
-                hlp_dyn_castf(
-                    &mut (*v).v as *mut _ as *mut c_void,
-                    (*t).__bindgen_anon_1.tparam,
-                )
+                return 0.0;
+            }
+            t = (*v).t;
+            if !hlp_is_dynamic(t) {
+                data = &mut (*v).v as *mut _ as *mut c_void;
             }
         }
-        _ => {
-            invalid_cast(
-                t,
-                &mut hl_type {
-                    kind: hl_type_kind_HF32,
-                    __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                        obj: ptr::null_mut(),
+
+        match (*t).kind {
+            hl::hl_type_kind_HUI8 => *(data as *mut u8) as f32,
+            hl::hl_type_kind_HUI16 => *(data as *mut u16) as f32,
+            hl::hl_type_kind_HI32 => *(data as *mut i32) as f32,
+            hl::hl_type_kind_HI64 => *(data as *mut i64) as f32,
+            hl::hl_type_kind_HF32 => *(data as *mut f32),
+            hl::hl_type_kind_HF64 => *(data as *mut f64) as f32,
+            hl::hl_type_kind_HBOOL => {
+                if *(data as *mut bool) {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            }
+            hl::hl_type_kind_HNULL => {
+                let v = *(data as *mut *mut vdynamic);
+                if v.is_null() {
+                    0.0
+                } else {
+                    hlp_dyn_castf(
+                        &mut (*v).v as *mut _ as *mut c_void,
+                        (*t).__bindgen_anon_1.tparam,
+                    )
+                }
+            }
+            _ => {
+                invalid_cast(
+                    t,
+                    &mut hl_type {
+                        kind: hl_type_kind_HF32,
+                        __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                            obj: ptr::null_mut(),
+                        },
+                        vobj_proto: ptr::null_mut(),
+                        mark_bits: ptr::null_mut(),
                     },
-                    vobj_proto: ptr::null_mut(),
-                    mark_bits: ptr::null_mut(),
-                },
-            );
-            0.0
+                );
+                0.0
+            }
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_castd(data: *mut c_void, t: *mut hl_type) -> f64 {
-    // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
-    let mut t = t;
-    let mut data = data;
+    unsafe {
+        // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
+        let mut t = t;
+        let mut data = data;
 
-    if (*t).kind == hl::hl_type_kind_HDYN {
-        let v = *(data as *mut *mut vdynamic);
-        if v.is_null() {
-            return 0.0;
-        }
-        t = (*v).t;
-        if !hlp_is_dynamic(t) {
-            data = &mut (*v).v as *mut _ as *mut c_void;
-        }
-    }
-
-    match (*t).kind {
-        hl::hl_type_kind_HUI8 => *(data as *mut u8) as f64,
-        hl::hl_type_kind_HUI16 => *(data as *mut u16) as f64,
-        hl::hl_type_kind_HI32 => *(data as *mut i32) as f64,
-        hl::hl_type_kind_HI64 => *(data as *mut i64) as f64,
-        hl::hl_type_kind_HF32 => *(data as *mut f32) as f64,
-        hl::hl_type_kind_HF64 => *(data as *mut f64),
-        hl::hl_type_kind_HBOOL => {
-            if *(data as *mut bool) {
-                1_f64
-            } else {
-                0_f64
-            }
-        }
-        hl::hl_type_kind_HNULL => {
+        if (*t).kind == hl::hl_type_kind_HDYN {
             let v = *(data as *mut *mut vdynamic);
             if v.is_null() {
-                0.0
-            } else {
-                hlp_dyn_castd(
-                    &mut (*v).v as *mut _ as *mut c_void,
-                    (*t).__bindgen_anon_1.tparam,
-                )
+                return 0.0;
+            }
+            t = (*v).t;
+            if !hlp_is_dynamic(t) {
+                data = &mut (*v).v as *mut _ as *mut c_void;
             }
         }
-        _ => {
-            invalid_cast(
-                t,
-                &mut hl_type {
-                    kind: hl_type_kind_HF64,
-                    __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                        obj: ptr::null_mut(),
+
+        match (*t).kind {
+            hl::hl_type_kind_HUI8 => *(data as *mut u8) as f64,
+            hl::hl_type_kind_HUI16 => *(data as *mut u16) as f64,
+            hl::hl_type_kind_HI32 => *(data as *mut i32) as f64,
+            hl::hl_type_kind_HI64 => *(data as *mut i64) as f64,
+            hl::hl_type_kind_HF32 => *(data as *mut f32) as f64,
+            hl::hl_type_kind_HF64 => *(data as *mut f64),
+            hl::hl_type_kind_HBOOL => {
+                if *(data as *mut bool) {
+                    1_f64
+                } else {
+                    0_f64
+                }
+            }
+            hl::hl_type_kind_HNULL => {
+                let v = *(data as *mut *mut vdynamic);
+                if v.is_null() {
+                    0.0
+                } else {
+                    hlp_dyn_castd(
+                        &mut (*v).v as *mut _ as *mut c_void,
+                        (*t).__bindgen_anon_1.tparam,
+                    )
+                }
+            }
+            _ => {
+                invalid_cast(
+                    t,
+                    &mut hl_type {
+                        kind: hl_type_kind_HF64,
+                        __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                            obj: ptr::null_mut(),
+                        },
+                        vobj_proto: ptr::null_mut(),
+                        mark_bits: ptr::null_mut(),
                     },
-                    vobj_proto: ptr::null_mut(),
-                    mark_bits: ptr::null_mut(),
-                },
-            );
-            0.0
+                );
+                0.0
+            }
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_casti64(data: *mut c_void, t: *mut hl_type) -> i64 {
-    // hl_track_call(HL_TRACK_CAST, on_cast(t, &hlt_i64));
-    let mut t = t;
-    let mut data = data;
+    unsafe {
+        // hl_track_call(HL_TRACK_CAST, on_cast(t, &hlt_i64));
+        let mut t = t;
+        let mut data = data;
 
-    if (*t).kind == hl::hl_type_kind_HDYN {
-        let v = *(data as *mut *mut vdynamic);
-        if v.is_null() {
-            return 0;
-        }
-        t = (*v).t;
-        if !hlp_is_dynamic(t) {
-            data = &mut (*v).v as *mut _ as *mut c_void;
-        }
-    }
-
-    match (*t).kind {
-        hl::hl_type_kind_HUI8 => *(data as *mut u8) as i64,
-        hl::hl_type_kind_HUI16 => *(data as *mut u16) as i64,
-        hl::hl_type_kind_HI32 => *(data as *mut i32) as i64,
-        hl::hl_type_kind_HI64 => *(data as *mut i64),
-        hl::hl_type_kind_HF32 => *(data as *mut f32) as i64,
-        hl::hl_type_kind_HF64 => *(data as *mut f64) as i64,
-        hl::hl_type_kind_HBOOL => *(data as *mut bool) as i64,
-        hl::hl_type_kind_HNULL => {
+        if (*t).kind == hl::hl_type_kind_HDYN {
             let v = *(data as *mut *mut vdynamic);
             if v.is_null() {
-                0
-            } else {
-                hlp_dyn_casti64(
-                    &mut (*v).v as *mut _ as *mut c_void,
-                    (*t).__bindgen_anon_1.tparam,
-                )
+                return 0;
+            }
+            t = (*v).t;
+            if !hlp_is_dynamic(t) {
+                data = &mut (*v).v as *mut _ as *mut c_void;
             }
         }
-        _ => {
-            invalid_cast(
-                t,
-                &mut hl_type {
-                    kind: hl_type_kind_HI64,
-                    __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                        obj: std::ptr::null_mut(),
+
+        match (*t).kind {
+            hl::hl_type_kind_HUI8 => *(data as *mut u8) as i64,
+            hl::hl_type_kind_HUI16 => *(data as *mut u16) as i64,
+            hl::hl_type_kind_HI32 => *(data as *mut i32) as i64,
+            hl::hl_type_kind_HI64 => *(data as *mut i64),
+            hl::hl_type_kind_HF32 => *(data as *mut f32) as i64,
+            hl::hl_type_kind_HF64 => *(data as *mut f64) as i64,
+            hl::hl_type_kind_HBOOL => *(data as *mut bool) as i64,
+            hl::hl_type_kind_HNULL => {
+                let v = *(data as *mut *mut vdynamic);
+                if v.is_null() {
+                    0
+                } else {
+                    hlp_dyn_casti64(
+                        &mut (*v).v as *mut _ as *mut c_void,
+                        (*t).__bindgen_anon_1.tparam,
+                    )
+                }
+            }
+            _ => {
+                invalid_cast(
+                    t,
+                    &mut hl_type {
+                        kind: hl_type_kind_HI64,
+                        __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                            obj: std::ptr::null_mut(),
+                        },
+                        vobj_proto: std::ptr::null_mut(),
+                        mark_bits: std::ptr::null_mut(),
                     },
-                    vobj_proto: std::ptr::null_mut(),
-                    mark_bits: std::ptr::null_mut(),
-                },
-            );
-            0
+                );
+                0
+            }
         }
     }
 }
@@ -344,321 +359,331 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     t: *mut hl_type,
     to: *mut hl_type,
 ) -> *mut c_void {
-    // `t` here is often read out of a value's header, and a Dynamic slot
-    // holding an UNBOXED payload yields a garbage "type" — the recursive
-    // arms below (HVIRTUAL->HOBJ passes `(*(*v).value).t`) then SIGSEGV'd
-    // on addresses like 0xc00000000000. Validate before dereferencing.
-    let sane_type = |p: *mut hl_type| -> bool {
-        let a = p as usize;
-        !p.is_null() && a >= 0x1000 && a.is_multiple_of(std::mem::align_of::<usize>())
-    };
-    if !sane_type(t) || !sane_type(to) {
-        return ptr::null_mut();
-    }
-    if (*t).kind > 22 || (*to).kind > 22 {
-        return ptr::null_mut();
-    }
-
-    if (*to).kind == hl_type_kind_HDYN && hlp_is_dynamic(t) {
-        return *(data as *mut *mut vdynamic) as *mut c_void;
-    }
-
-    let mut t = t;
-    let mut data = data;
-
-    // Held for the whole cast, as it always was; the heap query below is the
-    // only thing here that reaches the allocator.
-    let _gc = crate::gc::gc_guard();
-
-    if (*t).kind == hl_type_kind_HDYN || (*t).kind == hl_type_kind_HNULL {
-        let v = *(data as *mut *mut vdynamic);
-        if v.is_null() {
+    unsafe {
+        // `t` here is often read out of a value's header, and a Dynamic slot
+        // holding an UNBOXED payload yields a garbage "type" — the recursive
+        // arms below (HVIRTUAL->HOBJ passes `(*(*v).value).t`) then SIGSEGV'd
+        // on addresses like 0xc00000000000. Validate before dereferencing.
+        let sane_type = |p: *mut hl_type| -> bool {
+            let a = p as usize;
+            !p.is_null() && a >= 0x1000 && a.is_multiple_of(std::mem::align_of::<usize>())
+        };
+        if !sane_type(t) || !sane_type(to) {
             return ptr::null_mut();
         }
-        if (*to).kind == hl_type_kind_HNULL
-            && (*v).t == (*to).__bindgen_anon_1.tparam
-            && crate::rt::is_gc_ptr(v as *const c_void)
-        {
-            return v as *mut c_void;
-        }
-        t = (*v).t;
-        if !hlp_is_dynamic(t) {
-            data = &mut (*v).v as *mut _ as *mut c_void;
-        }
-    } else if hlp_is_dynamic(t) {
-        let v = *(data as *mut *mut vdynamic);
-        if v.is_null() {
+        if (*t).kind > 22 || (*to).kind > 22 {
             return ptr::null_mut();
         }
-        t = (*v).t;
-        if t.is_null() || (*t).kind > 22 {
-            return ptr::null_mut();
+
+        if (*to).kind == hl_type_kind_HDYN && hlp_is_dynamic(t) {
+            return *(data as *mut *mut vdynamic) as *mut c_void;
         }
-    }
 
-    if t.is_null() || to.is_null() {
-        return ptr::null_mut();
-    }
-    if env_flag!("ASH_DBG_SC") {
-        eprintln!(
-            "[dyn_castp] pre-safe_cast t={:p} k={} to={:p} k={}",
-            t,
-            (*t).kind,
-            to,
-            (*to).kind
-        );
-        use std::io::Write;
-        std::io::stderr().flush().ok();
-    }
-    if t == to || hlp_safe_cast(t, to) {
-        return *(data as *mut *mut c_void);
-    }
+        let mut t = t;
+        let mut data = data;
 
-    match ((*t).kind, (*to).kind) {
-        (hl_type_kind_HOBJ, hl_type_kind_HOBJ) => {
-            let t1_obj = (*t).__bindgen_anon_1.obj;
-            let t2 = (*to).__bindgen_anon_1.obj;
-            if t1_obj.is_null()
-                || t2.is_null()
-                || (t1_obj as usize) < 0x10000
-                || (t2 as usize) < 0x10000
-                || !(t1_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
-                || !(t2 as usize).is_multiple_of(std::mem::align_of::<usize>())
-            {
+        // Held for the whole cast, as it always was; the heap query below is the
+        // only thing here that reaches the allocator.
+        let _gc = crate::gc::gc_guard();
+
+        if (*t).kind == hl_type_kind_HDYN || (*t).kind == hl_type_kind_HNULL {
+            let v = *(data as *mut *mut vdynamic);
+            if v.is_null() {
                 return ptr::null_mut();
             }
-            let mut t1 = t1_obj;
-            loop {
-                if t1 == t2 {
-                    return *(data as *mut *mut c_void);
-                }
-                if (*t1).super_.is_null() {
-                    break;
-                }
-                let sup = (*t1).super_;
-                if (sup as usize) < 0x10000
-                    || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>())
-                {
-                    break;
-                }
-                if (*sup).kind != hl_type_kind_HOBJ {
-                    break;
-                }
-                let sup_obj = (*sup).__bindgen_anon_1.obj;
-                if sup_obj.is_null()
-                    || (sup_obj as usize) < 0x10000
-                    || !(sup_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
-                {
-                    break;
-                }
-                t1 = sup_obj;
-            }
-            let t_obj_for_cast = (*t).__bindgen_anon_1.obj;
-            if !t_obj_for_cast.is_null()
-                && (t_obj_for_cast as usize) >= 0x10000
-                && !(*t_obj_for_cast).rt.is_null()
-                && ((*t_obj_for_cast).rt as usize) >= 0x10000
-                && (*(*t_obj_for_cast).rt).castFun.is_some()
+            if (*to).kind == hl_type_kind_HNULL
+                && (*v).t == (*to).__bindgen_anon_1.tparam
+                && crate::rt::is_gc_ptr(v as *const c_void)
             {
-                let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
-                let obj_val = *(data as *mut *mut vdynamic);
-                if env_flag!("ASH_DBG_SC") {
-                    eprintln!(
-                        "[dyn_castp] castFun={:p} obj={:p} to={:p}",
-                        cast_fn as *const (), obj_val, to
-                    );
-                    std::io::Write::flush(&mut std::io::stderr()).ok();
-                }
-                let v = cast_fn(obj_val, to);
-                if !v.is_null() {
-                    return v as *mut c_void;
-                }
-            } else {
-                // castFun could not be stored because __cast is an
-                // interpreter stub; run it through the bridge instead.
-                let v = crate::obj::cast_via_stub_castfun(t, *(data as *mut *mut vdynamic), to);
-                if !v.is_null() {
-                    return v as *mut c_void;
-                }
+                return v as *mut c_void;
+            }
+            t = (*v).t;
+            if !hlp_is_dynamic(t) {
+                data = &mut (*v).v as *mut _ as *mut c_void;
+            }
+        } else if hlp_is_dynamic(t) {
+            let v = *(data as *mut *mut vdynamic);
+            if v.is_null() {
+                return ptr::null_mut();
+            }
+            t = (*v).t;
+            if t.is_null() || (*t).kind > 22 {
+                return ptr::null_mut();
             }
         }
-        (hl_type_kind_HSTRUCT, hl_type_kind_HSTRUCT) => {
-            let mut t1 = (*t).__bindgen_anon_1.obj;
-            let t2 = (*to).__bindgen_anon_1.obj;
-            loop {
-                if t1 == t2 {
-                    return *(data as *mut *mut c_void);
-                }
-                if (*t1).super_.is_null() {
-                    break;
-                }
-                t1 = (*(*t1).super_).__bindgen_anon_1.obj;
-            }
-            let t_obj_for_cast = (*t).__bindgen_anon_1.obj;
-            if !t_obj_for_cast.is_null()
-                && (t_obj_for_cast as usize) >= 0x10000
-                && !(*t_obj_for_cast).rt.is_null()
-                && ((*t_obj_for_cast).rt as usize) >= 0x10000
-                && (*(*t_obj_for_cast).rt).castFun.is_some()
-            {
-                let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
-                let obj_val = *(data as *mut *mut vdynamic);
-                if env_flag!("ASH_DBG_SC") {
-                    eprintln!(
-                        "[dyn_castp] castFun={:p} obj={:p} to={:p}",
-                        cast_fn as *const (), obj_val, to
-                    );
-                    std::io::Write::flush(&mut std::io::stderr()).ok();
-                }
-                let v = cast_fn(obj_val, to);
-                if !v.is_null() {
-                    return v as *mut c_void;
-                }
-            } else {
-                // castFun could not be stored because __cast is an
-                // interpreter stub; run it through the bridge instead.
-                let v = crate::obj::cast_via_stub_castfun(t, *(data as *mut *mut vdynamic), to);
-                if !v.is_null() {
-                    return v as *mut c_void;
-                }
-            }
+
+        if t.is_null() || to.is_null() {
+            return ptr::null_mut();
         }
-        (hl_type_kind_HFUN, hl_type_kind_HFUN) => {
-            let c = *(data as *mut *mut vclosure);
-            if !c.is_null() {
-                if (*c).fun == crate::fun::fun_var_args as *mut c_void {
-                    // Its -1 arity is intentionally compatible with every
-                    // typed function. With no external JIT wrapper generator
-                    // installed, Ash calls it through the dynamic closure
-                    // path, which packs the actual arguments at run time.
-                    return c as *mut c_void;
+        if env_flag!("ASH_DBG_SC") {
+            eprintln!(
+                "[dyn_castp] pre-safe_cast t={:p} k={} to={:p} k={}",
+                t,
+                (*t).kind,
+                to,
+                (*to).kind
+            );
+            use std::io::Write;
+            std::io::stderr().flush().ok();
+        }
+        if t == to || hlp_safe_cast(t, to) {
+            return *(data as *mut *mut c_void);
+        }
+
+        match ((*t).kind, (*to).kind) {
+            (hl_type_kind_HOBJ, hl_type_kind_HOBJ) => {
+                let t1_obj = (*t).__bindgen_anon_1.obj;
+                let t2 = (*to).__bindgen_anon_1.obj;
+                if t1_obj.is_null()
+                    || t2.is_null()
+                    || (t1_obj as usize) < 0x10000
+                    || (t2 as usize) < 0x10000
+                    || !(t1_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
+                    || !(t2 as usize).is_multiple_of(std::mem::align_of::<usize>())
+                {
+                    return ptr::null_mut();
                 }
-                let w = hlp_make_fun_wrapper(c, to);
-                if !w.is_null() {
-                    return w as *mut c_void;
+                let mut t1 = t1_obj;
+                loop {
+                    if t1 == t2 {
+                        return *(data as *mut *mut c_void);
+                    }
+                    if (*t1).super_.is_null() {
+                        break;
+                    }
+                    let sup = (*t1).super_;
+                    if (sup as usize) < 0x10000
+                        || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>())
+                    {
+                        break;
+                    }
+                    if (*sup).kind != hl_type_kind_HOBJ {
+                        break;
+                    }
+                    let sup_obj = (*sup).__bindgen_anon_1.obj;
+                    if sup_obj.is_null()
+                        || (sup_obj as usize) < 0x10000
+                        || !(sup_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
+                    {
+                        break;
+                    }
+                    t1 = sup_obj;
                 }
-                // No wrapper generator is registered in interpreter mode
-                // (hlc_get_wrapper is a JIT service), so a signature-bending
-                // cast used to die in invalid_cast even though the interpreter
-                // does not call this pointer through either C signature. Its
-                // closure dispatcher marshals arguments against the callee's
-                // own bytecode type and coerces the result into the caller's
-                // destination type. Matching arity is therefore sufficient;
-                // this also covers a void method fetched dynamically as
-                // `Dynamic()->Dynamic` (Issue6294).
-                let cf = (*(*c).t).__bindgen_anon_1.fun.as_ref();
-                let tf = (*to).__bindgen_anon_1.fun.as_ref();
-                if let (Some(cf), Some(tf)) = (cf, tf) {
-                    if cf.nargs == tf.nargs {
+                let t_obj_for_cast = (*t).__bindgen_anon_1.obj;
+                if !t_obj_for_cast.is_null()
+                    && (t_obj_for_cast as usize) >= 0x10000
+                    && !(*t_obj_for_cast).rt.is_null()
+                    && ((*t_obj_for_cast).rt as usize) >= 0x10000
+                    && (*(*t_obj_for_cast).rt).castFun.is_some()
+                {
+                    let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
+                    let obj_val = *(data as *mut *mut vdynamic);
+                    if env_flag!("ASH_DBG_SC") {
+                        eprintln!(
+                            "[dyn_castp] castFun={:p} obj={:p} to={:p}",
+                            cast_fn as *const (), obj_val, to
+                        );
+                        std::io::Write::flush(&mut std::io::stderr()).ok();
+                    }
+                    let v = cast_fn(obj_val, to);
+                    if !v.is_null() {
+                        return v as *mut c_void;
+                    }
+                } else {
+                    // castFun could not be stored because __cast is an
+                    // interpreter stub; run it through the bridge instead.
+                    let v = crate::obj::cast_via_stub_castfun(t, *(data as *mut *mut vdynamic), to);
+                    if !v.is_null() {
+                        return v as *mut c_void;
+                    }
+                }
+            }
+            (hl_type_kind_HSTRUCT, hl_type_kind_HSTRUCT) => {
+                let mut t1 = (*t).__bindgen_anon_1.obj;
+                let t2 = (*to).__bindgen_anon_1.obj;
+                loop {
+                    if t1 == t2 {
+                        return *(data as *mut *mut c_void);
+                    }
+                    if (*t1).super_.is_null() {
+                        break;
+                    }
+                    t1 = (*(*t1).super_).__bindgen_anon_1.obj;
+                }
+                let t_obj_for_cast = (*t).__bindgen_anon_1.obj;
+                if !t_obj_for_cast.is_null()
+                    && (t_obj_for_cast as usize) >= 0x10000
+                    && !(*t_obj_for_cast).rt.is_null()
+                    && ((*t_obj_for_cast).rt as usize) >= 0x10000
+                    && (*(*t_obj_for_cast).rt).castFun.is_some()
+                {
+                    let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
+                    let obj_val = *(data as *mut *mut vdynamic);
+                    if env_flag!("ASH_DBG_SC") {
+                        eprintln!(
+                            "[dyn_castp] castFun={:p} obj={:p} to={:p}",
+                            cast_fn as *const (), obj_val, to
+                        );
+                        std::io::Write::flush(&mut std::io::stderr()).ok();
+                    }
+                    let v = cast_fn(obj_val, to);
+                    if !v.is_null() {
+                        return v as *mut c_void;
+                    }
+                } else {
+                    // castFun could not be stored because __cast is an
+                    // interpreter stub; run it through the bridge instead.
+                    let v = crate::obj::cast_via_stub_castfun(t, *(data as *mut *mut vdynamic), to);
+                    if !v.is_null() {
+                        return v as *mut c_void;
+                    }
+                }
+            }
+            (hl_type_kind_HFUN, hl_type_kind_HFUN) => {
+                let c = *(data as *mut *mut vclosure);
+                if !c.is_null() {
+                    if (*c).fun == crate::fun::fun_var_args as *mut c_void {
+                        // Its -1 arity is intentionally compatible with every
+                        // typed function. With no external JIT wrapper generator
+                        // installed, Ash calls it through the dynamic closure
+                        // path, which packs the actual arguments at run time.
+                        return c as *mut c_void;
+                    }
+                    let w = hlp_make_fun_wrapper(c, to);
+                    if !w.is_null() {
+                        return w as *mut c_void;
+                    }
+                    // No wrapper generator is registered in interpreter mode
+                    // (hlc_get_wrapper is a JIT service), so a signature-bending
+                    // cast used to die in invalid_cast even though the interpreter
+                    // does not call this pointer through either C signature. Its
+                    // closure dispatcher marshals arguments against the callee's
+                    // own bytecode type and coerces the result into the caller's
+                    // destination type. Matching arity is therefore sufficient;
+                    // this also covers a void method fetched dynamically as
+                    // `Dynamic()->Dynamic` (Issue6294).
+                    let cf = (*(*c).t).__bindgen_anon_1.fun.as_ref();
+                    let tf = (*to).__bindgen_anon_1.fun.as_ref();
+                    if let (Some(cf), Some(tf)) = (cf, tf)
+                        && cf.nargs == tf.nargs
+                    {
                         return c as *mut c_void;
                     }
                 }
             }
-        }
-        (hl_type_kind_HOBJ, hl_type_kind_HVIRTUAL) => {
-            return hl_to_virtual(to, *(data as *mut *mut vdynamic)) as *mut c_void;
-        }
-        (hl_type_kind_HDYNOBJ, hl_type_kind_HVIRTUAL) => {
-            return hl_to_virtual(to, *(data as *mut *mut vdynamic)) as *mut c_void;
-        }
-        (hl_type_kind_HVIRTUAL, hl_type_kind_HVIRTUAL) => {
-            return hl_to_virtual(to, *(data as *mut *mut vdynamic)) as *mut c_void;
-        }
-        (hl_type_kind_HVIRTUAL, hl_type_kind_HOBJ) => {
-            let v = *(data as *mut *mut vvirtual);
-            if !(*v).value.is_null() {
-                return hlp_dyn_castp(
-                    &mut (*v).value as *mut _ as *mut c_void,
-                    (*(*v).value).t,
-                    to,
-                );
+            (hl_type_kind_HOBJ, hl_type_kind_HVIRTUAL) => {
+                return hl_to_virtual(to, *(data as *mut *mut vdynamic)) as *mut c_void;
             }
-        }
-        (hl_type_kind_HOBJ, hl_type_kind_HDYN)
-        | (hl_type_kind_HDYNOBJ, hl_type_kind_HDYN)
-        | (hl_type_kind_HFUN, hl_type_kind_HDYN)
-        | (hl_type_kind_HNULL, hl_type_kind_HDYN)
-        | (hl_type_kind_HARRAY, hl_type_kind_HDYN) => {
-            return *(data as *mut *mut c_void);
-        }
-        _ => {}
-    }
-
-    if (*to).kind == hl_type_kind_HDYN {
-        return hlp_make_dyn(data, t) as *mut c_void;
-    }
-
-    if (*to).kind == hl_type_kind_HNULL {
-        if (*(*to).__bindgen_anon_1.tparam).kind == (*t).kind {
-            return hlp_make_dyn(data, t) as *mut c_void;
-        }
-        match (*(*to).__bindgen_anon_1.tparam).kind {
-            hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
-                let v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
-                return hlp_make_dyn(&v as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
-                    as *mut c_void;
+            (hl_type_kind_HDYNOBJ, hl_type_kind_HVIRTUAL) => {
+                return hl_to_virtual(to, *(data as *mut *mut vdynamic)) as *mut c_void;
             }
-            hl_type_kind_HI64 => {
-                let v = hlp_dyn_casti64(data, t);
-                return hlp_make_dyn(&v as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
-                    as *mut c_void;
+            (hl_type_kind_HVIRTUAL, hl_type_kind_HVIRTUAL) => {
+                return hl_to_virtual(to, *(data as *mut *mut vdynamic)) as *mut c_void;
             }
-            hl_type_kind_HF32 => {
-                let f = hlp_dyn_castf(data, t);
-                return hlp_make_dyn(&f as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
-                    as *mut c_void;
+            (hl_type_kind_HVIRTUAL, hl_type_kind_HOBJ) => {
+                let v = *(data as *mut *mut vvirtual);
+                if !(*v).value.is_null() {
+                    return hlp_dyn_castp(
+                        &mut (*v).value as *mut _ as *mut c_void,
+                        (*(*v).value).t,
+                        to,
+                    );
+                }
             }
-            hl_type_kind_HF64 => {
-                let d = hlp_dyn_castd(data, t);
-                return hlp_make_dyn(&d as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
-                    as *mut c_void;
+            (hl_type_kind_HOBJ, hl_type_kind_HDYN)
+            | (hl_type_kind_HDYNOBJ, hl_type_kind_HDYN)
+            | (hl_type_kind_HFUN, hl_type_kind_HDYN)
+            | (hl_type_kind_HNULL, hl_type_kind_HDYN)
+            | (hl_type_kind_HARRAY, hl_type_kind_HDYN) => {
+                return *(data as *mut *mut c_void);
             }
             _ => {}
         }
-    }
 
-    if (*to).kind == hl_type_kind_HREF {
-        match (*(*to).__bindgen_anon_1.tparam).kind {
-            hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<i32>())
-                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
-                    .as_ptr() as *mut i32;
-                *v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
-                return v as *mut c_void;
+        if (*to).kind == hl_type_kind_HDYN {
+            return hlp_make_dyn(data, t) as *mut c_void;
+        }
+
+        if (*to).kind == hl_type_kind_HNULL {
+            if (*(*to).__bindgen_anon_1.tparam).kind == (*t).kind {
+                return hlp_make_dyn(data, t) as *mut c_void;
             }
-            hl_type_kind_HI64 => {
-                let d = crate::rt::gc_alloc(std::mem::size_of::<i64>())
-                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
-                    .as_ptr() as *mut i64;
-                *d = hlp_dyn_casti64(data, t);
-                return d as *mut c_void;
-            }
-            hl_type_kind_HF32 => {
-                let f = crate::rt::gc_alloc(std::mem::size_of::<f32>())
-                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
-                    .as_ptr() as *mut f32;
-                *f = hlp_dyn_castf(data, t);
-                return f as *mut c_void;
-            }
-            hl_type_kind_HF64 => {
-                let d = crate::rt::gc_alloc(std::mem::size_of::<f64>())
-                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
-                    .as_ptr() as *mut f64;
-                *d = hlp_dyn_castd(data, t);
-                return d as *mut c_void;
-            }
-            _ => {
-                let p = crate::rt::gc_alloc(std::mem::size_of::<*mut c_void>())
-                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
-                    .as_ptr() as *mut *mut c_void;
-                *p = hlp_dyn_castp(data, t, (*to).__bindgen_anon_1.tparam);
-                return p as *mut c_void;
+            match (*(*to).__bindgen_anon_1.tparam).kind {
+                hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
+                    let v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
+                    return hlp_make_dyn(
+                        &v as *const _ as *mut c_void,
+                        (*to).__bindgen_anon_1.tparam,
+                    ) as *mut c_void;
+                }
+                hl_type_kind_HI64 => {
+                    let v = hlp_dyn_casti64(data, t);
+                    return hlp_make_dyn(
+                        &v as *const _ as *mut c_void,
+                        (*to).__bindgen_anon_1.tparam,
+                    ) as *mut c_void;
+                }
+                hl_type_kind_HF32 => {
+                    let f = hlp_dyn_castf(data, t);
+                    return hlp_make_dyn(
+                        &f as *const _ as *mut c_void,
+                        (*to).__bindgen_anon_1.tparam,
+                    ) as *mut c_void;
+                }
+                hl_type_kind_HF64 => {
+                    let d = hlp_dyn_castd(data, t);
+                    return hlp_make_dyn(
+                        &d as *const _ as *mut c_void,
+                        (*to).__bindgen_anon_1.tparam,
+                    ) as *mut c_void;
+                }
+                _ => {}
             }
         }
-    }
 
-    invalid_cast(t, to);
-    ptr::null_mut()
+        if (*to).kind == hl_type_kind_HREF {
+            match (*(*to).__bindgen_anon_1.tparam).kind {
+                hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
+                    let v = crate::rt::gc_alloc(std::mem::size_of::<i32>())
+                        .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
+                        .as_ptr() as *mut i32;
+                    *v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
+                    return v as *mut c_void;
+                }
+                hl_type_kind_HI64 => {
+                    let d = crate::rt::gc_alloc(std::mem::size_of::<i64>())
+                        .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
+                        .as_ptr() as *mut i64;
+                    *d = hlp_dyn_casti64(data, t);
+                    return d as *mut c_void;
+                }
+                hl_type_kind_HF32 => {
+                    let f = crate::rt::gc_alloc(std::mem::size_of::<f32>())
+                        .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
+                        .as_ptr() as *mut f32;
+                    *f = hlp_dyn_castf(data, t);
+                    return f as *mut c_void;
+                }
+                hl_type_kind_HF64 => {
+                    let d = crate::rt::gc_alloc(std::mem::size_of::<f64>())
+                        .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
+                        .as_ptr() as *mut f64;
+                    *d = hlp_dyn_castd(data, t);
+                    return d as *mut c_void;
+                }
+                _ => {
+                    let p = crate::rt::gc_alloc(std::mem::size_of::<*mut c_void>())
+                        .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
+                        .as_ptr() as *mut *mut c_void;
+                    *p = hlp_dyn_castp(data, t, (*to).__bindgen_anon_1.tparam);
+                    return p as *mut c_void;
+                }
+            }
+        }
+
+        invalid_cast(t, to);
+        ptr::null_mut()
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -666,22 +691,24 @@ pub unsafe extern "C" fn hlp_value_cast(
     v: *mut hl::vdynamic,
     t: *mut hl::hl_type,
 ) -> *mut hl::vdynamic {
-    // hl_track_call(HL_TRACK_CAST, {
-    //     let v_type = if !v.is_null() { (*v).t } else { &hl::hlt_dyn as *const _ as *mut _ };
-    //     hl::on_cast(v_type, t);
-    // });
+    unsafe {
+        // hl_track_call(HL_TRACK_CAST, {
+        //     let v_type = if !v.is_null() { (*v).t } else { &hl::hlt_dyn as *const _ as *mut _ };
+        //     hl::on_cast(v_type, t);
+        // });
 
-    if (*t).kind == hl::hl_type_kind_HDYN || v.is_null() || hlp_safe_cast((*v).t, t) {
-        return v;
+        if (*t).kind == hl::hl_type_kind_HDYN || v.is_null() || hlp_safe_cast((*v).t, t) {
+            return v;
+        }
+
+        invalid_cast((*v).t, t);
+        ptr::null_mut()
     }
-
-    invalid_cast((*v).t, t);
-    ptr::null_mut()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_safe_cast(a: *mut hl::hl_type, b: *mut hl::hl_type) -> bool {
-    hlp_safe_cast(a, b)
+    unsafe { hlp_safe_cast(a, b) }
 }
 
 #[unsafe(no_mangle)]
@@ -695,157 +722,154 @@ pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
-    if a == b {
-        return 0;
-    }
-    if a.is_null() {
-        return -1;
-    }
-    if b.is_null() {
-        return 1;
-    }
-    if (*a).t.is_null() || (*b).t.is_null() {
-        return hlp_ptr_compare(a, b);
-    }
+    unsafe {
+        if a == b {
+            return 0;
+        }
+        if a.is_null() {
+            return -1;
+        }
+        if b.is_null() {
+            return 1;
+        }
+        if (*a).t.is_null() || (*b).t.is_null() {
+            return hlp_ptr_compare(a, b);
+        }
 
-    let ka = (*(*a).t).kind;
-    let kb = (*(*b).t).kind;
-    let cmp_f64 = |x: f64, y: f64| -> i32 {
-        if x < y {
-            -1
-        } else if x > y {
-            1
-        } else {
-            0
-        }
-    };
-    let cmp_ord = |o: Ordering| -> i32 {
-        match o {
-            Ordering::Less => -1,
-            Ordering::Equal => 0,
-            Ordering::Greater => 1,
-        }
-    };
-
-    match (ka, kb) {
-        (ka, kb)
-            if matches!(ka, hl_type_kind_HOBJ | hl_type_kind_HDYNOBJ)
-                && kb == hl_type_kind_HVIRTUAL =>
-        {
-            return hlp_dyn_compare(a, (*(b as *mut vvirtual)).value);
-        }
-        (ka, kb)
-            if ka == hl_type_kind_HVIRTUAL
-                && matches!(kb, hl_type_kind_HOBJ | hl_type_kind_HDYNOBJ) =>
-        {
-            return hlp_dyn_compare((*(a as *mut vvirtual)).value, b);
-        }
-        (ka, kb) if ka == hl_type_kind_HVIRTUAL && kb == hl_type_kind_HVIRTUAL => {
-            let av = (*(a as *mut vvirtual)).value;
-            let bv = (*(b as *mut vvirtual)).value;
-            return if !av.is_null() && !bv.is_null() {
-                hlp_dyn_compare(av, bv)
+        let ka = (*(*a).t).kind;
+        let kb = (*(*b).t).kind;
+        let cmp_f64 = |x: f64, y: f64| -> i32 {
+            if x < y {
+                -1
+            } else if x > y {
+                1
             } else {
-                hl::hl_invalid_comparison as i32
-            };
-        }
-        _ => {}
-    }
-
-    if ka == kb {
-        return match ka {
-            hl_type_kind_HI32 => cmp_ord((*a).v.i.cmp(&(*b).v.i)),
-            hl_type_kind_HUI8 => cmp_ord((*a).v.ui8.cmp(&(*b).v.ui8)),
-            hl_type_kind_HUI16 => cmp_ord((*a).v.ui16.cmp(&(*b).v.ui16)),
-            hl_type_kind_HI64 => cmp_ord((*a).v.i64_.cmp(&(*b).v.i64_)),
-            hl_type_kind_HBOOL => cmp_ord(((*a).v.b as u8).cmp(&((*b).v.b as u8))),
-            hl_type_kind_HF32 => cmp_f64((*a).v.f as f64, (*b).v.f as f64),
-            hl_type_kind_HF64 => cmp_f64((*a).v.d, (*b).v.d),
-            hl_type_kind_HBYTES => {
-                crate::ucs2::ucmp((*a).v.bytes as *const uchar, (*b).v.bytes as *const uchar)
-                    .signum()
+                0
             }
-            hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
-                let obj = (*(*a).t).__bindgen_anon_1.obj;
-                if !obj.is_null() {
-                    let rt = (*obj).rt;
-                    if !rt.is_null() {
-                        if let Some(compare_fn) = (*rt).compareFun {
-                            return compare_fn(a, b);
-                        }
-                        // Ash represents Haxe String values as String objects
-                        // in Dynamic slots. Compare their UTF-16 payload, but
-                        // only after proving both objects have the exact same
-                        // runtime type. The old "first field is HBYTES" test
-                        // also matched ArrayBytes and then used its field
-                        // offset on an unrelated HOBJ, turning a Bool field
-                        // into the pointer 0x1.
-                        let name = (*obj).name;
-                        let is_string = ka == hl_type_kind_HOBJ
-                            && (*a).t == (*b).t
-                            && !name.is_null()
-                            && *name == b'S' as uchar
-                            && *name.add(1) == b't' as uchar
-                            && *name.add(2) == b'r' as uchar
-                            && *name.add(3) == b'i' as uchar
-                            && *name.add(4) == b'n' as uchar
-                            && *name.add(5) == b'g' as uchar
-                            && *name.add(6) == 0;
-                        if is_string
-                            && (*obj).nfields >= 1
-                            && !(*obj).fields.is_null()
-                            && !(*(*obj).fields).t.is_null()
-                            && (*(*(*obj).fields).t).kind == hl_type_kind_HBYTES
-                            && (*rt).nfields >= (*obj).nfields
-                            && !(*rt).fields_indexes.is_null()
-                        {
-                            let parent_fields = (*rt).nfields as usize - (*obj).nfields as usize;
-                            let offset = *(*rt).fields_indexes.add(parent_fields) as usize;
-                            let a_bytes = *((a as *mut u8).add(offset) as *mut *const uchar);
-                            let b_bytes = *((b as *mut u8).add(offset) as *mut *const uchar);
-                            if !a_bytes.is_null() && !b_bytes.is_null() {
-                                return crate::ucs2::ucmp(a_bytes, b_bytes).signum();
+        };
+        let cmp_ord = |o: Ordering| -> i32 {
+            match o {
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+                Ordering::Greater => 1,
+            }
+        };
+
+        match (ka, kb) {
+            (ka, kb)
+                if matches!(ka, hl_type_kind_HOBJ | hl_type_kind_HDYNOBJ)
+                    && kb == hl_type_kind_HVIRTUAL =>
+            {
+                return hlp_dyn_compare(a, (*(b as *mut vvirtual)).value);
+            }
+            (ka, kb)
+                if ka == hl_type_kind_HVIRTUAL
+                    && matches!(kb, hl_type_kind_HOBJ | hl_type_kind_HDYNOBJ) =>
+            {
+                return hlp_dyn_compare((*(a as *mut vvirtual)).value, b);
+            }
+            (ka, kb) if ka == hl_type_kind_HVIRTUAL && kb == hl_type_kind_HVIRTUAL => {
+                let av = (*(a as *mut vvirtual)).value;
+                let bv = (*(b as *mut vvirtual)).value;
+                return if !av.is_null() && !bv.is_null() {
+                    hlp_dyn_compare(av, bv)
+                } else {
+                    hl::hl_invalid_comparison as i32
+                };
+            }
+            _ => {}
+        }
+
+        if ka == kb {
+            return match ka {
+                hl_type_kind_HI32 => cmp_ord((*a).v.i.cmp(&(*b).v.i)),
+                hl_type_kind_HUI8 => cmp_ord((*a).v.ui8.cmp(&(*b).v.ui8)),
+                hl_type_kind_HUI16 => cmp_ord((*a).v.ui16.cmp(&(*b).v.ui16)),
+                hl_type_kind_HI64 => cmp_ord((*a).v.i64_.cmp(&(*b).v.i64_)),
+                hl_type_kind_HBOOL => cmp_ord(((*a).v.b as u8).cmp(&((*b).v.b as u8))),
+                hl_type_kind_HF32 => cmp_f64((*a).v.f as f64, (*b).v.f as f64),
+                hl_type_kind_HF64 => cmp_f64((*a).v.d, (*b).v.d),
+                hl_type_kind_HBYTES => {
+                    crate::ucs2::ucmp((*a).v.bytes as *const uchar, (*b).v.bytes as *const uchar)
+                        .signum()
+                }
+                hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
+                    let obj = (*(*a).t).__bindgen_anon_1.obj;
+                    if !obj.is_null() {
+                        let rt = (*obj).rt;
+                        if !rt.is_null() {
+                            if let Some(compare_fn) = (*rt).compareFun {
+                                return compare_fn(a, b);
+                            }
+                            // Ash represents Haxe String values as String objects
+                            // in Dynamic slots. Compare their UTF-16 payload, but
+                            // only after proving both objects have the exact same
+                            // runtime type. The old "first field is HBYTES" test
+                            // also matched ArrayBytes and then used its field
+                            // offset on an unrelated HOBJ, turning a Bool field
+                            // into the pointer 0x1.
+                            let name = (*obj).name;
+                            let is_string = ka == hl_type_kind_HOBJ
+                                && (*a).t == (*b).t
+                                && !name.is_null()
+                                && *name == b'S' as uchar
+                                && *name.add(1) == b't' as uchar
+                                && *name.add(2) == b'r' as uchar
+                                && *name.add(3) == b'i' as uchar
+                                && *name.add(4) == b'n' as uchar
+                                && *name.add(5) == b'g' as uchar
+                                && *name.add(6) == 0;
+                            if is_string
+                                && (*obj).nfields >= 1
+                                && !(*obj).fields.is_null()
+                                && !(*(*obj).fields).t.is_null()
+                                && (*(*(*obj).fields).t).kind == hl_type_kind_HBYTES
+                                && (*rt).nfields >= (*obj).nfields
+                                && !(*rt).fields_indexes.is_null()
+                            {
+                                let parent_fields =
+                                    (*rt).nfields as usize - (*obj).nfields as usize;
+                                let offset = *(*rt).fields_indexes.add(parent_fields) as usize;
+                                let a_bytes = *((a as *mut u8).add(offset) as *mut *const uchar);
+                                let b_bytes = *((b as *mut u8).add(offset) as *mut *const uchar);
+                                if !a_bytes.is_null() && !b_bytes.is_null() {
+                                    return crate::ucs2::ucmp(a_bytes, b_bytes).signum();
+                                }
                             }
                         }
                     }
+                    // Other object content comparison is opt-in through
+                    // compareFun; the fallback is identity ordering.
+                    hlp_ptr_compare(a, b)
                 }
-                // Other object content comparison is opt-in through
-                // compareFun; the fallback is identity ordering.
-                hlp_ptr_compare(a, b)
-            }
-            // Enum values are heap objects whose first word is their type.
-            // Reading v.ptr observes the constructor index at offset 8, so
-            // two unrelated zero-argument enums otherwise compare equal.
-            hl::hl_type_kind_HENUM => hlp_ptr_compare(a, b),
-            _ => hlp_ptr_compare((*a).v.ptr as *const vdynamic, (*b).v.ptr as *const vdynamic),
-        };
-    }
-
-    // `hl_type_kind`, not u32 — the alias is i32 under MSVC, u32 under clang.
-    let as_num = |v: *mut vdynamic, k: hl::hl_type_kind| -> Option<f64> {
-        match k {
-            hl_type_kind_HI32 => Some(unsafe { (*v).v.i as f64 }),
-            hl_type_kind_HUI8 => Some(unsafe { (*v).v.ui8 as f64 }),
-            hl_type_kind_HUI16 => Some(unsafe { (*v).v.ui16 as f64 }),
-            hl_type_kind_HI64 => Some(unsafe { (*v).v.i64_ as f64 }),
-            hl_type_kind_HF32 => Some(unsafe { (*v).v.f as f64 }),
-            hl_type_kind_HF64 => Some(unsafe { (*v).v.d }),
-            hl_type_kind_HBOOL => Some(unsafe {
-                if (*v).v.b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }),
-            _ => None,
+                // Enum values are heap objects whose first word is their type.
+                // Reading v.ptr observes the constructor index at offset 8, so
+                // two unrelated zero-argument enums otherwise compare equal.
+                hl::hl_type_kind_HENUM => hlp_ptr_compare(a, b),
+                _ => hlp_ptr_compare((*a).v.ptr as *const vdynamic, (*b).v.ptr as *const vdynamic),
+            };
         }
-    };
 
-    if let (Some(x), Some(y)) = (as_num(a, ka), as_num(b, kb)) {
-        return cmp_f64(x, y);
+        // `hl_type_kind`, not u32 — the alias is i32 under MSVC, u32 under clang.
+        let as_num = |v: *mut vdynamic, k: hl::hl_type_kind| -> Option<f64> {
+            match k {
+                hl_type_kind_HI32 => Some((*v).v.i as f64),
+                hl_type_kind_HUI8 => Some((*v).v.ui8 as f64),
+                hl_type_kind_HUI16 => Some((*v).v.ui16 as f64),
+                hl_type_kind_HI64 => Some((*v).v.i64_ as f64),
+                hl_type_kind_HF32 => Some((*v).v.f as f64),
+                hl_type_kind_HF64 => Some((*v).v.d),
+                hl_type_kind_HBOOL => Some(if (*v).v.b { 1.0 } else { 0.0 }),
+                _ => None,
+            }
+        };
+
+        if let (Some(x), Some(y)) = (as_num(a, ka), as_num(b, kb)) {
+            return cmp_f64(x, y);
+        }
+
+        hlp_ptr_compare(a, b)
     }
-
-    hlp_ptr_compare(a, b)
 }
 
 /// Dynamic arithmetic: `a <op> b` where at least one side arrives boxed.
@@ -858,119 +882,121 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 /// then checks `Std.isOfType(v, Int)` observes the difference.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_op(op: i32, a: *mut vdynamic, b: *mut vdynamic) -> *mut vdynamic {
-    const OP_ADD: i32 = 0;
-    const OP_SUB: i32 = 1;
-    const OP_MUL: i32 = 2;
-    const OP_MOD: i32 = 3;
-    const OP_DIV: i32 = 4;
-    const OP_SHL: i32 = 5;
-    const OP_SHR: i32 = 6;
-    const OP_USHR: i32 = 7;
-    const OP_AND: i32 = 8;
-    const OP_OR: i32 = 9;
-    const OP_XOR: i32 = 10;
-    const OP_LAST: i32 = 11;
+    unsafe {
+        const OP_ADD: i32 = 0;
+        const OP_SUB: i32 = 1;
+        const OP_MUL: i32 = 2;
+        const OP_MOD: i32 = 3;
+        const OP_DIV: i32 = 4;
+        const OP_SHL: i32 = 5;
+        const OP_SHR: i32 = 6;
+        const OP_USHR: i32 = 7;
+        const OP_AND: i32 = 8;
+        const OP_OR: i32 = 9;
+        const OP_XOR: i32 = 10;
+        const OP_LAST: i32 = 11;
 
-    const OP_NAMES: [&str; OP_LAST as usize] =
-        ["+", "-", "*", "%", "/", "<<", ">>", ">>>", "&", "|", "^"];
+        const OP_NAMES: [&str; OP_LAST as usize] =
+            ["+", "-", "*", "%", "/", "<<", ">>", ">>>", "&", "|", "^"];
 
-    if !(0..OP_LAST).contains(&op) {
-        hlp_error(str_to_uchar_ptr(&format!("Invalid op {op}")));
-        return ptr::null_mut();
-    }
-
-    // Two nulls are not an error: division and modulo yield NaN, everything
-    // else yields null, which is what `null + null` evaluates to in Haxe.
-    if a.is_null() && b.is_null() {
-        if op == OP_DIV || op == OP_MOD {
-            let nan = f64::NAN;
-            return hlp_make_dyn(&nan as *const f64 as *mut c_void, crate::types::hlt_f64());
+        if !(0..OP_LAST).contains(&op) {
+            hlp_error(str_to_uchar_ptr(&format!("Invalid op {op}")));
+            return ptr::null_mut();
         }
-        return ptr::null_mut();
-    }
 
-    // A null operand counts as a number here (it casts to 0 / NaN), matching
-    // upstream's `!a || is_number(a->t)`.
-    let numeric = |v: *mut vdynamic| -> bool {
-        if v.is_null() {
-            return true;
+        // Two nulls are not an error: division and modulo yield NaN, everything
+        // else yields null, which is what `null + null` evaluates to in Haxe.
+        if a.is_null() && b.is_null() {
+            if op == OP_DIV || op == OP_MOD {
+                let nan = f64::NAN;
+                return hlp_make_dyn(&nan as *const f64 as *mut c_void, crate::types::hlt_f64());
+            }
+            return ptr::null_mut();
         }
-        let t = (*v).t;
-        if t.is_null() {
-            return false;
-        }
-        // HUI8 (1) through HBOOL (7) — upstream's is_number, and ash's kind
-        // numbering is identical to hl.h's.
-        (hl::hl_type_kind_HUI8..=hl::hl_type_kind_HBOOL).contains(&(*t).kind)
-    };
 
-    if numeric(a) && numeric(b) {
-        let mut pa = a;
-        let mut pb = b;
-        let dyn_t = crate::types::hlt_dyn();
-        // `dyn_castd`/`dyn_casti` take the address of the operand, not the
-        // operand, exactly as the C does with `&a`.
-        let da = &mut pa as *mut *mut vdynamic as *mut c_void;
-        let db = &mut pb as *mut *mut vdynamic as *mut c_void;
-
-        let as_f64 = |v: f64| -> *mut vdynamic {
-            hlp_make_dyn(&v as *const f64 as *mut c_void, crate::types::hlt_f64())
-        };
-        let as_i32 = |v: i32| -> *mut vdynamic {
-            hlp_make_dyn(&v as *const i32 as *mut c_void, crate::types::hlt_i32())
+        // A null operand counts as a number here (it casts to 0 / NaN), matching
+        // upstream's `!a || is_number(a->t)`.
+        let numeric = |v: *mut vdynamic| -> bool {
+            if v.is_null() {
+                return true;
+            }
+            let t = (*v).t;
+            if t.is_null() {
+                return false;
+            }
+            // HUI8 (1) through HBOOL (7) — upstream's is_number, and ash's kind
+            // numbering is identical to hl.h's.
+            (hl::hl_type_kind_HUI8..=hl::hl_type_kind_HBOOL).contains(&(*t).kind)
         };
 
-        match op {
-            OP_ADD | OP_SUB | OP_MUL | OP_DIV | OP_MOD => {
-                let va = hlp_dyn_castd(da, dyn_t);
-                let vb = hlp_dyn_castd(db, dyn_t);
-                return as_f64(match op {
-                    OP_ADD => va + vb,
-                    OP_SUB => va - vb,
-                    OP_MUL => va * vb,
-                    OP_DIV => va / vb,
-                    _ => va % vb, // Rust's % on f64 is fmod, including sign
-                });
-            }
-            _ => {
-                let i32_t = crate::types::hlt_i32();
-                let va = hlp_dyn_casti(da, dyn_t, i32_t);
-                let vb = hlp_dyn_casti(db, dyn_t, i32_t);
-                return as_i32(match op {
-                    // Upstream shifts with C's operators, which are undefined
-                    // past the width; wrapping keeps the result defined
-                    // without changing it for the in-range shifts real code
-                    // performs.
-                    OP_SHL => va.wrapping_shl(vb as u32),
-                    OP_SHR => va.wrapping_shr(vb as u32),
-                    OP_USHR => ((va as u32).wrapping_shr(vb as u32)) as i32,
-                    OP_AND => va & vb,
-                    OP_OR => va | vb,
-                    OP_XOR => va ^ vb,
-                    // Unreachable: the range check at the top rejected every
-                    // other op. A value rather than a panic, because an
-                    // unwind here would cross the FFI boundary.
-                    _ => 0,
-                });
-            }
-        }
-    }
+        if numeric(a) && numeric(b) {
+            let mut pa = a;
+            let mut pb = b;
+            let dyn_t = crate::types::hlt_dyn();
+            // `dyn_castd`/`dyn_casti` take the address of the operand, not the
+            // operand, exactly as the C does with `&a`.
+            let da = &mut pa as *mut *mut vdynamic as *mut c_void;
+            let db = &mut pb as *mut *mut vdynamic as *mut c_void;
 
-    let name = |v: *mut vdynamic| -> String {
-        if v.is_null() || (*v).t.is_null() {
-            return "null".to_string();
+            let as_f64 = |v: f64| -> *mut vdynamic {
+                hlp_make_dyn(&v as *const f64 as *mut c_void, crate::types::hlt_f64())
+            };
+            let as_i32 = |v: i32| -> *mut vdynamic {
+                hlp_make_dyn(&v as *const i32 as *mut c_void, crate::types::hlt_i32())
+            };
+
+            match op {
+                OP_ADD | OP_SUB | OP_MUL | OP_DIV | OP_MOD => {
+                    let va = hlp_dyn_castd(da, dyn_t);
+                    let vb = hlp_dyn_castd(db, dyn_t);
+                    return as_f64(match op {
+                        OP_ADD => va + vb,
+                        OP_SUB => va - vb,
+                        OP_MUL => va * vb,
+                        OP_DIV => va / vb,
+                        _ => va % vb, // Rust's % on f64 is fmod, including sign
+                    });
+                }
+                _ => {
+                    let i32_t = crate::types::hlt_i32();
+                    let va = hlp_dyn_casti(da, dyn_t, i32_t);
+                    let vb = hlp_dyn_casti(db, dyn_t, i32_t);
+                    return as_i32(match op {
+                        // Upstream shifts with C's operators, which are undefined
+                        // past the width; wrapping keeps the result defined
+                        // without changing it for the in-range shifts real code
+                        // performs.
+                        OP_SHL => va.wrapping_shl(vb as u32),
+                        OP_SHR => va.wrapping_shr(vb as u32),
+                        OP_USHR => ((va as u32).wrapping_shr(vb as u32)) as i32,
+                        OP_AND => va & vb,
+                        OP_OR => va | vb,
+                        OP_XOR => va ^ vb,
+                        // Unreachable: the range check at the top rejected every
+                        // other op. A value rather than a panic, because an
+                        // unwind here would cross the FFI boundary.
+                        _ => 0,
+                    });
+                }
+            }
         }
-        CStr::from_ptr(hlp_type_str((*v).t) as *const std::ffi::c_char)
-            .to_string_lossy()
-            .into_owned()
-    };
-    hlp_error(str_to_uchar_ptr(&format!(
-        "Can't perform dyn op {} {} {}",
-        name(a),
-        OP_NAMES[op as usize],
-        name(b)
-    )));
-    ptr::null_mut()
+
+        let name = |v: *mut vdynamic| -> String {
+            if v.is_null() || (*v).t.is_null() {
+                return "null".to_string();
+            }
+            CStr::from_ptr(hlp_type_str((*v).t) as *const std::ffi::c_char)
+                .to_string_lossy()
+                .into_owned()
+        };
+        hlp_error(str_to_uchar_ptr(&format!(
+            "Can't perform dyn op {} {} {}",
+            name(a),
+            OP_NAMES[op as usize],
+            name(b)
+        )));
+        ptr::null_mut()
+    }
 }
 
 // --- Boxed-return unboxers for JIT-emitted dynamic virtual calls ---
@@ -981,30 +1007,38 @@ pub unsafe extern "C" fn hlp_dyn_op(op: i32, a: *mut vdynamic, b: *mut vdynamic)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_toint(v: *mut vdynamic) -> i32 {
-    let mut slot = v;
-    hlp_dyn_casti(
-        &mut slot as *mut _ as *mut c_void,
-        crate::types::hlt_dyn(),
-        crate::types::hlt_i32(),
-    )
+    unsafe {
+        let mut slot = v;
+        hlp_dyn_casti(
+            &mut slot as *mut _ as *mut c_void,
+            crate::types::hlt_dyn(),
+            crate::types::hlt_i32(),
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_tofloat(v: *mut vdynamic) -> f32 {
-    let mut slot = v;
-    hlp_dyn_castf(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+    unsafe {
+        let mut slot = v;
+        hlp_dyn_castf(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_todouble(v: *mut vdynamic) -> f64 {
-    let mut slot = v;
-    hlp_dyn_castd(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+    unsafe {
+        let mut slot = v;
+        hlp_dyn_castd(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_toi64(v: *mut vdynamic) -> i64 {
-    let mut slot = v;
-    hlp_dyn_casti64(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+    unsafe {
+        let mut slot = v;
+        hlp_dyn_casti64(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+    }
 }
 
 /// The address a dynamic value stands for.
@@ -1015,28 +1049,26 @@ pub unsafe extern "C" fn hlp_dyn_toi64(v: *mut vdynamic) -> i64 {
 /// two views of one object compare unequal.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_value_address(v: *mut vdynamic) -> i64 {
-    if v.is_null() {
-        return 0;
-    }
-    let t = (*v).t;
-    let dynamic = !t.is_null()
-        && matches!(
-            (*t).kind,
-            hl::hl_type_kind_HDYN
-                | hl::hl_type_kind_HFUN
-                | hl::hl_type_kind_HOBJ
-                | hl::hl_type_kind_HARRAY
-                | hl::hl_type_kind_HVIRTUAL
-                | hl::hl_type_kind_HDYNOBJ
-                | hl::hl_type_kind_HABSTRACT
-                | hl::hl_type_kind_HENUM
-                | hl::hl_type_kind_HNULL
-                | hl::hl_type_kind_HSTRUCT
-        );
-    if dynamic {
-        v as i64
-    } else {
-        (*v).v.ptr as i64
+    unsafe {
+        if v.is_null() {
+            return 0;
+        }
+        let t = (*v).t;
+        let dynamic = !t.is_null()
+            && matches!(
+                (*t).kind,
+                hl::hl_type_kind_HDYN
+                    | hl::hl_type_kind_HFUN
+                    | hl::hl_type_kind_HOBJ
+                    | hl::hl_type_kind_HARRAY
+                    | hl::hl_type_kind_HVIRTUAL
+                    | hl::hl_type_kind_HDYNOBJ
+                    | hl::hl_type_kind_HABSTRACT
+                    | hl::hl_type_kind_HENUM
+                    | hl::hl_type_kind_HNULL
+                    | hl::hl_type_kind_HSTRUCT
+            );
+        if dynamic { v as i64 } else { (*v).v.ptr as i64 }
     }
 }
 

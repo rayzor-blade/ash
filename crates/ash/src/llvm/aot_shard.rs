@@ -57,7 +57,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use inkwell::GlobalVisibility;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::context::Context;
 use inkwell::llvm_sys;
@@ -67,7 +68,6 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 use inkwell::values::{AsValueRef, FunctionValue};
-use inkwell::GlobalVisibility;
 
 use super::module::JITModule;
 
@@ -158,8 +158,8 @@ fn instruction_count(f: FunctionValue<'_>) -> usize {
 /// then every instruction goes, which severs every use of a block; only then
 /// do the blocks.
 fn strip_body(f: FunctionValue<'_>) {
-    use llvm_sys::core::*;
     use llvm_sys::LLVMTypeKind;
+    use llvm_sys::core::*;
     unsafe {
         let fref = f.as_value_ref();
         let mut bb = LLVMGetFirstBasicBlock(fref);
@@ -537,11 +537,7 @@ impl<'ctx> JITModule<'ctx> {
         // shard's own IR lands beside it under the same stem.
         let dump_ir: Option<PathBuf> = std::env::var_os("ASH_AOT_DUMP_IR").map(|d| {
             let p = PathBuf::from(d);
-            if p.is_dir() {
-                p.join("module.ll")
-            } else {
-                p
-            }
+            if p.is_dir() { p.join("module.ll") } else { p }
         });
 
         let began = std::time::Instant::now();

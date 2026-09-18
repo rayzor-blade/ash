@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 /// How the runtime is linked, which follows from whether the program loads an
 /// HDLL rather than from anyone's choice.

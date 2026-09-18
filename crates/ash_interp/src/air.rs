@@ -33,7 +33,7 @@
 use std::{collections::HashMap, sync::OnceLock};
 
 use air::opcodes::Opcode;
-use ash_core::air_pipeline::{optimized_with_config, AshModule};
+use ash_core::air_pipeline::{AshModule, optimized_with_config};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::types::{HLFunction, TypeRef};
 

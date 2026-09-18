@@ -3,11 +3,11 @@ use std::ops::Add;
 use super::module::JITModule;
 use crate::hl;
 use crate::types::{HLObjField, HLObjProto, HLType, HLTypeObj};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use inkwell::{
+    AddressSpace,
     types::StructType,
     values::{BasicValueEnum, PointerValue, StructValue},
-    AddressSpace,
 };
 
 impl<'ctx> JITModule<'ctx> {

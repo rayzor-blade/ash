@@ -33,15 +33,15 @@ fn handles() -> &'static Mutex<HashMap<String, usize>> {
 #[cfg(any(unix, windows))]
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            dirs.push(parent.to_path_buf());
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        dirs.push(parent.to_path_buf());
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if !dirs.contains(&cwd) {
-            dirs.push(cwd);
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && !dirs.contains(&cwd)
+    {
+        dirs.push(cwd);
     }
     dirs
 }
@@ -60,7 +60,7 @@ fn search_dirs() -> Vec<PathBuf> {
 // caches it, so the pointer stays valid for as long as anything can ask.
 #[cfg(not(any(unix, windows)))]
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     // Whether a library of this name was loaded.
     fn ash_host_dlopen(name: *const u8, name_len: i32) -> i32;
     // The table index of `symbol` in `lib`, or 0.
@@ -69,54 +69,62 @@ extern "C" {
 
 #[cfg(not(any(unix, windows)))]
 unsafe fn dlsym_handle(handle: *mut c_void, symbol: &str) -> *mut c_void {
-    if handle.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        if handle.is_null() {
+            return std::ptr::null_mut();
+        }
+        let lib = CStr::from_ptr(handle as *const c_char).to_bytes();
+        ash_host_dlsym(
+            lib.as_ptr(),
+            lib.len() as i32,
+            symbol.as_ptr(),
+            symbol.len() as i32,
+        ) as *mut c_void
     }
-    let lib = CStr::from_ptr(handle as *const c_char).to_bytes();
-    ash_host_dlsym(
-        lib.as_ptr(),
-        lib.len() as i32,
-        symbol.as_ptr(),
-        symbol.len() as i32,
-    ) as *mut c_void
 }
 
 #[cfg(not(any(unix, windows)))]
 unsafe fn library(lib: &str) -> *mut c_void {
-    if let Some(&h) = handles().lock().expect("hdll handles poisoned").get(lib) {
-        return h as *mut c_void;
+    unsafe {
+        if let Some(&h) = handles().lock().expect("hdll handles poisoned").get(lib) {
+            return h as *mut c_void;
+        }
+        if ash_host_dlopen(lib.as_ptr(), lib.len() as i32) == 0 {
+            return std::ptr::null_mut();
+        }
+        let Ok(name) = CString::new(lib) else {
+            return std::ptr::null_mut();
+        };
+        let handle = name.into_raw() as *mut c_void;
+        handles()
+            .lock()
+            .expect("hdll handles poisoned")
+            .insert(lib.to_string(), handle as usize);
+        handle
     }
-    if ash_host_dlopen(lib.as_ptr(), lib.len() as i32) == 0 {
-        return std::ptr::null_mut();
-    }
-    let Ok(name) = CString::new(lib) else {
-        return std::ptr::null_mut();
-    };
-    let handle = name.into_raw() as *mut c_void;
-    handles()
-        .lock()
-        .expect("hdll handles poisoned")
-        .insert(lib.to_string(), handle as usize);
-    handle
 }
 
 #[cfg(unix)]
 unsafe fn dlopen_path(path: &std::path::Path) -> *mut c_void {
-    let Ok(c) = CString::new(path.to_string_lossy().as_bytes()) else {
-        return std::ptr::null_mut();
-    };
-    // RTLD_GLOBAL so the library can see the runtime's own hl_* exports, and
-    // an ABSOLUTE path because dlopen reads a name with no slash in it as a
-    // SONAME and never looks in the working directory.
-    libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL)
+    unsafe {
+        let Ok(c) = CString::new(path.to_string_lossy().as_bytes()) else {
+            return std::ptr::null_mut();
+        };
+        // RTLD_GLOBAL so the library can see the runtime's own hl_* exports, and
+        // an ABSOLUTE path because dlopen reads a name with no slash in it as a
+        // SONAME and never looks in the working directory.
+        libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL)
+    }
 }
 
 #[cfg(unix)]
 unsafe fn dlsym_handle(handle: *mut c_void, symbol: &str) -> *mut c_void {
-    let Ok(c) = CString::new(symbol) else {
-        return std::ptr::null_mut();
-    };
-    libc::dlsym(handle, c.as_ptr())
+    unsafe {
+        let Ok(c) = CString::new(symbol) else {
+            return std::ptr::null_mut();
+        };
+        libc::dlsym(handle, c.as_ptr())
+    }
 }
 
 #[cfg(windows)]
@@ -159,41 +167,43 @@ fn candidates(lib: &str) -> Vec<String> {
 
 #[cfg(any(unix, windows))]
 unsafe fn library(lib: &str) -> *mut c_void {
-    if let Some(&h) = handles().lock().expect("hdll handles poisoned").get(lib) {
-        return h as *mut c_void;
-    }
-    for dir in search_dirs() {
-        for name in candidates(lib) {
-            let path = dir.join(&name);
-            if !path.exists() {
-                continue;
-            }
-            let handle = dlopen_path(&path);
-            if !handle.is_null() {
-                handles()
-                    .lock()
-                    .expect("hdll handles poisoned")
-                    .insert(lib.to_string(), handle as usize);
-                return handle;
-            }
-            // A file that IS there and still will not load is the interesting
-            // case -- almost always its own dependencies. Staying quiet about
-            // it leaves only "primitive not found", which points at the wrong
-            // thing entirely.
-            #[cfg(unix)]
-            {
-                let err = libc::dlerror();
-                if !err.is_null() {
-                    eprintln!(
-                        "[ash] cannot load {}: {}",
-                        path.display(),
-                        CStr::from_ptr(err).to_string_lossy()
-                    );
+    unsafe {
+        if let Some(&h) = handles().lock().expect("hdll handles poisoned").get(lib) {
+            return h as *mut c_void;
+        }
+        for dir in search_dirs() {
+            for name in candidates(lib) {
+                let path = dir.join(&name);
+                if !path.exists() {
+                    continue;
+                }
+                let handle = dlopen_path(&path);
+                if !handle.is_null() {
+                    handles()
+                        .lock()
+                        .expect("hdll handles poisoned")
+                        .insert(lib.to_string(), handle as usize);
+                    return handle;
+                }
+                // A file that IS there and still will not load is the interesting
+                // case -- almost always its own dependencies. Staying quiet about
+                // it leaves only "primitive not found", which points at the wrong
+                // thing entirely.
+                #[cfg(unix)]
+                {
+                    let err = libc::dlerror();
+                    if !err.is_null() {
+                        eprintln!(
+                            "[ash] cannot load {}: {}",
+                            path.display(),
+                            CStr::from_ptr(err).to_string_lossy()
+                        );
+                    }
                 }
             }
         }
+        std::ptr::null_mut()
     }
-    std::ptr::null_mut()
 }
 
 /// Primitives a sandbox answers for itself.
@@ -253,45 +263,48 @@ fn sandbox_primitive(lib: &str, name: &str) -> *mut c_void {
 /// `lib` and `name` must be valid NUL-terminated C strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char) -> *mut c_void {
-    if lib.is_null() || name.is_null() {
-        return std::ptr::null_mut();
-    }
-    let (Ok(lib), Ok(name)) = (CStr::from_ptr(lib).to_str(), CStr::from_ptr(name).to_str()) else {
-        return std::ptr::null_mut();
-    };
-    // Asked before the library is, because in a sandbox there is no library
-    // and the answer does not depend on one.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let built_in = sandbox_primitive(lib, name);
-        if !built_in.is_null() {
-            return built_in;
+    unsafe {
+        if lib.is_null() || name.is_null() {
+            return std::ptr::null_mut();
         }
+        let (Ok(lib), Ok(name)) = (CStr::from_ptr(lib).to_str(), CStr::from_ptr(name).to_str())
+        else {
+            return std::ptr::null_mut();
+        };
+        // Asked before the library is, because in a sandbox there is no library
+        // and the answer does not depend on one.
+        #[cfg(not(any(unix, windows)))]
+        {
+            let built_in = sandbox_primitive(lib, name);
+            if !built_in.is_null() {
+                return built_in;
+            }
+        }
+        let handle = library(lib);
+        if handle.is_null() {
+            return std::ptr::null_mut();
+        }
+        // The DEFINE_PRIM protocol, in full. `hlp_<name>` is NOT the primitive: the
+        // macro expands to
+        //
+        //   EXPORT void *hlp_<name>(const char **sign) {
+        //       *sign = <signature>; return (void*)&HL_NAME(<name>);
+        //   }
+        //
+        // a RESOLVER that reports the signature through an out-parameter and
+        // returns the real function. Storing the resolver and calling it as the
+        // primitive writes a signature string through whatever the first argument
+        // happens to be -- for a callback that is the vclosure, and the write
+        // faults on read-only memory some distance from the actual mistake.
+        let resolver = dlsym_handle(handle, &format!("hlp_{name}"));
+        if resolver.is_null() {
+            return std::ptr::null_mut();
+        }
+        type Resolver = unsafe extern "C" fn(*mut *const c_char) -> *mut c_void;
+        let resolver: Resolver = std::mem::transmute(resolver);
+        let mut sign: *const c_char = std::ptr::null();
+        resolver(&mut sign)
     }
-    let handle = library(lib);
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    // The DEFINE_PRIM protocol, in full. `hlp_<name>` is NOT the primitive: the
-    // macro expands to
-    //
-    //   EXPORT void *hlp_<name>(const char **sign) {
-    //       *sign = <signature>; return (void*)&HL_NAME(<name>);
-    //   }
-    //
-    // a RESOLVER that reports the signature through an out-parameter and
-    // returns the real function. Storing the resolver and calling it as the
-    // primitive writes a signature string through whatever the first argument
-    // happens to be -- for a callback that is the vclosure, and the write
-    // faults on read-only memory some distance from the actual mistake.
-    let resolver = dlsym_handle(handle, &format!("hlp_{name}"));
-    if resolver.is_null() {
-        return std::ptr::null_mut();
-    }
-    type Resolver = unsafe extern "C" fn(*mut *const c_char) -> *mut c_void;
-    let resolver: Resolver = std::mem::transmute(resolver);
-    let mut sign: *const c_char = std::ptr::null();
-    resolver(&mut sign)
 }
 
 /// Raise the error HashLink's `disabled_primitive` raises.
@@ -305,19 +318,21 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
 /// `lib` and `name` must be valid NUL-terminated C strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_aot_native_missing(lib: *const c_char, name: *const c_char) {
-    let show = |p: *const c_char| {
-        if p.is_null() {
-            "?".to_string()
-        } else {
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    };
-    let msg = format!(
-        "Native library '{}' not loaded, or it exports no '{}'",
-        show(lib),
-        show(name)
-    );
-    crate::error::hlp_error(crate::strings::str_to_uchar_ptr(&msg));
+    unsafe {
+        let show = |p: *const c_char| {
+            if p.is_null() {
+                "?".to_string()
+            } else {
+                CStr::from_ptr(p).to_string_lossy().into_owned()
+            }
+        };
+        let msg = format!(
+            "Native library '{}' not loaded, or it exports no '{}'",
+            show(lib),
+            show(name)
+        );
+        crate::error::hlp_error(crate::strings::str_to_uchar_ptr(&msg));
+    }
 }
 
 #[cfg(test)]

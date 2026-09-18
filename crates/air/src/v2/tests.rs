@@ -11,9 +11,9 @@
 // Test-local closures and expectation tables use big ad-hoc tuple types.
 #![allow(clippy::type_complexity)]
 
-use super::analysis::{read_class, write_class, AliasClass, CfgInfo, LoopForest};
+use super::analysis::{AliasClass, CfgInfo, LoopForest, read_class, write_class};
 use super::ir::*;
-use super::lower::{lower, lower_with, lower_with_positions, ModuleBuilder};
+use super::lower::{ModuleBuilder, lower, lower_with, lower_with_positions};
 use super::module::{
     CalleeBody, ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo,
 };
@@ -22,7 +22,7 @@ use super::passes::{
     NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, RedundantGuardElim,
     ScalarReplacement, TailRecursionElim,
 };
-use super::serialize::{serialize, Serialized};
+use super::serialize::{Serialized, serialize};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
 use crate::opcodes::*;
 use std::collections::HashMap;
@@ -670,11 +670,12 @@ fn lower_positions_mark_blocks_and_line_changes() {
 
     // Without a table, no markers at all.
     let f = lower_with_positions(&ops, &tys, &NoModuleInfo, None).unwrap();
-    assert!(f
-        .blocks
-        .iter()
-        .flat_map(|b| b.instrs.iter())
-        .all(|i| !matches!(i, Instr::Pos { .. })));
+    assert!(
+        f.blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .all(|i| !matches!(i, Instr::Pos { .. }))
+    );
 }
 
 #[test]
@@ -725,11 +726,12 @@ fn lower_incr_stays_ssa_when_nothing_else_pins() {
         .filter(|i| matches!(i, Instr::UnOp { op: UnOp::Incr, .. }))
         .count();
     assert_eq!(incrs, 2);
-    assert!(f
-        .blocks
-        .iter()
-        .flat_map(|b| b.instrs.iter())
-        .all(|i| !matches!(i, Instr::CellIncr { .. })));
+    assert!(
+        f.blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .all(|i| !matches!(i, Instr::CellIncr { .. }))
+    );
 }
 
 /// A counter whose address is taken is still a cell, and still uses the fused
@@ -766,10 +768,12 @@ fn lower_pinned_ref_cell() {
     assert_eq!(f.cells.len(), 1);
     assert_eq!(f.cells[0].reg, 0);
     assert_eq!(f.cells[0].reason, PinReason::RefTaken);
-    assert!(f.blocks[1]
-        .instrs
-        .iter()
-        .any(|i| matches!(i, Instr::CellRef { .. })));
+    assert!(
+        f.blocks[1]
+            .instrs
+            .iter()
+            .any(|i| matches!(i, Instr::CellRef { .. }))
+    );
 }
 
 #[test]
@@ -811,7 +815,7 @@ fn lower_nested_traps() {
     let f = lower(&ops, &tys).unwrap();
     verify(&f).unwrap();
     assert_eq!(f.cells.len(), 2); // both exception registers pinned
-                                  // the inner handler (Rethrow block) sits inside the outer region
+    // the inner handler (Rethrow block) sits inside the outer region
     let rethrow_block = f
         .blocks
         .iter()
@@ -936,10 +940,11 @@ fn lower_virtualclosure_immediate_field() {
         .unwrap();
     assert_eq!(field, 7);
     let out = serialize(&f).unwrap();
-    assert!(out
-        .ops
-        .iter()
-        .any(|o| matches!(o, Opcode::VirtualClosure { field, .. } if field.0 == 7)));
+    assert!(
+        out.ops
+            .iter()
+            .any(|o| matches!(o, Opcode::VirtualClosure { field, .. } if field.0 == 7))
+    );
 }
 
 #[test]
@@ -976,10 +981,12 @@ fn lower_switch_default_fallthrough() {
         .expect("switch lowered");
     assert_eq!(targets.len(), 2);
     // default is the block of the opcode right after the Switch
-    assert!(f.blocks[default.idx()]
-        .instrs
-        .iter()
-        .any(|i| matches!(i, Instr::Int { idx: 0, .. })));
+    assert!(
+        f.blocks[default.idx()]
+            .instrs
+            .iter()
+            .any(|i| matches!(i, Instr::Int { idx: 0, .. }))
+    );
 }
 
 #[test]
@@ -2652,11 +2659,13 @@ fn loop_forest_nests_inner_loops() {
     assert_eq!(forest.get(outer).depth, 0);
     assert!(forest.get(outer).children.contains(&inner));
     assert!(forest.roots.contains(&outer));
-    assert!(forest
-        .get(inner)
-        .blocks
-        .iter()
-        .all(|&b| forest.get(outer).contains(b)));
+    assert!(
+        forest
+            .get(inner)
+            .blocks
+            .iter()
+            .all(|&b| forest.get(outer).contains(b))
+    );
     assert_eq!(forest.depth_of(forest.get(inner).header), 2);
 }
 
@@ -2673,14 +2682,16 @@ fn alias_classes_separate_storage() {
     assert!(AliasClass::Global(1).may_alias(AliasClass::Global(1)));
     assert!(!AliasClass::RawBytes.may_alias(AliasClass::ArrayData));
     assert!(!AliasClass::Cell(CellId(0)).may_alias(AliasClass::Cell(CellId(1))));
-    assert!(!AliasClass::EnumParam {
-        construct: 0,
-        field: 0
-    }
-    .may_alias(AliasClass::EnumParam {
-        construct: 1,
-        field: 0
-    }));
+    assert!(
+        !AliasClass::EnumParam {
+            construct: 0,
+            field: 0
+        }
+        .may_alias(AliasClass::EnumParam {
+            construct: 1,
+            field: 0
+        })
+    );
     // Reflective access can resolve to an object field.
     assert!(AliasClass::DynBox.may_alias(of0));
     assert!(of0.may_alias(AliasClass::DynBox));
@@ -6303,7 +6314,7 @@ fn widening_emits_vector_instructions_that_verify() {
 /// which ash does not do yet, so the only sound answer for now is to refuse.
 #[test]
 fn an_element_that_does_not_fill_a_machine_vector_is_refused() {
-    use super::passes::widen::{lanes_fit_for_test, Decline};
+    use super::passes::widen::{Decline, lanes_fit_for_test};
     // 4-byte element, VF 4: exactly 128 bits.
     assert!(lanes_fit_for_test(TypeRef(3), Some(4)).is_ok());
     // 1- and 2-byte elements underfill it.

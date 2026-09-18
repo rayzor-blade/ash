@@ -28,8 +28,8 @@ const CHILD: &str = "ASH_WIN_SETJMP_CHILD";
 unsafe fn module_of(addr: usize) -> String {
     use windows_sys::Win32::Foundation::HMODULE;
     use windows_sys::Win32::System::LibraryLoader::{
-        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GetModuleFileNameW, GetModuleHandleExW,
     };
     let mut module: HMODULE = std::ptr::null_mut();
     let ok = GetModuleHandleExW(

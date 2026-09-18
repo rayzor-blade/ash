@@ -12,11 +12,11 @@ use inkwell::{AddressSpace, IntPredicate};
 use crate::hl::{
     hl_type_kind_HABSTRACT, hl_type_kind_HBOOL, hl_type_kind_HDYN, hl_type_kind_HF32,
     hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ,
-    hl_type_kind_HSTRUCT, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL,
+    hl_type_kind_HSTRUCT, hl_type_kind_HUI8, hl_type_kind_HUI16, hl_type_kind_HVIRTUAL,
 };
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 impl<'ctx> JITModule<'ctx> {
     /// `Cast { kind, dst, src }`: one of the seven HL conversion opcodes,

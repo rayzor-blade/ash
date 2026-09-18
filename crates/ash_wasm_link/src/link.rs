@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use wasmparser::{RelocationEntry, RelocationType};
 
 use crate::object::{ImportKind, ObjImport, Object, SegmentInfo, SymbolTarget};
@@ -1030,11 +1030,11 @@ fn mark_reachable(
 
     let root =
         |oi: usize, defined: u32, kept: &mut Vec<Vec<bool>>, work: &mut Vec<(usize, u32)>| {
-            if let Some(slot) = kept[oi].get_mut(defined as usize) {
-                if !*slot {
-                    *slot = true;
-                    work.push((oi, defined));
-                }
+            if let Some(slot) = kept[oi].get_mut(defined as usize)
+                && !*slot
+            {
+                *slot = true;
+                work.push((oi, defined));
             }
         };
 
@@ -2255,10 +2255,10 @@ fn emit(
         let imported = obj.imported_functions();
         let mut by_fspace: HashMap<u32, &str> = HashMap::new();
         for sym in &obj.symbols {
-            if let SymbolTarget::Function { index } = sym.target {
-                if !sym.is_undefined() {
-                    by_fspace.entry(index).or_insert(sym.name.as_str());
-                }
+            if let SymbolTarget::Function { index } = sym.target
+                && !sym.is_undefined()
+            {
+                by_fspace.entry(index).or_insert(sym.name.as_str());
             }
         }
         for (li, out) in layout.func_out[oi].iter().enumerate() {

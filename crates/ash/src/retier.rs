@@ -4,12 +4,12 @@
 //! after header phis and before header instructions. Source and destination
 //! retain that version; neither reconstructs identities from register numbers.
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use air::v2::ir::{BlockId, CellId, TypeRef, ValueId};
-use air::v2::{liveness::Liveness, CfgInfo};
-use anyhow::{bail, Result};
+use air::v2::{CfgInfo, liveness::Liveness};
+use anyhow::{Result, bail};
 
 use crate::air_pipeline::Optimized;
 
@@ -211,10 +211,12 @@ mod tests {
             assert!(layout.slots.iter().any(|s| s.input == Input::Value(v)));
         }
         for phi in &air.ir.blocks[header.idx()].phis {
-            assert!(layout
-                .slots
-                .iter()
-                .any(|s| s.input == Input::Value(phi.dst)));
+            assert!(
+                layout
+                    .slots
+                    .iter()
+                    .any(|s| s.input == Input::Value(phi.dst))
+            );
         }
     }
 
@@ -281,9 +283,11 @@ mod tests {
                 ty: TypeRef(0)
             }
         );
-        assert!(layout
-            .slots
-            .iter()
-            .any(|s| matches!(s.input, Input::Value(_))));
+        assert!(
+            layout
+                .slots
+                .iter()
+                .any(|s| matches!(s.input, Input::Value(_)))
+        );
     }
 }

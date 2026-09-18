@@ -8,10 +8,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasmtime::{Caller, Engine, Linker, Module};
 
-use super::{control::Control, linker_for, store_for, Host, Outcome};
+use super::{Host, Outcome, control::Control, linker_for, store_for};
 
 /// What a thread needs in order to become another instance of this program.
 ///

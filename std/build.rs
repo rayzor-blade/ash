@@ -226,10 +226,10 @@ fn cross_clang_args(target: &str, host: &str) -> Vec<String> {
         if let Some(sysroot) = print_sysroot(name) {
             return vec![format!("--target={target}"), format!("--sysroot={sysroot}")];
         }
-        if let Some(compiler) = on_path(name) {
-            if let Some(sysroot) = sysroot_beside(&compiler, &gcc_triple) {
-                return vec![format!("--target={target}"), format!("--sysroot={sysroot}")];
-            }
+        if let Some(compiler) = on_path(name)
+            && let Some(sysroot) = sysroot_beside(&compiler, &gcc_triple)
+        {
+            return vec![format!("--target={target}"), format!("--sysroot={sysroot}")];
         }
     }
 
@@ -338,9 +338,19 @@ fn main() {
 
     assert_bindings_usable(&bindings.to_string());
 
-    // Write the bindings to the $OUT_DIR/bindings.rs file.
+    // Write the bindings to the $OUT_DIR/bindings.rs file. This bindgen
+    // predates the 2024 edition, whose extern blocks are `unsafe extern`.
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("hl_bindings.rs"))
-        .expect("Couldn't write bindings!");
+    let text = bindings
+        .to_string()
+        .replace("\nextern \"C\" {", "\nunsafe extern \"C\" {")
+        .replace(
+            "::std::slice::from_raw_parts(self.as_ptr(), len)",
+            "unsafe { ::std::slice::from_raw_parts(self.as_ptr(), len) }",
+        )
+        .replace(
+            "::std::slice::from_raw_parts_mut(self.as_mut_ptr(), len)",
+            "unsafe { ::std::slice::from_raw_parts_mut(self.as_mut_ptr(), len) }",
+        );
+    std::fs::write(out_path.join("hl_bindings.rs"), text).expect("Couldn't write bindings!");
 }

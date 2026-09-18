@@ -99,11 +99,11 @@ macro_rules! runtime_table {
             use super::*;
             $(
                 #[inline(always)]
-                pub unsafe fn $name($($arg: $ty),*) $(-> $ret)? {
+                pub unsafe fn $name($($arg: $ty),*) $(-> $ret)? { unsafe {
                     let f: unsafe extern "C" fn($($ty),*) $(-> $ret)? =
                         std::mem::transmute(slot::$name.load(Ordering::Relaxed));
                     f($($arg),*)
-                }
+                }}
             )*
         }
 
@@ -270,23 +270,23 @@ pub fn alloc_immortal(size: usize) -> Option<NonNull<u8>> {
 /// Allocate a finalizable block whose word zero holds `finalize`.
 #[inline(always)]
 pub unsafe fn alloc_with_finalizer(size: usize, finalize: Finalizer) -> *mut c_void {
-    call::alloc_with_finalizer(size, Some(finalize))
+    unsafe { call::alloc_with_finalizer(size, Some(finalize)) }
 }
 
 /// Allocate a finalizable block and leave word zero to the caller.
 #[inline(always)]
 pub unsafe fn alloc_finalizable(size: usize) -> *mut c_void {
-    call::alloc_with_finalizer(size, None)
+    unsafe { call::alloc_with_finalizer(size, None) }
 }
 
 #[inline(always)]
 pub unsafe fn allocation_size(ptr: *const c_void) -> usize {
-    call::allocation_size(ptr)
+    unsafe { call::allocation_size(ptr) }
 }
 
 #[inline(always)]
 pub unsafe fn is_gc_ptr(ptr: *const c_void) -> bool {
-    call::is_gc_ptr(ptr)
+    unsafe { call::is_gc_ptr(ptr) }
 }
 
 /// Report an allocation that could not be satisfied, and stop.
@@ -299,12 +299,12 @@ pub fn out_of_memory(what: &str) -> ! {
 /// Park until `waiter` is woken or `deadline` passes.
 #[inline(always)]
 pub unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
-    call::park(waiter, timeout_ns(deadline))
+    unsafe { call::park(waiter, timeout_ns(deadline)) }
 }
 
 #[inline(always)]
 pub unsafe fn sleep_for(duration: Duration) {
-    call::sleep_ns(duration_ns(duration))
+    unsafe { call::sleep_ns(duration_ns(duration)) }
 }
 
 fn timeout_ns(deadline: Option<Instant>) -> u64 {
@@ -339,19 +339,23 @@ pub(crate) fn seal() {
 /// `hlp_gc_init` has run or ash's heap was created lazily by an allocation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_install(table: *const RuntimeVTable) -> bool {
-    if table.is_null() {
-        return false;
+    unsafe {
+        if table.is_null() {
+            return false;
+        }
+        let table = &*table;
+        if table.version != RT_VERSION
+            || table.size as usize != std::mem::size_of::<RuntimeVTable>()
+        {
+            return false;
+        }
+        if SEALED.load(Ordering::Acquire) || crate::gc::heap_exists() {
+            return false;
+        }
+        install_entries(table);
+        INSTALLED.store(true, Ordering::Release);
+        true
     }
-    let table = &*table;
-    if table.version != RT_VERSION || table.size as usize != std::mem::size_of::<RuntimeVTable>() {
-        return false;
-    }
-    if SEALED.load(Ordering::Acquire) || crate::gc::heap_exists() {
-        return false;
-    }
-    install_entries(table);
-    INSTALLED.store(true, Ordering::Release);
-    true
 }
 
 /// Whether a host table has been installed.
@@ -364,13 +368,13 @@ pub extern "C" fn hlp_rt_installed() -> bool {
 /// for a scheduler that replaces ash's and must call it around every switch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_switch_hook() -> Option<crate::fiber::FiberSwitchHook> {
-    crate::fiber::switch_hook()
+    unsafe { crate::fiber::switch_hook() }
 }
 
 /// The closure runner registered with `hlp_set_closure_runner`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_closure_runner() -> Option<crate::fiber::ClosureRunner> {
-    crate::fiber::closure_runner()
+    unsafe { crate::fiber::closure_runner() }
 }
 
 /// Swap this thread's live exception state (trap chain head, exception
@@ -378,7 +382,9 @@ pub unsafe extern "C" fn hlp_rt_closure_runner() -> Option<crate::fiber::Closure
 /// switch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_exc_swap(trap: *mut *mut TrapContext, exc: *mut *mut vdynamic) {
-    crate::gc::gc_swap_exc_state(&mut *trap, &mut *exc);
+    unsafe {
+        crate::gc::gc_swap_exc_state(&mut *trap, &mut *exc);
+    }
 }
 
 // ── ash's own implementations, C-shaped ─────────────────────────────────
@@ -408,20 +414,22 @@ mod ash {
         size: usize,
         finalize: Option<Finalizer>,
     ) -> *mut c_void {
-        crate::gc::alloc_with_finalizer(size, finalize)
+        unsafe { crate::gc::alloc_with_finalizer(size, finalize) }
     }
 
     pub unsafe extern "C" fn allocation_size(ptr: *const c_void) -> usize {
-        crate::gc::allocation_size(ptr)
+        unsafe { crate::gc::allocation_size(ptr) }
     }
 
     pub unsafe extern "C" fn is_gc_ptr(ptr: *const c_void) -> bool {
-        crate::gc::gc_locked_init().is_gc_ptr(ptr as *const vdynamic)
+        unsafe { crate::gc::gc_locked_init().is_gc_ptr(ptr as *const vdynamic) }
     }
 
     pub unsafe extern "C" fn out_of_memory(what: *const u8, len: usize) -> ! {
-        let what = std::str::from_utf8_unchecked(std::slice::from_raw_parts(what, len));
-        crate::gc::out_of_memory(what)
+        unsafe {
+            let what = std::str::from_utf8_unchecked(std::slice::from_raw_parts(what, len));
+            crate::gc::out_of_memory(what)
+        }
     }
 
     pub unsafe extern "C" fn gc_safepoint() {
@@ -447,23 +455,33 @@ mod ash {
     }
 
     pub unsafe extern "C" fn gc_register_fiber_stack(id: u32, base: usize, size: usize) {
-        crate::gc::gc_register_fiber_stack(id, base, size);
+        unsafe {
+            crate::gc::gc_register_fiber_stack(id, base, size);
+        }
     }
 
     pub unsafe extern "C" fn gc_update_fiber_sp(id: u32, sp: usize) {
-        crate::gc::gc_update_fiber_sp(id, sp);
+        unsafe {
+            crate::gc::gc_update_fiber_sp(id, sp);
+        }
     }
 
     pub unsafe extern "C" fn gc_unregister_fiber_stack(id: u32) {
-        crate::gc::gc_unregister_fiber_stack(id);
+        unsafe {
+            crate::gc::gc_unregister_fiber_stack(id);
+        }
     }
 
     pub unsafe extern "C" fn gc_add_persistent(ptr: *mut vdynamic) {
-        crate::gc::gc_add_persistent(ptr);
+        unsafe {
+            crate::gc::gc_add_persistent(ptr);
+        }
     }
 
     pub unsafe extern "C" fn gc_remove_persistent(ptr: *mut vdynamic) {
-        crate::gc::gc_remove_persistent(ptr);
+        unsafe {
+            crate::gc::gc_remove_persistent(ptr);
+        }
     }
 
     pub unsafe extern "C" fn add_root_slot(slot: usize) {
@@ -483,15 +501,15 @@ mod ash {
     }
 
     pub unsafe extern "C" fn new_waiter() -> Waiter {
-        crate::fiber::new_waiter()
+        unsafe { crate::fiber::new_waiter() }
     }
 
     pub unsafe extern "C" fn wake(waiter: Waiter) -> bool {
-        crate::fiber::wake(waiter)
+        unsafe { crate::fiber::wake(waiter) }
     }
 
     pub unsafe extern "C" fn park(waiter: Waiter, timeout_ns: u64) -> bool {
-        crate::fiber::park(waiter, deadline_from(timeout_ns))
+        unsafe { crate::fiber::park(waiter, deadline_from(timeout_ns)) }
     }
 
     /// With fibers alive, park the logical thread on a scheduler timer
@@ -499,22 +517,26 @@ mod ash {
     /// with none, sleep the OS thread, told to the collector so a world
     /// stop does not wait it out.
     pub unsafe extern "C" fn sleep_ns(ns: u64) {
-        let duration = Duration::from_nanos(ns);
-        if crate::fiber::fibers_active() {
-            crate::fiber::sleep_until(Instant::now() + duration);
-            return;
+        unsafe {
+            let duration = Duration::from_nanos(ns);
+            if crate::fiber::fibers_active() {
+                crate::fiber::sleep_until(Instant::now() + duration);
+                return;
+            }
+            crate::thread::hlp_blocking(true);
+            std::thread::sleep(duration);
+            crate::thread::hlp_blocking(false);
         }
-        crate::thread::hlp_blocking(true);
-        std::thread::sleep(duration);
-        crate::thread::hlp_blocking(false);
     }
 
     pub unsafe extern "C" fn block_yield() {
-        crate::fiber::block_yield();
+        unsafe {
+            crate::fiber::block_yield();
+        }
     }
 
     pub unsafe extern "C" fn schedule_step() -> bool {
-        crate::fiber::schedule_step()
+        unsafe { crate::fiber::schedule_step() }
     }
 
     pub unsafe extern "C" fn thread_create(
@@ -522,35 +544,35 @@ mod ash {
         ctx: *mut c_void,
         flags: u32,
     ) -> *mut c_void {
-        crate::fiber::spawn(body, ctx, flags)
+        unsafe { crate::fiber::spawn(body, ctx, flags) }
     }
 
     pub unsafe extern "C" fn fibers_active() -> bool {
-        crate::fiber::fibers_active()
+        unsafe { crate::fiber::fibers_active() }
     }
 
     pub unsafe extern "C" fn current_id() -> u32 {
-        crate::fiber::current_id()
+        unsafe { crate::fiber::current_id() }
     }
 
     pub unsafe extern "C" fn current_handle() -> *mut c_void {
-        crate::fiber::current_handle().unwrap_or(std::ptr::null_mut())
+        unsafe { crate::fiber::current_handle().unwrap_or(std::ptr::null_mut()) }
     }
 
     pub unsafe extern "C" fn current_owner() -> u64 {
-        crate::fiber::current_owner()
+        unsafe { crate::fiber::current_owner() }
     }
 
     pub unsafe extern "C" fn current_ctx() -> *mut c_void {
-        crate::fiber::current_ctx()
+        unsafe { crate::fiber::current_ctx() }
     }
 
     pub unsafe extern "C" fn update_gc_blocking_depth(blocking: bool) -> bool {
-        crate::fiber::update_gc_blocking_depth(blocking)
+        unsafe { crate::fiber::update_gc_blocking_depth(blocking) }
     }
 
     pub unsafe extern "C" fn is_gc_blocking() -> bool {
-        crate::fiber::is_gc_blocking()
+        unsafe { crate::fiber::is_gc_blocking() }
     }
 
     pub unsafe extern "C" fn request_fiber_poll() {
@@ -579,8 +601,10 @@ mod tests {
 
     /// Counts, then forwards to ash's.
     unsafe extern "C" fn counting_safepoint() {
-        SAFEPOINTS.fetch_add(1, Ordering::SeqCst);
-        ash::gc_safepoint();
+        unsafe {
+            SAFEPOINTS.fetch_add(1, Ordering::SeqCst);
+            ash::gc_safepoint();
+        }
     }
 
     const CHILD_ENV: &str = "ASH_RT_SEAM_CHILD";

@@ -17,7 +17,7 @@
 //! `ASH_TRACE_NATIVES` reported, with the library prefix stripped. Without
 //! it, every `hlp_` symbol the library exports is asked.
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 
 /// One type from HashLink's signature grammar, and what is left after it.
 ///

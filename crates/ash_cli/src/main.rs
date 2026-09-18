@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ash_core::bytecode::BytecodeDecoder;
-use ash_core::native_lib::{init_std_library, NativeFunctionResolver};
+use ash_core::native_lib::{NativeFunctionResolver, init_std_library};
 use ash_interp::interpreter::{HLInterpreter, TierMode, TierPreset, TieredConfig};
 use clap::{ArgGroup, Parser, ValueEnum};
 use std::path::PathBuf;
@@ -768,7 +768,7 @@ fn exit_without_atexit(code: i32) -> ! {
 /// it is safe to consult from a signal handler.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 unsafe fn errno() -> i32 {
-    *libc::__error()
+    unsafe { *libc::__error() }
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
@@ -787,19 +787,21 @@ unsafe fn errno() -> i32 {
 /// `WriteFile(GetStdHandle(STD_ERROR_HANDLE))` and lands with it.
 #[cfg(unix)]
 unsafe fn write_stderr(bytes: &[u8]) {
-    let mut off = 0usize;
-    while off < bytes.len() {
-        let n = libc::write(
-            libc::STDERR_FILENO,
-            bytes.as_ptr().add(off) as *const std::ffi::c_void,
-            bytes.len() - off,
-        );
-        if n > 0 {
-            off += n as usize;
-        } else if n < 0 && errno() == libc::EINTR {
-            continue;
-        } else {
-            return;
+    unsafe {
+        let mut off = 0usize;
+        while off < bytes.len() {
+            let n = libc::write(
+                libc::STDERR_FILENO,
+                bytes.as_ptr().add(off) as *const std::ffi::c_void,
+                bytes.len() - off,
+            );
+            if n > 0 {
+                off += n as usize;
+            } else if n < 0 && errno() == libc::EINTR {
+                continue;
+            } else {
+                return;
+            }
         }
     }
 }
@@ -907,15 +909,17 @@ struct UContext64 {
 /// this is async-signal-safe.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
-    if ctx.is_null() {
-        return None;
+    unsafe {
+        if ctx.is_null() {
+            return None;
+        }
+        let mc = (*(ctx as *const UContext64)).uc_mcontext;
+        if mc.is_null() {
+            return None;
+        }
+        let ss = &(*mc).ss;
+        Some((ss.pc, ss.lr, ss.fp, ss.sp))
     }
-    let mc = (*(ctx as *const UContext64)).uc_mcontext;
-    if mc.is_null() {
-        return None;
-    }
-    let ss = &(*mc).ss;
-    Some((ss.pc, ss.lr, ss.fp, ss.sp))
 }
 
 /// x86_64 Linux: the register file lives in `ucontext_t.uc_mcontext.gregs`,
@@ -977,175 +981,177 @@ unsafe extern "C" fn crash_handler_siginfo(
     info: *mut libc::siginfo_t,
     ctx: *mut std::ffi::c_void,
 ) {
-    // `si_addr` is a plain field in Apple's `siginfo_t`, but on Linux the
-    // `libc` crate models the sigaction union with an accessor method, so the
-    // two spellings are not interchangeable.
-    let fault_addr = if !info.is_null() {
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        {
-            (*info).si_addr as usize
+    unsafe {
+        // `si_addr` is a plain field in Apple's `siginfo_t`, but on Linux the
+        // `libc` crate models the sigaction union with an accessor method, so the
+        // two spellings are not interchangeable.
+        let fault_addr = if !info.is_null() {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            {
+                (*info).si_addr as usize
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            {
+                (*info).si_addr() as usize
+            }
+        } else {
+            0
+        };
+
+        // If a native call recovery point is armed, siglongjmp back to it
+        // instead of crashing. This handles cases like macOS GL driver bugs
+        // where native code triggers SIGSEGV during normal operation.
+        if ash_interp::native_recovery::try_recover_from_signal(sig, fault_addr) {
+            return; // unreachable — siglongjmp never returns
         }
-        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-        {
-            (*info).si_addr() as usize
+
+        let name: &[u8] = match sig {
+            libc::SIGSEGV => b"SIGSEGV",
+            libc::SIGBUS => b"SIGBUS",
+            libc::SIGABRT => b"SIGABRT",
+            _ => b"UNKNOWN",
+        };
+
+        let mut buf = [0u8; 256];
+        let mut len = 0usize;
+        push_bytes(&mut buf, &mut len, b"\n=== CRASH: ");
+        push_bytes(&mut buf, &mut len, name);
+        push_bytes(&mut buf, &mut len, b" (signal ");
+        push_dec(&mut buf, &mut len, sig as u64);
+        push_bytes(&mut buf, &mut len, b") fault_addr=0x");
+        push_hex(&mut buf, &mut len, fault_addr as u64);
+
+        // The faulting PC/LR/FP straight out of the signal context. Reading the
+        // context is just a memory load, so it is signal-safe — and it is the only
+        // way to name the faulting frame here, since symbolization is not. JIT
+        // frames have no symbol at all: cross-check the PC against the
+        // `[tiered] promoted findex=… addr=…` lines that `--jit-log` prints.
+        if let Some((pc, lr, fp, sp)) = signal_registers(ctx) {
+            push_bytes(&mut buf, &mut len, b" pc=0x");
+            push_hex(&mut buf, &mut len, pc);
+            push_bytes(&mut buf, &mut len, b" lr=0x");
+            push_hex(&mut buf, &mut len, lr);
+            push_bytes(&mut buf, &mut len, b" fp=0x");
+            push_hex(&mut buf, &mut len, fp);
+            push_bytes(&mut buf, &mut len, b" sp=0x");
+            push_hex(&mut buf, &mut len, sp);
         }
-    } else {
-        0
-    };
+        push_bytes(&mut buf, &mut len, b" ===\n");
+        write_stderr(&buf[..len]);
 
-    // If a native call recovery point is armed, siglongjmp back to it
-    // instead of crashing. This handles cases like macOS GL driver bugs
-    // where native code triggers SIGSEGV during normal operation.
-    if ash_interp::native_recovery::try_recover_from_signal(sig, fault_addr) {
-        return; // unreachable — siglongjmp never returns
-    }
-
-    let name: &[u8] = match sig {
-        libc::SIGSEGV => b"SIGSEGV",
-        libc::SIGBUS => b"SIGBUS",
-        libc::SIGABRT => b"SIGABRT",
-        _ => b"UNKNOWN",
-    };
-
-    let mut buf = [0u8; 256];
-    let mut len = 0usize;
-    push_bytes(&mut buf, &mut len, b"\n=== CRASH: ");
-    push_bytes(&mut buf, &mut len, name);
-    push_bytes(&mut buf, &mut len, b" (signal ");
-    push_dec(&mut buf, &mut len, sig as u64);
-    push_bytes(&mut buf, &mut len, b") fault_addr=0x");
-    push_hex(&mut buf, &mut len, fault_addr as u64);
-
-    // The faulting PC/LR/FP straight out of the signal context. Reading the
-    // context is just a memory load, so it is signal-safe — and it is the only
-    // way to name the faulting frame here, since symbolization is not. JIT
-    // frames have no symbol at all: cross-check the PC against the
-    // `[tiered] promoted findex=… addr=…` lines that `--jit-log` prints.
-    if let Some((pc, lr, fp, sp)) = signal_registers(ctx) {
-        push_bytes(&mut buf, &mut len, b" pc=0x");
-        push_hex(&mut buf, &mut len, pc);
-        push_bytes(&mut buf, &mut len, b" lr=0x");
-        push_hex(&mut buf, &mut len, lr);
-        push_bytes(&mut buf, &mut len, b" fp=0x");
-        push_hex(&mut buf, &mut len, fp);
-        push_bytes(&mut buf, &mut len, b" sp=0x");
-        push_hex(&mut buf, &mut len, sp);
-    }
-    push_bytes(&mut buf, &mut len, b" ===\n");
-    write_stderr(&buf[..len]);
-
-    // Frame-pointer walk, default-on. Bounded stack reads plus a try_lock
-    // registry lookup — nothing here allocates or takes a lock it could
-    // deadlock on, unlike the opt-in Rust backtrace below. Both arm64 and
-    // x86_64 store [saved_fp, return_addr] at fp, so one walk serves both.
-    // JIT frames are named from the promotion registry (findex + tier);
-    // everything else goes through dladdr on unix.
-    if let Some((pc0, lr, mut fp, _sp)) = signal_registers(ctx) {
-        write_stderr(b"[ash] frames (innermost first):\n");
-        let mut frame = 0usize;
-        let emit = |pc: u64, frame: usize| {
-            let mut b = [0u8; 192];
-            let mut l = 0usize;
-            push_bytes(&mut b, &mut l, b"  #");
-            push_dec(&mut b, &mut l, frame as u64);
-            push_bytes(&mut b, &mut l, b" 0x");
-            push_hex(&mut b, &mut l, pc);
-            if let Some((findex, tier, off)) = ash_core::profile::describe_jit_pc(pc as usize) {
-                push_bytes(&mut b, &mut l, b" jit findex=");
-                push_dec(&mut b, &mut l, findex as u64);
-                push_bytes(&mut b, &mut l, b" (");
-                push_bytes(&mut b, &mut l, tier.as_bytes());
-                push_bytes(&mut b, &mut l, b"+0x");
-                push_hex(&mut b, &mut l, off as u64);
-                push_bytes(&mut b, &mut l, b")");
-                // Signal-safe: an index into a leaked table, no allocation.
-                if let Some(name) = ash_core::profile::static_name(findex) {
-                    push_bytes(&mut b, &mut l, b" ");
-                    push_bytes(&mut b, &mut l, name.as_bytes());
-                }
-            } else {
-                #[cfg(unix)]
-                unsafe {
-                    let mut info: libc::Dl_info = std::mem::zeroed();
-                    if libc::dladdr(pc as *const std::ffi::c_void, &mut info) != 0
-                        && !info.dli_sname.is_null()
-                    {
-                        let name = std::ffi::CStr::from_ptr(info.dli_sname);
+        // Frame-pointer walk, default-on. Bounded stack reads plus a try_lock
+        // registry lookup — nothing here allocates or takes a lock it could
+        // deadlock on, unlike the opt-in Rust backtrace below. Both arm64 and
+        // x86_64 store [saved_fp, return_addr] at fp, so one walk serves both.
+        // JIT frames are named from the promotion registry (findex + tier);
+        // everything else goes through dladdr on unix.
+        if let Some((pc0, lr, mut fp, _sp)) = signal_registers(ctx) {
+            write_stderr(b"[ash] frames (innermost first):\n");
+            let mut frame = 0usize;
+            let emit = |pc: u64, frame: usize| {
+                let mut b = [0u8; 192];
+                let mut l = 0usize;
+                push_bytes(&mut b, &mut l, b"  #");
+                push_dec(&mut b, &mut l, frame as u64);
+                push_bytes(&mut b, &mut l, b" 0x");
+                push_hex(&mut b, &mut l, pc);
+                if let Some((findex, tier, off)) = ash_core::profile::describe_jit_pc(pc as usize) {
+                    push_bytes(&mut b, &mut l, b" jit findex=");
+                    push_dec(&mut b, &mut l, findex as u64);
+                    push_bytes(&mut b, &mut l, b" (");
+                    push_bytes(&mut b, &mut l, tier.as_bytes());
+                    push_bytes(&mut b, &mut l, b"+0x");
+                    push_hex(&mut b, &mut l, off as u64);
+                    push_bytes(&mut b, &mut l, b")");
+                    // Signal-safe: an index into a leaked table, no allocation.
+                    if let Some(name) = ash_core::profile::static_name(findex) {
                         push_bytes(&mut b, &mut l, b" ");
-                        // Demangle into the fixed buffer — rustc_demangle
-                        // formats lazily, so a stack fmt::Write sink keeps
-                        // this allocation-free, which the signal context
-                        // requires.
-                        struct Sink<'a> {
-                            buf: &'a mut [u8; 192],
-                            len: &'a mut usize,
-                        }
-                        impl std::fmt::Write for Sink<'_> {
-                            fn write_str(&mut self, s: &str) -> std::fmt::Result {
-                                push_bytes(self.buf, self.len, s.as_bytes());
-                                Ok(())
+                        push_bytes(&mut b, &mut l, name.as_bytes());
+                    }
+                } else {
+                    #[cfg(unix)]
+                    {
+                        let mut info: libc::Dl_info = std::mem::zeroed();
+                        if libc::dladdr(pc as *const std::ffi::c_void, &mut info) != 0
+                            && !info.dli_sname.is_null()
+                        {
+                            let name = std::ffi::CStr::from_ptr(info.dli_sname);
+                            push_bytes(&mut b, &mut l, b" ");
+                            // Demangle into the fixed buffer — rustc_demangle
+                            // formats lazily, so a stack fmt::Write sink keeps
+                            // this allocation-free, which the signal context
+                            // requires.
+                            struct Sink<'a> {
+                                buf: &'a mut [u8; 192],
+                                len: &'a mut usize,
                             }
-                        }
-                        if let Ok(sym) = name.to_str() {
-                            let _ = std::fmt::write(
-                                &mut Sink {
-                                    buf: &mut b,
-                                    len: &mut l,
-                                },
-                                format_args!("{:#}", rustc_demangle::demangle(sym)),
-                            );
-                        } else {
-                            let bytes = name.to_bytes();
-                            let take = bytes.len().min(120);
-                            push_bytes(&mut b, &mut l, &bytes[..take]);
+                            impl std::fmt::Write for Sink<'_> {
+                                fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                                    push_bytes(self.buf, self.len, s.as_bytes());
+                                    Ok(())
+                                }
+                            }
+                            if let Ok(sym) = name.to_str() {
+                                let _ = std::fmt::write(
+                                    &mut Sink {
+                                        buf: &mut b,
+                                        len: &mut l,
+                                    },
+                                    format_args!("{:#}", rustc_demangle::demangle(sym)),
+                                );
+                            } else {
+                                let bytes = name.to_bytes();
+                                let take = bytes.len().min(120);
+                                push_bytes(&mut b, &mut l, &bytes[..take]);
+                            }
                         }
                     }
                 }
-            }
-            push_bytes(&mut b, &mut l, b"\n");
-            write_stderr(&b[..l]);
-        };
-        emit(pc0, frame);
-        frame += 1;
-        if lr != 0 && lr != pc0 {
-            emit(lr, frame);
+                push_bytes(&mut b, &mut l, b"\n");
+                write_stderr(&b[..l]);
+            };
+            emit(pc0, frame);
             frame += 1;
+            if lr != 0 && lr != pc0 {
+                emit(lr, frame);
+                frame += 1;
+            }
+            // The chain itself: each fp points at [saved_fp, return_addr].
+            // Sanity bounds keep a corrupted fp from turning the report into a
+            // second fault: alignment, monotonic growth, and a page of slack
+            // below 48 bits of address space.
+            while frame < 32 {
+                if fp == 0 || fp & 0xF != 0 || fp > 0x7FFF_FFFF_F000 {
+                    break;
+                }
+                let saved_fp = *(fp as *const u64);
+                let ra = *((fp + 8) as *const u64);
+                if ra < 0x1000 {
+                    break;
+                }
+                emit(ra, frame);
+                frame += 1;
+                if saved_fp <= fp {
+                    break;
+                }
+                fp = saved_fp;
+            }
         }
-        // The chain itself: each fp points at [saved_fp, return_addr].
-        // Sanity bounds keep a corrupted fp from turning the report into a
-        // second fault: alignment, monotonic growth, and a page of slack
-        // below 48 bits of address space.
-        while frame < 32 {
-            if fp == 0 || fp & 0xF != 0 || fp > 0x7FFF_FFFF_F000 {
-                break;
-            }
-            let saved_fp = unsafe { *(fp as *const u64) };
-            let ra = unsafe { *((fp + 8) as *const u64) };
-            if ra < 0x1000 {
-                break;
-            }
-            emit(ra, frame);
-            frame += 1;
-            if saved_fp <= fp {
-                break;
-            }
-            fp = saved_fp;
+
+        // Opt-in, best-effort, and NOT async-signal-safe — see the doc comment.
+        if *CRASH_BACKTRACE.get().unwrap_or(&false) {
+            write_stderr(b"[ash] ASH_CRASH_BACKTRACE=1: capturing (unsafe in a signal handler)\n");
+            let bt = std::backtrace::Backtrace::force_capture();
+            let text = bt.to_string();
+            write_stderr(text.as_bytes());
+            write_stderr(b"\n");
         }
-    }
 
-    // Opt-in, best-effort, and NOT async-signal-safe — see the doc comment.
-    if *CRASH_BACKTRACE.get().unwrap_or(&false) {
-        write_stderr(b"[ash] ASH_CRASH_BACKTRACE=1: capturing (unsafe in a signal handler)\n");
-        let bt = std::backtrace::Backtrace::force_capture();
-        let text = bt.to_string();
-        write_stderr(text.as_bytes());
-        write_stderr(b"\n");
+        // Restore the default disposition and re-raise, so the process dies from
+        // the original signal with the faulting frame intact.
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
     }
-
-    // Restore the default disposition and re-raise, so the process dies from
-    // the original signal with the faulting frame intact.
-    libc::signal(sig, libc::SIG_DFL);
-    libc::raise(sig);
 }
 
 /// `ash wasm`: read a module and say what it is.
@@ -1473,30 +1479,31 @@ fn run() -> Result<()> {
     // and reports what round-trips; `ASH_VERIFY_AIR=dump:<findex>` prints one
     // function's IR before and after optimization, which is how a pass that
     // fires zero times gets diagnosed.
-    if let Ok(mode) = std::env::var("ASH_VERIFY_AIR") {
-        if !mode.is_empty() && mode != "0" {
-            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-                _ => ash_core::air_pipeline::AirOptLevel::O2,
-            };
-            let opts = ash_core::air_pipeline::AirPassOptions::default();
-            if let Some(want) = mode
-                .strip_prefix("dump:")
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                for line in ash_core::air_pipeline::dump(&bytecode, want, level, &opts) {
-                    eprintln!("[air] {line}");
-                }
-                return Ok(());
-            }
-            for line in ash_core::air_pipeline::report(&bytecode, level, &opts) {
+    if let Ok(mode) = std::env::var("ASH_VERIFY_AIR")
+        && !mode.is_empty()
+        && mode != "0"
+    {
+        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+            _ => ash_core::air_pipeline::AirOptLevel::O2,
+        };
+        let opts = ash_core::air_pipeline::AirPassOptions::default();
+        if let Some(want) = mode
+            .strip_prefix("dump:")
+            .and_then(|s| s.parse::<i32>().ok())
+        {
+            for line in ash_core::air_pipeline::dump(&bytecode, want, level, &opts) {
                 eprintln!("[air] {line}");
             }
-            if mode == "only" {
-                return Ok(());
-            }
+            return Ok(());
+        }
+        for line in ash_core::air_pipeline::report(&bytecode, level, &opts) {
+            eprintln!("[air] {line}");
+        }
+        if mode == "only" {
+            return Ok(());
         }
     }
 
@@ -1505,86 +1512,90 @@ fn run() -> Result<()> {
     // handler map comes from AIR v2's Block::handler, which derives it by
     // dataflow over the CFG — the only form that resolves a region with more
     // than one normal exit.
-    if let Ok(mode) = std::env::var("ASH_VERIFY_TRAPS") {
-        if !mode.is_empty() && mode != "0" {
-            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-                _ => ash_core::air_pipeline::AirOptLevel::O2,
-            };
-            let (funcs, sites, covered) = ash_core::air_pipeline::trap_report(&bytecode, level);
-            eprintln!("[traps] {funcs} functions have a block under a handler");
-            eprintln!(
-                "[traps] {sites} may-throw sites, {covered} inside a handler ({:.1}%)",
-                if sites == 0 {
-                    0.0
-                } else {
-                    covered as f64 * 100.0 / sites as f64
-                }
-            );
-            if mode == "only" {
-                return Ok(());
+    if let Ok(mode) = std::env::var("ASH_VERIFY_TRAPS")
+        && !mode.is_empty()
+        && mode != "0"
+    {
+        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+            _ => ash_core::air_pipeline::AirOptLevel::O2,
+        };
+        let (funcs, sites, covered) = ash_core::air_pipeline::trap_report(&bytecode, level);
+        eprintln!("[traps] {funcs} functions have a block under a handler");
+        eprintln!(
+            "[traps] {sites} may-throw sites, {covered} inside a handler ({:.1}%)",
+            if sites == 0 {
+                0.0
+            } else {
+                covered as f64 * 100.0 / sites as f64
             }
+        );
+        if mode == "only" {
+            return Ok(());
         }
     }
 
-    if let Ok(mode) = std::env::var("ASH_ESCAPE") {
-        if !mode.is_empty() && mode != "0" {
-            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-                _ => ash_core::air_pipeline::AirOptLevel::O2,
-            };
-            for line in ash_core::air_pipeline::escape_report(&bytecode, level) {
-                eprintln!("[escape] {line}");
-            }
-            if mode == "only" {
-                return Ok(());
-            }
+    if let Ok(mode) = std::env::var("ASH_ESCAPE")
+        && !mode.is_empty()
+        && mode != "0"
+    {
+        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+            _ => ash_core::air_pipeline::AirOptLevel::O2,
+        };
+        for line in ash_core::air_pipeline::escape_report(&bytecode, level) {
+            eprintln!("[escape] {line}");
+        }
+        if mode == "only" {
+            return Ok(());
         }
     }
 
     // `ASH_REACH=only` reports how much of the module can actually be entered.
     // A `.hl` links the whole stdlib, so any sweep that iterates bc.functions
     // is mostly measuring code that cannot run.
-    if let Ok(mode) = std::env::var("ASH_REACH") {
-        if !mode.is_empty() && mode != "0" {
-            for line in ash_core::reachable::report(&bytecode) {
-                eprintln!("[reach] {line}");
+    if let Ok(mode) = std::env::var("ASH_REACH")
+        && !mode.is_empty()
+        && mode != "0"
+    {
+        for line in ash_core::reachable::report(&bytecode) {
+            eprintln!("[reach] {line}");
+        }
+        if let Some(fx) = std::env::var("ASH_REACH_WHY")
+            .ok()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+        {
+            for line in ash_core::reachable::why(&bytecode, fx) {
+                eprintln!("[reach] why({fx}) {line}");
             }
-            if let Some(fx) = std::env::var("ASH_REACH_WHY")
-                .ok()
-                .and_then(|v| v.trim().parse::<i32>().ok())
-            {
-                for line in ash_core::reachable::why(&bytecode, fx) {
-                    eprintln!("[reach] why({fx}) {line}");
-                }
-            }
-            if mode == "only" {
-                return Ok(());
-            }
+        }
+        if mode == "only" {
+            return Ok(());
         }
     }
 
     // `ASH_VERIFY_OSR=only` reports which loops on-stack replacement would
     // accept. Computed over AIR, so loop discovery, dominance and the
     // address-escape question all come from the IR that already models them.
-    if let Ok(mode) = std::env::var("ASH_VERIFY_OSR") {
-        if !mode.is_empty() && mode != "0" {
-            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-                _ => ash_core::air_pipeline::AirOptLevel::O2,
-            };
-            for line in ash_core::air_pipeline::osr_report(&bytecode, level) {
-                eprintln!("[osr] {line}");
-            }
-            if mode == "only" {
-                return Ok(());
-            }
+    if let Ok(mode) = std::env::var("ASH_VERIFY_OSR")
+        && !mode.is_empty()
+        && mode != "0"
+    {
+        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+            _ => ash_core::air_pipeline::AirOptLevel::O2,
+        };
+        for line in ash_core::air_pipeline::osr_report(&bytecode, level) {
+            eprintln!("[osr] {line}");
+        }
+        if mode == "only" {
+            return Ok(());
         }
     }
 
@@ -1728,37 +1739,37 @@ fn run() -> Result<()> {
                     eprintln!("{line}");
                 }
             }
-            if let Some(stats) = interpreter.tiered_stats() {
-                if cli.jit_log {
+            if let Some(stats) = interpreter.tiered_stats()
+                && cli.jit_log
+            {
+                eprintln!(
+                    "[tiered] attempted={} succeeded={} failed={} compiled_calls={} fallbacks={} cranelift={} llvm={}",
+                    stats.attempted_promotions,
+                    stats.successful_promotions,
+                    stats.failed_promotions,
+                    stats.compiled_calls,
+                    stats.fallback_calls,
+                    stats.cranelift_promotions,
+                    stats.llvm_promotions
+                );
+                if let Some(report) = ash_interp::interpreter::decline_report() {
+                    eprint!("{report}");
+                }
+                // Did the promotions repay themselves? A compile that
+                // lands after the function stops being called cost its
+                // middle end and returned nothing, which on a short
+                // program is most of what the top tier does.
+                let installs = ash_interp::interpreter::install_call_counts();
+                if !installs.is_empty() && std::env::var_os("ASH_TIER_LOG").is_some() {
                     eprintln!(
-                        "[tiered] attempted={} succeeded={} failed={} compiled_calls={} fallbacks={} cranelift={} llvm={}",
-                        stats.attempted_promotions,
-                        stats.successful_promotions,
-                        stats.failed_promotions,
-                        stats.compiled_calls,
-                        stats.fallback_calls,
-                        stats.cranelift_promotions,
-                        stats.llvm_promotions
+                        "[tiered] llvm installs, calls at install time ({} functions):",
+                        installs.len()
                     );
-                    if let Some(report) = ash_interp::interpreter::decline_report() {
-                        eprint!("{report}");
-                    }
-                    // Did the promotions repay themselves? A compile that
-                    // lands after the function stops being called cost its
-                    // middle end and returned nothing, which on a short
-                    // program is most of what the top tier does.
-                    let installs = ash_interp::interpreter::install_call_counts();
-                    if !installs.is_empty() && std::env::var_os("ASH_TIER_LOG").is_some() {
+                    for (findex, calls) in installs.iter().take(24) {
                         eprintln!(
-                            "[tiered] llvm installs, calls at install time ({} functions):",
-                            installs.len()
+                            "[tiered]   findex={findex:<6} name={:<28} calls_at_install={calls}",
+                            ash_core::profile::static_name(*findex as u32).unwrap_or("?")
                         );
-                        for (findex, calls) in installs.iter().take(24) {
-                            eprintln!(
-                                "[tiered]   findex={findex:<6} name={:<28} calls_at_install={calls}",
-                                ash_core::profile::static_name(*findex as u32).unwrap_or("?")
-                            );
-                        }
                     }
                 }
             }
@@ -1917,16 +1928,15 @@ fn emit_optimized(
             Outcome::Optimized(mut ops, regs, new_ints) => {
                 if !new_ints.is_empty() {
                     for op in &mut ops {
-                        if let ash_core::opcodes::Opcode::Int { ptr, .. } = op {
-                            if ptr.0 >= int_base {
-                                let value = new_ints[ptr.0 - int_base];
-                                let at =
-                                    minted.iter().position(|v| *v == value).unwrap_or_else(|| {
-                                        minted.push(value);
-                                        minted.len() - 1
-                                    });
-                                ptr.0 = int_base + at;
-                            }
+                        if let ash_core::opcodes::Opcode::Int { ptr, .. } = op
+                            && ptr.0 >= int_base
+                        {
+                            let value = new_ints[ptr.0 - int_base];
+                            let at = minted.iter().position(|v| *v == value).unwrap_or_else(|| {
+                                minted.push(value);
+                                minted.len() - 1
+                            });
+                            ptr.0 = int_base + at;
                         }
                     }
                 }

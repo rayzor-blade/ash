@@ -1,12 +1,12 @@
 //! Escape analysis and scalar replacement of aggregates.
 
 use super::{
-    compact_values, feeds_handler_phi, handler_blocks, param_values, privatize, replace_all_uses,
-    Pass, PassOptions, PassStats, RegClaims,
+    Pass, PassOptions, PassStats, RegClaims, compact_values, feeds_handler_phi, handler_blocks,
+    param_values, privatize, replace_all_uses,
 };
+use crate::v2::ModuleInfo;
 use crate::v2::analysis::CfgInfo;
 use crate::v2::ir::*;
-use crate::v2::ModuleInfo;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -174,18 +174,18 @@ fn slot_allocs<'m>(f: &Function, info: &'m dyn ModuleInfo) -> Option<SlotAllocs<
     let mut consts = HashMap::new();
     for blk in &f.blocks {
         for ins in &blk.instrs {
-            if let Instr::Int { dst, idx } = ins {
-                if let Some(v) = f.int_at(*idx, pool) {
-                    consts.insert(*dst, v);
-                    match v {
-                        16 => {
-                            sixteen.insert(*dst);
-                        }
-                        0 => {
-                            zero.insert(*dst);
-                        }
-                        _ => {}
+            if let Instr::Int { dst, idx } = ins
+                && let Some(v) = f.int_at(*idx, pool)
+            {
+                consts.insert(*dst, v);
+                match v {
+                    16 => {
+                        sixteen.insert(*dst);
                     }
+                    0 => {
+                        zero.insert(*dst);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -394,11 +394,11 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAlloc
                 }
             }
             for ins in &blk.instrs {
-                if let Instr::Copy { dst, src } = ins {
-                    if aliases.contains(dst) || aliases.contains(src) {
-                        aliases.insert(*dst);
-                        aliases.insert(*src);
-                    }
+                if let Instr::Copy { dst, src } = ins
+                    && (aliases.contains(dst) || aliases.contains(src))
+                {
+                    aliases.insert(*dst);
+                    aliases.insert(*src);
                 }
             }
         }
@@ -835,10 +835,10 @@ fn plan_for(
             }
             if let Instr::VecOp { args, .. } = ins {
                 for a in args {
-                    if let VecArg::Slot { base, .. } = a {
-                        if let Some(&r) = web.root_of.get(base) {
-                            demanded.insert((r, 0));
-                        }
+                    if let VecArg::Slot { base, .. } = a
+                        && let Some(&r) = web.root_of.get(base)
+                    {
+                        demanded.insert((r, 0));
                     }
                 }
             }
@@ -898,14 +898,14 @@ fn plan_for(
         let mut placed: HashSet<usize> = HashSet::new();
         let mut ever: HashSet<usize> = defs.iter().copied().collect();
         // The stitch is a definition *at* the object phi's own block.
-        if let Some(&i) = stitch_at.get(&(web.root_block[r], r, fd)) {
-            if demanded.contains(&(r, fd)) {
-                placed.insert(web.root_block[r]);
-                phi_fields
-                    .entry(web.root_block[r])
-                    .or_default()
-                    .push((r, fd, Var::Stitch(i)));
-            }
+        if let Some(&i) = stitch_at.get(&(web.root_block[r], r, fd))
+            && demanded.contains(&(r, fd))
+        {
+            placed.insert(web.root_block[r]);
+            phi_fields
+                .entry(web.root_block[r])
+                .or_default()
+                .push((r, fd, Var::Stitch(i)));
         }
         while let Some(x) = work.pop() {
             for &y in &cfg.dom.dom_frontier[x] {
@@ -1079,19 +1079,19 @@ fn plan_for(
                 // Operands read the value current before the instruction;
                 // the write defines a new one after.
                 for (i, a) in args.iter().enumerate() {
-                    if let VecArg::Slot { base, .. } = a {
-                        if let Some(&r) = web.root_of.get(base) {
-                            plan.vec_reads.push(((b, k), i, *stacks[&(r, 0)].last()?));
-                        }
+                    if let VecArg::Slot { base, .. } = a
+                        && let Some(&r) = web.root_of.get(base)
+                    {
+                        plan.vec_reads.push(((b, k), i, *stacks[&(r, 0)].last()?));
                     }
                 }
-                if let VecOut::Slot { base, .. } = out {
-                    if let Some(&r) = web.root_of.get(base) {
-                        let v = ValueId(next_write);
-                        next_write += 1;
-                        plan.vec_writes.push(((b, k), v));
-                        stacks.get_mut(&(r, 0)).expect("known var").push(v);
-                    }
+                if let VecOut::Slot { base, .. } = out
+                    && let Some(&r) = web.root_of.get(base)
+                {
+                    let v = ValueId(next_write);
+                    next_write += 1;
+                    plan.vec_writes.push(((b, k), v));
+                    stacks.get_mut(&(r, 0)).expect("known var").push(v);
                 }
                 continue;
             }

@@ -9,7 +9,7 @@
 use air::v2::ir::{TypeRef as AirTypeRef, ValueId};
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValue, PointerValue};
-use inkwell::{basic_block::BasicBlock, AddressSpace};
+use inkwell::{AddressSpace, basic_block::BasicBlock};
 
 use crate::llvm::module::JITModule;
 
@@ -17,11 +17,11 @@ use super::{hl_hash_utf8, sized_alloc_enabled};
 use crate::hl::{
     hl_type_kind_HBOOL, hl_type_kind_HDYNOBJ, hl_type_kind_HF32, hl_type_kind_HF64,
     hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HOBJ, hl_type_kind_HSTRUCT,
-    hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL,
+    hl_type_kind_HTYPE, hl_type_kind_HUI8, hl_type_kind_HUI16, hl_type_kind_HVIRTUAL,
     hl_type_kind_HVOID,
 };
 use crate::types::HLFunction;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 impl<'ctx> JITModule<'ctx> {
     /// `dst = obj.field`, with `obj_ty` as the object's type.

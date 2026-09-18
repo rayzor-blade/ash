@@ -19,9 +19,9 @@
 
 use std::os::raw::{c_int, c_void};
 
-use miniz_oxide::deflate::core::{create_comp_flags_from_zip_params, CompressorOxide};
+use miniz_oxide::deflate::core::{CompressorOxide, create_comp_flags_from_zip_params};
 use miniz_oxide::deflate::stream::deflate;
-use miniz_oxide::inflate::stream::{inflate, InflateState};
+use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{MZError, MZFlush, MZStatus};
 
 use crate::error::hlp_error;
@@ -191,35 +191,37 @@ pub fn adler32(adler: u32, data: &[u8]) -> u32 {
 /// `in` is a NUL-terminated UTF-16 string to be hashed as UTF-8, and `len` is
 /// then ignored.
 pub unsafe extern "C" fn fmt_digest(out: *mut u8, input: *const u8, len: c_int, format: c_int) {
-    let mut utf8: Option<Vec<u8>> = None;
-    let data: &[u8] = if format & 256 != 0 {
-        let mut size: i32 = 0;
-        let p = crate::strings::hlp_utf16_to_utf8(input, 0, &mut size);
-        if p.is_null() {
+    unsafe {
+        let mut utf8: Option<Vec<u8>> = None;
+        let data: &[u8] = if format & 256 != 0 {
+            let mut size: i32 = 0;
+            let p = crate::strings::hlp_utf16_to_utf8(input, 0, &mut size);
+            if p.is_null() {
+                &[]
+            } else {
+                utf8 = Some(std::slice::from_raw_parts(p, size.max(0) as usize).to_vec());
+                utf8.as_deref().unwrap_or(&[])
+            }
+        } else if input.is_null() || len <= 0 {
             &[]
         } else {
-            utf8 = Some(std::slice::from_raw_parts(p, size.max(0) as usize).to_vec());
-            utf8.as_deref().unwrap_or(&[])
+            std::slice::from_raw_parts(input, len as usize)
+        };
+        match format & 0xff {
+            0 => std::ptr::copy_nonoverlapping(md5(data).as_ptr(), out, 16),
+            1 => std::ptr::copy_nonoverlapping(sha1(data).as_ptr(), out, 20),
+            2 => {
+                let seed = (out as *const u32).read_unaligned();
+                (out as *mut u32).write_unaligned(crc32(seed, data));
+            }
+            3 => {
+                let seed = (out as *const u32).read_unaligned();
+                (out as *mut u32).write_unaligned(adler32(seed, data));
+            }
+            other => hlp_error(str_to_uchar_ptr(&format!("Unknown digest format {other}"))),
         }
-    } else if input.is_null() || len <= 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(input, len as usize)
-    };
-    match format & 0xff {
-        0 => std::ptr::copy_nonoverlapping(md5(data).as_ptr(), out, 16),
-        1 => std::ptr::copy_nonoverlapping(sha1(data).as_ptr(), out, 20),
-        2 => {
-            let seed = (out as *const u32).read_unaligned();
-            (out as *mut u32).write_unaligned(crc32(seed, data));
-        }
-        3 => {
-            let seed = (out as *const u32).read_unaligned();
-            (out as *mut u32).write_unaligned(adler32(seed, data));
-        }
-        other => hlp_error(str_to_uchar_ptr(&format!("Unknown digest format {other}"))),
+        drop(utf8);
     }
-    drop(utf8);
 }
 
 // ---------------------------------------------------------------------------
@@ -238,11 +240,13 @@ pub struct FmtZip {
 }
 
 unsafe fn zip<'a>(z: *mut FmtZip) -> &'a mut FmtZip {
-    if z.is_null() {
-        hlp_error(str_to_uchar_ptr("Invalid zip stream"));
-        unreachable!("hlp_error does not return");
+    unsafe {
+        if z.is_null() {
+            hlp_error(str_to_uchar_ptr("Invalid zip stream"));
+            unreachable!("hlp_error does not return");
+        }
+        &mut *z
     }
-    &mut *z
 }
 
 fn zlib_error(err: MZError) -> ! {
@@ -291,26 +295,30 @@ pub unsafe extern "C" fn fmt_deflate_bound(_zip: *mut FmtZip, length: c_int) -> 
 
 /// `fmt.zip_end(zip)`.
 pub unsafe extern "C" fn fmt_zip_end(z: *mut FmtZip) {
-    let z = zip(z);
-    z.inflater = None;
-    z.deflater = None;
+    unsafe {
+        let z = zip(z);
+        z.inflater = None;
+        z.deflater = None;
+    }
 }
 
 /// `fmt.zip_flush_mode(zip, mode)`, in Haxe's `FlushMode` order: NO, SYNC,
 /// FULL, FINISH, BLOCK.
 pub unsafe extern "C" fn fmt_zip_flush_mode(z: *mut FmtZip, mode: c_int) {
-    let z = zip(z);
-    z.flush = match mode {
-        0 => MZFlush::None,
-        1 => MZFlush::Sync,
-        2 => MZFlush::Full,
-        3 => MZFlush::Finish,
-        4 => MZFlush::Block,
-        other => {
-            hlp_error(str_to_uchar_ptr(&format!("Invalid flush mode {other}")));
-            unreachable!("hlp_error does not return");
-        }
-    };
+    unsafe {
+        let z = zip(z);
+        z.flush = match mode {
+            0 => MZFlush::None,
+            1 => MZFlush::Sync,
+            2 => MZFlush::Full,
+            3 => MZFlush::Finish,
+            4 => MZFlush::Block,
+            other => {
+                hlp_error(str_to_uchar_ptr(&format!("Invalid flush mode {other}")));
+                unreachable!("hlp_error does not return");
+            }
+        };
+    }
 }
 
 /// The two buffers a `*_buffer` call works on, checked as upstream checks them.
@@ -322,23 +330,25 @@ unsafe fn buffers<'a>(
     dstpos: c_int,
     dstlen: c_int,
 ) -> (&'a [u8], &'a mut [u8]) {
-    let slen = srclen - srcpos;
-    let dlen = dstlen - dstpos;
-    if srcpos < 0 || dstpos < 0 || slen < 0 || dlen < 0 {
-        hlp_error(str_to_uchar_ptr("Out of range"));
-        unreachable!("hlp_error does not return");
+    unsafe {
+        let slen = srclen - srcpos;
+        let dlen = dstlen - dstpos;
+        if srcpos < 0 || dstpos < 0 || slen < 0 || dlen < 0 {
+            hlp_error(str_to_uchar_ptr("Out of range"));
+            unreachable!("hlp_error does not return");
+        }
+        let input = if src.is_null() || slen == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(src.add(srcpos as usize), slen as usize)
+        };
+        let output = if dst.is_null() || dlen == 0 {
+            &mut [][..]
+        } else {
+            std::slice::from_raw_parts_mut(dst.add(dstpos as usize), dlen as usize)
+        };
+        (input, output)
     }
-    let input = if src.is_null() || slen == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(src.add(srcpos as usize), slen as usize)
-    };
-    let output = if dst.is_null() || dlen == 0 {
-        &mut [][..]
-    } else {
-        std::slice::from_raw_parts_mut(dst.add(dstpos as usize), dlen as usize)
-    };
-    (input, output)
 }
 
 /// `fmt.inflate_buffer(zip, src, srcPos, srcLen, dst, dstPos, dstLen, read, write)`.
@@ -355,30 +365,32 @@ pub unsafe extern "C" fn fmt_inflate_buffer(
     read: *mut c_int,
     write: *mut c_int,
 ) -> bool {
-    let z = zip(z);
-    let Some(state) = z.inflater.as_deref_mut() else {
-        hlp_error(str_to_uchar_ptr("Not an inflate stream, or already closed"));
-        unreachable!("hlp_error does not return");
-    };
-    let (input, output) = buffers(src, srcpos, srclen, dst, dstpos, dstlen);
-    // A full flush has no meaning for inflate and miniz refuses it; zlib
-    // treats it as a sync flush there.
-    let flush = if z.flush == MZFlush::Full {
-        MZFlush::Sync
-    } else {
-        z.flush
-    };
-    let result = inflate(state, input, output, flush);
-    let status = match result.status {
-        Ok(s) => s,
-        // No progress on an empty output buffer is not an error to zlib's
-        // callers either: they read 0/0 and come back with room.
-        Err(MZError::Buf) => MZStatus::Ok,
-        Err(e) => zlib_error(e),
-    };
-    *read = result.bytes_consumed as c_int;
-    *write = result.bytes_written as c_int;
-    status == MZStatus::StreamEnd
+    unsafe {
+        let z = zip(z);
+        let Some(state) = z.inflater.as_deref_mut() else {
+            hlp_error(str_to_uchar_ptr("Not an inflate stream, or already closed"));
+            unreachable!("hlp_error does not return");
+        };
+        let (input, output) = buffers(src, srcpos, srclen, dst, dstpos, dstlen);
+        // A full flush has no meaning for inflate and miniz refuses it; zlib
+        // treats it as a sync flush there.
+        let flush = if z.flush == MZFlush::Full {
+            MZFlush::Sync
+        } else {
+            z.flush
+        };
+        let result = inflate(state, input, output, flush);
+        let status = match result.status {
+            Ok(s) => s,
+            // No progress on an empty output buffer is not an error to zlib's
+            // callers either: they read 0/0 and come back with room.
+            Err(MZError::Buf) => MZStatus::Ok,
+            Err(e) => zlib_error(e),
+        };
+        *read = result.bytes_consumed as c_int;
+        *write = result.bytes_written as c_int;
+        status == MZStatus::StreamEnd
+    }
 }
 
 /// `fmt.deflate_buffer(zip, src, srcPos, srcLen, dst, dstPos, dstLen, read, write)`.
@@ -395,21 +407,23 @@ pub unsafe extern "C" fn fmt_deflate_buffer(
     read: *mut c_int,
     write: *mut c_int,
 ) -> bool {
-    let z = zip(z);
-    let Some(state) = z.deflater.as_deref_mut() else {
-        hlp_error(str_to_uchar_ptr("Not a deflate stream, or already closed"));
-        unreachable!("hlp_error does not return");
-    };
-    let (input, output) = buffers(src, srcpos, srclen, dst, dstpos, dstlen);
-    let result = deflate(state, input, output, z.flush);
-    let status = match result.status {
-        Ok(s) => s,
-        Err(MZError::Buf) => MZStatus::Ok,
-        Err(e) => zlib_error(e),
-    };
-    *read = result.bytes_consumed as c_int;
-    *write = result.bytes_written as c_int;
-    status == MZStatus::StreamEnd
+    unsafe {
+        let z = zip(z);
+        let Some(state) = z.deflater.as_deref_mut() else {
+            hlp_error(str_to_uchar_ptr("Not a deflate stream, or already closed"));
+            unreachable!("hlp_error does not return");
+        };
+        let (input, output) = buffers(src, srcpos, srclen, dst, dstpos, dstlen);
+        let result = deflate(state, input, output, z.flush);
+        let status = match result.status {
+            Ok(s) => s,
+            Err(MZError::Buf) => MZStatus::Ok,
+            Err(e) => zlib_error(e),
+        };
+        *read = result.bytes_consumed as c_int;
+        *write = result.bytes_written as c_int;
+        status == MZStatus::StreamEnd
+    }
 }
 
 /// The primitives above, by their `fmt` names, for the sandbox's resolver.

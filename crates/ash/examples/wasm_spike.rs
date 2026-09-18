@@ -6,10 +6,10 @@
 //! anything the wasm backend refuses.
 //!
 //! Usage: wasm_spike <file.hl> [out.o]
+use inkwell::OptimizationLevel;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use inkwell::OptimizationLevel;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);

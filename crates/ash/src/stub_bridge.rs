@@ -57,7 +57,7 @@ pub fn set_stub_resolver(f: StubResolver) {
 /// separate from [`ash_jit_call_stub`]: the generated caller still owns the
 /// exact HL ABI and can invoke the returned pointer without erasing f32/f64,
 /// sub-word integer, or aggregate calling-convention details.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_jit_resolve_stub(sentinel: i64) -> i64 {
     if sentinel <= 0 || sentinel >= STUB_SENTINEL_LIMIT as i64 {
         return 0;
@@ -77,7 +77,7 @@ pub unsafe extern "C" fn ash_jit_resolve_stub(sentinel: i64) -> i64 {
 ///
 /// # Safety
 /// `args` must point to `nargs` i64 words encoded per the module contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_jit_call_stub(
     sentinel: i64,
     caller: i32,

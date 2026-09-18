@@ -1,7 +1,7 @@
 //! Link objects from the command line, for testing against a known linker.
 //!
 //! `cargo run --example link_objects -- [--shared-memory] out.wasm a.o b.o`
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

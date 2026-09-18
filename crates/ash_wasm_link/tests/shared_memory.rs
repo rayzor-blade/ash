@@ -12,7 +12,7 @@
 
 mod common;
 
-use ash_wasm_link::{link, LinkOptions};
+use ash_wasm_link::{LinkOptions, link};
 use common::{object, read};
 use wasmtime::{Config, Engine, Linker, MemoryType, Module, SharedMemory, Store};
 

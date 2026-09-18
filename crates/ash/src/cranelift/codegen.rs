@@ -28,14 +28,14 @@
 //! [`reject_reason`] remains as a compile-time tripwire: adding a new AIR V2
 //! instruction requires classifying it before this backend will build.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 
 use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
-    SigRef, Signature, SourceLoc, StackSlot, StackSlotData, StackSlotKind, Type, Value,
+    AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
+    SigRef, Signature, SourceLoc, StackSlot, StackSlotData, StackSlotKind, Type, Value, types,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::FunctionBuilder;
@@ -48,11 +48,11 @@ use air::v2::ir::{
 use super::backend::{AshCraneliftBackend, CraneliftTierContext, DynShape};
 use super::lower::LoweredFunction;
 use super::{
-    abi_class, argument_abi_class, entry_return_class, record_native_signature, record_result,
-    record_word, widen_of, AbiClass, Widen,
+    AbiClass, Widen, abi_class, argument_abi_class, entry_return_class, record_native_signature,
+    record_result, record_word, widen_of,
 };
 use crate::hl_bindings as hl;
-use crate::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
+use crate::stub_bridge::{STUB_SENTINEL_LIMIT, ash_jit_call_stub, ash_jit_resolve_stub};
 
 // Cranelift has no floating remainder instruction. Keeping these helpers in
 // Rust avoids depending on a platform-specific libm symbol name while still
@@ -3296,11 +3296,7 @@ impl AirCodegen<'_, '_> {
             return match op {
                 BinOp::SDiv => {
                     let q = self.b.ins().sshr_imm(sum, k);
-                    if c < 0 {
-                        self.b.ins().ineg(q)
-                    } else {
-                        q
-                    }
+                    if c < 0 { self.b.ins().ineg(q) } else { q }
                 }
                 _ => {
                     // Remainder keeps the dividend's sign: mask the biased

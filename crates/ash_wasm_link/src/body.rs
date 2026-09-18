@@ -35,7 +35,7 @@
 //! [`reencode`] takes and returns the same shape, so a caller can swap one for
 //! the other without touching anything around it.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 
 /// Re-encode one function body, changing nothing.

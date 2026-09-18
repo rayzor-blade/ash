@@ -8,13 +8,13 @@
 //! every value and cell slot in the same order.
 
 use air::v2::ir::{CellId, MemAccess as AirMemAccess, ValueId};
+use inkwell::AddressSpace;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValue, PointerValue};
-use inkwell::AddressSpace;
 
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 impl<'ctx> JITModule<'ctx> {
     /// `dst = base[index]` at the width selected by `kind`.

@@ -37,7 +37,7 @@ use crate::opcodes::{
     Opcode, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun, RefGlobal, RefInt, RefString,
     RefType, Reg,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::{BTreeMap, HashSet};
 
 /// A sequence of `(dst, src)` register moves.
@@ -277,10 +277,10 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     let resolve_fall = |p: usize, s: usize| -> usize {
         match fall_entry[p] {
             Some(e) => {
-                if let Entry::Copy { target, .. } = &entries[e] {
-                    if *target == s {
-                        return e;
-                    }
+                if let Entry::Copy { target, .. } = &entries[e]
+                    && *target == s
+                {
+                    return e;
                 }
                 entry_of_block[s]
             }

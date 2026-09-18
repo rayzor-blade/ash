@@ -22,25 +22,25 @@
 //!   [`crate::stub_bridge::ash_jit_call_stub`] exactly like the LLVM
 //!   tier's `build_stub_guarded_indirect_call`.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
 
 use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
-    SigRef, Signature, StackSlotData, StackSlotKind, Type, Value,
+    AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
+    SigRef, Signature, StackSlotData, StackSlotKind, Type, Value, types,
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 
 use super::backend::{AshCraneliftBackend, CraneliftTierContext};
 use super::{
-    abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode,
-    record_native_signature, record_result, record_word, widen_of, AbiClass, Widen,
+    AbiClass, Widen, abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode,
+    record_native_signature, record_result, record_word, widen_of,
 };
 use crate::hl_bindings as hl;
 use crate::opcodes::{Opcode, Reg};
-use crate::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
+use crate::stub_bridge::{STUB_SENTINEL_LIMIT, ash_jit_call_stub, ash_jit_resolve_stub};
 use crate::types::{HLFunction, HLTypeFun, TypeRef};
 
 /// A lowered function plus the marshaling metadata the interpreter needs.

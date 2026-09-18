@@ -29,15 +29,15 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use inkwell::AddressSpace;
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue};
-use inkwell::AddressSpace;
 
 use crate::hl::{
     hl_type_kind, hl_type_kind_HBOOL, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32,
-    hl_type_kind_HI64, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVOID,
+    hl_type_kind_HI64, hl_type_kind_HUI8, hl_type_kind_HUI16, hl_type_kind_HVOID,
 };
 use crate::llvm::module::JITModule;
 

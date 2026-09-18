@@ -13,26 +13,30 @@ fn local_naive_to_timestamp(naive: NaiveDateTime) -> Option<i32> {
 }
 
 unsafe fn utf16_to_string_with_len(bytes: *const vbyte, byte_len: i32) -> String {
-    if bytes.is_null() || byte_len <= 0 {
-        return String::new();
+    unsafe {
+        if bytes.is_null() || byte_len <= 0 {
+            return String::new();
+        }
+        let unit_len = (byte_len as usize) / 2;
+        let units = std::slice::from_raw_parts(bytes as *const uchar, unit_len);
+        String::from_utf16_lossy(units)
     }
-    let unit_len = (byte_len as usize) / 2;
-    let units = std::slice::from_raw_parts(bytes as *const uchar, unit_len);
-    String::from_utf16_lossy(units)
 }
 
 unsafe fn alloc_utf16_string(s: &str, out_len: *mut i32) -> *mut vbyte {
-    let utf16: Vec<u16> = s.encode_utf16().collect();
-    if !out_len.is_null() {
-        *out_len = utf16.len() as i32;
+    unsafe {
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        if !out_len.is_null() {
+            *out_len = utf16.len() as i32;
+        }
+        let out = hlp_alloc_bytes(((utf16.len() + 1) * 2) as i32) as *mut u16;
+        if out.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::copy_nonoverlapping(utf16.as_ptr(), out, utf16.len());
+        *out.add(utf16.len()) = 0;
+        out as *mut vbyte
     }
-    let out = hlp_alloc_bytes(((utf16.len() + 1) * 2) as i32) as *mut u16;
-    if out.is_null() {
-        return ptr::null_mut();
-    }
-    ptr::copy_nonoverlapping(utf16.as_ptr(), out, utf16.len());
-    *out.add(utf16.len()) = 0;
-    out as *mut vbyte
 }
 
 #[unsafe(no_mangle)]
@@ -68,30 +72,32 @@ pub extern "C" fn hlp_date_from_time(t: f64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_date_from_string(bytes: *const vbyte, len: i32) -> i32 {
-    let s = utf16_to_string_with_len(bytes, len);
-    let s = s.trim();
+    unsafe {
+        let s = utf16_to_string_with_len(bytes, len);
+        let s = s.trim();
 
-    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return local_naive_to_timestamp(naive).unwrap_or(0);
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        if let Some(naive) = date.and_hms_opt(0, 0, 0) {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
             return local_naive_to_timestamp(naive).unwrap_or(0);
         }
-    }
-    if let Ok(time) = NaiveTime::parse_from_str(s, "%H:%M:%S") {
-        // HashLink defines a time-only Date string as that time on the Unix
-        // epoch date in UTC.  Treating it as an unsupported string returned
-        // timestamp zero, losing the supplied hours/minutes/seconds.
-        if let Some(date) = NaiveDate::from_ymd_opt(1970, 1, 1) {
-            let timestamp = Utc
-                .from_utc_datetime(&NaiveDateTime::new(date, time))
-                .timestamp();
-            return i32::try_from(timestamp).unwrap_or(0);
+        if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            && let Some(naive) = date.and_hms_opt(0, 0, 0)
+        {
+            return local_naive_to_timestamp(naive).unwrap_or(0);
         }
-    }
+        if let Ok(time) = NaiveTime::parse_from_str(s, "%H:%M:%S") {
+            // HashLink defines a time-only Date string as that time on the Unix
+            // epoch date in UTC.  Treating it as an unsupported string returned
+            // timestamp zero, losing the supplied hours/minutes/seconds.
+            if let Some(date) = NaiveDate::from_ymd_opt(1970, 1, 1) {
+                let timestamp = Utc
+                    .from_utc_datetime(&NaiveDateTime::new(date, time))
+                    .timestamp();
+                return i32::try_from(timestamp).unwrap_or(0);
+            }
+        }
 
-    0
+        0
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -110,36 +116,38 @@ pub unsafe extern "C" fn hlp_date_get_inf(
     seconds: *mut i32,
     wday: *mut i32,
 ) {
-    let dt = Local
-        .timestamp_opt(t as i64, 0)
-        .single()
-        .unwrap_or_else(|| {
-            Local
-                .timestamp_opt(0, 0)
-                .single()
-                .expect("epoch should exist")
-        });
+    unsafe {
+        let dt = Local
+            .timestamp_opt(t as i64, 0)
+            .single()
+            .unwrap_or_else(|| {
+                Local
+                    .timestamp_opt(0, 0)
+                    .single()
+                    .expect("epoch should exist")
+            });
 
-    if !year.is_null() {
-        *year = dt.year();
-    }
-    if !month.is_null() {
-        *month = dt.month0() as i32;
-    }
-    if !day.is_null() {
-        *day = dt.day() as i32;
-    }
-    if !hours.is_null() {
-        *hours = dt.hour() as i32;
-    }
-    if !minutes.is_null() {
-        *minutes = dt.minute() as i32;
-    }
-    if !seconds.is_null() {
-        *seconds = dt.second() as i32;
-    }
-    if !wday.is_null() {
-        *wday = dt.weekday().num_days_from_sunday() as i32;
+        if !year.is_null() {
+            *year = dt.year();
+        }
+        if !month.is_null() {
+            *month = dt.month0() as i32;
+        }
+        if !day.is_null() {
+            *day = dt.day() as i32;
+        }
+        if !hours.is_null() {
+            *hours = dt.hour() as i32;
+        }
+        if !minutes.is_null() {
+            *minutes = dt.minute() as i32;
+        }
+        if !seconds.is_null() {
+            *seconds = dt.second() as i32;
+        }
+        if !wday.is_null() {
+            *wday = dt.weekday().num_days_from_sunday() as i32;
+        }
     }
 }
 
@@ -154,46 +162,50 @@ pub unsafe extern "C" fn hlp_date_get_utc_inf(
     seconds: *mut i32,
     wday: *mut i32,
 ) {
-    let dt = Utc.timestamp_opt(t as i64, 0).single().unwrap_or_else(|| {
-        Utc.timestamp_opt(0, 0)
-            .single()
-            .expect("epoch should exist")
-    });
+    unsafe {
+        let dt = Utc.timestamp_opt(t as i64, 0).single().unwrap_or_else(|| {
+            Utc.timestamp_opt(0, 0)
+                .single()
+                .expect("epoch should exist")
+        });
 
-    if !year.is_null() {
-        *year = dt.year();
-    }
-    if !month.is_null() {
-        *month = dt.month0() as i32;
-    }
-    if !day.is_null() {
-        *day = dt.day() as i32;
-    }
-    if !hours.is_null() {
-        *hours = dt.hour() as i32;
-    }
-    if !minutes.is_null() {
-        *minutes = dt.minute() as i32;
-    }
-    if !seconds.is_null() {
-        *seconds = dt.second() as i32;
-    }
-    if !wday.is_null() {
-        *wday = dt.weekday().num_days_from_sunday() as i32;
+        if !year.is_null() {
+            *year = dt.year();
+        }
+        if !month.is_null() {
+            *month = dt.month0() as i32;
+        }
+        if !day.is_null() {
+            *day = dt.day() as i32;
+        }
+        if !hours.is_null() {
+            *hours = dt.hour() as i32;
+        }
+        if !minutes.is_null() {
+            *minutes = dt.minute() as i32;
+        }
+        if !seconds.is_null() {
+            *seconds = dt.second() as i32;
+        }
+        if !wday.is_null() {
+            *wday = dt.weekday().num_days_from_sunday() as i32;
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_date_to_string(t: i32, len: *mut i32) -> *mut vbyte {
-    let dt = Local
-        .timestamp_opt(t as i64, 0)
-        .single()
-        .unwrap_or_else(|| {
-            Local
-                .timestamp_opt(0, 0)
-                .single()
-                .expect("epoch should exist")
-        });
-    let s = dt.format("%Y-%m-%d %H:%M:%S").to_string();
-    alloc_utf16_string(&s, len)
+    unsafe {
+        let dt = Local
+            .timestamp_opt(t as i64, 0)
+            .single()
+            .unwrap_or_else(|| {
+                Local
+                    .timestamp_opt(0, 0)
+                    .single()
+                    .expect("epoch should exist")
+            });
+        let s = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+        alloc_utf16_string(&s, len)
+    }
 }

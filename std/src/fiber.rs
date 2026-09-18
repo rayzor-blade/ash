@@ -20,7 +20,7 @@
 
 use crate::error::TrapContext;
 use crate::hl::{vclosure, vdynamic};
-use crate::rt::{FiberBody, Waiter, RT_THREAD_COMPILED};
+use crate::rt::{FiberBody, RT_THREAD_COMPILED, Waiter};
 // Native fibers switch stacks; wasm fibers are driven by the host. Same
 // four operations either way, so the scheduler below does not branch.
 #[cfg(target_family = "wasm")]
@@ -145,7 +145,7 @@ pub(crate) fn request_fiber_poll() {
 /// made the safe point itself a hot-path bottleneck on Apple Silicon.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_poll_epoch_address() -> *const u64 {
-    crate::rt::fiber_poll_epoch_address()
+    unsafe { crate::rt::fiber_poll_epoch_address() }
 }
 
 pub(crate) unsafe extern "C" fn fiber_poll_epoch_address() -> *const u64 {
@@ -161,17 +161,19 @@ fn ensure_preemption_timer() {
         #[cfg(not(target_family = "wasm"))]
         let _ = std::thread::Builder::new()
             .name("ash-fiber-timer".into())
-            .spawn(|| loop {
-                let (lock, changed) = &*PREEMPTOR_WAKE;
-                let mut guard = lock.lock().unwrap();
-                while LOGICAL_THREADS.load(Ordering::Acquire) == 0 {
-                    guard = changed.wait(guard).unwrap();
-                }
-                drop(guard);
+            .spawn(|| {
+                loop {
+                    let (lock, changed) = &*PREEMPTOR_WAKE;
+                    let mut guard = lock.lock().unwrap();
+                    while LOGICAL_THREADS.load(Ordering::Acquire) == 0 {
+                        guard = changed.wait(guard).unwrap();
+                    }
+                    drop(guard);
 
-                std::thread::sleep(FIBER_QUANTUM);
-                if LOGICAL_THREADS.load(Ordering::Acquire) != 0 {
-                    request_fiber_poll();
+                    std::thread::sleep(FIBER_QUANTUM);
+                    if LOGICAL_THREADS.load(Ordering::Acquire) != 0 {
+                        request_fiber_poll();
+                    }
                 }
             });
     });
@@ -224,8 +226,10 @@ pub unsafe extern "C" fn hlp_set_fiber_switch_hook(hook: FiberSwitchHook) {
 
 /// The registered switch hook, if any.
 pub(crate) unsafe fn switch_hook() -> Option<FiberSwitchHook> {
-    let hook = FIBER_SWITCH_HOOK.load(Ordering::Acquire);
-    (hook != 0).then(|| std::mem::transmute::<usize, FiberSwitchHook>(hook))
+    unsafe {
+        let hook = FIBER_SWITCH_HOOK.load(Ordering::Acquire);
+        (hook != 0).then(|| std::mem::transmute::<usize, FiberSwitchHook>(hook))
+    }
 }
 
 /// The host enables worker dispatch whenever it can resolve a thread body to
@@ -272,15 +276,17 @@ pub(crate) fn is_stub_sentinel(address: usize) -> bool {
 }
 
 pub(crate) unsafe fn resolve_stub_sentinel(address: usize) -> *mut c_void {
-    if !is_stub_sentinel(address) {
-        return address as *mut c_void;
+    unsafe {
+        if !is_stub_sentinel(address) {
+            return address as *mut c_void;
+        }
+        let resolver = STUB_RESOLVER.load(Ordering::Acquire);
+        if resolver == 0 {
+            return ptr::null_mut();
+        }
+        let resolver = std::mem::transmute::<usize, StubResolver>(resolver);
+        resolver(address.wrapping_sub(1) as i32)
     }
-    let resolver = STUB_RESOLVER.load(Ordering::Acquire);
-    if resolver == 0 {
-        return ptr::null_mut();
-    }
-    let resolver = std::mem::transmute::<usize, StubResolver>(resolver);
-    resolver(address.wrapping_sub(1) as i32)
 }
 
 /// True only while an OS worker is executing a worker-affine VM fiber.
@@ -288,7 +294,7 @@ pub(crate) unsafe fn resolve_stub_sentinel(address: usize) -> *mut c_void {
 /// single main-thread interpreter through the legacy stub bridge.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_is_worker_lane() -> bool {
-    crate::rt::is_worker_lane()
+    unsafe { crate::rt::is_worker_lane() }
 }
 
 pub(crate) unsafe extern "C" fn is_worker_lane() -> bool {
@@ -299,8 +305,10 @@ pub(crate) unsafe extern "C" fn is_worker_lane() -> bool {
 /// (e.g. virtual method dispatch fallback) that encounters a stub-sentinel
 /// function pointer it must not call directly.
 pub(crate) unsafe fn closure_runner() -> Option<ClosureRunner> {
-    let runner = CLOSURE_RUNNER.load(Ordering::Acquire);
-    (runner != 0).then(|| std::mem::transmute::<usize, ClosureRunner>(runner))
+    unsafe {
+        let runner = CLOSURE_RUNNER.load(Ordering::Acquire);
+        (runner != 0).then(|| std::mem::transmute::<usize, ClosureRunner>(runner))
+    }
 }
 
 struct VmFiber {
@@ -857,21 +865,23 @@ pub(crate) fn foreign_threads_seen() -> bool {
 }
 
 pub(crate) unsafe fn new_waiter() -> Waiter {
-    let token = NEXT_WAIT_TOKEN.fetch_add(1, Ordering::Relaxed).max(1);
-    let waiter = Waiter {
-        scheduler_id: SCHEDULER.with(|scheduler| scheduler.borrow().id),
-        fiber_id: current_id(),
-        token,
-    };
-    WAIT_REGISTRY.lock().unwrap().insert(
-        token,
-        WaitRegistration {
-            scheduler_id: waiter.scheduler_id,
-            fiber_id: waiter.fiber_id,
-            status: WaitStatus::Waiting,
-        },
-    );
-    waiter
+    unsafe {
+        let token = NEXT_WAIT_TOKEN.fetch_add(1, Ordering::Relaxed).max(1);
+        let waiter = Waiter {
+            scheduler_id: SCHEDULER.with(|scheduler| scheduler.borrow().id),
+            fiber_id: current_id(),
+            token,
+        };
+        WAIT_REGISTRY.lock().unwrap().insert(
+            token,
+            WaitRegistration {
+                scheduler_id: waiter.scheduler_id,
+                fiber_id: waiter.fiber_id,
+                status: WaitStatus::Waiting,
+            },
+        );
+        waiter
+    }
 }
 
 /// Wake a waiter if it still names the wait operation on which the fiber is
@@ -965,91 +975,95 @@ unsafe fn scheduler_idle(deadline: Option<Instant>) {
 /// deadline expires. Worker fibers leave a precise wait token for the
 /// scheduler; the main context drives the scheduler while it waits.
 pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
-    debug_assert_eq!(waiter.fiber_id, current_id());
-    if waiter.fiber_id == 0 && !is_main_thread() {
-        // A thread the runtime never created. It has no fiber to yield and no
-        // claim on the scheduler — driving one from here would run Haxe work
-        // on a thread the collector does not know about — so it waits on the
-        // OS instead and only reads the notification the waker leaves.
-        worker_trace("park-foreign", waiter.token, deadline.is_some() as u64);
-        loop {
-            // Polled here for the same reason `park-main` polls: a registered
-            // mutator that never reaches a safepoint holds up every world
-            // stop for as long as it waits. This loop used to sleep without
-            // one, so a foreign thread parked on a token was invisible to the
-            // collector until its waker arrived.
-            crate::rt::gc_safepoint();
-            match wait_status(waiter.token) {
-                Some(WaitStatus::Notified) => {
-                    finish_wait(waiter.token);
-                    return true;
+    unsafe {
+        debug_assert_eq!(waiter.fiber_id, current_id());
+        if waiter.fiber_id == 0 && !is_main_thread() {
+            // A thread the runtime never created. It has no fiber to yield and no
+            // claim on the scheduler — driving one from here would run Haxe work
+            // on a thread the collector does not know about — so it waits on the
+            // OS instead and only reads the notification the waker leaves.
+            worker_trace("park-foreign", waiter.token, deadline.is_some() as u64);
+            loop {
+                // Polled here for the same reason `park-main` polls: a registered
+                // mutator that never reaches a safepoint holds up every world
+                // stop for as long as it waits. This loop used to sleep without
+                // one, so a foreign thread parked on a token was invisible to the
+                // collector until its waker arrived.
+                crate::rt::gc_safepoint();
+                match wait_status(waiter.token) {
+                    Some(WaitStatus::Notified) => {
+                        finish_wait(waiter.token);
+                        return true;
+                    }
+                    Some(WaitStatus::TimedOut) | None => {
+                        finish_wait(waiter.token);
+                        return false;
+                    }
+                    Some(WaitStatus::Waiting) => {}
                 }
-                Some(WaitStatus::TimedOut) | None => {
-                    finish_wait(waiter.token);
-                    return false;
+                if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                    let _ = claim_timeout(waiter.token);
+                    return finish_wait(waiter.token) == Some(WaitStatus::Notified);
                 }
-                Some(WaitStatus::Waiting) => {}
-            }
-            if deadline.is_some_and(|limit| Instant::now() >= limit) {
-                let _ = claim_timeout(waiter.token);
-                return finish_wait(waiter.token) == Some(WaitStatus::Notified);
-            }
-            std::thread::sleep(std::time::Duration::from_micros(50));
-        }
-    }
-    if waiter.fiber_id == 0 {
-        worker_trace("park-main", waiter.token, deadline.is_some() as u64);
-        loop {
-            crate::rt::gc_safepoint();
-            match wait_status(waiter.token) {
-                Some(WaitStatus::Notified) => {
-                    finish_wait(waiter.token);
-                    worker_trace("resume-main", waiter.token, 1);
-                    return true;
-                }
-                Some(WaitStatus::TimedOut) | None => {
-                    finish_wait(waiter.token);
-                    worker_trace("resume-main", waiter.token, 0);
-                    return false;
-                }
-                Some(WaitStatus::Waiting) => {}
-            }
-            if deadline.is_some_and(|limit| Instant::now() >= limit) {
-                let _ = claim_timeout(waiter.token);
-                return finish_wait(waiter.token) == Some(WaitStatus::Notified);
-            }
-            if !schedule_step() {
-                scheduler_idle(deadline);
+                std::thread::sleep(std::time::Duration::from_micros(50));
             }
         }
-    }
+        if waiter.fiber_id == 0 {
+            worker_trace("park-main", waiter.token, deadline.is_some() as u64);
+            loop {
+                crate::rt::gc_safepoint();
+                match wait_status(waiter.token) {
+                    Some(WaitStatus::Notified) => {
+                        finish_wait(waiter.token);
+                        worker_trace("resume-main", waiter.token, 1);
+                        return true;
+                    }
+                    Some(WaitStatus::TimedOut) | None => {
+                        finish_wait(waiter.token);
+                        worker_trace("resume-main", waiter.token, 0);
+                        return false;
+                    }
+                    Some(WaitStatus::Waiting) => {}
+                }
+                if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                    let _ = claim_timeout(waiter.token);
+                    return finish_wait(waiter.token) == Some(WaitStatus::Notified);
+                }
+                if !schedule_step() {
+                    scheduler_idle(deadline);
+                }
+            }
+        }
 
-    if wait_status(waiter.token) == Some(WaitStatus::Notified) {
+        if wait_status(waiter.token) == Some(WaitStatus::Notified) {
+            finish_wait(waiter.token);
+            return true;
+        }
+
+        ACTIVE_FIBER.with(|active| {
+            let mut fiber = active.get().expect("park called outside a fiber");
+            debug_assert!(fiber.pending_park.is_none());
+            fiber.pending_park = Some(ParkRequest { waiter, deadline });
+            active.set(Some(fiber));
+        });
+        yield_now_backend();
+        let notified = ACTIVE_FIBER.with(|active| {
+            active
+                .get()
+                .is_some_and(|fiber| fiber.resume_cause == ResumeCause::Notified)
+        }) || wait_status(waiter.token) == Some(WaitStatus::Notified);
         finish_wait(waiter.token);
-        return true;
+        notified
     }
-
-    ACTIVE_FIBER.with(|active| {
-        let mut fiber = active.get().expect("park called outside a fiber");
-        debug_assert!(fiber.pending_park.is_none());
-        fiber.pending_park = Some(ParkRequest { waiter, deadline });
-        active.set(Some(fiber));
-    });
-    yield_now_backend();
-    let notified = ACTIVE_FIBER.with(|active| {
-        active
-            .get()
-            .is_some_and(|fiber| fiber.resume_cause == ResumeCause::Notified)
-    }) || wait_status(waiter.token) == Some(WaitStatus::Notified);
-    finish_wait(waiter.token);
-    notified
 }
 
 /// Sleep without keeping a worker fiber runnable. The main context continues
 /// driving ready fibers while it waits for its own deadline.
 pub(crate) unsafe fn sleep_until(deadline: Instant) {
-    let waiter = new_waiter();
-    let _ = park(waiter, Some(deadline));
+    unsafe {
+        let waiter = new_waiter();
+        let _ = park(waiter, Some(deadline));
+    }
 }
 
 /// Per-logical-thread bookkeeping for `Gc.blocking`. It is intentionally kept
@@ -1096,68 +1110,76 @@ fn update_blocking_depth(depth: &mut u32, blocking: bool) -> bool {
 /// exception and may terminate the fiber.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_is_root_closure(c: *mut vclosure) -> bool {
-    let ctx = crate::rt::current_ctx();
-    !ctx.is_null() && ctx == c as *mut c_void
+    unsafe {
+        let ctx = crate::rt::current_ctx();
+        !ctx.is_null() && ctx == c as *mut c_void
+    }
 }
 
 unsafe fn notify_switch(from: u32, to: u32) {
-    if WORKER_LANE.with(Cell::get) {
-        return;
-    }
-    let hook = FIBER_SWITCH_HOOK.load(Ordering::Acquire);
-    if hook != 0 {
-        let hook = std::mem::transmute::<usize, FiberSwitchHook>(hook);
-        hook(from, to);
+    unsafe {
+        if WORKER_LANE.with(Cell::get) {
+            return;
+        }
+        let hook = FIBER_SWITCH_HOOK.load(Ordering::Acquire);
+        if hook != 0 {
+            let hook = std::mem::transmute::<usize, FiberSwitchHook>(hook);
+            hook(from, to);
+        }
     }
 }
 
 unsafe fn run_closure(c: *mut vclosure) {
-    let fun = (*c).fun as usize;
-    // Compiled, rather than an interpreter stub waiting to be. Asked through
-    // `is_stub_sentinel` for the reason `thread_create` asks it that way: a
-    // WebAssembly function pointer is a table index in the low hundreds, so
-    // comparing against the limit calls every one of them a sentinel -- and
-    // this is the refusal at the end of that, a worker that will not run the
-    // body it was handed.
-    let compiled = fun != 0 && !is_stub_sentinel(fun);
-    if crate::rt::is_worker_lane() {
-        if compiled {
+    unsafe {
+        let fun = (*c).fun as usize;
+        // Compiled, rather than an interpreter stub waiting to be. Asked through
+        // `is_stub_sentinel` for the reason `thread_create` asks it that way: a
+        // WebAssembly function pointer is a table index in the low hundreds, so
+        // comparing against the limit calls every one of them a sentinel -- and
+        // this is the refusal at the end of that, a worker that will not run the
+        // body it was handed.
+        let compiled = fun != 0 && !is_stub_sentinel(fun);
+        if crate::rt::is_worker_lane() {
+            if compiled {
+                hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
+            } else {
+                eprintln!(
+                    "[ash] worker fiber received uncompiled closure sentinel {fun:#x}; refusing interpreter re-entry"
+                );
+            }
+            return;
+        }
+        if let Some(runner) = closure_runner() {
+            runner(c, std::ptr::null_mut(), 0);
+        } else if compiled {
+            // Invoke a compiled thread body through the same typed ABI bridge used
+            // by dynamic native calls. We are already on the thread fiber's stack;
+            // creating another fiber here would change Thread.current() identity.
             hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
         } else {
             eprintln!(
-                "[ash] worker fiber received uncompiled closure sentinel {fun:#x}; refusing interpreter re-entry"
+                "[ash] fiber: cannot run closure (fun={:#x}, hasValue={}) — no closure runner set",
+                fun,
+                (*c).hasValue
             );
         }
-        return;
-    }
-    if let Some(runner) = closure_runner() {
-        runner(c, std::ptr::null_mut(), 0);
-    } else if compiled {
-        // Invoke a compiled thread body through the same typed ABI bridge used
-        // by dynamic native calls. We are already on the thread fiber's stack;
-        // creating another fiber here would change Thread.current() identity.
-        hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
-    } else {
-        eprintln!(
-            "[ash] fiber: cannot run closure (fun={:#x}, hasValue={}) — no closure runner set",
-            fun,
-            (*c).hasValue
-        );
     }
 }
 
 /// The fiber body handed to the scheduler: run the closure, then drop the
 /// root `thread_create` gave it. A guard, so an erroring body drops it too.
 unsafe extern "C-unwind" fn run_closure_body(ctx: *mut c_void) {
-    struct Unroot(*mut vclosure);
-    impl Drop for Unroot {
-        fn drop(&mut self) {
-            unsafe { crate::rt::gc_remove_persistent(self.0 as *mut vdynamic) };
+    unsafe {
+        struct Unroot(*mut vclosure);
+        impl Drop for Unroot {
+            fn drop(&mut self) {
+                unsafe { crate::rt::gc_remove_persistent(self.0 as *mut vdynamic) };
+            }
         }
+        let c = ctx as *mut vclosure;
+        let _unroot = Unroot(c);
+        run_closure(c);
     }
-    let c = ctx as *mut vclosure;
-    let _unroot = Unroot(c);
-    run_closure(c);
 }
 
 /// Run a compiled closure through the same dynamic argument marshaller used
@@ -1170,118 +1192,125 @@ pub unsafe extern "C" fn hlp_jit_closure_runner(
     args: *mut *mut vdynamic,
     nargs: i32,
 ) -> *mut vdynamic {
-    if c.is_null() || nargs < 0 {
-        return ptr::null_mut();
-    }
-
-    let mut closure = c;
-    if (*closure).hasValue == 2 {
-        let wrapper = closure as *mut crate::hl::vclosure_wrapper;
-        closure = (*wrapper).wrappedFun;
-        if closure.is_null() {
-            eprintln!("[ash] fiber: closure wrapper has no wrapped function");
+    unsafe {
+        if c.is_null() || nargs < 0 {
             return ptr::null_mut();
         }
-    }
 
-    let closure_type = (*closure).t;
-    if closure_type.is_null() {
-        eprintln!("[ash] fiber: compiled closure has no function type");
-        return ptr::null_mut();
-    }
-
-    // Bound closures store the stripped closure type; its parent is the full
-    // method type whose first argument is the bound receiver.
-    let call_type = if (*closure).hasValue != 0 {
-        let parent = (*closure_type)
-            .__bindgen_anon_1
-            .fun
-            .as_ref()
-            .map_or(std::ptr::null_mut(), |fun| fun.parent);
-        if parent.is_null() {
-            closure_type
-        } else {
-            parent
+        let mut closure = c;
+        if (*closure).hasValue == 2 {
+            let wrapper = closure as *mut crate::hl::vclosure_wrapper;
+            closure = (*wrapper).wrappedFun;
+            if closure.is_null() {
+                eprintln!("[ash] fiber: closure wrapper has no wrapped function");
+                return ptr::null_mut();
+            }
         }
-    } else {
-        closure_type
-    };
 
-    let total = nargs as usize + usize::from((*closure).hasValue != 0);
-    let array = crate::obj::hlp_alloc_dyn_array(total as i32);
-    if array.is_null() {
-        return ptr::null_mut();
-    }
-    let values = crate::types::hl_aptr::<*mut vdynamic>(array);
-    if (*closure).hasValue != 0 {
-        *values = (*closure).value as *mut vdynamic;
-    }
-    for i in 0..nargs as usize {
-        *values.add(i + usize::from((*closure).hasValue != 0)) = if args.is_null() {
-            ptr::null_mut()
+        let closure_type = (*closure).t;
+        if closure_type.is_null() {
+            eprintln!("[ash] fiber: compiled closure has no function type");
+            return ptr::null_mut();
+        }
+
+        // Bound closures store the stripped closure type; its parent is the full
+        // method type whose first argument is the bound receiver.
+        let call_type = if (*closure).hasValue != 0 {
+            let parent = (*closure_type)
+                .__bindgen_anon_1
+                .fun
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |fun| fun.parent);
+            if parent.is_null() {
+                closure_type
+            } else {
+                parent
+            }
         } else {
-            *args.add(i)
+            closure_type
         };
-    }
 
-    // hlp_call_method expects a closure without an already-bound value and
-    // receives the receiver as the first dynamic argument instead.
-    let call_closure = crate::types::vclosure_new(call_type, (*closure).fun, 0, ptr::null_mut());
-    crate::fun::hlp_call_method(&call_closure as *const vclosure as *mut vdynamic, array)
+        let total = nargs as usize + usize::from((*closure).hasValue != 0);
+        let array = crate::obj::hlp_alloc_dyn_array(total as i32);
+        if array.is_null() {
+            return ptr::null_mut();
+        }
+        let values = crate::types::hl_aptr::<*mut vdynamic>(array);
+        if (*closure).hasValue != 0 {
+            *values = (*closure).value as *mut vdynamic;
+        }
+        for i in 0..nargs as usize {
+            *values.add(i + usize::from((*closure).hasValue != 0)) = if args.is_null() {
+                ptr::null_mut()
+            } else {
+                *args.add(i)
+            };
+        }
+
+        // hlp_call_method expects a closure without an already-bound value and
+        // receives the receiver as the first dynamic argument instead.
+        let call_closure =
+            crate::types::vclosure_new(call_type, (*closure).fun, 0, ptr::null_mut());
+        crate::fun::hlp_call_method(&call_closure as *const vclosure as *mut vdynamic, array)
+    }
 }
 
 unsafe fn install_fiber(id: u32, body: FiberBody, ctx: *mut c_void) {
-    worker_trace(
-        "install",
-        id as u64,
-        SCHEDULER.with(|scheduler| scheduler.borrow().id),
-    );
-    let ctx_usize = ctx as usize;
-    let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
-        body(ctx_usize as *mut c_void);
-    }));
-    // Both backends put a suspended fiber's live values somewhere the
-    // collector has to look: a switched-out stack natively, and the side
-    // stack the link-time transform writes locals into on wasm. Either way
-    // an object a suspended fiber alone refers to is only reachable through
-    // this range.
-    let (base, len) = fiber.stack_range();
-    crate::rt::gc_register_fiber_stack(id, base as usize, len);
-    // Charge the off-heap stack as GC allocation pressure so dead fibers'
-    // stacks translate into collections (wren_lift core/fiber.rs:189-199).
-    crate::rt::gc_track_external(len as u64);
+    unsafe {
+        worker_trace(
+            "install",
+            id as u64,
+            SCHEDULER.with(|scheduler| scheduler.borrow().id),
+        );
+        let ctx_usize = ctx as usize;
+        let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
+            body(ctx_usize as *mut c_void);
+        }));
+        // Both backends put a suspended fiber's live values somewhere the
+        // collector has to look: a switched-out stack natively, and the side
+        // stack the link-time transform writes locals into on wasm. Either way
+        // an object a suspended fiber alone refers to is only reachable through
+        // this range.
+        let (base, len) = fiber.stack_range();
+        crate::rt::gc_register_fiber_stack(id, base as usize, len);
+        // Charge the off-heap stack as GC allocation pressure so dead fibers'
+        // stacks translate into collections (wren_lift core/fiber.rs:189-199).
+        crate::rt::gc_track_external(len as u64);
 
-    SCHEDULER.with(|scheduler| {
-        let mut scheduler = scheduler.borrow_mut();
-        scheduler.fibers.push(VmFiber {
-            fiber,
-            id,
-            ctx,
-            run_state: FiberRunState::Runnable,
-            resume_cause: ResumeCause::Scheduled,
-            gc_blocking_depth: 0,
-            trap_head: std::ptr::null_mut(),
-            exc_value: std::ptr::null_mut(),
+        SCHEDULER.with(|scheduler| {
+            let mut scheduler = scheduler.borrow_mut();
+            scheduler.fibers.push(VmFiber {
+                fiber,
+                id,
+                ctx,
+                run_state: FiberRunState::Runnable,
+                resume_cause: ResumeCause::Scheduled,
+                gc_blocking_depth: 0,
+                trap_head: std::ptr::null_mut(),
+                exc_value: std::ptr::null_mut(),
+            });
+            scheduler.enqueue_ready(id);
         });
-        scheduler.enqueue_ready(id);
-    });
+    }
 }
 
 unsafe fn drain_scheduler_commands() {
-    let endpoint = SCHEDULER.with(|scheduler| Arc::clone(&scheduler.borrow().endpoint));
-    let commands: Vec<SchedulerCommand> = {
-        let mut queue = endpoint.commands.lock().unwrap();
-        queue.drain(..).collect()
-    };
-    for command in commands {
-        match command {
-            SchedulerCommand::Wake(waiter) => {
-                SCHEDULER.with(|scheduler| {
-                    scheduler.borrow_mut().wake_claimed(waiter);
-                });
-            }
-            SchedulerCommand::Spawn { id, body, ctx } => {
-                install_fiber(id, body, ctx as *mut c_void);
+    unsafe {
+        let endpoint = SCHEDULER.with(|scheduler| Arc::clone(&scheduler.borrow().endpoint));
+        let commands: Vec<SchedulerCommand> = {
+            let mut queue = endpoint.commands.lock().unwrap();
+            queue.drain(..).collect()
+        };
+        for command in commands {
+            match command {
+                SchedulerCommand::Wake(waiter) => {
+                    SCHEDULER.with(|scheduler| {
+                        scheduler.borrow_mut().wake_claimed(waiter);
+                    });
+                }
+                SchedulerCommand::Spawn { id, body, ctx } => {
+                    install_fiber(id, body, ctx as *mut c_void);
+                }
             }
         }
     }
@@ -1292,111 +1321,117 @@ unsafe fn drain_scheduler_commands() {
 /// The closure half: root it, decide whether its body is compiled, and hand
 /// the scheduler a body callback and the closure as its context.
 pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
-    if c.is_null() {
-        return std::ptr::null_mut();
-    }
+    unsafe {
+        if c.is_null() {
+            return std::ptr::null_mut();
+        }
 
-    // Root the closure while the fiber exists — it is otherwise reachable
-    // only from Rust heap memory the GC cannot see. `run_closure_body`
-    // drops the root when the body is done.
-    crate::rt::gc_add_persistent(c as *mut vdynamic);
-    if env_flag!(os "ASH_DBG_FIBER") {
-        let nargs = (*c)
-            .t
-            .as_ref()
-            .and_then(|ty| ty.__bindgen_anon_1.fun.as_ref())
-            .map_or(-1, |fun| fun.nargs);
-        eprintln!(
-            "[fiber] create closure={c:p} fun={:p} has_value={} value={:p} nargs={nargs}",
-            (*c).fun,
-            (*c).hasValue,
-            (*c).value
-        );
-    }
-    let mut flags = 0;
-    if can_dispatch_to_worker() {
-        // A freshly-created closure commonly still carries findex+1. Resolve
-        // that sentinel before choosing a lane so the first Haxe thread gets
-        // the same M:N treatment as later closures whose call sites happened
-        // to compile them already. Failure is non-fatal: the main scheduler
-        // can still execute it through the interpreter bridge.
-        //
-        // Asked through `is_stub_sentinel` and not by comparing the pointer
-        // against the limit, because the two answers differ on WebAssembly: a
-        // function pointer there IS a small integer -- a table index in the
-        // low hundreds -- so every real one is below the limit and looks like
-        // a sentinel. Comparing directly said no body was compiled and sent
-        // every Haxe thread to the main scheduler, on the one target where
-        // they are all compiled by construction.
-        let fun = (*c).fun as usize;
-        if is_stub_sentinel(fun) {
-            let resolved = resolve_stub_sentinel(fun);
-            if !resolved.is_null() {
-                (*c).fun = resolved;
-            } else {
-                worker_trace("resolve-failed", c as u64, fun as u64);
+        // Root the closure while the fiber exists — it is otherwise reachable
+        // only from Rust heap memory the GC cannot see. `run_closure_body`
+        // drops the root when the body is done.
+        crate::rt::gc_add_persistent(c as *mut vdynamic);
+        if env_flag!(os "ASH_DBG_FIBER") {
+            let nargs = (*c)
+                .t
+                .as_ref()
+                .and_then(|ty| ty.__bindgen_anon_1.fun.as_ref())
+                .map_or(-1, |fun| fun.nargs);
+            eprintln!(
+                "[fiber] create closure={c:p} fun={:p} has_value={} value={:p} nargs={nargs}",
+                (*c).fun,
+                (*c).hasValue,
+                (*c).value
+            );
+        }
+        let mut flags = 0;
+        if can_dispatch_to_worker() {
+            // A freshly-created closure commonly still carries findex+1. Resolve
+            // that sentinel before choosing a lane so the first Haxe thread gets
+            // the same M:N treatment as later closures whose call sites happened
+            // to compile them already. Failure is non-fatal: the main scheduler
+            // can still execute it through the interpreter bridge.
+            //
+            // Asked through `is_stub_sentinel` and not by comparing the pointer
+            // against the limit, because the two answers differ on WebAssembly: a
+            // function pointer there IS a small integer -- a table index in the
+            // low hundreds -- so every real one is below the limit and looks like
+            // a sentinel. Comparing directly said no body was compiled and sent
+            // every Haxe thread to the main scheduler, on the one target where
+            // they are all compiled by construction.
+            let fun = (*c).fun as usize;
+            if is_stub_sentinel(fun) {
+                let resolved = resolve_stub_sentinel(fun);
+                if !resolved.is_null() {
+                    (*c).fun = resolved;
+                } else {
+                    worker_trace("resolve-failed", c as u64, fun as u64);
+                }
+            }
+            let fun = (*c).fun as usize;
+            if fun != 0 && !is_stub_sentinel(fun) {
+                flags |= RT_THREAD_COMPILED;
             }
         }
-        let fun = (*c).fun as usize;
-        if fun != 0 && !is_stub_sentinel(fun) {
-            flags |= RT_THREAD_COMPILED;
-        }
+        crate::rt::thread_create(run_closure_body, c as *mut c_void, flags)
     }
-    crate::rt::thread_create(run_closure_body, c as *mut c_void, flags)
 }
 
 /// The scheduler half of `thread_create`: a fiber running `body(ctx)`.
 pub(crate) unsafe fn spawn(body: FiberBody, ctx: *mut c_void, flags: u32) -> *mut c_void {
-    let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
-    LOGICAL_THREADS.fetch_add(1, Ordering::Release);
-    ensure_preemption_timer();
-    request_fiber_poll();
-    worker_trace("create", id as u64, ctx as u64);
-    if flags & RT_THREAD_COMPILED != 0 && dispatch_to_worker(id, body, ctx) {
-        return ((id as usize) << 4 | 1) as *mut c_void;
+    unsafe {
+        let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
+        LOGICAL_THREADS.fetch_add(1, Ordering::Release);
+        ensure_preemption_timer();
+        request_fiber_poll();
+        worker_trace("create", id as u64, ctx as u64);
+        if flags & RT_THREAD_COMPILED != 0 && dispatch_to_worker(id, body, ctx) {
+            return ((id as usize) << 4 | 1) as *mut c_void;
+        }
+        install_fiber(id, body, ctx);
+
+        // Give the new thread a chance to run to its first blocking point,
+        // matching the "starts immediately" expectation of real threads.
+        //
+        // Not where a fiber cannot suspend. A wasm module has no addressable
+        // stack and no way to move between two, so `Fiber::resume` there runs the
+        // body straight through to its return (see `ash_wasm_runtime::guest`).
+        // Running it here would therefore not start a thread, it would finish
+        // one -- before the creator's next statement. A body that waits for the
+        // creator then waits forever, which is the Haxe suite's atomics test
+        // exactly: the new thread spins until the creator moves an atomic, and
+        // the creator cannot move it because it is still inside this call. The
+        // fiber is installed and runs at the creator's first blocking point,
+        // which is the earliest moment its body can make progress.
+        #[cfg(not(target_family = "wasm"))]
+        schedule_step();
+
+        // Handle = fiber id, offset so it is never null and never a valid ptr.
+        ((id as usize) << 4 | 1) as *mut c_void
     }
-    install_fiber(id, body, ctx);
-
-    // Give the new thread a chance to run to its first blocking point,
-    // matching the "starts immediately" expectation of real threads.
-    //
-    // Not where a fiber cannot suspend. A wasm module has no addressable
-    // stack and no way to move between two, so `Fiber::resume` there runs the
-    // body straight through to its return (see `ash_wasm_runtime::guest`).
-    // Running it here would therefore not start a thread, it would finish
-    // one -- before the creator's next statement. A body that waits for the
-    // creator then waits forever, which is the Haxe suite's atomics test
-    // exactly: the new thread spins until the creator moves an atomic, and
-    // the creator cannot move it because it is still inside this call. The
-    // fiber is installed and runs at the creator's first blocking point,
-    // which is the earliest moment its body can make progress.
-    #[cfg(not(target_family = "wasm"))]
-    schedule_step();
-
-    // Handle = fiber id, offset so it is never null and never a valid ptr.
-    ((id as usize) << 4 | 1) as *mut c_void
 }
 
 unsafe fn remove_fiber(fiber: VmFiber, state: FiberState) {
-    worker_trace(
-        "remove",
-        fiber.id as u64,
-        u64::from(matches!(state, FiberState::Errored)),
-    );
-    crate::rt::gc_unregister_fiber_stack(fiber.id);
-    LOGICAL_THREADS.fetch_sub(1, Ordering::Release);
-    if WORKER_LANE.with(Cell::get) {
-        SCHEDULER.with(|scheduler| {
-            let endpoint = Arc::clone(&scheduler.borrow().endpoint);
-            let _ = endpoint
-                .assigned
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |load| {
-                    Some(load.saturating_sub(1))
-                });
-        });
-    }
-    if let FiberState::Errored = state {
-        eprintln!("[ash] fiber {} terminated with a panic", fiber.id);
+    unsafe {
+        worker_trace(
+            "remove",
+            fiber.id as u64,
+            u64::from(matches!(state, FiberState::Errored)),
+        );
+        crate::rt::gc_unregister_fiber_stack(fiber.id);
+        LOGICAL_THREADS.fetch_sub(1, Ordering::Release);
+        if WORKER_LANE.with(Cell::get) {
+            SCHEDULER.with(|scheduler| {
+                let endpoint = Arc::clone(&scheduler.borrow().endpoint);
+                let _ = endpoint
+                    .assigned
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |load| {
+                        Some(load.saturating_sub(1))
+                    });
+            });
+        }
+        if let FiberState::Errored = state {
+            eprintln!("[ash] fiber {} terminated with a panic", fiber.id);
+        }
     }
 }
 
@@ -1404,114 +1439,116 @@ unsafe fn remove_fiber(fiber: VmFiber, state: FiberState) {
 /// Fibers parked on a resource or timer do not consume context switches.
 /// Runs on the main context only. Returns true if any fiber was resumed.
 pub(crate) unsafe fn schedule_step() -> bool {
-    if ACTIVE_FIBER.with(|active| active.get().is_some()) {
-        // A fiber calling this should yield instead — never nest resumes.
-        return false;
-    }
-    drain_scheduler_commands();
-    wake_due_timers();
-    let mut resumed = false;
-    let turns = SCHEDULER.with(|scheduler| scheduler.borrow().ready.len());
-    for _ in 0..turns {
-        let Some(mut vm_fiber) = SCHEDULER.with(|scheduler| {
-            let mut scheduler = scheduler.borrow_mut();
-            loop {
-                let id = scheduler.ready.pop_front()?;
-                let Some(index) = scheduler.fiber_index(id) else {
-                    continue;
-                };
-                break Some(scheduler.fibers.swap_remove(index));
-            }
-        }) else {
-            break;
-        };
-        let state = vm_fiber.fiber.state();
-        if matches!(state, FiberState::Done | FiberState::Errored) {
-            remove_fiber(vm_fiber, state);
-            continue;
+    unsafe {
+        if ACTIVE_FIBER.with(|active| active.get().is_some()) {
+            // A fiber calling this should yield instead — never nest resumes.
+            return false;
         }
-        if vm_fiber.run_state != FiberRunState::Runnable {
-            SCHEDULER.with(|scheduler| scheduler.borrow_mut().fibers.push(vm_fiber));
-            continue;
-        }
-        resumed = true;
-        let id = vm_fiber.id;
-
-        // Record where the main stack is suspended for the GC, then swap
-        // this fiber's exception state into the live cells.
-        let probe: usize = 0;
-        crate::rt::gc_update_fiber_sp(0, &probe as *const usize as usize);
-        let (mut trap, mut exc) = (vm_fiber.trap_head, vm_fiber.exc_value);
-        crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
-        SCHEDULER.with(|scheduler| {
-            let mut scheduler = scheduler.borrow_mut();
-            scheduler.main_trap = trap;
-            scheduler.main_exc = exc;
-        });
-        vm_fiber.run_state = FiberRunState::Running;
-        let active = ActiveFiber {
-            id,
-            ctx: vm_fiber.ctx,
-            resume_cause: vm_fiber.resume_cause,
-            pending_park: None,
-            gc_blocking_depth: vm_fiber.gc_blocking_depth,
-        };
-        vm_fiber.resume_cause = ResumeCause::Scheduled;
-        ACTIVE_FIBER.with(|slot| {
-            debug_assert!(slot.get().is_none());
-            slot.set(Some(active));
-        });
-        notify_switch(0, id);
-
-        vm_fiber.fiber.resume();
-
-        // Publish the suspended fiber stack before the host switch hook can
-        // publish interpreter roots. `hlp_gc_scan_roots_done` is allowed to
-        // honor a pending collection, so doing this after `notify_switch`
-        // left the just-yielded compiled frames invisible during precisely
-        // that collection. Under GC stress this reclaimed values held by a
-        // worker loop (for example its linked-list head) before the fiber was
-        // resumed.
-        crate::rt::gc_update_fiber_sp(id, vm_fiber.fiber.saved_sp() as usize);
-        notify_switch(id, 0);
-        let active = ACTIVE_FIBER
-            .with(|slot| slot.replace(None))
-            .expect("resumed fiber lost its active state");
-        vm_fiber.gc_blocking_depth = active.gc_blocking_depth;
-        let (mut trap, mut exc) = SCHEDULER.with(|scheduler| {
-            let scheduler = scheduler.borrow();
-            (scheduler.main_trap, scheduler.main_exc)
-        });
-        crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
-        vm_fiber.trap_head = trap;
-        vm_fiber.exc_value = exc;
-
-        let state = vm_fiber.fiber.state();
-        if matches!(state, FiberState::Done | FiberState::Errored) {
-            remove_fiber(vm_fiber, state);
-        } else if let Some(request) = active.pending_park {
-            debug_assert_eq!(request.waiter.fiber_id, id);
-            vm_fiber.run_state = FiberRunState::Waiting(request.waiter.token);
-            SCHEDULER.with(|scheduler| {
-                let mut scheduler = scheduler.borrow_mut();
-                if let Some(deadline) = request.deadline {
-                    scheduler
-                        .timers
-                        .push(Reverse((deadline, request.waiter.token, id)));
-                }
-                scheduler.fibers.push(vm_fiber);
-            });
-        } else {
-            vm_fiber.run_state = FiberRunState::Runnable;
-            SCHEDULER.with(|scheduler| {
-                let mut scheduler = scheduler.borrow_mut();
-                scheduler.fibers.push(vm_fiber);
-                scheduler.enqueue_ready(id);
-            });
-        }
+        drain_scheduler_commands();
         wake_due_timers();
+        let mut resumed = false;
+        let turns = SCHEDULER.with(|scheduler| scheduler.borrow().ready.len());
+        for _ in 0..turns {
+            let Some(mut vm_fiber) = SCHEDULER.with(|scheduler| {
+                let mut scheduler = scheduler.borrow_mut();
+                loop {
+                    let id = scheduler.ready.pop_front()?;
+                    let Some(index) = scheduler.fiber_index(id) else {
+                        continue;
+                    };
+                    break Some(scheduler.fibers.swap_remove(index));
+                }
+            }) else {
+                break;
+            };
+            let state = vm_fiber.fiber.state();
+            if matches!(state, FiberState::Done | FiberState::Errored) {
+                remove_fiber(vm_fiber, state);
+                continue;
+            }
+            if vm_fiber.run_state != FiberRunState::Runnable {
+                SCHEDULER.with(|scheduler| scheduler.borrow_mut().fibers.push(vm_fiber));
+                continue;
+            }
+            resumed = true;
+            let id = vm_fiber.id;
+
+            // Record where the main stack is suspended for the GC, then swap
+            // this fiber's exception state into the live cells.
+            let probe: usize = 0;
+            crate::rt::gc_update_fiber_sp(0, &probe as *const usize as usize);
+            let (mut trap, mut exc) = (vm_fiber.trap_head, vm_fiber.exc_value);
+            crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
+            SCHEDULER.with(|scheduler| {
+                let mut scheduler = scheduler.borrow_mut();
+                scheduler.main_trap = trap;
+                scheduler.main_exc = exc;
+            });
+            vm_fiber.run_state = FiberRunState::Running;
+            let active = ActiveFiber {
+                id,
+                ctx: vm_fiber.ctx,
+                resume_cause: vm_fiber.resume_cause,
+                pending_park: None,
+                gc_blocking_depth: vm_fiber.gc_blocking_depth,
+            };
+            vm_fiber.resume_cause = ResumeCause::Scheduled;
+            ACTIVE_FIBER.with(|slot| {
+                debug_assert!(slot.get().is_none());
+                slot.set(Some(active));
+            });
+            notify_switch(0, id);
+
+            vm_fiber.fiber.resume();
+
+            // Publish the suspended fiber stack before the host switch hook can
+            // publish interpreter roots. `hlp_gc_scan_roots_done` is allowed to
+            // honor a pending collection, so doing this after `notify_switch`
+            // left the just-yielded compiled frames invisible during precisely
+            // that collection. Under GC stress this reclaimed values held by a
+            // worker loop (for example its linked-list head) before the fiber was
+            // resumed.
+            crate::rt::gc_update_fiber_sp(id, vm_fiber.fiber.saved_sp() as usize);
+            notify_switch(id, 0);
+            let active = ACTIVE_FIBER
+                .with(|slot| slot.replace(None))
+                .expect("resumed fiber lost its active state");
+            vm_fiber.gc_blocking_depth = active.gc_blocking_depth;
+            let (mut trap, mut exc) = SCHEDULER.with(|scheduler| {
+                let scheduler = scheduler.borrow();
+                (scheduler.main_trap, scheduler.main_exc)
+            });
+            crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
+            vm_fiber.trap_head = trap;
+            vm_fiber.exc_value = exc;
+
+            let state = vm_fiber.fiber.state();
+            if matches!(state, FiberState::Done | FiberState::Errored) {
+                remove_fiber(vm_fiber, state);
+            } else if let Some(request) = active.pending_park {
+                debug_assert_eq!(request.waiter.fiber_id, id);
+                vm_fiber.run_state = FiberRunState::Waiting(request.waiter.token);
+                SCHEDULER.with(|scheduler| {
+                    let mut scheduler = scheduler.borrow_mut();
+                    if let Some(deadline) = request.deadline {
+                        scheduler
+                            .timers
+                            .push(Reverse((deadline, request.waiter.token, id)));
+                    }
+                    scheduler.fibers.push(vm_fiber);
+                });
+            } else {
+                vm_fiber.run_state = FiberRunState::Runnable;
+                SCHEDULER.with(|scheduler| {
+                    let mut scheduler = scheduler.borrow_mut();
+                    scheduler.fibers.push(vm_fiber);
+                    scheduler.enqueue_ready(id);
+                });
+            }
+            wake_due_timers();
+        }
+        resumed
     }
-    resumed
 }
 
 /// Cooperative scheduling safe point for a running VM.
@@ -1528,37 +1565,43 @@ pub(crate) unsafe fn schedule_step() -> bool {
 /// is still runnable and remains responsible for its own frame pacing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_poll() {
-    crate::rt::fiber_poll();
+    unsafe {
+        crate::rt::fiber_poll();
+    }
 }
 
 pub(crate) unsafe extern "C" fn fiber_poll() {
-    crate::rt::gc_safepoint();
-    if !fibers_active() {
-        return;
-    }
-    if ACTIVE_FIBER.with(|active| active.get().is_some()) {
-        yield_now_backend();
-    } else {
-        schedule_step();
+    unsafe {
+        crate::rt::gc_safepoint();
+        if !fibers_active() {
+            return;
+        }
+        if ACTIVE_FIBER.with(|active| active.get().is_some()) {
+            yield_now_backend();
+        } else {
+            schedule_step();
+        }
     }
 }
 
 /// Universal "I am blocked" primitive: on a fiber, yield to the scheduler;
 /// on the main context, run other fibers and take a short pacing nap.
 pub(crate) unsafe fn block_yield() {
-    if ACTIVE_FIBER.with(|active| active.get().is_some()) {
-        yield_now_backend();
-    } else {
-        crate::rt::gc_safepoint();
-        schedule_step();
-        // Always pace after a pass: a resumed-but-still-blocked fiber yields
-        // instantly, and treating that as progress spins main and every
-        // blocked fiber at 100% CPU ping-pong. 1ms keeps the old cadence
-        // without burning a core.
-        // std's sleep rather than nanosleep: same syscall on unix, plus the
-        // EINTR retry a pacing nap wants anyway, and no Win32 fork. Windows
-        // may round the wait up to the OS timer resolution — acceptable,
-        // because this is pacing and not a deadline.
-        std::thread::sleep(std::time::Duration::from_millis(1));
+    unsafe {
+        if ACTIVE_FIBER.with(|active| active.get().is_some()) {
+            yield_now_backend();
+        } else {
+            crate::rt::gc_safepoint();
+            schedule_step();
+            // Always pace after a pass: a resumed-but-still-blocked fiber yields
+            // instantly, and treating that as progress spins main and every
+            // blocked fiber at 100% CPU ping-pong. 1ms keeps the old cadence
+            // without burning a core.
+            // std's sleep rather than nanosleep: same syscall on unix, plus the
+            // EINTR retry a pacing nap wants anyway, and no Win32 fork. Windows
+            // may round the wait up to the OS timer resolution — acceptable,
+            // because this is pacing and not a deadline.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 }

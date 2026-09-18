@@ -122,10 +122,10 @@ pub use ir::{
     BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, InlineSite,
     Instr, MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,
 };
-pub use lower::{lower, lower_with, lower_with_positions, ModuleBuilder};
+pub use lower::{ModuleBuilder, lower, lower_with, lower_with_positions};
 pub use module::{
-    CalleeBody, ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo, NO_MODULE_INFO,
+    CalleeBody, ModuleInfo, ModuleTables, NO_MODULE_INFO, NativeImport, NativeTable, NoModuleInfo,
 };
 pub use passes::{OptLevel, Pass, PassManager, PassOptions, PassReport, PassStats};
-pub use serialize::{serialize, Serialized};
+pub use serialize::{Serialized, serialize};
 pub use verify::verify;

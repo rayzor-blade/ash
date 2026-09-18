@@ -6,8 +6,8 @@
 
 #![allow(dead_code)]
 
-use ash_wasm_link::object::{ObjData, ObjGlobal, Object, SegmentInfo, SymbolTarget};
 use ash_wasm_link::Symbol;
+use ash_wasm_link::object::{ObjData, ObjGlobal, Object, SegmentInfo, SymbolTarget};
 use wasmparser::{FuncType, RelocationEntry, RelocationType, SymbolFlags, ValType};
 
 /// A body that pushes two five-byte `i32.const` slots and drops them, so

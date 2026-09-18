@@ -11,11 +11,11 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasmtime::{Caller, Linker};
 
 use super::fibers::YIELD_MODULE;
-use super::{guest_memory, guest_slice, Host};
+use super::{Host, guest_memory, guest_slice};
 
 /// Install both: `Sys.command`, and the five that make a `sys.io.Process`.
 pub(crate) fn install(linker: &mut Linker<Host>) -> Result<()> {
@@ -78,14 +78,13 @@ fn rebase_guest_paths(line: &str) -> String {
     // the guest cannot see, so it gets the resolves-or-not test the whole
     // line cannot have -- the rest of the line may well name a path that is
     // about to be created.
-    if let Some(cmd) = line.split_whitespace().next() {
-        if line.starts_with(cmd)
-            && cmd.starts_with('/')
-            && !Path::new(&rebase_guest_arg(cmd)).exists()
-        {
-            let (_, rest) = line.split_at(cmd.len());
-            return format!("{cmd}{}", rebase_guest_paths_in(rest));
-        }
+    if let Some(cmd) = line.split_whitespace().next()
+        && line.starts_with(cmd)
+        && cmd.starts_with('/')
+        && !Path::new(&rebase_guest_arg(cmd)).exists()
+    {
+        let (_, rest) = line.split_at(cmd.len());
+        return format!("{cmd}{}", rebase_guest_paths_in(rest));
     }
     rebase_guest_paths_in(line)
 }
@@ -300,10 +299,10 @@ fn install_process(linker: &mut Linker<Host>) -> Result<()> {
             YIELD_MODULE,
             "ash_host_process_free",
             |mut caller: Caller<'_, Host>, handle: i32| {
-                if let Ok(i) = usize::try_from(handle) {
-                    if let Some(slot) = caller.data_mut().processes.get_mut(i) {
-                        *slot = None;
-                    }
+                if let Ok(i) = usize::try_from(handle)
+                    && let Some(slot) = caller.data_mut().processes.get_mut(i)
+                {
+                    *slot = None;
                 }
             },
         )

@@ -33,7 +33,7 @@
 //! -- the twelve imports are still installed and every one answers `NOTSUP`,
 //! so a program that never opens a socket runs there unchanged.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasmtime::{Caller, Linker};
 
 use super::Host;
@@ -142,7 +142,7 @@ mod os {
     use std::mem;
     use std::ptr;
 
-    use super::{errno, ev, OsFd, PollFd, Table};
+    use super::{OsFd, PollFd, Table, errno, ev};
 
     /// Darwin's `send` only grew `MSG_NOSIGNAL` in recent SDKs; `SO_NOSIGPIPE`
     /// at open does the same job there, and the unix runtime makes the same
@@ -190,21 +190,19 @@ mod os {
     const ADDR_LEN: libc::socklen_t = mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
 
     unsafe fn set_int_opt(s: OsFd, level: c_int, name: c_int, value: c_int) -> c_int {
-        libc::setsockopt(
-            s,
-            level,
-            name,
-            &value as *const c_int as *const c_void,
-            mem::size_of::<c_int>() as libc::socklen_t,
-        )
+        unsafe {
+            libc::setsockopt(
+                s,
+                level,
+                name,
+                &value as *const c_int as *const c_void,
+                mem::size_of::<c_int>() as libc::socklen_t,
+            )
+        }
     }
 
     fn status(rc: c_int) -> i32 {
-        if rc < 0 {
-            last_errno()
-        } else {
-            0
-        }
+        if rc < 0 { last_errno() } else { 0 }
     }
 
     impl Table {
@@ -520,7 +518,7 @@ mod os {
 /// and every one of them refuses.
 #[cfg(not(unix))]
 mod os {
-    use super::{errno, PollFd, Table};
+    use super::{PollFd, Table, errno};
 
     impl Table {
         pub fn open(&mut self, _udp: i32) -> i32 {

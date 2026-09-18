@@ -5,7 +5,7 @@ use crate::opcodes::{
 };
 use crate::types::{
     HLConstant, HLEnumConstruct, HLFunction, HLNative, HLObjField, HLObjProto, HLType, HLTypeEnum,
-    HLTypeFun, HLTypeObj, HLTypeVirtual, TypeRef, ValueTypeKind, OP_NARGS,
+    HLTypeFun, HLTypeObj, HLTypeVirtual, OP_NARGS, TypeRef, ValueTypeKind,
 };
 use ash_macro::load_symbol;
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -14,14 +14,13 @@ use std::borrow::BorrowMut;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::native_lib::STD_LIBRARY;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
 use std::mem;
 use std::path::Path;
 use std::rc::Rc;
 
 #[load_symbol]
-extern "C" {
+unsafe extern "C" {
     fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i32;
 }
 
@@ -121,7 +120,7 @@ impl BytecodeDecoder {
                 return Err(io::Error::new(
                     e.kind(),
                     format!("Error reading header: {}", e),
-                ))
+                ));
             }
         }
 

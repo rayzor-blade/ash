@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use std::io::IsTerminal;
 
-use ariadne::{sources, Color, Config, Label, Report, ReportKind};
+use ariadne::{Color, Config, Label, Report, ReportKind, sources};
 
 /// One frame, as the renderer needs it.
 ///

@@ -37,9 +37,9 @@
 //! rewrite stays able to process any module, and a rewrite that would need a
 //! renumbering it cannot do fails loudly.
 
-use anyhow::{anyhow, bail, Result};
-use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
+use anyhow::{Result, anyhow, bail};
 use wasm_encoder::Instruction;
+use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 use wasmparser::{FuncValidator, Operator, ValidatorResources};
 
 /// One function body being rewritten.

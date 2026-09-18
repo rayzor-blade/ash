@@ -34,8 +34,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use air::v2::module::{CalleeBody, ModuleInfo, NativeImport};
 use air::v2::{
-    lower_with_positions, serialize, verify, Function, OptLevel, PassManager, PassOptions,
-    PassReport, Serialized, TypeRef,
+    Function, OptLevel, PassManager, PassOptions, PassReport, Serialized, TypeRef,
+    lower_with_positions, serialize, verify,
 };
 
 use crate::bytecode::DecodedBytecode;

@@ -26,8 +26,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use js_sys::{Function, Object, Reflect};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use super::imports::Host;
 

@@ -1,6 +1,6 @@
 use crate::hl::*;
 use crate::types::*;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use libc::c_char;
 use libc::{c_void, malloc};
 use num_enum::TryFromPrimitive;

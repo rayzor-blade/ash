@@ -1,6 +1,6 @@
 //! Self-recursive tail-call elimination.
 
-use super::{compact_values, replace_all_uses, Pass, PassOptions, PassStats};
+use super::{Pass, PassOptions, PassStats, compact_values, replace_all_uses};
 use crate::v2::ir::*;
 use anyhow::Result;
 use std::collections::HashMap;

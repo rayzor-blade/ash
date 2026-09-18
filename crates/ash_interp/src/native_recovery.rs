@@ -47,7 +47,7 @@ pub type SigJmpBuf = [u64; 64];
 const SIGJMP_BUF_ZERO: SigJmpBuf = [0; 64];
 
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     /// glibc does **not** export a `sigsetjmp` symbol: `<setjmp.h>` defines it
     /// as a macro over `__sigsetjmp`, so an `extern "C" { fn sigsetjmp }`
     /// declaration fails to link on linux-gnu with an undefined reference.
@@ -115,46 +115,50 @@ fn current_thread_id() -> usize {
 /// Must only be called from a signal handler context.
 #[cfg(unix)]
 pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
-    let me = current_thread_id();
-    for slot in SLOTS.iter() {
-        if slot.active.load(Ordering::Relaxed) && slot.owner.load(Ordering::Relaxed) == me {
-            slot.active.store(false, Ordering::Relaxed);
-            slot.signal.store(sig, Ordering::Relaxed);
-            slot.fault_addr.store(fault_addr, Ordering::Relaxed);
-            siglongjmp(slot.buf.get() as *mut u64, 1);
-            // unreachable - siglongjmp never returns
+    unsafe {
+        let me = current_thread_id();
+        for slot in SLOTS.iter() {
+            if slot.active.load(Ordering::Relaxed) && slot.owner.load(Ordering::Relaxed) == me {
+                slot.active.store(false, Ordering::Relaxed);
+                slot.signal.store(sig, Ordering::Relaxed);
+                slot.fault_addr.store(fault_addr, Ordering::Relaxed);
+                siglongjmp(slot.buf.get() as *mut u64, 1);
+                // unreachable - siglongjmp never returns
+            }
         }
+        false
     }
-    false
 }
 
 #[inline(always)]
 #[cfg(unix)]
 unsafe fn arm_slot(index: usize) -> i32 {
-    let slot = &SLOTS[index];
-    // savemask 0, not 1. Arming happens on every native call the interpreter
-    // makes, and on macOS saving the mask costs TWO syscalls per arm --
-    // sigprocmask for the mask and sigaltstack for the stack state. Sampling
-    // a game's loading screen put both at the top of the profile, ahead of
-    // the interpreter itself, because loading a level is a long run of native
-    // calls into SDL and the image codecs.
-    //
-    // The mask only needs restoring when a fault actually happened: the
-    // handler runs with the delivered signal blocked, and siglongjmp out of
-    // it would leave it blocked. That is the cold path, so unblock there
-    // instead of paying for the save on every arm.
-    let result = sigsetjmp(slot.buf.get() as *mut u64, 0);
-    if result == 0 {
-        slot.owner.store(current_thread_id(), Ordering::Relaxed);
-        slot.active.store(true, Ordering::Relaxed);
-    } else {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGSEGV);
-        libc::sigaddset(&mut set, libc::SIGBUS);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    unsafe {
+        let slot = &SLOTS[index];
+        // savemask 0, not 1. Arming happens on every native call the interpreter
+        // makes, and on macOS saving the mask costs TWO syscalls per arm --
+        // sigprocmask for the mask and sigaltstack for the stack state. Sampling
+        // a game's loading screen put both at the top of the profile, ahead of
+        // the interpreter itself, because loading a level is a long run of native
+        // calls into SDL and the image codecs.
+        //
+        // The mask only needs restoring when a fault actually happened: the
+        // handler runs with the delivered signal blocked, and siglongjmp out of
+        // it would leave it blocked. That is the cold path, so unblock there
+        // instead of paying for the save on every arm.
+        let result = sigsetjmp(slot.buf.get() as *mut u64, 0);
+        if result == 0 {
+            slot.owner.store(current_thread_id(), Ordering::Relaxed);
+            slot.active.store(true, Ordering::Relaxed);
+        } else {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGSEGV);
+            libc::sigaddset(&mut set, libc::SIGBUS);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        }
+        result
     }
-    result
 }
 
 #[inline]
@@ -172,7 +176,7 @@ fn disarm_slot(index: usize) {
 #[inline(always)]
 #[cfg(unix)]
 pub unsafe fn arm_native_recovery() -> i32 {
-    arm_slot(SLOT_INTERP)
+    unsafe { arm_slot(SLOT_INTERP) }
 }
 
 /// Disarm the interpreter recovery point after a successful native call.
@@ -201,7 +205,7 @@ pub fn last_recovery_fault_addr() -> usize {
 #[inline(always)]
 #[cfg(unix)]
 pub unsafe fn arm_tiered_recovery() -> i32 {
-    arm_slot(SLOT_TIERED)
+    unsafe { arm_slot(SLOT_TIERED) }
 }
 
 /// Disarm the tiered-broker recovery point after a successful compile.

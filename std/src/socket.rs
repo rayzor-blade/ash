@@ -112,184 +112,210 @@ mod sys {
     }
 
     pub unsafe fn create(udp: bool) -> Sock {
-        let ty = if udp {
-            libc::SOCK_DGRAM
-        } else {
-            libc::SOCK_STREAM
-        };
-        let s = libc::socket(libc::AF_INET, ty, 0);
-        if s == INVALID {
-            return INVALID;
+        unsafe {
+            let ty = if udp {
+                libc::SOCK_DGRAM
+            } else {
+                libc::SOCK_STREAM
+            };
+            let s = libc::socket(libc::AF_INET, ty, 0);
+            if s == INVALID {
+                return INVALID;
+            }
+            // Upstream passes NULL/0 as the option value here, which Darwin
+            // rejects with EFAULT and so leaves SIGPIPE armed; pass the real
+            // value so writing to a closed peer returns EPIPE instead of
+            // killing the process.
+            #[cfg(target_vendor = "apple")]
+            {
+                let one: c_int = 1;
+                libc::setsockopt(
+                    s,
+                    libc::SOL_SOCKET,
+                    libc::SO_NOSIGPIPE,
+                    &one as *const c_int as *const c_void,
+                    mem::size_of::<c_int>() as libc::socklen_t,
+                );
+            }
+            // Sockets must not be inherited across exec.
+            let old = libc::fcntl(s, libc::F_GETFD, 0);
+            if old >= 0 {
+                libc::fcntl(s, libc::F_SETFD, old | libc::FD_CLOEXEC);
+            }
+            s
         }
-        // Upstream passes NULL/0 as the option value here, which Darwin
-        // rejects with EFAULT and so leaves SIGPIPE armed; pass the real
-        // value so writing to a closed peer returns EPIPE instead of
-        // killing the process.
-        #[cfg(target_vendor = "apple")]
-        {
-            let one: c_int = 1;
-            libc::setsockopt(
-                s,
-                libc::SOL_SOCKET,
-                libc::SO_NOSIGPIPE,
-                &one as *const c_int as *const c_void,
-                mem::size_of::<c_int>() as libc::socklen_t,
-            );
-        }
-        // Sockets must not be inherited across exec.
-        let old = libc::fcntl(s, libc::F_GETFD, 0);
-        if old >= 0 {
-            libc::fcntl(s, libc::F_SETFD, old | libc::FD_CLOEXEC);
-        }
-        s
     }
 
     pub unsafe fn close(s: Sock) {
-        libc::close(s);
+        unsafe {
+            libc::close(s);
+        }
     }
 
     pub unsafe fn send(s: Sock, buf: *const u8, len: c_int) -> isize {
-        libc::send(s, buf as *const c_void, len as usize, NOSIGNAL)
+        unsafe { libc::send(s, buf as *const c_void, len as usize, NOSIGNAL) }
     }
 
     pub unsafe fn recv(s: Sock, buf: *mut u8, len: c_int) -> isize {
-        libc::recv(s, buf as *mut c_void, len as usize, NOSIGNAL)
+        unsafe { libc::recv(s, buf as *mut c_void, len as usize, NOSIGNAL) }
     }
 
     pub unsafe fn send_to(s: Sock, buf: *const u8, len: c_int, addr: &SockAddrIn) -> isize {
-        libc::sendto(
-            s,
-            buf as *const c_void,
-            len as usize,
-            NOSIGNAL,
-            addr as *const SockAddrIn as *const libc::sockaddr,
-            mem::size_of::<SockAddrIn>() as libc::socklen_t,
-        )
+        unsafe {
+            libc::sendto(
+                s,
+                buf as *const c_void,
+                len as usize,
+                NOSIGNAL,
+                addr as *const SockAddrIn as *const libc::sockaddr,
+                mem::size_of::<SockAddrIn>() as libc::socklen_t,
+            )
+        }
     }
 
     pub unsafe fn recv_from(s: Sock, buf: *mut u8, len: c_int, addr: &mut SockAddrIn) -> isize {
-        let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
-        libc::recvfrom(
-            s,
-            buf as *mut c_void,
-            len as usize,
-            NOSIGNAL,
-            addr as *mut SockAddrIn as *mut libc::sockaddr,
-            &mut alen,
-        )
+        unsafe {
+            let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
+            libc::recvfrom(
+                s,
+                buf as *mut c_void,
+                len as usize,
+                NOSIGNAL,
+                addr as *mut SockAddrIn as *mut libc::sockaddr,
+                &mut alen,
+            )
+        }
     }
 
     pub unsafe fn connect(s: Sock, addr: &SockAddrIn) -> bool {
-        libc::connect(
-            s,
-            addr as *const SockAddrIn as *const libc::sockaddr,
-            mem::size_of::<SockAddrIn>() as libc::socklen_t,
-        ) == 0
+        unsafe {
+            libc::connect(
+                s,
+                addr as *const SockAddrIn as *const libc::sockaddr,
+                mem::size_of::<SockAddrIn>() as libc::socklen_t,
+            ) == 0
+        }
     }
 
     pub unsafe fn bind(s: Sock, addr: &SockAddrIn) -> bool {
-        // Upstream sets SO_REUSEADDR on POSIX only; on Windows the option
-        // means "steal a live listener", which is not what is wanted.
-        let opt: c_int = 1;
-        libc::setsockopt(
-            s,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            &opt as *const c_int as *const c_void,
-            mem::size_of::<c_int>() as libc::socklen_t,
-        );
-        libc::bind(
-            s,
-            addr as *const SockAddrIn as *const libc::sockaddr,
-            mem::size_of::<SockAddrIn>() as libc::socklen_t,
-        ) != -1
+        unsafe {
+            // Upstream sets SO_REUSEADDR on POSIX only; on Windows the option
+            // means "steal a live listener", which is not what is wanted.
+            let opt: c_int = 1;
+            libc::setsockopt(
+                s,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &opt as *const c_int as *const c_void,
+                mem::size_of::<c_int>() as libc::socklen_t,
+            );
+            libc::bind(
+                s,
+                addr as *const SockAddrIn as *const libc::sockaddr,
+                mem::size_of::<SockAddrIn>() as libc::socklen_t,
+            ) != -1
+        }
     }
 
     pub unsafe fn listen(s: Sock, n: c_int) -> bool {
-        libc::listen(s, n) != -1
+        unsafe { libc::listen(s, n) != -1 }
     }
 
     pub unsafe fn accept(s: Sock) -> Sock {
-        let mut addr: SockAddrIn = mem::zeroed();
-        let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
-        libc::accept(
-            s,
-            &mut addr as *mut SockAddrIn as *mut libc::sockaddr,
-            &mut alen,
-        )
+        unsafe {
+            let mut addr: SockAddrIn = mem::zeroed();
+            let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
+            libc::accept(
+                s,
+                &mut addr as *mut SockAddrIn as *mut libc::sockaddr,
+                &mut alen,
+            )
+        }
     }
 
     pub unsafe fn sock_name(s: Sock) -> Option<SockAddrIn> {
-        let mut addr: SockAddrIn = mem::zeroed();
-        let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
-        if libc::getsockname(
-            s,
-            &mut addr as *mut SockAddrIn as *mut libc::sockaddr,
-            &mut alen,
-        ) == -1
-        {
-            return None;
+        unsafe {
+            let mut addr: SockAddrIn = mem::zeroed();
+            let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
+            if libc::getsockname(
+                s,
+                &mut addr as *mut SockAddrIn as *mut libc::sockaddr,
+                &mut alen,
+            ) == -1
+            {
+                return None;
+            }
+            Some(addr)
         }
-        Some(addr)
     }
 
     pub unsafe fn peer_name(s: Sock) -> Option<SockAddrIn> {
-        let mut addr: SockAddrIn = mem::zeroed();
-        let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
-        if libc::getpeername(
-            s,
-            &mut addr as *mut SockAddrIn as *mut libc::sockaddr,
-            &mut alen,
-        ) == -1
-        {
-            return None;
+        unsafe {
+            let mut addr: SockAddrIn = mem::zeroed();
+            let mut alen = mem::size_of::<SockAddrIn>() as libc::socklen_t;
+            if libc::getpeername(
+                s,
+                &mut addr as *mut SockAddrIn as *mut libc::sockaddr,
+                &mut alen,
+            ) == -1
+            {
+                return None;
+            }
+            Some(addr)
         }
-        Some(addr)
     }
 
     pub unsafe fn shutdown(s: Sock, read: bool, write: bool) -> bool {
-        let how = if read {
-            if write {
-                libc::SHUT_RDWR
+        unsafe {
+            let how = if read {
+                if write {
+                    libc::SHUT_RDWR
+                } else {
+                    libc::SHUT_RD
+                }
             } else {
-                libc::SHUT_RD
-            }
-        } else {
-            libc::SHUT_WR
-        };
-        libc::shutdown(s, how) == 0
+                libc::SHUT_WR
+            };
+            libc::shutdown(s, how) == 0
+        }
     }
 
     pub unsafe fn set_blocking(s: Sock, b: bool) -> bool {
-        let rights = libc::fcntl(s, libc::F_GETFL);
-        if rights == -1 {
-            return false;
+        unsafe {
+            let rights = libc::fcntl(s, libc::F_GETFL);
+            if rights == -1 {
+                return false;
+            }
+            let rights = if b {
+                rights & !libc::O_NONBLOCK
+            } else {
+                rights | libc::O_NONBLOCK
+            };
+            libc::fcntl(s, libc::F_SETFL, rights) != -1
         }
-        let rights = if b {
-            rights & !libc::O_NONBLOCK
-        } else {
-            rights | libc::O_NONBLOCK
-        };
-        libc::fcntl(s, libc::F_SETFL, rights) != -1
     }
 
     pub unsafe fn set_timeout(s: Sock, t: f64) -> bool {
-        let time = timeval_of(t);
-        let val = &time as *const libc::timeval as *const c_void;
-        let len = mem::size_of::<libc::timeval>() as libc::socklen_t;
-        libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_SNDTIMEO, val, len) == 0
-            && libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_RCVTIMEO, val, len) == 0
+        unsafe {
+            let time = timeval_of(t);
+            let val = &time as *const libc::timeval as *const c_void;
+            let len = mem::size_of::<libc::timeval>() as libc::socklen_t;
+            libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_SNDTIMEO, val, len) == 0
+                && libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_RCVTIMEO, val, len) == 0
+        }
     }
 
     pub unsafe fn set_flag(s: Sock, level: c_int, name: c_int, b: bool) -> bool {
-        let flag: c_int = b as c_int;
-        libc::setsockopt(
-            s,
-            level,
-            name,
-            &flag as *const c_int as *const c_void,
-            mem::size_of::<c_int>() as libc::socklen_t,
-        ) == 0
+        unsafe {
+            let flag: c_int = b as c_int;
+            libc::setsockopt(
+                s,
+                level,
+                name,
+                &flag as *const c_int as *const c_void,
+                mem::size_of::<c_int>() as libc::socklen_t,
+            ) == 0
+        }
     }
 
     pub const TCP_LEVEL: c_int = libc::IPPROTO_TCP;
@@ -323,26 +349,32 @@ mod sys {
 
     impl FdSet {
         pub unsafe fn init(region: *mut u8, _count: usize) -> FdSet {
-            let ptr = region as *mut libc::fd_set;
-            libc::FD_ZERO(ptr);
-            FdSet { ptr }
+            unsafe {
+                let ptr = region as *mut libc::fd_set;
+                libc::FD_ZERO(ptr);
+                FdSet { ptr }
+            }
         }
 
         /// False when the descriptor is outside the range an fd_set indexes;
         /// setting it anyway would scribble past the bitmap.
         pub unsafe fn add(&mut self, s: Sock) -> bool {
-            if s < 0 || s as usize >= libc::FD_SETSIZE {
-                return false;
+            unsafe {
+                if s < 0 || s as usize >= libc::FD_SETSIZE {
+                    return false;
+                }
+                libc::FD_SET(s, self.ptr);
+                true
             }
-            libc::FD_SET(s, self.ptr);
-            true
         }
 
         pub unsafe fn contains(&self, s: Sock) -> bool {
-            if s < 0 || s as usize >= libc::FD_SETSIZE {
-                return false;
+            unsafe {
+                if s < 0 || s as usize >= libc::FD_SETSIZE {
+                    return false;
+                }
+                libc::FD_ISSET(s, self.ptr)
             }
-            libc::FD_ISSET(s, self.ptr)
         }
     }
 
@@ -353,21 +385,23 @@ mod sys {
         except: Option<&FdSet>,
         timeout: Option<f64>,
     ) -> c_int {
-        let mut time;
-        let tp = match timeout {
-            Some(t) => {
-                time = timeval_of(t);
-                &mut time as *mut libc::timeval
-            }
-            None => ptr::null_mut(),
-        };
-        libc::select(
-            nfds as c_int,
-            read.map_or(ptr::null_mut(), |s| s.ptr),
-            write.map_or(ptr::null_mut(), |s| s.ptr),
-            except.map_or(ptr::null_mut(), |s| s.ptr),
-            tp,
-        )
+        unsafe {
+            let mut time;
+            let tp = match timeout {
+                Some(t) => {
+                    time = timeval_of(t);
+                    &mut time as *mut libc::timeval
+                }
+                None => ptr::null_mut(),
+            };
+            libc::select(
+                nfds as c_int,
+                read.map_or(ptr::null_mut(), |s| s.ptr),
+                write.map_or(ptr::null_mut(), |s| s.ptr),
+                except.map_or(ptr::null_mut(), |s| s.ptr),
+                tp,
+            )
+        }
     }
 
     /// First IPv4 address for a NUL-terminated host name, in network order.
@@ -375,57 +409,65 @@ mod sys {
     /// Upstream calls `gethostbyname`/`gethostbyname_r`; `getaddrinfo` is the
     /// POSIX replacement, is thread-safe, and returns the same `s_addr`.
     pub unsafe fn resolve_ipv4(name: *const u8) -> Option<c_int> {
-        let mut hints: libc::addrinfo = mem::zeroed();
-        hints.ai_family = libc::AF_INET;
-        hints.ai_socktype = libc::SOCK_STREAM;
-        let mut res: *mut libc::addrinfo = ptr::null_mut();
-        if libc::getaddrinfo(name as *const libc::c_char, ptr::null(), &hints, &mut res) != 0 {
-            return None;
-        }
-        let mut out = None;
-        let mut cur = res;
-        while !cur.is_null() {
-            let ai = &*cur;
-            if ai.ai_family == libc::AF_INET
-                && !ai.ai_addr.is_null()
-                && ai.ai_addrlen as usize >= mem::size_of::<SockAddrIn>()
-            {
-                out = Some((*(ai.ai_addr as *const SockAddrIn)).sin_addr.s_addr as c_int);
-                break;
+        unsafe {
+            let mut hints: libc::addrinfo = mem::zeroed();
+            hints.ai_family = libc::AF_INET;
+            hints.ai_socktype = libc::SOCK_STREAM;
+            let mut res: *mut libc::addrinfo = ptr::null_mut();
+            if libc::getaddrinfo(name as *const libc::c_char, ptr::null(), &hints, &mut res) != 0 {
+                return None;
             }
-            cur = ai.ai_next;
+            let mut out = None;
+            let mut cur = res;
+            while !cur.is_null() {
+                let ai = &*cur;
+                if ai.ai_family == libc::AF_INET
+                    && !ai.ai_addr.is_null()
+                    && ai.ai_addrlen as usize >= mem::size_of::<SockAddrIn>()
+                {
+                    out = Some((*(ai.ai_addr as *const SockAddrIn)).sin_addr.s_addr as c_int);
+                    break;
+                }
+                cur = ai.ai_next;
+            }
+            libc::freeaddrinfo(res);
+            out
         }
-        libc::freeaddrinfo(res);
-        out
     }
 
     /// Reverse lookup, mirroring upstream's `gethostbyaddr` branch. The
     /// returned name is copied out immediately because it lives in the
     /// resolver's static buffer.
     pub unsafe fn reverse_ipv4(ip: c_int) -> Option<Vec<u8>> {
-        let h = gethostbyaddr(&ip as *const c_int as *const c_void, 4, libc::AF_INET);
-        if h.is_null() || (*h).h_name.is_null() {
-            return None;
+        unsafe {
+            let h = gethostbyaddr(&ip as *const c_int as *const c_void, 4, libc::AF_INET);
+            if h.is_null() || (*h).h_name.is_null() {
+                return None;
+            }
+            Some(copy_cstr((*h).h_name as *const u8))
         }
-        Some(copy_cstr((*h).h_name as *const u8))
     }
 
     pub unsafe fn local_name() -> Option<Vec<u8>> {
-        let mut buf = [0u8; 256];
-        if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == -1 {
-            return None;
+        unsafe {
+            let mut buf = [0u8; 256];
+            if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == -1 {
+                return None;
+            }
+            // gethostname may leave the buffer unterminated on truncation.
+            buf[255] = 0;
+            Some(copy_cstr(buf.as_ptr()))
         }
-        // gethostname may leave the buffer unterminated on truncation.
-        buf[255] = 0;
-        Some(copy_cstr(buf.as_ptr()))
     }
 
     unsafe fn copy_cstr(p: *const u8) -> Vec<u8> {
-        let mut len = 0usize;
-        while *p.add(len) != 0 {
-            len += 1;
+        unsafe {
+            let mut len = 0usize;
+            while *p.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(p, len).to_vec()
         }
-        std::slice::from_raw_parts(p, len).to_vec()
     }
 }
 
@@ -469,7 +511,7 @@ mod sys {
     // `-errno` otherwise; a call that produces nothing returns 0 or `+errno`.
     // The numbers are WASI preview 1's, listed in `errno` below.
     #[link(wasm_import_module = "env")]
-    extern "C" {
+    unsafe extern "C" {
         /// A fresh descriptor, TCP unless `udp` is set.
         fn ash_host_socket_open(udp: i32) -> i32;
         /// `ip` is an `s_addr` in network order reinterpreted as an int, the
@@ -600,36 +642,44 @@ mod sys {
     }
 
     pub unsafe fn create(udp: bool) -> Sock {
-        let rc = ash_host_socket_open(i32::from(udp));
-        if rc < 0 {
-            fail(-rc);
-            return INVALID;
+        unsafe {
+            let rc = ash_host_socket_open(i32::from(udp));
+            if rc < 0 {
+                fail(-rc);
+                return INVALID;
+            }
+            rc
         }
-        rc
     }
 
     pub unsafe fn close(s: Sock) {
-        if s >= 0 {
-            ash_host_socket_close(s);
+        unsafe {
+            if s >= 0 {
+                ash_host_socket_close(s);
+            }
         }
     }
 
     pub unsafe fn send(s: Sock, buf: *const u8, len: c_int) -> isize {
-        let rc = ash_host_socket_send(s, buf, len);
-        if rc < 0 {
-            fail(-rc);
-            return -1;
+        unsafe {
+            let rc = ash_host_socket_send(s, buf, len);
+            if rc < 0 {
+                fail(-rc);
+                return -1;
+            }
+            rc as isize
         }
-        rc as isize
     }
 
     pub unsafe fn recv(s: Sock, buf: *mut u8, len: c_int) -> isize {
-        let rc = ash_host_socket_recv(s, buf, len);
-        if rc < 0 {
-            fail(-rc);
-            return -1;
+        unsafe {
+            let rc = ash_host_socket_recv(s, buf, len);
+            if rc < 0 {
+                fail(-rc);
+                return -1;
+            }
+            rc as isize
         }
-        rc as isize
     }
 
     /// Datagram addressing is not part of the import set yet: UDP sockets can
@@ -652,103 +702,119 @@ mod sys {
     /// through `block_error` and reports the in-progress connect as success,
     /// as upstream does.
     pub unsafe fn connect(s: Sock, addr: &SockAddrIn) -> bool {
-        let (ip, port) = addr_parts(addr);
-        let rc = ash_host_socket_connect(s, ip, port);
-        if rc != 0 {
-            fail(rc);
-            return false;
+        unsafe {
+            let (ip, port) = addr_parts(addr);
+            let rc = ash_host_socket_connect(s, ip, port);
+            if rc != 0 {
+                fail(rc);
+                return false;
+            }
+            true
         }
-        true
     }
 
     pub unsafe fn bind(s: Sock, addr: &SockAddrIn) -> bool {
-        let (ip, port) = addr_parts(addr);
-        let rc = ash_host_socket_bind(s, ip, port);
-        if rc != 0 {
-            fail(rc);
-            return false;
+        unsafe {
+            let (ip, port) = addr_parts(addr);
+            let rc = ash_host_socket_bind(s, ip, port);
+            if rc != 0 {
+                fail(rc);
+                return false;
+            }
+            true
         }
-        true
     }
 
     pub unsafe fn listen(s: Sock, n: c_int) -> bool {
-        let rc = ash_host_socket_listen(s, n);
-        if rc != 0 {
-            fail(rc);
-            return false;
+        unsafe {
+            let rc = ash_host_socket_listen(s, n);
+            if rc != 0 {
+                fail(rc);
+                return false;
+            }
+            true
         }
-        true
     }
 
     pub unsafe fn accept(s: Sock) -> Sock {
-        let rc = ash_host_socket_accept(s);
-        if rc < 0 {
-            fail(-rc);
-            return INVALID;
+        unsafe {
+            let rc = ash_host_socket_accept(s);
+            if rc < 0 {
+                fail(-rc);
+                return INVALID;
+            }
+            rc
         }
-        rc
     }
 
     unsafe fn name(s: Sock, which: i32) -> Option<SockAddrIn> {
-        let mut out = [0i32; 2];
-        let rc = ash_host_socket_name(s, which, out.as_mut_ptr());
-        if rc != 0 {
-            fail(rc);
-            return None;
+        unsafe {
+            let mut out = [0i32; 2];
+            let rc = ash_host_socket_name(s, which, out.as_mut_ptr());
+            if rc != 0 {
+                fail(rc);
+                return None;
+            }
+            Some(sockaddr_in(out[0], out[1]))
         }
-        Some(sockaddr_in(out[0], out[1]))
     }
 
     pub unsafe fn sock_name(s: Sock) -> Option<SockAddrIn> {
-        name(s, 0)
+        unsafe { name(s, 0) }
     }
 
     pub unsafe fn peer_name(s: Sock) -> Option<SockAddrIn> {
-        name(s, 1)
+        unsafe { name(s, 1) }
     }
 
     pub unsafe fn shutdown(s: Sock, read: bool, write: bool) -> bool {
-        let how = i32::from(read) | (i32::from(write) << 1);
-        let rc = ash_host_socket_shutdown(s, how);
-        if rc != 0 {
-            fail(rc);
-            return false;
+        unsafe {
+            let how = i32::from(read) | (i32::from(write) << 1);
+            let rc = ash_host_socket_shutdown(s, how);
+            if rc != 0 {
+                fail(rc);
+                return false;
+            }
+            true
         }
-        true
     }
 
     unsafe fn set(s: Sock, opt: i32, value: i32) -> bool {
-        let rc = ash_host_socket_set(s, opt, value);
-        if rc != 0 {
-            fail(rc);
-            return false;
+        unsafe {
+            let rc = ash_host_socket_set(s, opt, value);
+            if rc != 0 {
+                fail(rc);
+                return false;
+            }
+            true
         }
-        true
     }
 
     pub unsafe fn set_blocking(s: Sock, b: bool) -> bool {
-        set(s, 0, i32::from(b))
+        unsafe { set(s, 0, i32::from(b)) }
     }
 
     /// Seconds to whole milliseconds; the cast saturates, so an absurd
     /// timeout becomes a long one rather than a negative one.
     pub unsafe fn set_timeout(s: Sock, t: f64) -> bool {
-        set(s, 3, (t * 1000.0).max(0.0) as i32)
+        unsafe { set(s, 3, (t * 1000.0).max(0.0) as i32) }
     }
 
     /// Only the two options the natives above ask for have a host-side
     /// number; anything else is refused as unsupported rather than mapped to
     /// a kernel constant the host would have to guess the meaning of.
     pub unsafe fn set_flag(s: Sock, level: c_int, name: c_int, b: bool) -> bool {
-        let opt = match (level, name) {
-            (TCP_LEVEL, TCP_NODELAY) => 1,
-            (SOCKET_LEVEL, SO_BROADCAST) => 2,
-            _ => {
-                fail(errno::NOTSUP);
-                return false;
-            }
-        };
-        set(s, opt, i32::from(b))
+        unsafe {
+            let opt = match (level, name) {
+                (TCP_LEVEL, TCP_NODELAY) => 1,
+                (SOCKET_LEVEL, SO_BROADCAST) => 2,
+                _ => {
+                    fail(errno::NOTSUP);
+                    return false;
+                }
+            };
+            set(s, opt, i32::from(b))
+        }
     }
 
     // The option names the code above passes to `set_flag`. Values match the
@@ -822,41 +888,43 @@ mod sys {
         except: Option<&FdSet>,
         timeout: Option<f64>,
     ) -> c_int {
-        let _ = nfds;
-        let mut fds: Vec<PollFd> = Vec::new();
-        for (set, bit) in [(read, RD), (write, WR), (except, PRI)] {
-            let Some(set) = set else { continue };
-            for &(fd, _) in set.entries.borrow().iter() {
-                match fds.iter_mut().find(|p| p.fd == fd) {
-                    Some(p) => p.events |= bit,
-                    None => fds.push(PollFd {
-                        fd,
-                        events: bit,
-                        revents: 0,
-                    }),
+        unsafe {
+            let _ = nfds;
+            let mut fds: Vec<PollFd> = Vec::new();
+            for (set, bit) in [(read, RD), (write, WR), (except, PRI)] {
+                let Some(set) = set else { continue };
+                for &(fd, _) in set.entries.borrow().iter() {
+                    match fds.iter_mut().find(|p| p.fd == fd) {
+                        Some(p) => p.events |= bit,
+                        None => fds.push(PollFd {
+                            fd,
+                            events: bit,
+                            revents: 0,
+                        }),
+                    }
                 }
             }
-        }
-        // Rounded up so a short timeout is a wait and not a spin; the cast
-        // saturates for a long one.
-        let timeout_ms = match timeout {
-            None => -1,
-            Some(t) => (t * 1000.0).ceil().max(0.0) as i32,
-        };
-        let rc = ash_host_socket_poll(fds.as_mut_ptr(), fds.len() as i32, timeout_ms);
-        if rc < 0 {
-            fail(-rc);
-            return -1;
-        }
-        for (set, mask) in [(read, RD | HUP | ERR), (write, WR | ERR), (except, PRI)] {
-            let Some(set) = set else { continue };
-            for (fd, ready) in set.entries.borrow_mut().iter_mut() {
-                if let Some(p) = fds.iter().find(|p| p.fd == *fd) {
-                    *ready = p.revents & mask != 0;
+            // Rounded up so a short timeout is a wait and not a spin; the cast
+            // saturates for a long one.
+            let timeout_ms = match timeout {
+                None => -1,
+                Some(t) => (t * 1000.0).ceil().max(0.0) as i32,
+            };
+            let rc = ash_host_socket_poll(fds.as_mut_ptr(), fds.len() as i32, timeout_ms);
+            if rc < 0 {
+                fail(-rc);
+                return -1;
+            }
+            for (set, mask) in [(read, RD | HUP | ERR), (write, WR | ERR), (except, PRI)] {
+                let Some(set) = set else { continue };
+                for (fd, ready) in set.entries.borrow_mut().iter_mut() {
+                    if let Some(p) = fds.iter().find(|p| p.fd == *fd) {
+                        *ready = p.revents & mask != 0;
+                    }
                 }
             }
+            rc
         }
-        rc
     }
 
     /// # Safety
@@ -869,20 +937,22 @@ mod sys {
     /// `new Host("localhost")` -- the way nearly every socket example and
     /// test opens a connection -- fail on wasm alone.
     pub unsafe fn resolve_ipv4(name: *const u8) -> Option<c_int> {
-        if name.is_null() {
-            return None;
+        unsafe {
+            if name.is_null() {
+                return None;
+            }
+            let mut end = name;
+            while *end != 0 {
+                end = end.add(1);
+            }
+            let text = std::slice::from_raw_parts(name, end.offset_from(name) as usize);
+            if text.eq_ignore_ascii_case(b"localhost") {
+                // The bytes in network order, read back in this machine's, which
+                // is what an `s_addr` is and what `sockaddr_in` expects.
+                return Some(u32::from_ne_bytes([127, 0, 0, 1]) as c_int);
+            }
+            None
         }
-        let mut end = name;
-        while *end != 0 {
-            end = end.add(1);
-        }
-        let text = std::slice::from_raw_parts(name, end.offset_from(name) as usize);
-        if text.eq_ignore_ascii_case(b"localhost") {
-            // The bytes in network order, read back in this machine's, which
-            // is what an `s_addr` is and what `sockaddr_in` expects.
-            return Some(u32::from_ne_bytes([127, 0, 0, 1]) as c_int);
-        }
-        None
     }
 
     /// # Safety
@@ -1074,11 +1144,7 @@ mod sys {
 
     pub unsafe fn shutdown(s: Sock, read: bool, write: bool) -> bool {
         let how = if read {
-            if write {
-                ws::SD_BOTH
-            } else {
-                ws::SD_RECEIVE
-            }
+            if write { ws::SD_BOTH } else { ws::SD_RECEIVE }
         } else {
             ws::SD_SEND
         };
@@ -1262,10 +1328,12 @@ pub struct hl_socket {
 /// `_BYTES` that Haxe reads with `String.fromUTF8`, so the terminator is part
 /// of the contract, and the storage must be the VM's, not Rust's.
 unsafe fn gc_cstring(src: &[u8]) -> *mut vbyte {
-    let out = hlp_alloc_bytes((src.len() + 1) as c_int);
-    ptr::copy_nonoverlapping(src.as_ptr(), out, src.len());
-    *out.add(src.len()) = 0;
-    out
+    unsafe {
+        let out = hlp_alloc_bytes((src.len() + 1) as c_int);
+        ptr::copy_nonoverlapping(src.as_ptr(), out, src.len());
+        *out.add(src.len()) = 0;
+        out
+    }
 }
 
 /// Parses the strict dotted-quad form `inet_addr` accepts, returning the
@@ -1297,11 +1365,13 @@ fn parse_ipv4(text: &[u8]) -> Option<c_int> {
 }
 
 unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
-    let mut len = 0usize;
-    while *p.add(len) != 0 {
-        len += 1;
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(p, len)
     }
-    std::slice::from_raw_parts(p, len)
 }
 
 // ============================================================================
@@ -1317,44 +1387,50 @@ pub extern "C" fn hlp_socket_init() {
 /// `DEFINE_PRIM(_SOCK, socket_new, _BOOL)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_new(udp: bool) -> *mut hl_socket {
-    let s = sys::create(udp);
-    if !sys::is_valid(s) {
-        return ptr::null_mut();
+    unsafe {
+        let s = sys::create(udp);
+        if !sys::is_valid(s) {
+            return ptr::null_mut();
+        }
+        let hs = hlp_alloc_bytes(std::mem::size_of::<hl_socket>() as c_int) as *mut hl_socket;
+        (*hs).sock = s;
+        hs
     }
-    let hs = hlp_alloc_bytes(std::mem::size_of::<hl_socket>() as c_int) as *mut hl_socket;
-    (*hs).sock = s;
-    hs
 }
 
 /// `DEFINE_PRIM(_VOID, socket_close, _SOCK)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_close(s: *mut hl_socket) {
-    if s.is_null() {
-        return;
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        sys::close((*s).sock);
+        // Poisoning the handle is what makes a double close, and any later send
+        // on a closed socket, return an error instead of hitting a recycled fd.
+        (*s).sock = sys::INVALID;
     }
-    sys::close((*s).sock);
-    // Poisoning the handle is what makes a double close, and any later send
-    // on a closed socket, return an error instead of hitting a recycled fd.
-    (*s).sock = sys::INVALID;
 }
 
 /// `DEFINE_PRIM(_I32, socket_send_char, _SOCK _I32)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_send_char(s: *mut hl_socket, c: c_int) -> c_int {
-    if s.is_null() {
-        return -2;
+    unsafe {
+        if s.is_null() {
+            return -2;
+        }
+        let byte = c as u8;
+        hl_blocking(true);
+        let sent = sys::send((*s).sock, &byte, 1);
+        hl_blocking(false);
+        if sent < 0 {
+            let e = sys::block_error();
+            trace::io("send", e);
+            return e;
+        }
+        trace::io("send", 1);
+        1
     }
-    let byte = c as u8;
-    hl_blocking(true);
-    let sent = sys::send((*s).sock, &byte, 1);
-    hl_blocking(false);
-    if sent < 0 {
-        let e = sys::block_error();
-        trace::io("send", e);
-        return e;
-    }
-    trace::io("send", 1);
-    1
 }
 
 /// `DEFINE_PRIM(_I32, socket_send, _SOCK _BYTES _I32 _I32)`
@@ -1365,31 +1441,33 @@ pub unsafe extern "C" fn hlp_socket_send(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    if s.is_null() {
-        return -2;
+    unsafe {
+        if s.is_null() {
+            return -2;
+        }
+        // Declared blocking for the same reason `recv` is: a full send buffer
+        // parks this thread inside the kernel, and a collector that does not know
+        // that waits for it to reach a safe point it will never reach.
+        hl_blocking(true);
+        let r = sys::send((*s).sock, buf.wrapping_offset(pos as isize), len);
+        hl_blocking(false);
+        if r < 0 {
+            let e = sys::block_error();
+            trace::io("send", e);
+            return e;
+        }
+        trace::io("send", r as c_int);
+        trace::message(
+            "send",
+            buf.wrapping_offset(pos as isize) as *const u8,
+            r as i32,
+        );
+        // Upstream returns the requested `len` rather than `r`, which reports a
+        // short write on a non-blocking socket as a complete one and silently
+        // drops the tail. Returning the count actually sent can only ever be
+        // lower, so callers written against upstream still behave.
+        r as c_int
     }
-    // Declared blocking for the same reason `recv` is: a full send buffer
-    // parks this thread inside the kernel, and a collector that does not know
-    // that waits for it to reach a safe point it will never reach.
-    hl_blocking(true);
-    let r = sys::send((*s).sock, buf.wrapping_offset(pos as isize), len);
-    hl_blocking(false);
-    if r < 0 {
-        let e = sys::block_error();
-        trace::io("send", e);
-        return e;
-    }
-    trace::io("send", r as c_int);
-    trace::message(
-        "send",
-        buf.wrapping_offset(pos as isize) as *const u8,
-        r as i32,
-    );
-    // Upstream returns the requested `len` rather than `r`, which reports a
-    // short write on a non-blocking socket as a complete one and silently
-    // drops the tail. Returning the count actually sent can only ever be
-    // lower, so callers written against upstream still behave.
-    r as c_int
 }
 
 /// `DEFINE_PRIM(_I32, socket_recv, _SOCK _BYTES _I32 _I32)`
@@ -1400,48 +1478,52 @@ pub unsafe extern "C" fn hlp_socket_recv(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    if s.is_null() {
-        return -2;
+    unsafe {
+        if s.is_null() {
+            return -2;
+        }
+        hl_blocking(true);
+        let ret = sys::recv((*s).sock, buf.wrapping_offset(pos as isize), len);
+        hl_blocking(false);
+        if ret < 0 {
+            let e = sys::block_error();
+            trace::io("recv", e);
+            return e;
+        }
+        trace::io("recv", ret as c_int);
+        trace::message(
+            "recv",
+            buf.wrapping_offset(pos as isize) as *const u8,
+            ret as i32,
+        );
+        // 0 is end-of-stream here, which `sys.net.Socket` turns into Eof.
+        ret as c_int
     }
-    hl_blocking(true);
-    let ret = sys::recv((*s).sock, buf.wrapping_offset(pos as isize), len);
-    hl_blocking(false);
-    if ret < 0 {
-        let e = sys::block_error();
-        trace::io("recv", e);
-        return e;
-    }
-    trace::io("recv", ret as c_int);
-    trace::message(
-        "recv",
-        buf.wrapping_offset(pos as isize) as *const u8,
-        ret as i32,
-    );
-    // 0 is end-of-stream here, which `sys.net.Socket` turns into Eof.
-    ret as c_int
 }
 
 /// `DEFINE_PRIM(_I32, socket_recv_char, _SOCK)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_recv_char(s: *mut hl_socket) -> c_int {
-    if s.is_null() {
-        return -2;
+    unsafe {
+        if s.is_null() {
+            return -2;
+        }
+        let mut byte: u8 = 0;
+        hl_blocking(true);
+        let ret = sys::recv((*s).sock, &mut byte, 1);
+        hl_blocking(false);
+        if ret < 0 {
+            let e = sys::block_error();
+            trace::io("recv", e);
+            return e;
+        }
+        if ret == 0 {
+            trace::io("recv", 0);
+            return -2;
+        }
+        trace::io("recv", 1);
+        byte as c_int
     }
-    let mut byte: u8 = 0;
-    hl_blocking(true);
-    let ret = sys::recv((*s).sock, &mut byte, 1);
-    hl_blocking(false);
-    if ret < 0 {
-        let e = sys::block_error();
-        trace::io("recv", e);
-        return e;
-    }
-    if ret == 0 {
-        trace::io("recv", 0);
-        return -2;
-    }
-    trace::io("recv", 1);
-    byte as c_int
 }
 
 /// `DEFINE_PRIM(_I32, host_resolve, _BYTES)`
@@ -1451,46 +1533,54 @@ pub unsafe extern "C" fn hlp_socket_recv_char(s: *mut hl_socket) -> c_int {
 /// which Haxe reports as "Unresolved host".
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_resolve(host: *mut vbyte) -> c_int {
-    if host.is_null() {
-        return -1;
+    unsafe {
+        if host.is_null() {
+            return -1;
+        }
+        if let Some(ip) = parse_ipv4(cstr_slice(host)) {
+            return ip;
+        }
+        hl_blocking(true);
+        let ip = sys::resolve_ipv4(host);
+        hl_blocking(false);
+        ip.unwrap_or(-1)
     }
-    if let Some(ip) = parse_ipv4(cstr_slice(host)) {
-        return ip;
-    }
-    hl_blocking(true);
-    let ip = sys::resolve_ipv4(host);
-    hl_blocking(false);
-    ip.unwrap_or(-1)
 }
 
 /// `DEFINE_PRIM(_BYTES, host_to_string, _I32)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_to_string(ip: c_int) -> *mut vbyte {
-    // The int is a raw `s_addr`, so its native byte order already is the
-    // wire order; upstream reaches the same digits through inet_ntoa.
-    let o = ip.to_ne_bytes();
-    let text = format!("{}.{}.{}.{}", o[0], o[1], o[2], o[3]);
-    gc_cstring(text.as_bytes())
+    unsafe {
+        // The int is a raw `s_addr`, so its native byte order already is the
+        // wire order; upstream reaches the same digits through inet_ntoa.
+        let o = ip.to_ne_bytes();
+        let text = format!("{}.{}.{}.{}", o[0], o[1], o[2], o[3]);
+        gc_cstring(text.as_bytes())
+    }
 }
 
 /// `DEFINE_PRIM(_BYTES, host_reverse, _I32)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_reverse(ip: c_int) -> *mut vbyte {
-    hl_blocking(true);
-    let name = sys::reverse_ipv4(ip);
-    hl_blocking(false);
-    match name {
-        Some(n) => gc_cstring(&n),
-        None => ptr::null_mut(),
+    unsafe {
+        hl_blocking(true);
+        let name = sys::reverse_ipv4(ip);
+        hl_blocking(false);
+        match name {
+            Some(n) => gc_cstring(&n),
+            None => ptr::null_mut(),
+        }
     }
 }
 
 /// `DEFINE_PRIM(_BYTES, host_local, _NO_ARG)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_local() -> *mut vbyte {
-    match sys::local_name() {
-        Some(n) => gc_cstring(&n),
-        None => ptr::null_mut(),
+    unsafe {
+        match sys::local_name() {
+            Some(n) => gc_cstring(&n),
+            None => ptr::null_mut(),
+        }
     }
 }
 
@@ -1501,8 +1591,8 @@ pub unsafe extern "C" fn hlp_host_local() -> *mut vbyte {
 /// which direction stopped first. Totals are reported per socket so a stalled
 /// stream is distinguishable from one that never opened.
 mod trace {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     pub fn on() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
@@ -1541,29 +1631,31 @@ mod trace {
     /// # Safety
     /// `buf` must be valid for `len` bytes.
     pub unsafe fn message(dir: &str, buf: *const u8, len: i32) {
-        if !on() || buf.is_null() || len <= 0 {
-            return;
-        }
-        let bytes = std::slice::from_raw_parts(buf, len as usize);
-        let Some(at) = bytes.windows(6).position(|w| w == b"\"type\"") else {
-            return;
-        };
-        // Past `"type"`, its colon and opening quote, to the value.
-        let rest = &bytes[at + 6..];
-        let Some(open) = rest.iter().position(|&c| c == b'"') else {
-            return;
-        };
-        let value = &rest[open + 1..];
-        let Some(end) = value.iter().position(|&c| c == b'"') else {
-            return;
-        };
-        let name: String = value[..end]
-            .iter()
-            .take(48)
-            .map(|&c| if c.is_ascii_graphic() { c as char } else { '.' })
-            .collect();
-        if !name.is_empty() {
-            eprintln!("[sock] {dir} type=\"{name}\"");
+        unsafe {
+            if !on() || buf.is_null() || len <= 0 {
+                return;
+            }
+            let bytes = std::slice::from_raw_parts(buf, len as usize);
+            let Some(at) = bytes.windows(6).position(|w| w == b"\"type\"") else {
+                return;
+            };
+            // Past `"type"`, its colon and opening quote, to the value.
+            let rest = &bytes[at + 6..];
+            let Some(open) = rest.iter().position(|&c| c == b'"') else {
+                return;
+            };
+            let value = &rest[open + 1..];
+            let Some(end) = value.iter().position(|&c| c == b'"') else {
+                return;
+            };
+            let name: String = value[..end]
+                .iter()
+                .take(48)
+                .map(|&c| if c.is_ascii_graphic() { c as char } else { '.' })
+                .collect();
+            if !name.is_empty() {
+                eprintln!("[sock] {dir} type=\"{name}\"");
+            }
         }
     }
 
@@ -1598,54 +1690,62 @@ mod trace {
 /// `DEFINE_PRIM(_BOOL, socket_connect, _SOCK _I32 _I32)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_connect(s: *mut hl_socket, host: c_int, port: c_int) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        let addr = sys::sockaddr_in(host, port);
+        hl_blocking(true);
+        let ok = sys::connect((*s).sock, &addr);
+        let blocked = !ok && sys::block_error() == -1;
+        hl_blocking(false);
+        // A non-blocking connect reports "in progress"; upstream calls that a
+        // success and lets select decide when the handshake finished.
+        trace::connect(host, port, ok || blocked);
+        ok || blocked
     }
-    let addr = sys::sockaddr_in(host, port);
-    hl_blocking(true);
-    let ok = sys::connect((*s).sock, &addr);
-    let blocked = !ok && sys::block_error() == -1;
-    hl_blocking(false);
-    // A non-blocking connect reports "in progress"; upstream calls that a
-    // success and lets select decide when the handshake finished.
-    trace::connect(host, port, ok || blocked);
-    ok || blocked
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_listen, _SOCK _I32)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_listen(s: *mut hl_socket, n: c_int) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        sys::listen((*s).sock, n)
     }
-    sys::listen((*s).sock, n)
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_bind, _SOCK _I32 _I32)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_bind(s: *mut hl_socket, host: c_int, port: c_int) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        let addr = sys::sockaddr_in(host, port);
+        sys::bind((*s).sock, &addr)
     }
-    let addr = sys::sockaddr_in(host, port);
-    sys::bind((*s).sock, &addr)
 }
 
 /// `DEFINE_PRIM(_SOCK, socket_accept, _SOCK)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_accept(s: *mut hl_socket) -> *mut hl_socket {
-    if s.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if s.is_null() {
+            return ptr::null_mut();
+        }
+        hl_blocking(true);
+        let nsock = sys::accept((*s).sock);
+        hl_blocking(false);
+        if !sys::is_valid(nsock) {
+            return ptr::null_mut();
+        }
+        let hs = hlp_alloc_bytes(std::mem::size_of::<hl_socket>() as c_int) as *mut hl_socket;
+        (*hs).sock = nsock;
+        hs
     }
-    hl_blocking(true);
-    let nsock = sys::accept((*s).sock);
-    hl_blocking(false);
-    if !sys::is_valid(nsock) {
-        return ptr::null_mut();
-    }
-    let hs = hlp_alloc_bytes(std::mem::size_of::<hl_socket>() as c_int) as *mut hl_socket;
-    (*hs).sock = nsock;
-    hs
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_peer, _SOCK _REF(_I32) _REF(_I32))`
@@ -1655,21 +1755,23 @@ pub unsafe extern "C" fn hlp_socket_peer(
     host: *mut c_int,
     port: *mut c_int,
 ) -> bool {
-    if s.is_null() {
-        return false;
-    }
-    match sys::peer_name((*s).sock) {
-        Some(addr) => {
-            let (h, p) = sys::addr_parts(&addr);
-            if !host.is_null() {
-                *host = h;
-            }
-            if !port.is_null() {
-                *port = p;
-            }
-            true
+    unsafe {
+        if s.is_null() {
+            return false;
         }
-        None => false,
+        match sys::peer_name((*s).sock) {
+            Some(addr) => {
+                let (h, p) = sys::addr_parts(&addr);
+                if !host.is_null() {
+                    *host = h;
+                }
+                if !port.is_null() {
+                    *port = p;
+                }
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -1680,61 +1782,71 @@ pub unsafe extern "C" fn hlp_socket_host(
     host: *mut c_int,
     port: *mut c_int,
 ) -> bool {
-    if s.is_null() {
-        return false;
-    }
-    match sys::sock_name((*s).sock) {
-        Some(addr) => {
-            let (h, p) = sys::addr_parts(&addr);
-            if !host.is_null() {
-                *host = h;
-            }
-            if !port.is_null() {
-                *port = p;
-            }
-            true
+    unsafe {
+        if s.is_null() {
+            return false;
         }
-        None => false,
+        match sys::sock_name((*s).sock) {
+            Some(addr) => {
+                let (h, p) = sys::addr_parts(&addr);
+                if !host.is_null() {
+                    *host = h;
+                }
+                if !port.is_null() {
+                    *port = p;
+                }
+                true
+            }
+            None => false,
+        }
     }
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_set_timeout, _SOCK _F64)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_timeout(s: *mut hl_socket, t: f64) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        sys::set_timeout((*s).sock, t)
     }
-    sys::set_timeout((*s).sock, t)
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_shutdown, _SOCK _BOOL _BOOL)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_shutdown(s: *mut hl_socket, r: bool, w: bool) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        if !r && !w {
+            return true;
+        }
+        sys::shutdown((*s).sock, r, w)
     }
-    if !r && !w {
-        return true;
-    }
-    sys::shutdown((*s).sock, r, w)
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_set_blocking, _SOCK _BOOL)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_blocking(s: *mut hl_socket, b: bool) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        sys::set_blocking((*s).sock, b)
     }
-    sys::set_blocking((*s).sock, b)
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_set_fast_send, _SOCK _BOOL)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_fast_send(s: *mut hl_socket, b: bool) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        sys::set_flag((*s).sock, sys::TCP_LEVEL, sys::TCP_NODELAY, b)
     }
-    sys::set_flag((*s).sock, sys::TCP_LEVEL, sys::TCP_NODELAY, b)
 }
 
 /// `socket_set_broadcast(_SOCK _BOOL) : _BOOL`
@@ -1743,10 +1855,12 @@ pub unsafe extern "C" fn hlp_socket_set_fast_send(s: *mut hl_socket, b: bool) ->
 /// therefore fails to resolve it. Implemented so UDP broadcast works here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_broadcast(s: *mut hl_socket, b: bool) -> bool {
-    if s.is_null() {
-        return false;
+    unsafe {
+        if s.is_null() {
+            return false;
+        }
+        sys::set_flag((*s).sock, sys::SOCKET_LEVEL, sys::SO_BROADCAST, b)
     }
-    sys::set_flag((*s).sock, sys::SOCKET_LEVEL, sys::SO_BROADCAST, b)
 }
 
 /// `DEFINE_PRIM(_I32, socket_send_to, _SOCK _BYTES _I32 _I32 _I32)`
@@ -1760,15 +1874,17 @@ pub unsafe extern "C" fn hlp_socket_send_to(
     host: c_int,
     port: c_int,
 ) -> c_int {
-    if s.is_null() {
-        return -2;
+    unsafe {
+        if s.is_null() {
+            return -2;
+        }
+        let addr = sys::sockaddr_in(host, port);
+        let r = sys::send_to((*s).sock, data, len, &addr);
+        if r < 0 {
+            return sys::block_error();
+        }
+        r as c_int
     }
-    let addr = sys::sockaddr_in(host, port);
-    let r = sys::send_to((*s).sock, data, len, &addr);
-    if r < 0 {
-        return sys::block_error();
-    }
-    r as c_int
 }
 
 /// `DEFINE_PRIM(_I32, socket_recv_from, _SOCK _BYTES _I32 _REF(_I32) _REF(_I32))`
@@ -1780,33 +1896,35 @@ pub unsafe extern "C" fn hlp_socket_recv_from(
     host: *mut c_int,
     port: *mut c_int,
 ) -> c_int {
-    if s.is_null() {
-        return -2;
-    }
-    let mut addr = sys::sockaddr_in(0, 0);
-    hl_blocking(true);
-    let r = sys::recv_from((*s).sock, data, len, &mut addr);
-    hl_blocking(false);
-    let received = if r < 0 {
-        // Upstream folds Windows' WSAECONNRESET (an earlier datagram bounced)
-        // into an empty read rather than an error.
-        let err = sys::block_error();
-        if err == -2 && sys::conn_reset() {
-            0
-        } else {
-            return err;
+    unsafe {
+        if s.is_null() {
+            return -2;
         }
-    } else {
-        r as c_int
-    };
-    let (h, p) = sys::addr_parts(&addr);
-    if !host.is_null() {
-        *host = h;
+        let mut addr = sys::sockaddr_in(0, 0);
+        hl_blocking(true);
+        let r = sys::recv_from((*s).sock, data, len, &mut addr);
+        hl_blocking(false);
+        let received = if r < 0 {
+            // Upstream folds Windows' WSAECONNRESET (an earlier datagram bounced)
+            // into an empty read rather than an error.
+            let err = sys::block_error();
+            if err == -2 && sys::conn_reset() {
+                0
+            } else {
+                return err;
+            }
+        } else {
+            r as c_int
+        };
+        let (h, p) = sys::addr_parts(&addr);
+        if !host.is_null() {
+            *host = h;
+        }
+        if !port.is_null() {
+            *port = p;
+        }
+        received
     }
-    if !port.is_null() {
-        *port = p;
-    }
-    received
 }
 
 /// `DEFINE_PRIM(_I32, socket_fd_size, _I32)`
@@ -1829,63 +1947,67 @@ unsafe fn make_socket_set(
     left: &mut c_int,
     max: &mut u64,
 ) -> Result<Option<sys::FdSet>, ()> {
-    if a.is_null() {
-        return Ok(None);
-    }
-    let count = (*a).size.max(0);
-    let req = sys::fd_size(count);
-    if req < 0 || *left < req {
-        return Err(());
-    }
-    *left -= req;
-    let region = *cursor;
-    *cursor = (*cursor).add(req as usize);
-
-    let mut set = sys::FdSet::init(region, count as usize);
-    let aptr = hl_aptr::<*mut hl_socket>(a);
-    for i in 0..count {
-        let s = *aptr.add(i as usize);
-        if s.is_null() {
-            break;
+    unsafe {
+        if a.is_null() {
+            return Ok(None);
         }
-        let fd = (*s).sock;
-        // A socket closed while still sitting in a select set is simply never
-        // ready; upstream would pass the poisoned handle straight to FD_SET.
-        if !sys::is_valid(fd) {
-            continue;
-        }
-        if !set.add(fd) {
+        let count = (*a).size.max(0);
+        let req = sys::fd_size(count);
+        if req < 0 || *left < req {
             return Err(());
         }
-        let key = sys::sock_key(fd);
-        if key > *max {
-            *max = key;
+        *left -= req;
+        let region = *cursor;
+        *cursor = (*cursor).add(req as usize);
+
+        let mut set = sys::FdSet::init(region, count as usize);
+        let aptr = hl_aptr::<*mut hl_socket>(a);
+        for i in 0..count {
+            let s = *aptr.add(i as usize);
+            if s.is_null() {
+                break;
+            }
+            let fd = (*s).sock;
+            // A socket closed while still sitting in a select set is simply never
+            // ready; upstream would pass the poisoned handle straight to FD_SET.
+            if !sys::is_valid(fd) {
+                continue;
+            }
+            if !set.add(fd) {
+                return Err(());
+            }
+            let key = sys::sock_key(fd);
+            if key > *max {
+                *max = key;
+            }
         }
+        Ok(Some(set))
     }
-    Ok(Some(set))
 }
 
 /// Compacts `a` down to the sockets that came back ready, NUL-terminated when
 /// there is room. `sys.net.Socket.outArray` stops at that first null.
 unsafe fn make_array_result(set: &sys::FdSet, a: *mut varray) {
-    if a.is_null() {
-        return;
-    }
-    let count = (*a).size.max(0);
-    let aptr = hl_aptr::<*mut hl_socket>(a);
-    let mut pos = 0usize;
-    for i in 0..count {
-        let s = *aptr.add(i as usize);
-        if s.is_null() {
-            break;
+    unsafe {
+        if a.is_null() {
+            return;
         }
-        if set.contains((*s).sock) {
-            *aptr.add(pos) = s;
-            pos += 1;
+        let count = (*a).size.max(0);
+        let aptr = hl_aptr::<*mut hl_socket>(a);
+        let mut pos = 0usize;
+        for i in 0..count {
+            let s = *aptr.add(i as usize);
+            if s.is_null() {
+                break;
+            }
+            if set.contains((*s).sock) {
+                *aptr.add(pos) = s;
+                pos += 1;
+            }
         }
-    }
-    if pos < count as usize {
-        *aptr.add(pos) = ptr::null_mut();
+        if pos < count as usize {
+            *aptr.add(pos) = ptr::null_mut();
+        }
     }
 }
 
@@ -1899,44 +2021,46 @@ pub unsafe extern "C" fn hlp_socket_select(
     tmp_size: c_int,
     timeout: f64,
 ) -> bool {
-    let mut cursor = tmp;
-    // Without scratch space no set can be built; the all-NULL case still
-    // works, since select then just sleeps out the timeout.
-    let mut left = if tmp.is_null() { 0 } else { tmp_size.max(0) };
-    let mut max: u64 = 0;
+    unsafe {
+        let mut cursor = tmp;
+        // Without scratch space no set can be built; the all-NULL case still
+        // works, since select then just sleeps out the timeout.
+        let mut left = if tmp.is_null() { 0 } else { tmp_size.max(0) };
+        let mut max: u64 = 0;
 
-    let rs = match make_socket_set(ra, &mut cursor, &mut left, &mut max) {
-        Ok(set) => set,
-        Err(()) => return false,
-    };
-    let ws = match make_socket_set(wa, &mut cursor, &mut left, &mut max) {
-        Ok(set) => set,
-        Err(()) => return false,
-    };
-    let es = match make_socket_set(ea, &mut cursor, &mut left, &mut max) {
-        Ok(set) => set,
-        Err(()) => return false,
-    };
+        let rs = match make_socket_set(ra, &mut cursor, &mut left, &mut max) {
+            Ok(set) => set,
+            Err(()) => return false,
+        };
+        let ws = match make_socket_set(wa, &mut cursor, &mut left, &mut max) {
+            Ok(set) => set,
+            Err(()) => return false,
+        };
+        let es = match make_socket_set(ea, &mut cursor, &mut left, &mut max) {
+            Ok(set) => set,
+            Err(()) => return false,
+        };
 
-    // A negative timeout means "block indefinitely".
-    let deadline = if timeout < 0.0 { None } else { Some(timeout) };
-    hl_blocking(true);
-    let rc = sys::select(max + 1, rs.as_ref(), ws.as_ref(), es.as_ref(), deadline);
-    hl_blocking(false);
-    if rc < 0 {
-        return false;
-    }
+        // A negative timeout means "block indefinitely".
+        let deadline = if timeout < 0.0 { None } else { Some(timeout) };
+        hl_blocking(true);
+        let rc = sys::select(max + 1, rs.as_ref(), ws.as_ref(), es.as_ref(), deadline);
+        hl_blocking(false);
+        if rc < 0 {
+            return false;
+        }
 
-    if let Some(set) = rs.as_ref() {
-        make_array_result(set, ra);
+        if let Some(set) = rs.as_ref() {
+            make_array_result(set, ra);
+        }
+        if let Some(set) = ws.as_ref() {
+            make_array_result(set, wa);
+        }
+        if let Some(set) = es.as_ref() {
+            make_array_result(set, ea);
+        }
+        true
     }
-    if let Some(set) = ws.as_ref() {
-        make_array_result(set, wa);
-    }
-    if let Some(set) = es.as_ref() {
-        make_array_result(set, ea);
-    }
-    true
 }
 
 #[cfg(test)]
@@ -1960,29 +2084,35 @@ mod tests {
     }
 
     unsafe fn unpc(p: *const vbyte) -> String {
-        assert!(!p.is_null());
-        String::from_utf8_lossy(cstr_slice(p)).into_owned()
+        unsafe {
+            assert!(!p.is_null());
+            String::from_utf8_lossy(cstr_slice(p)).into_owned()
+        }
     }
 
     unsafe fn loopback() -> c_int {
-        let mut name = pc("127.0.0.1");
-        hlp_host_resolve(name.as_mut_ptr())
+        unsafe {
+            let mut name = pc("127.0.0.1");
+            hlp_host_resolve(name.as_mut_ptr())
+        }
     }
 
     /// Drives the real `socket_select` path, scratch buffer and all, and
     /// reads the answer out of the in-place compaction the Haxe side expects.
     unsafe fn wait_readable(s: *mut hl_socket) -> bool {
-        let a = crate::array::hlp_alloc_array(crate::types::hlt_bytes(), 1);
-        let slots = hl_aptr::<*mut hl_socket>(a);
-        *slots = s;
-        let size = hlp_socket_fd_size(1);
-        assert!(size > 0);
-        let tmp = hlp_alloc_bytes(size);
-        if !hlp_socket_select(a, ptr::null_mut(), ptr::null_mut(), tmp, size, 2.0) {
-            return false;
+        unsafe {
+            let a = crate::array::hlp_alloc_array(crate::types::hlt_bytes(), 1);
+            let slots = hl_aptr::<*mut hl_socket>(a);
+            *slots = s;
+            let size = hlp_socket_fd_size(1);
+            assert!(size > 0);
+            let tmp = hlp_alloc_bytes(size);
+            if !hlp_socket_select(a, ptr::null_mut(), ptr::null_mut(), tmp, size, 2.0) {
+                return false;
+            }
+            // A socket that was not ready gets overwritten with the NULL sentinel.
+            !(*slots).is_null()
         }
-        // A socket that was not ready gets overwritten with the NULL sentinel.
-        !(*slots).is_null()
     }
 
     #[test]

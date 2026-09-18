@@ -5,7 +5,7 @@
 //! child module of `interpreter` so it reaches `HLInterpreter`'s private
 //! fields without widening them.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::ffi::c_void;
 
 use ash_core::hl_bindings as hl;
@@ -23,8 +23,8 @@ use crate::tiering::env_flag;
 
 use super::instrument::{stride_probe, stride_probe_enabled};
 use super::{
-    func_of, hash_field_name, native_of, run_with_hl_trap, FnAllocDynObj, FnAllocObj,
-    FnAllocVirtual, HLInterpreter, StepResult,
+    FnAllocDynObj, FnAllocObj, FnAllocVirtual, HLInterpreter, StepResult, func_of, hash_field_name,
+    native_of, run_with_hl_trap,
 };
 
 impl HLInterpreter {
@@ -52,44 +52,44 @@ impl HLInterpreter {
         if !arr_val.is_null() && !arr_val.is_void() {
             if !arr_val.is_ptr() {
                 return Err(anyhow!(
-                        "SetArray: array reg r{} is not pointer in {} at pc={} (val={:?}, type_kind={})",
-                        array,
-                        func.name(),
-                        frame.pc,
-                        arr_val,
-                        bytecode.types[func.regs[array as usize].0].kind
-                    ));
+                    "SetArray: array reg r{} is not pointer in {} at pc={} (val={:?}, type_kind={})",
+                    array,
+                    func.name(),
+                    frame.pc,
+                    arr_val,
+                    bytecode.types[func.regs[array as usize].0].kind
+                ));
             }
             let arr_ptr = arr_val.as_ptr() as *mut u8;
             unsafe {
                 let size = *(arr_ptr.add(16) as *const i32);
                 if idx >= size.max(0) as usize {
                     return Err(anyhow!(
-                            "SetArray: index {} out of bounds (size={}) in {} at pc={} (arr=r{} val={:?} src={:?})",
-                            idx,
-                            size,
-                            func.name(),
-                            frame.pc,
-                            array,
-                            arr_val,
-                            src_val
-                        ));
+                        "SetArray: index {} out of bounds (size={}) in {} at pc={} (arr=r{} val={:?} src={:?})",
+                        idx,
+                        size,
+                        func.name(),
+                        frame.pc,
+                        array,
+                        arr_val,
+                        src_val
+                    ));
                 }
                 let at = *(arr_ptr.add(8) as *const *mut hl_type);
                 if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
                     return Err(anyhow!(
-                            "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
-                            at,
-                            func.name(),
-                            frame.pc,
-                            array,
-                            arr_val,
-                            idx,
-                            src_val,
-                            frame.registers.get(4),
-                            frame.registers.get(6),
-                            frame.registers.get(16)
-                        ));
+                        "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
+                        at,
+                        func.name(),
+                        frame.pc,
+                        array,
+                        arr_val,
+                        idx,
+                        src_val,
+                        frame.registers.get(4),
+                        frame.registers.get(6),
+                        frame.registers.get(16)
+                    ));
                 }
                 let at_kind = if at.is_null() {
                     hl::hl_type_kind_HDYN
@@ -210,29 +210,29 @@ impl HLInterpreter {
                 let size = *(arr_ptr.add(16) as *const i32);
                 if idx >= size.max(0) as usize {
                     return Err(anyhow!(
-                            "GetArray: index {} out of bounds (size={}) in {} at pc={} arr=r{} val={:?}",
-                            idx,
-                            size,
-                            func.name(),
-                            frame.pc,
-                            array,
-                            arr_val
-                        ));
+                        "GetArray: index {} out of bounds (size={}) in {} at pc={} arr=r{} val={:?}",
+                        idx,
+                        size,
+                        func.name(),
+                        frame.pc,
+                        array,
+                        arr_val
+                    ));
                 }
                 let at = *(arr_ptr.add(8) as *const *mut hl_type);
                 if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
                     return Err(anyhow!(
-                            "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
-                            at,
-                            func.name(),
-                            frame.pc,
-                            array,
-                            arr_val,
-                            idx,
-                            frame.registers.get(4),
-                            frame.registers.get(6),
-                            frame.registers.get(16)
-                        ));
+                        "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
+                        at,
+                        func.name(),
+                        frame.pc,
+                        array,
+                        arr_val,
+                        idx,
+                        frame.registers.get(4),
+                        frame.registers.get(6),
+                        frame.registers.get(16)
+                    ));
                 }
                 let at_kind = if at.is_null() {
                     hl::hl_type_kind_HDYN
@@ -554,9 +554,9 @@ impl HLInterpreter {
                                 let header_t = unsafe { (*obj_ptr).t };
                                 let dst_c = self.c_type_factory.get(dst_type_idx);
                                 eprintln!(
-                                        "[SafeCast-HOBJ#{}] src_tidx={} dst_tidx={} header={:p} dst_c={:p}",
-                                        c, src_type_idx, dst_type_idx, header_t, dst_c
-                                    );
+                                    "[SafeCast-HOBJ#{}] src_tidx={} dst_tidx={} header={:p} dst_c={:p}",
+                                    c, src_type_idx, dst_type_idx, header_t, dst_c
+                                );
                                 if !header_t.is_null() && (header_t as usize) >= 0x10000 {
                                     unsafe {
                                         let mut cur = header_t;
@@ -589,7 +589,9 @@ impl HLInterpreter {
                                                 "?".into()
                                             };
                                             let sup = (*obj).super_;
-                                            eprintln!("  [{d}] type={cur:p} obj={obj:p} name={name} super={sup:p}");
+                                            eprintln!(
+                                                "  [{d}] type={cur:p} obj={obj:p} name={name} super={sup:p}"
+                                            );
                                             if sup.is_null() || (sup as usize) < 0x10000 {
                                                 break;
                                             }
@@ -671,11 +673,7 @@ impl HLInterpreter {
                                             curo = (*sup).__bindgen_anon_1.obj;
                                             depth += 1;
                                         }
-                                        if upcast {
-                                            (None, true)
-                                        } else {
-                                            (found, false)
-                                        }
+                                        if upcast { (None, true) } else { (found, false) }
                                     } else {
                                         (None, false)
                                     }
@@ -921,9 +919,17 @@ impl HLInterpreter {
                     .map(String::as_str)
                     .unwrap_or("<oob>");
                 eprintln!(
-                        "[DYNSET] f{} pc={} obj={:?} field={} name={} hash={} src_ty={} src_kind={} src={:?}",
-                        func_idx, frame.pc, obj_val, field, fname, hfield, src_type_idx, src_kind, src_val
-                    );
+                    "[DYNSET] f{} pc={} obj={:?} field={} name={} hash={} src_ty={} src_kind={} src={:?}",
+                    func_idx,
+                    frame.pc,
+                    obj_val,
+                    field,
+                    fname,
+                    hfield,
+                    src_type_idx,
+                    src_kind,
+                    src_val
+                );
             }
             let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
             Self::dyn_set_field_by_hash(
@@ -1044,17 +1050,17 @@ impl HLInterpreter {
         let obj_val = frame.registers.get(obj);
         if env_flag!("ASH_DBG_FIELD") {
             eprintln!(
-                    "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
-                    func_idx,
-                    frame.pc,
-                    obj_type_idx,
-                    obj_kind,
-                    field,
-                    src_type_idx,
-                    src_kind,
-                    obj_val,
-                    frame.registers.get(src)
-                );
+                "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
+                func_idx,
+                frame.pc,
+                obj_type_idx,
+                obj_kind,
+                field,
+                src_type_idx,
+                src_kind,
+                obj_val,
+                frame.registers.get(src)
+            );
         }
         if !obj_val.is_null() && !obj_val.is_void() {
             // A Dynamic slot takes a box, not a raw payload. See
@@ -1071,9 +1077,9 @@ impl HLInterpreter {
                 let obj_ptr = obj_val.as_ptr() as *mut u8;
                 if env_flag!("ASH_DBG_FIELD") {
                     eprintln!(
-                            "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
-                            func_idx, frame.pc, obj_type_idx, obj_kind, field, src_kind, src_val
-                        );
+                        "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
+                        func_idx, frame.pc, obj_type_idx, obj_kind, field, src_kind, src_val
+                    );
                 }
                 unsafe {
                     Self::write_obj_field(
@@ -1092,9 +1098,9 @@ impl HLInterpreter {
                     let addr = unsafe { obj_ptr.add(offset) };
                     if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
-                                "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
-                                func_idx, frame.pc, obj_type_idx, field, offset, src_kind, src_val
-                            );
+                            "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
+                            func_idx, frame.pc, obj_type_idx, field, offset, src_kind, src_val
+                        );
                     }
                     unsafe { Self::write_value_at(addr, src_kind, src_val) };
                 } else {

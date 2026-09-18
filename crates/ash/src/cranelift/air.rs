@@ -533,7 +533,10 @@ pub fn gate_report(bc: &DecodedBytecode, level: AirOptLevel, opts: &AirPassOptio
     };
 
     let mut out = vec![
-        format!("gate delta at {level:?} over {} functions", bc.functions.len()),
+        format!(
+            "gate delta at {level:?} over {} functions",
+            bc.functions.len()
+        ),
         format!(
             "accepted by both={both_ok} refused by both={both_refused} widened={widened} narrowed={narrowed} pipeline-declined={failed}"
         ),

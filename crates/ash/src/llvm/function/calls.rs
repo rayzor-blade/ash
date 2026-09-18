@@ -18,9 +18,9 @@ use crate::hl::{
 };
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
-use super::{hl_hash_utf8, FuncPtr};
+use super::{FuncPtr, hl_hash_utf8};
 
 impl<'ctx> JITModule<'ctx> {
     /// Call by findex.

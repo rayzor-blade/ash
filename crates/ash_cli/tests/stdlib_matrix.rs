@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    ash_cli_bin, compile_haxe_case, load_parity_cases, parity_cases_file, parse_bool_env,
-    parse_u64_env, render_output, run_ash, run_haxe_interp, AshMode, ParityCase,
+    AshMode, ParityCase, ash_cli_bin, compile_haxe_case, load_parity_cases, parity_cases_file,
+    parse_bool_env, parse_u64_env, render_output, run_ash, run_haxe_interp,
 };
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -85,16 +85,16 @@ fn run_matrix(mode: AshMode) {
             continue;
         }
 
-        if let Some(baseline) = run_haxe_interp(&tests_dir, &case) {
-            if !baseline.status.success() {
-                unexpected.push(format!(
-                    "[BASELINE FAIL][{}] haxe --interp {}\n{}",
-                    mode_name,
-                    case.main,
-                    render_output(&baseline)
-                ));
-                continue;
-            }
+        if let Some(baseline) = run_haxe_interp(&tests_dir, &case)
+            && !baseline.status.success()
+        {
+            unexpected.push(format!(
+                "[BASELINE FAIL][{}] haxe --interp {}\n{}",
+                mode_name,
+                case.main,
+                render_output(&baseline)
+            ));
+            continue;
         }
 
         let hl_path = tests_dir.join(&case.hl);

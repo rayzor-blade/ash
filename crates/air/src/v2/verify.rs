@@ -18,7 +18,7 @@
 use super::ir::*;
 use super::lower::build_domtree_from_succs;
 use crate::dominance::DominatorTree;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub fn verify(f: &Function) -> Result<()> {
     let nb = f.blocks.len();
@@ -94,10 +94,10 @@ pub fn verify(f: &Function) -> Result<()> {
         if let Terminator::Trap { exc_cell, .. } = blk.term {
             check_c(exc_cell, "trap exc", b)?;
         }
-        if let Terminator::CondJump { cond, b: rhs, .. } = &blk.term {
-            if cond.is_unary() != rhs.is_none() {
-                bail!("b{}: CondJump {:?} operand arity mismatch", b, cond);
-            }
+        if let Terminator::CondJump { cond, b: rhs, .. } = &blk.term
+            && cond.is_unary() != rhs.is_none()
+        {
+            bail!("b{}: CondJump {:?} operand arity mismatch", b, cond);
         }
     }
     for (v, d) in def.iter().enumerate() {
@@ -471,15 +471,15 @@ fn verify_trap_regions(f: &Function, _succs: &[Vec<usize>]) -> Result<()> {
 
         // Exceptional edge: uses the entry stack (throw happens before any
         // trailing EndTrap executes) and pops the innermost region.
-        if let Some(h) = blk.handler {
-            if f.block_may_throw(BlockId(b as u32)) {
-                let mut st = s0.clone();
-                let (top_h, _) = st.pop().unwrap();
-                if top_h != h.idx() {
-                    bail!("b{}: exceptional edge does not target innermost handler", b);
-                }
-                propagate(h.idx(), st, &mut wl)?;
+        if let Some(h) = blk.handler
+            && f.block_may_throw(BlockId(b as u32))
+        {
+            let mut st = s0.clone();
+            let (top_h, _) = st.pop().unwrap();
+            if top_h != h.idx() {
+                bail!("b{}: exceptional edge does not target innermost handler", b);
             }
+            propagate(h.idx(), st, &mut wl)?;
         }
 
         // Normal flow: apply a trailing EndTrap, then the terminator.

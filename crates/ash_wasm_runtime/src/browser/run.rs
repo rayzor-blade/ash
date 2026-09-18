@@ -23,17 +23,17 @@
 //! first here reaches the GC before the entrypoint has started it.
 
 use js_sys::{Function, Object, Reflect, SharedArrayBuffer, Uint8Array, WebAssembly};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use std::rc::Rc;
 
 use super::fibers::Fibers;
-use super::imports::{imports, Host};
+use super::imports::{Host, imports};
 use super::memory::Guest;
 use super::threads::Threads;
-use crate::imported_memory::{imported_memory, MemoryLimits};
+use crate::imported_memory::{MemoryLimits, imported_memory};
 
 /// How a run ended, as a page sees it.
 #[wasm_bindgen]

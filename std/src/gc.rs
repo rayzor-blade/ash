@@ -4,7 +4,7 @@
 // spelling. The trio cannot all be satisfied at once.
 #![allow(clippy::deref_addrof, dangerous_implicit_autorefs)]
 use crate::error::TrapContext;
-use crate::hl::{self, hl_type, hl_type_obj, vdynamic, HL_WSIZE};
+use crate::hl::{self, HL_WSIZE, hl_type, hl_type_obj, vdynamic};
 use crate::rt::Finalizer;
 use crate::types::hlp_type_size;
 use std::cell::{Cell, RefCell};
@@ -20,8 +20,8 @@ use std::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::{
-    DiscardVirtualMemory, VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-    PAGE_READWRITE,
+    DiscardVirtualMemory, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc,
+    VirtualFree,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -57,19 +57,21 @@ static PENDING_FINALIZER_COUNT: std::sync::atomic::AtomicUsize =
 /// fields after it -- the layout upstream's `hl_fdopen` has. `None` leaves
 /// word zero to the caller, which is upstream's `hl_gc_alloc_gen` shape.
 pub(crate) unsafe fn alloc_with_finalizer(size: usize, finalize: Option<Finalizer>) -> *mut c_void {
-    debug_assert!(size >= mem::size_of::<usize>());
-    let mut gc = gc_locked_init();
-    let Some(ptr) = gc.allocate(size) else {
-        return ptr::null_mut();
-    };
-    let p = ptr.as_ptr();
-    // Both under the one lock hold. A collection between the two would find a
-    // registered block with a null callback and quietly skip it.
-    gc.register_finalizable(p);
-    if let Some(finalize) = finalize {
-        (p as *mut usize).write(finalize as *const () as usize);
+    unsafe {
+        debug_assert!(size >= mem::size_of::<usize>());
+        let mut gc = gc_locked_init();
+        let Some(ptr) = gc.allocate(size) else {
+            return ptr::null_mut();
+        };
+        let p = ptr.as_ptr();
+        // Both under the one lock hold. A collection between the two would find a
+        // registered block with a null callback and quietly skip it.
+        gc.register_finalizable(p);
+        if let Some(finalize) = finalize {
+            (p as *mut usize).write(finalize as *const () as usize);
+        }
+        p as *mut c_void
     }
-    p as *mut c_void
 }
 
 /// Call the finalizers a collection queued. The GC lock must NOT be held.
@@ -1039,21 +1041,23 @@ fn stop_mutator_world() -> StoppedWorld {
 /// `out` must be valid for `cap` `u64` writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_registered_threads(out: *mut u64, cap: usize) -> usize {
-    crate::rt::gc_registered_threads(out, cap)
+    unsafe { crate::rt::gc_registered_threads(out, cap) }
 }
 
 pub(crate) unsafe extern "C" fn gc_registered_threads(out: *mut u64, cap: usize) -> usize {
-    if out.is_null() || cap == 0 {
-        return 0;
+    unsafe {
+        if out.is_null() || cap == 0 {
+            return 0;
+        }
+        let Ok(world) = MUTATOR_WORLD.state.try_lock() else {
+            return 0;
+        };
+        let n = world.mutators.len().min(cap);
+        for (i, m) in world.mutators.iter().take(n).enumerate() {
+            *out.add(i) = m.thread;
+        }
+        n
     }
-    let Ok(world) = MUTATOR_WORLD.state.try_lock() else {
-        return 0;
-    };
-    let n = world.mutators.len().min(cap);
-    for (i, m) in world.mutators.iter().take(n).enumerate() {
-        *out.add(i) = m.thread;
-    }
-    n
 }
 
 fn mutator_scan_range_count() -> usize {
@@ -1247,18 +1251,20 @@ fn inline_alloc_locator() -> (u32, i64) {
 /// region. `kind` 0 says it may not.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_inline_alloc_layout(out: *mut InlineAllocLayout) {
-    let (kind, offset) = inline_alloc_locator();
-    *out = InlineAllocLayout {
-        kind,
-        cur: std::mem::offset_of!(Tlab, cur) as u32,
-        limit: std::mem::offset_of!(Tlab, limit) as u32,
-        objects: std::mem::offset_of!(Tlab, objects) as u32,
-        heap_base: std::mem::offset_of!(Tlab, heap_base) as u32,
-        line: LINE_SIZE as u32,
-        quantum: ALLOC_QUANTUM as u32,
-        max_obj: TLAB_MAX_OBJ as u32,
-        offset,
-    };
+    unsafe {
+        let (kind, offset) = inline_alloc_locator();
+        *out = InlineAllocLayout {
+            kind,
+            cur: std::mem::offset_of!(Tlab, cur) as u32,
+            limit: std::mem::offset_of!(Tlab, limit) as u32,
+            objects: std::mem::offset_of!(Tlab, objects) as u32,
+            heap_base: std::mem::offset_of!(Tlab, heap_base) as u32,
+            line: LINE_SIZE as u32,
+            quantum: ALLOC_QUANTUM as u32,
+            max_obj: TLAB_MAX_OBJ as u32,
+            offset,
+        };
+    }
 }
 
 /// TLAB enabled? Off under stress, and via ASH_GC_TLAB=0.
@@ -2368,13 +2374,17 @@ pub(crate) fn gc_lock_unwind_to(target: usize) {
 /// to hold the lock across its whole module init.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_lock() {
-    crate::rt::gc_lock();
+    unsafe {
+        crate::rt::gc_lock();
+    }
 }
 
 /// Manually release one level of the GC lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_unlock() {
-    crate::rt::gc_unlock();
+    unsafe {
+        crate::rt::gc_unlock();
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_lock() {
@@ -2686,10 +2696,10 @@ fn scan_allocation_shared(
 fn mark_threads() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
-        if let Ok(v) = std::env::var("ASH_GC_MARK_THREADS") {
-            if let Ok(n) = v.parse::<usize>() {
-                return n.max(1);
-            }
+        if let Ok(v) = std::env::var("ASH_GC_MARK_THREADS")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            return n.max(1);
         }
         // N-1, so the machine keeps a core for everything that is not
         // marking: the promoter thread compiling in the background, the
@@ -3316,59 +3326,61 @@ impl ImmixAllocator {
     }
 
     pub unsafe fn is_gc_ptr<T>(&self, ptr: *const T) -> bool {
-        // Cast the pointer to a usize for address arithmetic
-        let addr = ptr as usize;
+        unsafe {
+            // Cast the pointer to a usize for address arithmetic
+            let addr = ptr as usize;
 
-        // Check if the address is within the heap
-        if addr < self.heap.memory.as_ptr() as usize
-            || addr >= (self.heap.memory.as_ptr() as usize + self.heap.memory.len)
-        {
-            return false;
-        }
-
-        // Calculate the block index
-        let block_index = (addr - self.heap.memory.as_ptr() as usize) / BLOCK_SIZE;
-
-        // Check if the block is in use
-        if !self.heap.used_blocks.contains(&(block_index * BLOCK_SIZE)) {
-            return false;
-        }
-
-        // Calculate the line index within the block
-        let line_index = (addr % BLOCK_SIZE) / LINE_SIZE;
-
-        // Check if the line is marked (i.e., in use)
-        if !self.blocks[block_index].is_marked(line_index) {
-            return false;
-        }
-
-        // If it's a vdynamic pointer, we need to check its internal pointer as well
-        if std::mem::size_of::<T>() == std::mem::size_of::<hl::vdynamic>() {
-            // Safety: We've already checked that this pointer is within our heap
-            let vd = unsafe { &*(ptr as *const hl::vdynamic) };
-
-            // Check the type pointer
-            if !vd.t.is_null() && !self.is_gc_ptr(vd.t) {
+            // Check if the address is within the heap
+            if addr < self.heap.memory.as_ptr() as usize
+                || addr >= (self.heap.memory.as_ptr() as usize + self.heap.memory.len)
+            {
                 return false;
             }
 
-            // Check the value pointer for certain types
-            match unsafe { (*vd.t).kind } {
-                hl::hl_type_kind_HOBJ
-                | hl::hl_type_kind_HFUN
-                | hl::hl_type_kind_HARRAY
-                | hl::hl_type_kind_HVIRTUAL
-                | hl::hl_type_kind_HDYNOBJ
-                | hl::hl_type_kind_HBYTES
-                    if !self.is_gc_ptr(vd.v.ptr) =>
-                {
+            // Calculate the block index
+            let block_index = (addr - self.heap.memory.as_ptr() as usize) / BLOCK_SIZE;
+
+            // Check if the block is in use
+            if !self.heap.used_blocks.contains(&(block_index * BLOCK_SIZE)) {
+                return false;
+            }
+
+            // Calculate the line index within the block
+            let line_index = (addr % BLOCK_SIZE) / LINE_SIZE;
+
+            // Check if the line is marked (i.e., in use)
+            if !self.blocks[block_index].is_marked(line_index) {
+                return false;
+            }
+
+            // If it's a vdynamic pointer, we need to check its internal pointer as well
+            if std::mem::size_of::<T>() == std::mem::size_of::<hl::vdynamic>() {
+                // Safety: We've already checked that this pointer is within our heap
+                let vd = &*(ptr as *const hl::vdynamic);
+
+                // Check the type pointer
+                if !vd.t.is_null() && !self.is_gc_ptr(vd.t) {
                     return false;
                 }
-                _ => {} // Other types don't have additional pointers to check
-            }
-        }
 
-        true
+                // Check the value pointer for certain types
+                match (*vd.t).kind {
+                    hl::hl_type_kind_HOBJ
+                    | hl::hl_type_kind_HFUN
+                    | hl::hl_type_kind_HARRAY
+                    | hl::hl_type_kind_HVIRTUAL
+                    | hl::hl_type_kind_HDYNOBJ
+                    | hl::hl_type_kind_HBYTES
+                        if !self.is_gc_ptr(vd.v.ptr) =>
+                    {
+                        return false;
+                    }
+                    _ => {} // Other types don't have additional pointers to check
+                }
+            }
+
+            true
+        }
     }
 
     fn mark_allocation(&self, offset: usize, out: &mut Vec<(usize, usize)>) {
@@ -4181,15 +4193,15 @@ impl ImmixAllocator {
             let mut live = Vec::new();
             for &block in &used_block_addrs {
                 for q in block / ALLOC_QUANTUM..(block + BLOCK_SIZE) / ALLOC_QUANTUM {
-                    if self.heap.objects[q].load(Ordering::Relaxed) & OBJECT_MARK != 0 {
-                        if let Some(object) = containing_allocation(
+                    if self.heap.objects[q].load(Ordering::Relaxed) & OBJECT_MARK != 0
+                        && let Some(object) = containing_allocation(
                             &self.blocks,
                             &self.heap.alloc_sizes,
                             &self.heap.objects,
                             q * ALLOC_QUANTUM,
-                        ) {
-                            live.push(object);
-                        }
+                        )
+                    {
+                        live.push(object);
                     }
                 }
             }
@@ -4425,29 +4437,29 @@ impl ImmixAllocator {
         // referrer is a heap field shows up here instead. Dead objects are
         // skipped — stale pointers in garbage are expected, not evidence.
         // One O(retained heap) pass per collection, diagnosis-only.
-        if !freed.is_empty() {
-            if let Some(objects) = &audit_objects {
-                let base = self.heap.memory.as_ptr() as usize;
-                let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
-                let in_freed = |w: usize| -> bool {
-                    if w < base || w >= base + self.heap.memory.len {
-                        return false;
+        if !freed.is_empty()
+            && let Some(objects) = &audit_objects
+        {
+            let base = self.heap.memory.as_ptr() as usize;
+            let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
+            let in_freed = |w: usize| -> bool {
+                if w < base || w >= base + self.heap.memory.len {
+                    return false;
+                }
+                let off = (w - base) & !(BLOCK_SIZE - 1);
+                freed.contains(&off)
+            };
+            for &(offset, size) in objects {
+                let lo = base + offset;
+                let mut p = lo;
+                while p + WORD <= lo + size {
+                    let w = unsafe { *(p as *const usize) };
+                    if in_freed(w) {
+                        eprintln!(
+                            "[gc-audit] #{seq} live object word @{p:#x} points into freed block ({w:#x})"
+                        );
                     }
-                    let off = (w - base) & !(BLOCK_SIZE - 1);
-                    freed.contains(&off)
-                };
-                for &(offset, size) in objects {
-                    let lo = base + offset;
-                    let mut p = lo;
-                    while p + WORD <= lo + size {
-                        let w = unsafe { *(p as *const usize) };
-                        if in_freed(w) {
-                            eprintln!(
-                                "[gc-audit] #{seq} live object word @{p:#x} points into freed block ({w:#x})"
-                            );
-                        }
-                        p += WORD;
-                    }
+                    p += WORD;
                 }
             }
         }
@@ -4566,7 +4578,12 @@ impl ImmixAllocator {
                  ({:.1}MB, {pct:.1}% full)  by-marked-lines: 1={} 2-4={} 5-16={} 17-64={} 65-192={} 193+={}",
                 (occ_blocks * BLOCK_SIZE) as f64 / 1048576.0,
                 (occ_marked * LINE_SIZE) as f64 / 1048576.0,
-                occ_hist[0], occ_hist[1], occ_hist[2], occ_hist[3], occ_hist[4], occ_hist[5],
+                occ_hist[0],
+                occ_hist[1],
+                occ_hist[2],
+                occ_hist[3],
+                occ_hist[4],
+                occ_hist[5],
             );
         }
 
@@ -4648,10 +4665,12 @@ impl ImmixAllocator {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_register_root(ptr: *mut hl::vdynamic) {
-    if ptr.is_null() {
-        return;
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+        crate::rt::gc_add_persistent(ptr);
     }
-    crate::rt::gc_add_persistent(ptr);
 }
 
 #[unsafe(no_mangle)]
@@ -4690,41 +4709,45 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
     visitor: unsafe extern "C" fn(*mut hl::vdynamic, *mut hl::hl_type, *mut c_void),
     ctx: *mut c_void,
 ) {
-    crate::rt::gc_walk_heap(visitor, ctx);
+    unsafe {
+        crate::rt::gc_walk_heap(visitor, ctx);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_walk_heap(visitor: crate::rt::HeapVisitor, ctx: *mut c_void) {
-    let _guard = gc_guard();
-    let gc = match (*(&raw mut GC)).get_mut() {
-        Some(g) => g,
-        None => return,
-    };
-    let heap_base = gc.heap.memory.as_ptr() as usize;
+    unsafe {
+        let _guard = gc_guard();
+        let gc = match (*(&raw mut GC)).get_mut() {
+            Some(g) => g,
+            None => return,
+        };
+        let heap_base = gc.heap.memory.as_ptr() as usize;
 
-    // `used_blocks` holds byte offsets from the heap base, as every other
-    // reader of it takes them.
-    for &block_offset in &gc.heap.used_blocks {
-        let first_line = block_offset / LINE_SIZE;
+        // `used_blocks` holds byte offsets from the heap base, as every other
+        // reader of it takes them.
+        for &block_offset in &gc.heap.used_blocks {
+            let first_line = block_offset / LINE_SIZE;
 
-        let mut line = first_line;
-        let block_end_line = first_line + LINES_PER_BLOCK;
+            let mut line = first_line;
+            let block_end_line = first_line + LINES_PER_BLOCK;
 
-        while line < block_end_line {
-            let alloc_lines = gc.heap.alloc_sizes[line] as usize;
-            if alloc_lines == 0 {
-                line += 1;
-                continue;
+            while line < block_end_line {
+                let alloc_lines = gc.heap.alloc_sizes[line] as usize;
+                if alloc_lines == 0 {
+                    line += 1;
+                    continue;
+                }
+
+                let obj_addr = heap_base + line * LINE_SIZE;
+                let obj = obj_addr as *mut hl::vdynamic;
+
+                // Validate: first field must be a type pointer
+                if !(*obj).t.is_null() {
+                    visitor(obj, (*obj).t, ctx);
+                }
+
+                line += alloc_lines;
             }
-
-            let obj_addr = heap_base + line * LINE_SIZE;
-            let obj = obj_addr as *mut hl::vdynamic;
-
-            // Validate: first field must be a type pointer
-            if !(*obj).t.is_null() {
-                visitor(obj, (*obj).t, ctx);
-            }
-
-            line += alloc_lines;
         }
     }
 }
@@ -4765,8 +4788,10 @@ pub unsafe extern "C" fn hlp_gc_safepoint() {
 /// Seals the runtime table: `hlp_rt_install` is refused from here on.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_init() {
-    crate::rt::seal();
-    crate::rt::gc_init();
+    unsafe {
+        crate::rt::seal();
+        crate::rt::gc_init();
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_init() {
@@ -4777,7 +4802,9 @@ pub(crate) unsafe extern "C" fn gc_init() {
 /// Called once at JIT entry before running user code.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
-    crate::rt::gc_set_stack_top(top);
+    unsafe {
+        crate::rt::gc_set_stack_top(top);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_set_stack_top(top: usize) {
@@ -4789,7 +4816,9 @@ pub(crate) unsafe extern "C" fn gc_set_stack_top(top: usize) {
 /// both feed the same per-thread registry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_register_thread(stack_top: *mut c_void) {
-    crate::rt::register_thread(stack_top);
+    unsafe {
+        crate::rt::register_thread(stack_top);
+    }
 }
 
 pub(crate) unsafe extern "C" fn register_thread(stack_top: *mut c_void) {
@@ -4801,7 +4830,9 @@ pub(crate) unsafe extern "C" fn register_thread(stack_top: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_unregister_thread() {
-    crate::rt::unregister_thread();
+    unsafe {
+        crate::rt::unregister_thread();
+    }
 }
 
 pub(crate) unsafe extern "C" fn unregister_thread() {
@@ -4815,7 +4846,9 @@ pub(crate) unsafe extern "C" fn unregister_thread() {
 /// Called after init_constants with pointer to globals array and count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_globals(ptr: *const *mut c_void, count: usize) {
-    crate::rt::gc_set_globals(ptr, count);
+    unsafe {
+        crate::rt::gc_set_globals(ptr, count);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_set_globals(ptr: *const *mut c_void, count: usize) {
@@ -4826,7 +4859,9 @@ pub(crate) unsafe extern "C" fn gc_set_globals(ptr: *const *mut c_void, count: u
 /// Clear interpreter-provided conservative scan ranges.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_scan_roots_done() {
-    crate::rt::gc_scan_roots_done();
+    unsafe {
+        crate::rt::gc_scan_roots_done();
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_scan_roots_done() {
@@ -4836,7 +4871,9 @@ pub(crate) unsafe extern "C" fn gc_scan_roots_done() {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
-    crate::rt::gc_clear_scan_roots();
+    unsafe {
+        crate::rt::gc_clear_scan_roots();
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_clear_scan_roots() {
@@ -4847,7 +4884,9 @@ pub(crate) unsafe extern "C" fn gc_clear_scan_roots() {
 /// Add an interpreter-provided conservative scan range.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
-    crate::rt::gc_add_scan_root(ptr, size);
+    unsafe {
+        crate::rt::gc_add_scan_root(ptr, size);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_add_scan_root(ptr: *const c_void, size: usize) {
@@ -4878,7 +4917,9 @@ pub unsafe extern "C" fn hlp_gc_set_scan_roots_live(
     ranges: *const (usize, usize),
     len: *const usize,
 ) {
-    crate::rt::gc_set_scan_roots_live(ranges, len);
+    unsafe {
+        crate::rt::gc_set_scan_roots_live(ranges, len);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_set_scan_roots_live(
@@ -4901,23 +4942,27 @@ pub(crate) unsafe extern "C" fn gc_set_scan_roots_live(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_scan_roots(ranges: *const (usize, usize), count: usize) {
-    crate::rt::gc_set_scan_roots(ranges, count);
+    unsafe {
+        crate::rt::gc_set_scan_roots(ranges, count);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_set_scan_roots(ranges: *const (usize, usize), count: usize) {
-    let mut gc = gc_locked();
-    gc.heap.safepoint_mode = true;
-    let ranges: &[(usize, usize)] = if ranges.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(ranges, count)
-    };
-    set_current_scan_ranges(ranges);
-    // The world lock is released by now, and must be: honouring a deferred
-    // collection reaches stop_mutator_world, which takes it again.
-    if gc.heap.collect_pending {
-        set_collect_origin(1);
-        gc.collect_garbage();
+    unsafe {
+        let mut gc = gc_locked();
+        gc.heap.safepoint_mode = true;
+        let ranges: &[(usize, usize)] = if ranges.is_null() || count == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(ranges, count)
+        };
+        set_current_scan_ranges(ranges);
+        // The world lock is released by now, and must be: honouring a deferred
+        // collection reaches stop_mutator_world, which takes it again.
+        if gc.heap.collect_pending {
+            set_collect_origin(1);
+            gc.collect_garbage();
+        }
     }
 }
 
@@ -4926,7 +4971,9 @@ pub(crate) unsafe extern "C" fn gc_set_scan_roots(ranges: *const (usize, usize),
 /// collection trigger and resets after every collection.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_track_external(bytes: u64) {
-    crate::rt::gc_track_external(bytes);
+    unsafe {
+        crate::rt::gc_track_external(bytes);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_track_external(bytes: u64) {
@@ -4944,7 +4991,9 @@ pub(crate) unsafe extern "C" fn gc_track_external(bytes: u64) {
 /// flight on another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_enable(b: bool) {
-    crate::rt::gc_enable(b);
+    unsafe {
+        crate::rt::gc_enable(b);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_enable(b: bool) {
@@ -4954,7 +5003,7 @@ pub(crate) unsafe extern "C" fn gc_enable(b: bool) {
 /// `hl.Gc.flags` getter.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_get_flags() -> i32 {
-    crate::rt::gc_get_flags()
+    unsafe { crate::rt::gc_get_flags() }
 }
 
 pub(crate) unsafe extern "C" fn gc_get_flags() -> i32 {
@@ -4982,7 +5031,9 @@ pub(crate) unsafe extern "C" fn gc_get_flags() -> i32 {
 /// file from a caller that can.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_flags(f: i32) {
-    crate::rt::gc_set_flags(f);
+    unsafe {
+        crate::rt::gc_set_flags(f);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_set_flags(f: i32) {
@@ -5005,7 +5056,9 @@ pub(crate) unsafe extern "C" fn gc_set_flags(f: i32) {
 /// rather than a deadlock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_major() {
-    crate::rt::gc_major();
+    unsafe {
+        crate::rt::gc_major();
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_major() {
@@ -5051,7 +5104,9 @@ pub unsafe extern "C" fn hlp_gc_stats(
     allocation_count: *mut f64,
     current_memory: *mut f64,
 ) {
-    crate::rt::gc_stats(total_allocated, allocation_count, current_memory);
+    unsafe {
+        crate::rt::gc_stats(total_allocated, allocation_count, current_memory);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_stats(
@@ -5059,15 +5114,17 @@ pub(crate) unsafe extern "C" fn gc_stats(
     allocation_count: *mut f64,
     current_memory: *mut f64,
 ) {
-    if !total_allocated.is_null() {
-        *total_allocated = GC_STATS.bytes_allocated.load(Ordering::Relaxed) as f64;
-    }
-    if !allocation_count.is_null() {
-        *allocation_count = 0.0;
-    }
-    if !current_memory.is_null() {
-        let gc = gc_locked_init();
-        *current_memory = (gc.heap.used_blocks.len() * BLOCK_SIZE) as f64;
+    unsafe {
+        if !total_allocated.is_null() {
+            *total_allocated = GC_STATS.bytes_allocated.load(Ordering::Relaxed) as f64;
+        }
+        if !allocation_count.is_null() {
+            *allocation_count = 0.0;
+        }
+        if !current_memory.is_null() {
+            let gc = gc_locked_init();
+            *current_memory = (gc.heap.used_blocks.len() * BLOCK_SIZE) as f64;
+        }
     }
 }
 
@@ -5083,7 +5140,9 @@ pub(crate) unsafe extern "C" fn gc_stats(
 /// `Gc.flags.unset(Profile)` does what this does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_profile(b: bool) {
-    crate::rt::gc_profile(b);
+    unsafe {
+        crate::rt::gc_profile(b);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_profile(b: bool) {
@@ -5122,7 +5181,7 @@ pub(crate) unsafe extern "C" fn gc_profile(b: bool) {
 /// dies at the call site instead of being told ash cannot enumerate its heap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_get_live_objects(t: *mut hl_type, arr: *mut hl::varray) -> i32 {
-    crate::rt::gc_get_live_objects(t, arr)
+    unsafe { crate::rt::gc_get_live_objects(t, arr) }
 }
 
 pub(crate) unsafe extern "C" fn gc_get_live_objects(
@@ -5138,18 +5197,20 @@ pub(crate) unsafe extern "C" fn gc_get_live_objects(
 /// UTF-8, not the usual UTF-16: `hl_gc_dump_memory` takes `const char*` and
 /// `hl.Gc.dumpMemory` passes `fileName.toUtf8()`.
 unsafe fn c_utf8_path(p: *const hl::vbyte) -> Option<String> {
-    if p.is_null() {
-        return None;
+    unsafe {
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while len < 4096 && *p.add(len) != 0 {
+            len += 1;
+        }
+        if len == 0 {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(p, len);
+        Some(String::from_utf8_lossy(bytes).into_owned())
     }
-    let mut len = 0usize;
-    while len < 4096 && *p.add(len) != 0 {
-        len += 1;
-    }
-    if len == 0 {
-        return None;
-    }
-    let bytes = std::slice::from_raw_parts(p, len);
-    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Upstream hl_gc_dump_memory (gc.c): mark, then write the heap out for
@@ -5171,115 +5232,119 @@ unsafe fn c_utf8_path(p: *const hl::vbyte) -> Option<String> {
 /// allocation-time marking had already set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
-    crate::rt::gc_dump_memory(filename);
+    unsafe {
+        crate::rt::gc_dump_memory(filename);
+    }
 }
 
 pub(crate) unsafe extern "C" fn gc_dump_memory(filename: *mut hl::vbyte) {
-    use std::io::Write;
+    unsafe {
+        use std::io::Write;
 
-    let path = c_utf8_path(filename).unwrap_or_else(|| "hlmemory.dump".to_string());
-    let Ok(file) = std::fs::File::create(&path) else {
-        eprintln!("[gc] dump_memory: cannot create {path}");
-        return;
-    };
-    let mut out = std::io::BufWriter::new(file);
+        let path = c_utf8_path(filename).unwrap_or_else(|| "hlmemory.dump".to_string());
+        let Ok(file) = std::fs::File::create(&path) else {
+            eprintln!("[gc] dump_memory: cannot create {path}");
+            return;
+        };
+        let mut out = std::io::BufWriter::new(file);
 
-    let mut gc = gc_locked_init();
-    let stopped_world = stop_mutator_world();
+        let mut gc = gc_locked_init();
+        let stopped_world = stop_mutator_world();
 
-    // Before the mutator has entered user code there is no stack to scan
-    // conservatively, and marking from a partial root set would report
-    // live data as garbage.
-    let marked = !stopped_world.snapshots.is_empty();
-    if marked {
-        gc.mark_roots(&stopped_world.snapshots);
-    }
+        // Before the mutator has entered user code there is no stack to scan
+        // conservatively, and marking from a partial root set would report
+        // live data as garbage.
+        let marked = !stopped_world.snapshots.is_empty();
+        if marked {
+            gc.mark_roots(&stopped_world.snapshots);
+        }
 
-    let heap_base = gc.heap.memory.as_ptr() as usize;
-    let heap_len = gc.heap.memory.len;
-    let roots = gc.roots.borrow();
+        let heap_base = gc.heap.memory.as_ptr() as usize;
+        let heap_len = gc.heap.memory.len;
+        let roots = gc.roots.borrow();
 
-    let mut w = |line: String| {
-        let _ = writeln!(out, "{line}");
-    };
-    w("ASHMEM1 ash-immix".into());
-    w(format!("pointer-size {}", mem::size_of::<usize>()));
-    w(format!("heap-base {heap_base:#x}"));
-    w(format!("heap-size {heap_len}"));
-    w(format!("block-size {BLOCK_SIZE}"));
-    w(format!("line-size {LINE_SIZE}"));
-    w(format!("blocks-total {}", heap_len / BLOCK_SIZE));
-    w(format!("blocks-used {}", gc.heap.used_blocks.len()));
-    w(format!("blocks-free {}", gc.heap.free_blocks.len()));
-    w(format!("blocks-reusable {}", gc.heap.reusable_blocks.len()));
-    if gc.heap.tlab_blocks.is_empty() {
-        w("tlab-blocks none".into());
-    } else {
-        let mut blocks: Vec<usize> = gc.heap.tlab_blocks.values().copied().collect();
-        blocks.sort_unstable();
-        let rendered: Vec<String> = blocks
-            .iter()
-            .map(|b| format!("{:#x}", heap_base + b))
-            .collect();
-        w(format!("tlab-blocks {}", rendered.join(" ")));
-    }
-    w(format!("alloc-count {}", gc.heap.alloc_count));
-    w(format!("bytes-since-gc {}", gc.heap.bytes_since_gc));
-    w(format!("external-since-gc {}", gc.heap.external_since_gc));
-    w(format!("trigger-threshold {}", gc.heap.trigger_threshold));
-    w(format!(
-        "collector-enabled {}",
-        GC_ENABLED.load(Ordering::Relaxed)
-    ));
-    w(format!("safepoint-mode {}", gc.heap.safepoint_mode));
-    w(format!(
-        "collections {}",
-        GC_STATS.collections.load(Ordering::Relaxed)
-    ));
-    w(format!(
-        "blocks-reclaimed {}",
-        GC_STATS.blocks_reclaimed.load(Ordering::Relaxed)
-    ));
-    w(format!(
-        "bytes-allocated {}",
-        GC_STATS.bytes_allocated.load(Ordering::Relaxed)
-    ));
-    w(format!(
-        "external-bytes {}",
-        GC_STATS.external_bytes.load(Ordering::Relaxed)
-    ));
-    w(format!(
-        "pause-ns-total {}",
-        GC_STATS.pause_ns_total.load(Ordering::Relaxed)
-    ));
-    w(format!(
-        "pause-ns-max {}",
-        GC_STATS.pause_ns_max.load(Ordering::Relaxed)
-    ));
-    w(format!("roots-globals {}", roots.globals.len()));
-    w(format!("roots-stack {}", roots.stack_roots.len()));
-    w(format!("roots-persistent {}", roots.persistent_roots.len()));
-    w(format!("scan-ranges {}", mutator_scan_range_count()));
-    w(format!("marked {marked}"));
-
-    // One line per retained block: address, live lines, live bytes at line
-    // granularity. Line marks are the finest liveness ash records — reclaim
-    // is whole-block, so a block's marked-line count is its real occupancy.
-    w("# block <addr> <live-lines> <live-bytes>".into());
-    let mut used: Vec<usize> = gc.heap.used_blocks.iter().copied().collect();
-    used.sort_unstable();
-    for block_addr in used {
-        let live = gc.blocks[block_addr / BLOCK_SIZE].marked_line_count();
+        let mut w = |line: String| {
+            let _ = writeln!(out, "{line}");
+        };
+        w("ASHMEM1 ash-immix".into());
+        w(format!("pointer-size {}", mem::size_of::<usize>()));
+        w(format!("heap-base {heap_base:#x}"));
+        w(format!("heap-size {heap_len}"));
+        w(format!("block-size {BLOCK_SIZE}"));
+        w(format!("line-size {LINE_SIZE}"));
+        w(format!("blocks-total {}", heap_len / BLOCK_SIZE));
+        w(format!("blocks-used {}", gc.heap.used_blocks.len()));
+        w(format!("blocks-free {}", gc.heap.free_blocks.len()));
+        w(format!("blocks-reusable {}", gc.heap.reusable_blocks.len()));
+        if gc.heap.tlab_blocks.is_empty() {
+            w("tlab-blocks none".into());
+        } else {
+            let mut blocks: Vec<usize> = gc.heap.tlab_blocks.values().copied().collect();
+            blocks.sort_unstable();
+            let rendered: Vec<String> = blocks
+                .iter()
+                .map(|b| format!("{:#x}", heap_base + b))
+                .collect();
+            w(format!("tlab-blocks {}", rendered.join(" ")));
+        }
+        w(format!("alloc-count {}", gc.heap.alloc_count));
+        w(format!("bytes-since-gc {}", gc.heap.bytes_since_gc));
+        w(format!("external-since-gc {}", gc.heap.external_since_gc));
+        w(format!("trigger-threshold {}", gc.heap.trigger_threshold));
         w(format!(
-            "block {:#x} {live} {}",
-            heap_base + block_addr,
-            live * LINE_SIZE
+            "collector-enabled {}",
+            GC_ENABLED.load(Ordering::Relaxed)
         ));
-    }
-    w("end".into());
+        w(format!("safepoint-mode {}", gc.heap.safepoint_mode));
+        w(format!(
+            "collections {}",
+            GC_STATS.collections.load(Ordering::Relaxed)
+        ));
+        w(format!(
+            "blocks-reclaimed {}",
+            GC_STATS.blocks_reclaimed.load(Ordering::Relaxed)
+        ));
+        w(format!(
+            "bytes-allocated {}",
+            GC_STATS.bytes_allocated.load(Ordering::Relaxed)
+        ));
+        w(format!(
+            "external-bytes {}",
+            GC_STATS.external_bytes.load(Ordering::Relaxed)
+        ));
+        w(format!(
+            "pause-ns-total {}",
+            GC_STATS.pause_ns_total.load(Ordering::Relaxed)
+        ));
+        w(format!(
+            "pause-ns-max {}",
+            GC_STATS.pause_ns_max.load(Ordering::Relaxed)
+        ));
+        w(format!("roots-globals {}", roots.globals.len()));
+        w(format!("roots-stack {}", roots.stack_roots.len()));
+        w(format!("roots-persistent {}", roots.persistent_roots.len()));
+        w(format!("scan-ranges {}", mutator_scan_range_count()));
+        w(format!("marked {marked}"));
 
-    drop(roots);
-    let _ = out.flush();
+        // One line per retained block: address, live lines, live bytes at line
+        // granularity. Line marks are the finest liveness ash records — reclaim
+        // is whole-block, so a block's marked-line count is its real occupancy.
+        w("# block <addr> <live-lines> <live-bytes>".into());
+        let mut used: Vec<usize> = gc.heap.used_blocks.iter().copied().collect();
+        used.sort_unstable();
+        for block_addr in used {
+            let live = gc.blocks[block_addr / BLOCK_SIZE].marked_line_count();
+            w(format!(
+                "block {:#x} {live} {}",
+                heap_base + block_addr,
+                live * LINE_SIZE
+            ));
+        }
+        w("end".into());
+
+        drop(roots);
+        let _ = out.flush();
+    }
 }
 
 // ── Fiber-stack registry (crate-internal, used by fiber.rs) ─────────────────
@@ -5628,8 +5693,8 @@ mod tests {
     }
 
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn collector_rendezvous_with_registered_os_mutator() {
@@ -6090,12 +6155,14 @@ mod tests {
     /// then clear it, so an explicit free and a collection cannot both run it.
     static GUARDED_RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     unsafe extern "C" fn guarded_finalize(block: *mut c_void) {
-        let slot = block as *mut usize;
-        if *slot == 0 {
-            return;
+        unsafe {
+            let slot = block as *mut usize;
+            if *slot == 0 {
+                return;
+            }
+            *slot = 0;
+            GUARDED_RAN.fetch_add(1, Ordering::SeqCst);
         }
-        *slot = 0;
-        GUARDED_RAN.fetch_add(1, Ordering::SeqCst);
     }
 
     #[test]

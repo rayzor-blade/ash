@@ -11,13 +11,13 @@ use air::v2::ir::{
 use inkwell::types::{AnyType, AnyTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{
-    basic_block::BasicBlock, AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate,
+    AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate, basic_block::BasicBlock,
 };
 
 use crate::hl::{hl_type_kind_HDYN, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HVIRTUAL};
 use crate::llvm::module::JITModule;
 use crate::types::{HLFunction, TypeRef};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::fiber_polls_enabled;
 
@@ -154,7 +154,7 @@ impl<'ctx> JITModule<'ctx> {
                     other => {
                         return Err(anyhow!(
                             "AIR value v{i} is {lanes} lanes of a non-scalar type {other:?}"
-                        ))
+                        ));
                     }
                 };
                 (vec_ty, format!("vreg_{i}"))
@@ -668,7 +668,9 @@ impl<'ctx> JITModule<'ctx> {
                                 fv.into()
                             }
                             _ => {
-                                return Err(anyhow!("AIR BinOp {op:?} on mismatched operand types"))
+                                return Err(anyhow!(
+                                    "AIR BinOp {op:?} on mismatched operand types"
+                                ));
                             }
                         };
                         self.builder.build_store(registers[dst.idx()], out)?;

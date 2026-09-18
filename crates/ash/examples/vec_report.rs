@@ -7,7 +7,7 @@
 //!
 //! Usage: vec_report <file.hl> [<file.hl> ...] [--verbose]
 
-use air::v2::vectorize::{analyze, Refusal, VecOptions};
+use air::v2::vectorize::{Refusal, VecOptions, analyze};
 use std::collections::HashMap;
 
 fn refusal_name(r: &Refusal) -> String {

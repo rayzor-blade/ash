@@ -12,7 +12,7 @@
 use air::v2::analysis::CfgInfo;
 use air::v2::ir::BlockId;
 use air::v2::liveness::Liveness;
-use ash_core::air_pipeline::{optimized, AshModule};
+use ash_core::air_pipeline::{AshModule, optimized};
 
 fn main() {
     ash_core::native_lib::init_std_library().expect("init std");

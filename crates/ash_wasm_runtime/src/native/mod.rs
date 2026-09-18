@@ -36,7 +36,7 @@ mod threads;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 
 use process::Finished;

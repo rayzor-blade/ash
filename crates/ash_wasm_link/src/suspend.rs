@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// What one function does that the closure cares about.
 #[derive(Debug, Default, Clone)]

@@ -24,7 +24,7 @@
 
 use super::ir::{Function, TypeRef};
 use crate::opcodes::Opcode;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 
 /// A native function the module imports from a shared library.

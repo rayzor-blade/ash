@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use ash_core::bytecode::{BytecodeDecoder, DecodedBytecode};
 use ash_core::hl_bindings::{
-    hl_type_kind, hl_type_kind_HBOOL, hl_type_kind_HI64, hl_type_kind_HUI16, hl_type_kind_HUI8,
+    hl_type_kind, hl_type_kind_HBOOL, hl_type_kind_HI64, hl_type_kind_HUI8, hl_type_kind_HUI16,
 };
 use ash_core::opcodes::Opcode;
 use common::{ash_cli_bin, run_with_timeout, tests_dir};

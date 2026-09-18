@@ -1,140 +1,150 @@
 use crate::hl::{
-    self, _stringitem, hl_buffer, hl_type, hl_type_kind, hl_type_kind_HABSTRACT,
-    hl_type_kind_HARRAY, hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYNOBJ,
-    hl_type_kind_HENUM, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32,
-    hl_type_kind_HI64, hl_type_kind_HMETHOD, hl_type_kind_HNULL, hl_type_kind_HOBJ,
-    hl_type_kind_HPACKED, hl_type_kind_HREF, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE,
-    hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, stringitem,
-    tlist, uchar, varray, vclosure, vdynamic, vdynamic__bindgen_ty_1, vdynobj, venum, vlist,
-    vvirtual, HL_DYNOBJ_INDEX_MASK, HL_DYNOBJ_INDEX_SHIFT,
+    self, _stringitem, HL_DYNOBJ_INDEX_MASK, HL_DYNOBJ_INDEX_SHIFT, hl_buffer, hl_type,
+    hl_type_kind, hl_type_kind_HABSTRACT, hl_type_kind_HARRAY, hl_type_kind_HBOOL,
+    hl_type_kind_HBYTES, hl_type_kind_HDYNOBJ, hl_type_kind_HENUM, hl_type_kind_HF32,
+    hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32, hl_type_kind_HI64,
+    hl_type_kind_HMETHOD, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HPACKED,
+    hl_type_kind_HREF, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI8,
+    hl_type_kind_HUI16, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, stringitem, tlist, uchar,
+    varray, vclosure, vdynamic, vdynamic__bindgen_ty_1, vdynobj, venum, vlist, vvirtual,
 };
 use crate::obj::{hlp_field_name, hlp_get_obj_proto, hlp_hash_gen, hlp_lookup_find};
 use crate::strings::{hlp_utf16_length, str_to_uchar_ptr};
-use crate::types::{hl_aptr, hl_is_ptr, hlp_type_size, TSTR};
+use crate::types::{TSTR, hl_aptr, hl_is_ptr, hlp_type_size};
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
-    // Allocate memory for the hl_buffer struct
-    let buffer_ptr = match crate::rt::alloc_locked(std::mem::size_of::<hl_buffer>()) {
-        Some(ptr) => ptr.as_ptr() as *mut hl_buffer,
-        None => return std::ptr::null_mut(), // Return null if allocation fails
-    };
+    unsafe {
+        // Allocate memory for the hl_buffer struct
+        let buffer_ptr = match crate::rt::alloc_locked(std::mem::size_of::<hl_buffer>()) {
+            Some(ptr) => ptr.as_ptr() as *mut hl_buffer,
+            None => return std::ptr::null_mut(), // Return null if allocation fails
+        };
 
-    // Initialize the buffer
-    (*buffer_ptr).totlen = 0;
-    (*buffer_ptr).blen = 16;
-    (*buffer_ptr).data = std::ptr::null_mut();
+        // Initialize the buffer
+        (*buffer_ptr).totlen = 0;
+        (*buffer_ptr).blen = 16;
+        (*buffer_ptr).data = std::ptr::null_mut();
 
-    // Rooted on wasm only, and released by `hlp_buffer_content`.
-    //
-    // Elsewhere the caller's stack keeps it alive, as upstream relies on: a
-    // value live across a call sits in a callee-saved register or on the
-    // stack, and `mark_roots` scans both. On wasm it can sit in a wasm local,
-    // which is in the engine's frame rather than linear memory, where the
-    // collector cannot see it.
-    #[cfg(target_family = "wasm")]
-    crate::rt::gc_add_persistent(buffer_ptr as *mut vdynamic);
+        // Rooted on wasm only, and released by `hlp_buffer_content`.
+        //
+        // Elsewhere the caller's stack keeps it alive, as upstream relies on: a
+        // value live across a call sits in a callee-saved register or on the
+        // stack, and `mark_roots` scans both. On wasm it can sit in a wasm local,
+        // which is in the engine's frame rather than linear memory, where the
+        // collector cannot see it.
+        #[cfg(target_family = "wasm")]
+        crate::rt::gc_add_persistent(buffer_ptr as *mut vdynamic);
 
-    buffer_ptr
+        buffer_ptr
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, len: i32) {
-    // Adjust buffer length if necessary
-    while (*b).totlen >= ((*b).blen << 2) {
-        (*b).blen <<= 1;
+    unsafe {
+        // Adjust buffer length if necessary
+        while (*b).totlen >= ((*b).blen << 2) {
+            (*b).blen <<= 1;
+        }
+
+        // Determine the size to allocate
+        let size = if len < (*b).blen { (*b).blen } else { len };
+
+        // Allocate memory for the _stringitem struct (NOT the pointer typedef)
+        let it: stringitem = match crate::rt::alloc_locked(std::mem::size_of::<_stringitem>()) {
+            Some(ptr) => ptr.as_ptr() as stringitem,
+            None => return, // Return if allocation fails
+        };
+
+        // Allocate memory for the string data
+        let str_ptr = match crate::rt::alloc_locked((size << 1) as usize) {
+            Some(ptr) => ptr.as_ptr() as *mut uchar,
+            None => return, // Return if allocation fails
+        };
+
+        // Copy the string data
+        std::ptr::copy_nonoverlapping(s, str_ptr, len as usize);
+
+        // Initialize the stringitem
+        (*it).str_ = str_ptr;
+        (*it).size = size;
+        (*it).len = len;
+        (*it).next = (*b).data;
+
+        // Update the buffer
+        (*b).data = it;
+
+        // Update total length
+        (*b).totlen += len;
+
+        // No root on any target. A chunk never needed one: it is reachable through
+        // `b->data` and the `next` chain, so tracing the buffer reaches every chunk
+        // and the `str` block each one owns.
     }
-
-    // Determine the size to allocate
-    let size = if len < (*b).blen { (*b).blen } else { len };
-
-    // Allocate memory for the _stringitem struct (NOT the pointer typedef)
-    let it: stringitem = match crate::rt::alloc_locked(std::mem::size_of::<_stringitem>()) {
-        Some(ptr) => ptr.as_ptr() as stringitem,
-        None => return, // Return if allocation fails
-    };
-
-    // Allocate memory for the string data
-    let str_ptr = match crate::rt::alloc_locked((size << 1) as usize) {
-        Some(ptr) => ptr.as_ptr() as *mut uchar,
-        None => return, // Return if allocation fails
-    };
-
-    // Copy the string data
-    std::ptr::copy_nonoverlapping(s, str_ptr, len as usize);
-
-    // Initialize the stringitem
-    (*it).str_ = str_ptr;
-    (*it).size = size;
-    (*it).len = len;
-    (*it).next = (*b).data;
-
-    // Update the buffer
-    (*b).data = it;
-
-    // Update total length
-    (*b).totlen += len;
-
-    // No root on any target. A chunk never needed one: it is reachable through
-    // `b->data` and the `next` chain, so tracing the buffer reaches every chunk
-    // and the `str` block each one owns.
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_buffer_str_sub(b: *mut hl_buffer, mut s: *const uchar, mut len: i32) {
-    // Check for null pointer or non-positive length
-    if s.is_null() || len <= 0 {
-        return;
-    }
-
-    // Get the first item in the buffer
-    let it = (*b).data;
-    if !it.is_null() {
-        let free = (*it).size - (*it).len;
-        if free >= len {
-            // If there's enough space in the current item, copy the whole string
-            std::ptr::copy_nonoverlapping(s, (*it).str_.add((*it).len as usize), len as usize);
-            (*it).len += len;
-            (*b).totlen += len;
+    unsafe {
+        // Check for null pointer or non-positive length
+        if s.is_null() || len <= 0 {
             return;
-        } else if free > 0 {
-            // If there's some space, fill it and continue with the rest
-            std::ptr::copy_nonoverlapping(s, (*it).str_.add((*it).len as usize), free as usize);
-            (*it).len += free;
-            (*b).totlen += free;
-            // Adjust s and len for the remaining part
-            s = s.add(free as usize);
-            len -= free;
         }
-    }
 
-    // Append the remaining part as a new item (buffer_append_new updates totlen)
-    buffer_append_new(b, s, len);
+        // Get the first item in the buffer
+        let it = (*b).data;
+        if !it.is_null() {
+            let free = (*it).size - (*it).len;
+            if free >= len {
+                // If there's enough space in the current item, copy the whole string
+                std::ptr::copy_nonoverlapping(s, (*it).str_.add((*it).len as usize), len as usize);
+                (*it).len += len;
+                (*b).totlen += len;
+                return;
+            } else if free > 0 {
+                // If there's some space, fill it and continue with the rest
+                std::ptr::copy_nonoverlapping(s, (*it).str_.add((*it).len as usize), free as usize);
+                (*it).len += free;
+                (*b).totlen += free;
+                // Adjust s and len for the remaining part
+                s = s.add(free as usize);
+                len -= free;
+            }
+        }
+
+        // Append the remaining part as a new item (buffer_append_new updates totlen)
+        buffer_append_new(b, s, len);
+    }
 }
 
 pub unsafe extern "C" fn hlp_buffer_str(b: *mut hl_buffer, s: *const uchar) {
-    if !s.is_null() {
-        let len = hlp_utf16_length(s) as i32;
-        hlp_buffer_str_sub(b, s, len);
-    } else {
-        hlp_buffer_str_sub(b, str_to_uchar_ptr("null"), 4);
+    unsafe {
+        if !s.is_null() {
+            let len = hlp_utf16_length(s) as i32;
+            hlp_buffer_str_sub(b, s, len);
+        } else {
+            hlp_buffer_str_sub(b, str_to_uchar_ptr("null"), 4);
+        }
     }
 }
 
 pub unsafe extern "C" fn hlp_buffer_char(b: *mut hl_buffer, c: hl::uchar) {
-    // Get the first item in the buffer
-    let it = (*b).data;
+    unsafe {
+        // Get the first item in the buffer
+        let it = (*b).data;
 
-    // Check if there's an existing item and if it has space
-    if !it.is_null() && (*it).len != (*it).size {
-        // Add the character to the existing item
-        *(*it).str_.add((*it).len as usize) = c;
-        (*it).len += 1;
-        (*b).totlen += 1;
-    } else {
-        // Create a new item for the character (buffer_append_new updates totlen)
-        let c_ptr: *const uchar = &c;
-        buffer_append_new(b, c_ptr, 1);
+        // Check if there's an existing item and if it has space
+        if !it.is_null() && (*it).len != (*it).size {
+            // Add the character to the existing item
+            *(*it).str_.add((*it).len as usize) = c;
+            (*it).len += 1;
+            (*b).totlen += 1;
+        } else {
+            // Create a new item for the character (buffer_append_new updates totlen)
+            let c_ptr: *const uchar = &c;
+            buffer_append_new(b, c_ptr, 1);
+        }
     }
 }
 
@@ -151,170 +161,180 @@ use std::ptr;
 /// Returns null when there is no callable at all, which is the ONLY case
 /// upstream prints the class name for (hashlink src/std/buffer.c:236).
 unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const uchar {
-    let addr = f as usize;
-    if addr == 0 {
-        return ptr::null();
-    }
-    if crate::fiber::is_stub_sentinel(addr) {
-        let Some(runner) = crate::fiber::closure_runner() else {
+    unsafe {
+        let addr = f as usize;
+        if addr == 0 {
             return ptr::null();
-        };
-        let mut cl = crate::types::vclosure_new(crate::types::hlt_dyn(), f, 1, this as *mut c_void);
-        return runner(&mut cl, ptr::null_mut(), 0) as *const uchar;
+        }
+        if crate::fiber::is_stub_sentinel(addr) {
+            let Some(runner) = crate::fiber::closure_runner() else {
+                return ptr::null();
+            };
+            let mut cl =
+                crate::types::vclosure_new(crate::types::hlt_dyn(), f, 1, this as *mut c_void);
+            return runner(&mut cl, ptr::null_mut(), 0) as *const uchar;
+        }
+        let g: unsafe extern "C" fn(*mut vdynamic) -> *const uchar = std::mem::transmute(f);
+        g(this)
     }
-    let g: unsafe extern "C" fn(*mut vdynamic) -> *const uchar = std::mem::transmute(f);
-    g(this)
 }
 
 /// Invoke a zero-argument closure-valued `__string` field. Dynamic-object
 /// values store a pointer to the closure in their pointer-slot array; the
 /// closure's function can be either native code or an interpreter sentinel.
 unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
-    if c.is_null() || (*c).fun.is_null() {
-        return ptr::null();
-    }
-    let addr = (*c).fun as usize;
-    if crate::fiber::is_stub_sentinel(addr) {
-        let Some(runner) = crate::fiber::closure_runner() else {
+    unsafe {
+        if c.is_null() || (*c).fun.is_null() {
             return ptr::null();
-        };
-        return runner(c, ptr::null_mut(), 0) as *const uchar;
-    }
-    if (*c).hasValue != 0 {
-        let f: unsafe extern "C" fn(*mut c_void) -> *const uchar = std::mem::transmute((*c).fun);
-        f((*c).value)
-    } else {
-        let f: unsafe extern "C" fn() -> *const uchar = std::mem::transmute((*c).fun);
-        f()
+        }
+        let addr = (*c).fun as usize;
+        if crate::fiber::is_stub_sentinel(addr) {
+            let Some(runner) = crate::fiber::closure_runner() else {
+                return ptr::null();
+            };
+            return runner(c, ptr::null_mut(), 0) as *const uchar;
+        }
+        if (*c).hasValue != 0 {
+            let f: unsafe extern "C" fn(*mut c_void) -> *const uchar =
+                std::mem::transmute((*c).fun);
+            f((*c).value)
+        } else {
+            let f: unsafe extern "C" fn() -> *const uchar = std::mem::transmute((*c).fun);
+            f()
+        }
     }
 }
 
 pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) -> *mut hl::uchar {
-    // Allocate memory for the buffer content
-    let buf = match crate::rt::alloc_locked((((*b).totlen + 1) << 1) as usize) {
-        Some(ptr) => ptr.as_ptr() as *mut hl::uchar,
-        None => return ptr::null_mut(), // Return null if allocation fails
-    };
+    unsafe {
+        // Allocate memory for the buffer content
+        let buf = match crate::rt::alloc_locked((((*b).totlen + 1) << 1) as usize) {
+            Some(ptr) => ptr.as_ptr() as *mut hl::uchar,
+            None => return ptr::null_mut(), // Return null if allocation fails
+        };
 
-    // Start from the end of the buffer
-    let mut s = buf.add((*b).totlen as usize);
+        // Start from the end of the buffer
+        let mut s = buf.add((*b).totlen as usize);
 
-    // Null-terminate the string
-    *s = 0;
+        // Null-terminate the string
+        *s = 0;
 
-    // Iterate through the stringitems
-    let mut it = (*b).data;
-    while !it.is_null() {
-        // Move the pointer back by the length of the current item
-        s = s.sub((*it).len as usize);
+        // Iterate through the stringitems
+        let mut it = (*b).data;
+        while !it.is_null() {
+            // Move the pointer back by the length of the current item
+            s = s.sub((*it).len as usize);
 
-        // Copy the content of the current item
-        ptr::copy_nonoverlapping((*it).str_, s, (*it).len as usize);
+            // Copy the content of the current item
+            ptr::copy_nonoverlapping((*it).str_, s, (*it).len as usize);
 
-        // Move to the next item
-        it = (*it).next;
+            // Move to the next item
+            it = (*it).next;
+        }
+
+        // Set the length if the len pointer is not null
+        if !len.is_null() {
+            *len = (*b).totlen;
+        }
+
+        // The contents are in `buf` now, so the wasm root has done its job. A
+        // buffer abandoned without reaching this call stays rooted.
+        #[cfg(target_family = "wasm")]
+        crate::rt::gc_remove_persistent(b as *mut vdynamic);
+
+        buf
     }
-
-    // Set the length if the len pointer is not null
-    if !len.is_null() {
-        *len = (*b).totlen;
-    }
-
-    // The contents are in `buf` now, so the wasm root has done its job. A
-    // buffer abandoned without reaching this call stays rooted.
-    #[cfg(target_family = "wasm")]
-    crate::rt::gc_remove_persistent(b as *mut vdynamic);
-
-    buf
 }
 
 pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, parents: *mut tlist) {
-    // Same guard as hlp_type_str: describing a corrupt type must not panic.
-    if t.is_null() || (*t).kind as usize >= TSTR.len() {
-        hlp_buffer_str(b, str_to_uchar_ptr("?"));
-        return;
-    }
-    let c = TSTR[(*t).kind as usize];
-    if c != "null" {
-        hlp_buffer_str(b, str_to_uchar_ptr(c));
-        return;
-    }
-
-    let mut l = parents;
-    while !l.is_null() {
-        if (*l).t == t {
-            hlp_buffer_str(b, str_to_uchar_ptr("<...>"));
+    unsafe {
+        // Same guard as hlp_type_str: describing a corrupt type must not panic.
+        if t.is_null() || (*t).kind as usize >= TSTR.len() {
+            hlp_buffer_str(b, str_to_uchar_ptr("?"));
             return;
         }
-        l = (*l).next;
-    }
+        let c = TSTR[(*t).kind as usize];
+        if c != "null" {
+            hlp_buffer_str(b, str_to_uchar_ptr(c));
+            return;
+        }
 
-    let mut cur = tlist { t, next: parents };
-    let l = &mut cur as *mut tlist;
+        let mut l = parents;
+        while !l.is_null() {
+            if (*l).t == t {
+                hlp_buffer_str(b, str_to_uchar_ptr("<...>"));
+                return;
+            }
+            l = (*l).next;
+        }
 
-    match (*t).kind {
-        hl_type_kind_HFUN | hl_type_kind_HMETHOD => {
-            hlp_buffer_char(b, '(' as u16);
-            hlp_type_str_rec(b, (*(*t).__bindgen_anon_1.fun).ret, l);
-            hlp_buffer_char(b, ' ' as u16);
-            hlp_buffer_char(b, '(' as u16);
-            for i in 0..(*(*t).__bindgen_anon_1.fun).nargs as usize {
-                if i > 0 {
-                    hlp_buffer_char(b, ',' as u16);
+        let mut cur = tlist { t, next: parents };
+        let l = &mut cur as *mut tlist;
+
+        match (*t).kind {
+            hl_type_kind_HFUN | hl_type_kind_HMETHOD => {
+                hlp_buffer_char(b, '(' as u16);
+                hlp_type_str_rec(b, (*(*t).__bindgen_anon_1.fun).ret, l);
+                hlp_buffer_char(b, ' ' as u16);
+                hlp_buffer_char(b, '(' as u16);
+                for i in 0..(*(*t).__bindgen_anon_1.fun).nargs as usize {
+                    if i > 0 {
+                        hlp_buffer_char(b, ',' as u16);
+                    }
+                    hlp_type_str_rec(b, *(*(*t).__bindgen_anon_1.fun).args.add(i), l);
                 }
-                hlp_type_str_rec(b, *(*(*t).__bindgen_anon_1.fun).args.add(i), l);
+                hlp_buffer_char(b, ')' as u16);
+                hlp_buffer_char(b, ')' as u16);
             }
-            hlp_buffer_char(b, ')' as u16);
-            hlp_buffer_char(b, ')' as u16);
-        }
-        hl_type_kind_HSTRUCT => {
-            hlp_buffer_char(b, '@' as u16);
-            hlp_buffer_str(b, (*(*t).__bindgen_anon_1.obj).name);
-        }
-        hl_type_kind_HOBJ => {
-            hlp_buffer_str(b, (*(*t).__bindgen_anon_1.obj).name);
-        }
-        hl_type_kind_HREF => {
-            hlp_buffer_str(b, str_to_uchar_ptr("ref<"));
-            hlp_type_str_rec(b, (*t).__bindgen_anon_1.tparam, l);
-            hlp_buffer_char(b, '>' as u16);
-        }
-        hl_type_kind_HVIRTUAL => {
-            hlp_buffer_str(b, str_to_uchar_ptr("virtual<"));
-            for i in 0..(*(*t).__bindgen_anon_1.virt).nfields as usize {
-                let f = (*(*t).__bindgen_anon_1.virt).fields.add(i);
-                if i > 0 {
-                    hlp_buffer_char(b, ',' as u16);
-                }
-                hlp_buffer_str(b, (*f).name);
-                hlp_buffer_char(b, ':' as u16);
-                hlp_type_str_rec(b, (*f).t, l);
+            hl_type_kind_HSTRUCT => {
+                hlp_buffer_char(b, '@' as u16);
+                hlp_buffer_str(b, (*(*t).__bindgen_anon_1.obj).name);
             }
-            hlp_buffer_char(b, '>' as u16);
-        }
-        hl_type_kind_HABSTRACT => {
-            hlp_buffer_str(b, (*t).__bindgen_anon_1.abs_name);
-        }
-        hl_type_kind_HENUM => {
-            hlp_buffer_str(b, str_to_uchar_ptr("enum"));
-            if !(*(*t).__bindgen_anon_1.tenum).name.is_null() {
-                hlp_buffer_char(b, '<' as u16);
-                hlp_buffer_str(b, (*(*t).__bindgen_anon_1.tenum).name);
+            hl_type_kind_HOBJ => {
+                hlp_buffer_str(b, (*(*t).__bindgen_anon_1.obj).name);
+            }
+            hl_type_kind_HREF => {
+                hlp_buffer_str(b, str_to_uchar_ptr("ref<"));
+                hlp_type_str_rec(b, (*t).__bindgen_anon_1.tparam, l);
                 hlp_buffer_char(b, '>' as u16);
             }
-        }
-        hl_type_kind_HNULL => {
-            hlp_buffer_str(b, str_to_uchar_ptr("null<"));
-            hlp_type_str_rec(b, (*t).__bindgen_anon_1.tparam, l);
-            hlp_buffer_char(b, '>' as u16);
-        }
-        hl_type_kind_HPACKED => {
-            hlp_buffer_str(b, str_to_uchar_ptr("packed<"));
-            hlp_type_str_rec(b, (*t).__bindgen_anon_1.tparam, l);
-            hlp_buffer_char(b, '>' as u16);
-        }
-        _ => {
-            hlp_buffer_str(b, str_to_uchar_ptr("???"));
+            hl_type_kind_HVIRTUAL => {
+                hlp_buffer_str(b, str_to_uchar_ptr("virtual<"));
+                for i in 0..(*(*t).__bindgen_anon_1.virt).nfields as usize {
+                    let f = (*(*t).__bindgen_anon_1.virt).fields.add(i);
+                    if i > 0 {
+                        hlp_buffer_char(b, ',' as u16);
+                    }
+                    hlp_buffer_str(b, (*f).name);
+                    hlp_buffer_char(b, ':' as u16);
+                    hlp_type_str_rec(b, (*f).t, l);
+                }
+                hlp_buffer_char(b, '>' as u16);
+            }
+            hl_type_kind_HABSTRACT => {
+                hlp_buffer_str(b, (*t).__bindgen_anon_1.abs_name);
+            }
+            hl_type_kind_HENUM => {
+                hlp_buffer_str(b, str_to_uchar_ptr("enum"));
+                if !(*(*t).__bindgen_anon_1.tenum).name.is_null() {
+                    hlp_buffer_char(b, '<' as u16);
+                    hlp_buffer_str(b, (*(*t).__bindgen_anon_1.tenum).name);
+                    hlp_buffer_char(b, '>' as u16);
+                }
+            }
+            hl_type_kind_HNULL => {
+                hlp_buffer_str(b, str_to_uchar_ptr("null<"));
+                hlp_type_str_rec(b, (*t).__bindgen_anon_1.tparam, l);
+                hlp_buffer_char(b, '>' as u16);
+            }
+            hl_type_kind_HPACKED => {
+                hlp_buffer_str(b, str_to_uchar_ptr("packed<"));
+                hlp_type_str_rec(b, (*t).__bindgen_anon_1.tparam, l);
+                hlp_buffer_char(b, '>' as u16);
+            }
+            _ => {
+                hlp_buffer_str(b, str_to_uchar_ptr("???"));
+            }
         }
     }
 }
@@ -324,25 +344,27 @@ pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, pa
 // and obj.rs; without one the resolver fails the whole module load.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_str(t: *mut hl_type) -> *const uchar {
-    // A kind outside the table is a corrupt or non-type pointer; naming it
-    // "?" beats indexing out of bounds, which panics inside the very
-    // routine that exists to describe what went wrong (TestMisc,
-    // Issue2937).
-    if t.is_null() {
-        return str_to_uchar_ptr("?");
+    unsafe {
+        // A kind outside the table is a corrupt or non-type pointer; naming it
+        // "?" beats indexing out of bounds, which panics inside the very
+        // routine that exists to describe what went wrong (TestMisc,
+        // Issue2937).
+        if t.is_null() {
+            return str_to_uchar_ptr("?");
+        }
+        let kind = (*t).kind as usize;
+        if kind >= TSTR.len() {
+            return str_to_uchar_ptr("?");
+        }
+        let _c = TSTR[kind];
+        let c = str_to_uchar_ptr(_c);
+        if _c != "null" {
+            return c;
+        }
+        let b = hlp_alloc_buffer();
+        hlp_type_str_rec(b, t, std::ptr::null_mut());
+        hlp_buffer_content(b, std::ptr::null_mut())
     }
-    let kind = (*t).kind as usize;
-    if kind >= TSTR.len() {
-        return str_to_uchar_ptr("?");
-    }
-    let _c = TSTR[kind];
-    let c = str_to_uchar_ptr(_c);
-    if _c != "null" {
-        return c;
-    }
-    let b = hlp_alloc_buffer();
-    hlp_type_str_rec(b, t, std::ptr::null_mut());
-    hlp_buffer_content(b, std::ptr::null_mut())
 }
 
 pub unsafe extern "C" fn hlp_buffer_addr(
@@ -351,251 +373,261 @@ pub unsafe extern "C" fn hlp_buffer_addr(
     t: *mut hl_type,
     stack: *mut vlist,
 ) {
-    match (*t).kind {
-        hl_type_kind_HUI8 => {
-            let value = *(data as *mut u8);
-            let s = str_to_uchar_ptr(&format!("{}", value));
-            hlp_buffer_str(b, s);
-        }
-        hl_type_kind_HUI16 => {
-            let value = *(data as *mut u16);
-            let s = str_to_uchar_ptr(&format!("{}", value));
-            hlp_buffer_str(b, s);
-        }
-        hl_type_kind_HI32 => {
-            let value = *(data as *mut i32);
-            let s = str_to_uchar_ptr(&format!("{}", value));
-            hlp_buffer_str(b, s);
-        }
-        hl_type_kind_HI64 => {
-            let value = *(data as *mut i64);
-            let s = str_to_uchar_ptr(&format!("{}", value));
-            hlp_buffer_str(b, s);
-        }
-        hl_type_kind_HF32 => {
-            let value = *(data as *mut f32);
-            let s = str_to_uchar_ptr(&format!("{:.9}", value));
-            hlp_buffer_str(b, s);
-        }
-        hl_type_kind_HF64 => {
-            let value = *(data as *mut f64);
-            // hl_buffer_addr uses %.17g here, not the %.15g that Std.string
-            // goes through. The two precisions are deliberate upstream.
-            let s = str_to_uchar_ptr(&crate::strings::format_g(value, 17));
-            hlp_buffer_str(b, s);
-        }
-        hl_type_kind_HBYTES => {
-            let bytes_ptr = *(data as *mut *mut uchar);
-            hlp_buffer_str(b, bytes_ptr);
-        }
-        hl_type_kind_HTYPE => {
-            let mut tmp = crate::types::vdynamic_new(
-                t,
-                vdynamic__bindgen_ty_1 {
-                    ptr: *(data as *mut *mut c_void),
-                },
-            );
-            hlp_buffer_rec(
-                b,
-                if !tmp.v.ptr.is_null() {
-                    &mut tmp
-                } else {
-                    ptr::null_mut()
-                },
-                stack,
-            );
-        }
-        hl_type_kind_HREF => {
-            let mut tmp = crate::types::vdynamic_new(
-                t,
-                vdynamic__bindgen_ty_1 {
-                    ptr: *(data as *mut *mut c_void),
-                },
-            );
-            hlp_buffer_rec(
-                b,
-                if !tmp.v.ptr.is_null() {
-                    &mut tmp
-                } else {
-                    ptr::null_mut()
-                },
-                stack,
-            );
-        }
-        hl_type_kind_HABSTRACT => {
-            let mut tmp = crate::types::vdynamic_new(
-                t,
-                vdynamic__bindgen_ty_1 {
-                    ptr: *(data as *mut *mut c_void),
-                },
-            );
-            hlp_buffer_rec(
-                b,
-                if !tmp.v.ptr.is_null() {
-                    &mut tmp
-                } else {
-                    ptr::null_mut()
-                },
-                stack,
-            );
-        }
-        hl_type_kind_HBOOL => {
-            let value = *(data as *mut bool);
-            if value {
-                hlp_buffer_str_sub(b, str_to_uchar_ptr("true"), 4);
-            } else {
-                hlp_buffer_str_sub(b, str_to_uchar_ptr("false"), 5);
+    unsafe {
+        match (*t).kind {
+            hl_type_kind_HUI8 => {
+                let value = *(data as *mut u8);
+                let s = str_to_uchar_ptr(&format!("{}", value));
+                hlp_buffer_str(b, s);
             }
-        }
-        _ => {
-            let dyn_ptr = *(data as *mut *mut vdynamic);
-            hlp_buffer_rec(b, dyn_ptr, stack);
+            hl_type_kind_HUI16 => {
+                let value = *(data as *mut u16);
+                let s = str_to_uchar_ptr(&format!("{}", value));
+                hlp_buffer_str(b, s);
+            }
+            hl_type_kind_HI32 => {
+                let value = *(data as *mut i32);
+                let s = str_to_uchar_ptr(&format!("{}", value));
+                hlp_buffer_str(b, s);
+            }
+            hl_type_kind_HI64 => {
+                let value = *(data as *mut i64);
+                let s = str_to_uchar_ptr(&format!("{}", value));
+                hlp_buffer_str(b, s);
+            }
+            hl_type_kind_HF32 => {
+                let value = *(data as *mut f32);
+                let s = str_to_uchar_ptr(&format!("{:.9}", value));
+                hlp_buffer_str(b, s);
+            }
+            hl_type_kind_HF64 => {
+                let value = *(data as *mut f64);
+                // hl_buffer_addr uses %.17g here, not the %.15g that Std.string
+                // goes through. The two precisions are deliberate upstream.
+                let s = str_to_uchar_ptr(&crate::strings::format_g(value, 17));
+                hlp_buffer_str(b, s);
+            }
+            hl_type_kind_HBYTES => {
+                let bytes_ptr = *(data as *mut *mut uchar);
+                hlp_buffer_str(b, bytes_ptr);
+            }
+            hl_type_kind_HTYPE => {
+                let mut tmp = crate::types::vdynamic_new(
+                    t,
+                    vdynamic__bindgen_ty_1 {
+                        ptr: *(data as *mut *mut c_void),
+                    },
+                );
+                hlp_buffer_rec(
+                    b,
+                    if !tmp.v.ptr.is_null() {
+                        &mut tmp
+                    } else {
+                        ptr::null_mut()
+                    },
+                    stack,
+                );
+            }
+            hl_type_kind_HREF => {
+                let mut tmp = crate::types::vdynamic_new(
+                    t,
+                    vdynamic__bindgen_ty_1 {
+                        ptr: *(data as *mut *mut c_void),
+                    },
+                );
+                hlp_buffer_rec(
+                    b,
+                    if !tmp.v.ptr.is_null() {
+                        &mut tmp
+                    } else {
+                        ptr::null_mut()
+                    },
+                    stack,
+                );
+            }
+            hl_type_kind_HABSTRACT => {
+                let mut tmp = crate::types::vdynamic_new(
+                    t,
+                    vdynamic__bindgen_ty_1 {
+                        ptr: *(data as *mut *mut c_void),
+                    },
+                );
+                hlp_buffer_rec(
+                    b,
+                    if !tmp.v.ptr.is_null() {
+                        &mut tmp
+                    } else {
+                        ptr::null_mut()
+                    },
+                    stack,
+                );
+            }
+            hl_type_kind_HBOOL => {
+                let value = *(data as *mut bool);
+                if value {
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr("true"), 4);
+                } else {
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr("false"), 5);
+                }
+            }
+            _ => {
+                let dyn_ptr = *(data as *mut *mut vdynamic);
+                hlp_buffer_rec(b, dyn_ptr, stack);
+            }
         }
     }
 }
 
 pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, stack: *mut vlist) {
-    if v.is_null() {
-        hlp_buffer_str_sub(b, str_to_uchar_ptr("null"), 4);
-        return;
-    }
-    let kind: hl_type_kind = (*(*v).t).kind;
-    match kind {
-        hl_type_kind_HVOID => {
-            hlp_buffer_str_sub(b, str_to_uchar_ptr("void"), 4);
+    unsafe {
+        if v.is_null() {
+            hlp_buffer_str_sub(b, str_to_uchar_ptr("null"), 4);
+            return;
         }
-        hl_type_kind_HUI8 => {
-            let _str = format!("{}", (*v).v.ui8);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HUI16 => {
-            let _str = format!("{}", (*v).v.ui16);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HI32 => {
-            let _str = format!("{}", (*v).v.i);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-
-        hl_type_kind_HI64 => {
-            let _str = format!("{}", (*v).v.i64_);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HF64 => {
-            let _str = crate::strings::format_g((*v).v.d, 17);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HBOOL => {
-            if (*v).v.b {
-                hlp_buffer_str_sub(b, str_to_uchar_ptr("true"), 4);
-            } else {
-                hlp_buffer_str_sub(b, str_to_uchar_ptr("false"), 5);
+        let kind: hl_type_kind = (*(*v).t).kind;
+        match kind {
+            hl_type_kind_HVOID => {
+                hlp_buffer_str_sub(b, str_to_uchar_ptr("void"), 4);
             }
-        }
-        hl_type_kind_HF32 => {
-            let _str = format!("{:.9}", (*v).v.f);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HBYTES => {
-            hlp_buffer_str(b, (*v).v.bytes as *const uchar);
-        }
-        hl_type_kind_HFUN => {
-            hlp_buffer_str_sub(b, str_to_uchar_ptr("function#"), 9);
-            let _str = format!("{:p}", v);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HMETHOD => {
-            hlp_buffer_str_sub(b, str_to_uchar_ptr("method#"), 7);
-            let _str = format!("{:p}", (*v).v.ptr);
-            let s = str_to_uchar_ptr(_str.as_str());
-            let len = hlp_utf16_length(s);
-            hlp_buffer_str_sub(b, s, len as i32);
-        }
-        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
-            let o = (*(*v).t).__bindgen_anon_1.obj;
-            let rt = (*o).rt;
+            hl_type_kind_HUI8 => {
+                let _str = format!("{}", (*v).v.ui8);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HUI16 => {
+                let _str = format!("{}", (*v).v.ui16);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HI32 => {
+                let _str = format!("{}", (*v).v.i);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
 
-            // Do NOT filter out interpreter stubs here. The old
-            // `.filter(|&f| (f as usize) > 0x100000)` discarded every
-            // `__string` in an interpreted program -- all of them are
-            // sentinels in that mode -- and silently fell through to the
-            // class-name path below, so `"" + obj` printed the class name
-            // instead of calling toString. Upstream reaches the name path
-            // only when there is no toStringFun at all (buffer.c:236).
-            let to_string_fn = if !rt.is_null() {
-                let proto = hlp_get_obj_proto((*v).t);
-                (*proto).toStringFun
-            } else {
-                None
-            };
-            // A String is field-0-is-HBYTES shaped, and its bytes ARE its
-            // string form: upstream's String.__string hands back this.bytes
-            // with no allocation, so calling it is free there. ash's is a
-            // bytecode function that BUILDS a new string, and running it from
-            // in here re-enters the buffer machinery this call is already
-            // inside. Measured: the receiver was intact (this.bytes = "loop
-            // a...", len 19) while the returned pointer was a fresh
-            // allocation 0x50 further on holding garbage, which is how
-            // "loop acc=2147483647" printed as two mojibake characters under
-            // --jit-threshold 1. So string-likes take the direct-bytes path
-            // below and never re-enter; every other object gets its toString.
-            // Match String by NAME, not by shape. "field 0 is HBYTES" also
-            // matches hl.types.ArrayBytes_* — so arrays took the raw-bytes
-            // path and `a + ''` printed garbage instead of "[2,3,4]",
-            // regressing Issue6349 and Issue6722. String is the one type whose
-            // __string upstream returns this.bytes for; everything else,
-            // arrays included, must get its real toString.
-            let is_string_type = !(*o).name.is_null() && {
-                const S: [u16; 6] = [
-                    'S' as u16, 't' as u16, 'r' as u16, 'i' as u16, 'n' as u16, 'g' as u16,
-                ];
-                let n = (*o).name;
-                (0..6).all(|i| *n.add(i) == S[i]) && *n.add(6) == 0
-            };
-            let string_like_fast_path = is_string_type;
-            let this_ptr = if kind == hl_type_kind_HSTRUCT {
-                (*v).v.ptr as *mut vdynamic
-            } else {
-                v
-            };
-            let to_string_out = match to_string_fn {
-                Some(f) if !string_like_fast_path => {
-                    call_tostring_or_stub(f as *mut c_void, this_ptr)
+            hl_type_kind_HI64 => {
+                let _str = format!("{}", (*v).v.i64_);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HF64 => {
+                let _str = crate::strings::format_g((*v).v.d, 17);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HBOOL => {
+                if (*v).v.b {
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr("true"), 4);
+                } else {
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr("false"), 5);
                 }
-                _ => ptr::null(),
-            };
+            }
+            hl_type_kind_HF32 => {
+                let _str = format!("{:.9}", (*v).v.f);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HBYTES => {
+                hlp_buffer_str(b, (*v).v.bytes as *const uchar);
+            }
+            hl_type_kind_HFUN => {
+                hlp_buffer_str_sub(b, str_to_uchar_ptr("function#"), 9);
+                let _str = format!("{:p}", v);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HMETHOD => {
+                hlp_buffer_str_sub(b, str_to_uchar_ptr("method#"), 7);
+                let _str = format!("{:p}", (*v).v.ptr);
+                let s = str_to_uchar_ptr(_str.as_str());
+                let len = hlp_utf16_length(s);
+                hlp_buffer_str_sub(b, s, len as i32);
+            }
+            hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
+                let o = (*(*v).t).__bindgen_anon_1.obj;
+                let rt = (*o).rt;
 
-            if !to_string_out.is_null() {
-                hlp_buffer_str(b, to_string_out);
-            } else if !rt.is_null() {
-                // No callable toString (or it produced nothing).
-                // For String objects (field 0 is HBYTES), read the bytes pointer directly.
-                let fi = (*rt).fields_indexes;
-                let nfields = (*o).nfields;
-                let is_string_like = nfields >= 1 && !fi.is_null() && {
-                    let field0_type = (*(*o).fields.offset(0)).t;
-                    !field0_type.is_null() && (*field0_type).kind == hl_type_kind_HBYTES
+                // Do NOT filter out interpreter stubs here. The old
+                // `.filter(|&f| (f as usize) > 0x100000)` discarded every
+                // `__string` in an interpreted program -- all of them are
+                // sentinels in that mode -- and silently fell through to the
+                // class-name path below, so `"" + obj` printed the class name
+                // instead of calling toString. Upstream reaches the name path
+                // only when there is no toStringFun at all (buffer.c:236).
+                let to_string_fn = if !rt.is_null() {
+                    let proto = hlp_get_obj_proto((*v).t);
+                    (*proto).toStringFun
+                } else {
+                    None
                 };
-                if is_string_like {
-                    let field0_offset = *fi.offset(0) as usize;
-                    let bytes_ptr = *((v as *const u8).add(field0_offset) as *const *const uchar);
-                    if !bytes_ptr.is_null() {
-                        hlp_buffer_str(b, bytes_ptr);
+                // A String is field-0-is-HBYTES shaped, and its bytes ARE its
+                // string form: upstream's String.__string hands back this.bytes
+                // with no allocation, so calling it is free there. ash's is a
+                // bytecode function that BUILDS a new string, and running it from
+                // in here re-enters the buffer machinery this call is already
+                // inside. Measured: the receiver was intact (this.bytes = "loop
+                // a...", len 19) while the returned pointer was a fresh
+                // allocation 0x50 further on holding garbage, which is how
+                // "loop acc=2147483647" printed as two mojibake characters under
+                // --jit-threshold 1. So string-likes take the direct-bytes path
+                // below and never re-enter; every other object gets its toString.
+                // Match String by NAME, not by shape. "field 0 is HBYTES" also
+                // matches hl.types.ArrayBytes_* — so arrays took the raw-bytes
+                // path and `a + ''` printed garbage instead of "[2,3,4]",
+                // regressing Issue6349 and Issue6722. String is the one type whose
+                // __string upstream returns this.bytes for; everything else,
+                // arrays included, must get its real toString.
+                let is_string_type = !(*o).name.is_null() && {
+                    const S: [u16; 6] = [
+                        'S' as u16, 't' as u16, 'r' as u16, 'i' as u16, 'n' as u16, 'g' as u16,
+                    ];
+                    let n = (*o).name;
+                    (0..6).all(|i| *n.add(i) == S[i]) && *n.add(6) == 0
+                };
+                let string_like_fast_path = is_string_type;
+                let this_ptr = if kind == hl_type_kind_HSTRUCT {
+                    (*v).v.ptr as *mut vdynamic
+                } else {
+                    v
+                };
+                let to_string_out = match to_string_fn {
+                    Some(f) if !string_like_fast_path => {
+                        call_tostring_or_stub(f as *mut c_void, this_ptr)
+                    }
+                    _ => ptr::null(),
+                };
+
+                if !to_string_out.is_null() {
+                    hlp_buffer_str(b, to_string_out);
+                } else if !rt.is_null() {
+                    // No callable toString (or it produced nothing).
+                    // For String objects (field 0 is HBYTES), read the bytes pointer directly.
+                    let fi = (*rt).fields_indexes;
+                    let nfields = (*o).nfields;
+                    let is_string_like = nfields >= 1 && !fi.is_null() && {
+                        let field0_type = (*(*o).fields.offset(0)).t;
+                        !field0_type.is_null() && (*field0_type).kind == hl_type_kind_HBYTES
+                    };
+                    if is_string_like {
+                        let field0_offset = *fi.offset(0) as usize;
+                        let bytes_ptr =
+                            *((v as *const u8).add(field0_offset) as *const *const uchar);
+                        if !bytes_ptr.is_null() {
+                            hlp_buffer_str(b, bytes_ptr);
+                        } else {
+                            hlp_buffer_str(b, (*o).name);
+                        }
                     } else {
+                        if kind == hl_type_kind_HSTRUCT {
+                            hlp_buffer_char(b, '@' as u16);
+                        }
                         hlp_buffer_str(b, (*o).name);
                     }
                 } else {
@@ -604,201 +636,50 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                     }
                     hlp_buffer_str(b, (*o).name);
                 }
-            } else {
-                if kind == hl_type_kind_HSTRUCT {
-                    hlp_buffer_char(b, '@' as u16);
-                }
-                hlp_buffer_str(b, (*o).name);
             }
-        }
-        hl_type_kind_HTYPE => {
-            hlp_buffer_str(b, hlp_type_str((*v).v.ptr as *mut hl::hl_type));
-        }
-        hl_type_kind_HREF => {
-            hlp_buffer_str_sub(b, str_to_uchar_ptr("ref"), 3);
-        }
-        hl_type_kind_HARRAY => {
-            let a = v as *mut varray;
-            let at = (*a).at;
-            let stride = hlp_type_size(at);
-            let mut l = vlist { v, next: stack };
+            hl_type_kind_HTYPE => {
+                hlp_buffer_str(b, hlp_type_str((*v).v.ptr as *mut hl::hl_type));
+            }
+            hl_type_kind_HREF => {
+                hlp_buffer_str_sub(b, str_to_uchar_ptr("ref"), 3);
+            }
+            hl_type_kind_HARRAY => {
+                let a = v as *mut varray;
+                let at = (*a).at;
+                let stride = hlp_type_size(at);
+                let mut l = vlist { v, next: stack };
 
-            let mut vtmp = stack;
-            while !vtmp.is_null() {
-                if (*vtmp).v == v {
-                    hlp_buffer_str_sub(b, str_to_uchar_ptr("..."), 3);
+                let mut vtmp = stack;
+                while !vtmp.is_null() {
+                    if (*vtmp).v == v {
+                        hlp_buffer_str_sub(b, str_to_uchar_ptr("..."), 3);
+                        return;
+                    }
+                    vtmp = (*vtmp).next;
+                }
+
+                hlp_buffer_char(b, '[' as u16);
+                for i in 0..(*a).size as usize {
+                    if i > 0 {
+                        hlp_buffer_str_sub(b, str_to_uchar_ptr(", "), 2);
+                    }
+                    hlp_buffer_addr(
+                        b,
+                        hl_aptr::<c_void>(a).add(i * stride as usize),
+                        at,
+                        &mut l as *mut vlist,
+                    );
+                }
+                hlp_buffer_char(b, ']' as u16);
+            }
+
+            hl_type_kind_HVIRTUAL => {
+                let vv = v as *mut vvirtual;
+                if !(*vv).value.is_null() {
+                    hlp_buffer_rec(b, (*vv).value, stack);
                     return;
                 }
-                vtmp = (*vtmp).next;
-            }
 
-            hlp_buffer_char(b, '[' as u16);
-            for i in 0..(*a).size as usize {
-                if i > 0 {
-                    hlp_buffer_str_sub(b, str_to_uchar_ptr(", "), 2);
-                }
-                hlp_buffer_addr(
-                    b,
-                    hl_aptr::<c_void>(a).add(i * stride as usize),
-                    at,
-                    &mut l as *mut vlist,
-                );
-            }
-            hlp_buffer_char(b, ']' as u16);
-        }
-
-        hl_type_kind_HVIRTUAL => {
-            let vv = v as *mut vvirtual;
-            if !(*vv).value.is_null() {
-                hlp_buffer_rec(b, (*vv).value, stack);
-                return;
-            }
-
-            let mut vtmp = stack;
-            while !vtmp.is_null() {
-                if (*vtmp).v == v {
-                    hlp_buffer_str_sub(b, str_to_uchar_ptr("..."), 3);
-                    return;
-                }
-                vtmp = (*vtmp).next;
-            }
-
-            let mut l = vlist { v, next: stack };
-
-            hlp_buffer_char(b, '{' as u16);
-            // An uninitialised virtual has no lookup table, and this is the
-            // one consumer of it with no defence: the two in obj.rs return
-            // null on a null table, while dereferencing it here abends the
-            // process. Printing nothing is the wrong answer; aborting is a
-            // worse one.
-            if (*(*vv).t)
-                .__bindgen_anon_1
-                .virt
-                .as_ref()
-                .unwrap()
-                .lookup
-                .is_null()
-            {
-                hlp_buffer_str_sub(b, str_to_uchar_ptr("}"), 1);
-                return;
-            }
-            for i in 0..(*(*vv).t).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize {
-                let f = (*(*vv).t)
-                    .__bindgen_anon_1
-                    .virt
-                    .as_ref()
-                    .unwrap()
-                    .lookup
-                    .add(i);
-                if i > 0 {
-                    hlp_buffer_str_sub(b, str_to_uchar_ptr(", "), 2);
-                }
-                hlp_buffer_str(b, hlp_field_name((*f).hashed_name) as *const uchar);
-                hlp_buffer_str_sub(b, str_to_uchar_ptr(" : "), 3);
-                hlp_buffer_addr(
-                    b,
-                    (v as *mut c_void).add(
-                        *(*(*vv).t)
-                            .__bindgen_anon_1
-                            .virt
-                            .as_ref()
-                            .unwrap()
-                            .indexes
-                            .add((*f).field_index as usize) as usize,
-                    ),
-                    (*f).t,
-                    &mut l as *mut vlist,
-                );
-            }
-            hlp_buffer_char(b, '}' as u16);
-        }
-
-        hl_type_kind_HDYNOBJ => {
-            let o = v as *mut vdynobj;
-            let mut vtmp = stack;
-            while !vtmp.is_null() {
-                if (*vtmp).v == v {
-                    hlp_buffer_str_sub(b, str_to_uchar_ptr("..."), 3);
-                    return;
-                }
-                vtmp = (*vtmp).next;
-            }
-
-            let mut l = vlist { v, next: stack };
-
-            let f = hlp_lookup_find(
-                (*o).lookup,
-                (*o).nfields,
-                hlp_hash_gen(str_to_uchar_ptr("__string"), false),
-            );
-            if !f.is_null()
-                && (*(*f).t).kind == hl_type_kind_HFUN
-                && (*(*f).t).__bindgen_anon_1.fun.as_ref().unwrap().nargs == 0
-                && (*(*(*f).t).__bindgen_anon_1.fun.as_ref().unwrap().ret).kind
-                    == hl_type_kind_HBYTES
-            {
-                let slot = (*o)
-                    .values
-                    .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize);
-                let closure = *slot as *mut vclosure;
-                if !closure.is_null() {
-                    hlp_buffer_str(b, call_closure_tostring_or_stub(closure));
-                    return;
-                }
-            }
-
-            hlp_buffer_char(b, '{' as u16);
-            let mut indexes = [0i32; 128];
-            let indexes_ptr = if (*o).nfields <= 128 {
-                indexes.as_mut_ptr()
-            } else {
-                let size = ((*o).nfields as usize * std::mem::size_of::<i32>()) as usize;
-                match crate::rt::alloc_locked(size) {
-                    Some(ptr) => ptr.as_ptr() as *mut i32,
-                    None => return, // Handle allocation failure
-                }
-            };
-
-            for i in 0..(*o).nfields as usize {
-                let f = (*o).lookup.add(i);
-                *indexes_ptr.add((*f).field_index as usize >> HL_DYNOBJ_INDEX_SHIFT) = i as i32;
-            }
-
-            for i in 0..(*o).nfields as usize {
-                let f = (*o).lookup.add(*indexes_ptr.add(i) as usize);
-                if i > 0 {
-                    hlp_buffer_str_sub(b, str_to_uchar_ptr(", "), 2);
-                }
-                hlp_buffer_str(b, hlp_field_name((*f).hashed_name) as *const uchar);
-                hlp_buffer_str_sub(b, str_to_uchar_ptr(" : "), 3);
-                let ptr = if hl_is_ptr((*f).t) {
-                    (*o).values
-                        .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize)
-                        as *mut c_void
-                } else {
-                    (*o).raw_data
-                        .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize)
-                        as *mut c_void
-                };
-                hlp_buffer_addr(b, ptr, (*f).t, &mut l as *mut vlist);
-            }
-
-            if (*o).nfields > 128 {
-                // Instead of hl_gc_free, we don't need to explicitly free
-                // Our GC will handle this automatically
-            }
-
-            hlp_buffer_char(b, '}' as u16);
-        }
-
-        hl_type_kind_HENUM => {
-            let e = v as *mut venum;
-            let c = (*(*(*v).t).__bindgen_anon_1.tenum)
-                .constructs
-                .add((*e).index as usize);
-            if (*c).nparams == 0 {
-                hlp_buffer_str(b, (*c).name);
-            } else {
                 let mut vtmp = stack;
                 while !vtmp.is_null() {
                     if (*vtmp).v == v {
@@ -810,41 +691,188 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
 
                 let mut l = vlist { v, next: stack };
 
-                hlp_buffer_str(b, (*c).name);
-                hlp_buffer_char(b, '(' as u16);
-                for i in 0..(*c).nparams as usize {
+                hlp_buffer_char(b, '{' as u16);
+                // An uninitialised virtual has no lookup table, and this is the
+                // one consumer of it with no defence: the two in obj.rs return
+                // null on a null table, while dereferencing it here abends the
+                // process. Printing nothing is the wrong answer; aborting is a
+                // worse one.
+                if (*(*vv).t)
+                    .__bindgen_anon_1
+                    .virt
+                    .as_ref()
+                    .unwrap()
+                    .lookup
+                    .is_null()
+                {
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr("}"), 1);
+                    return;
+                }
+                for i in 0..(*(*vv).t).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize {
+                    let f = (*(*vv).t)
+                        .__bindgen_anon_1
+                        .virt
+                        .as_ref()
+                        .unwrap()
+                        .lookup
+                        .add(i);
                     if i > 0 {
-                        hlp_buffer_char(b, ',' as u16);
+                        hlp_buffer_str_sub(b, str_to_uchar_ptr(", "), 2);
                     }
+                    hlp_buffer_str(b, hlp_field_name((*f).hashed_name) as *const uchar);
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr(" : "), 3);
                     hlp_buffer_addr(
                         b,
-                        (v as *mut c_void).add(*(*c).offsets.add(i) as usize),
-                        *(*c).params.add(i),
+                        (v as *mut c_void).add(
+                            *(*(*vv).t)
+                                .__bindgen_anon_1
+                                .virt
+                                .as_ref()
+                                .unwrap()
+                                .indexes
+                                .add((*f).field_index as usize)
+                                as usize,
+                        ),
+                        (*f).t,
                         &mut l as *mut vlist,
                     );
                 }
-                hlp_buffer_char(b, ')' as u16);
+                hlp_buffer_char(b, '}' as u16);
             }
-        }
-        hl_type_kind_HABSTRACT => {
-            hlp_buffer_char(b, '~' as u16);
-            hlp_buffer_str(b, (*(*v).t).__bindgen_anon_1.abs_name);
-            hlp_buffer_char(b, ':' as u16);
-            let ptr_str = format!("{:p}", (*v).v.ptr as *const c_void);
-            let uchar_ptr = str_to_uchar_ptr(&ptr_str);
-            hlp_buffer_str(b, uchar_ptr);
-        }
-        _ => {
-            let ptr_str = format!("{:p}H", v as *const c_void);
-            let uchar_ptr = str_to_uchar_ptr(&ptr_str);
-            hlp_buffer_str(b, uchar_ptr);
+
+            hl_type_kind_HDYNOBJ => {
+                let o = v as *mut vdynobj;
+                let mut vtmp = stack;
+                while !vtmp.is_null() {
+                    if (*vtmp).v == v {
+                        hlp_buffer_str_sub(b, str_to_uchar_ptr("..."), 3);
+                        return;
+                    }
+                    vtmp = (*vtmp).next;
+                }
+
+                let mut l = vlist { v, next: stack };
+
+                let f = hlp_lookup_find(
+                    (*o).lookup,
+                    (*o).nfields,
+                    hlp_hash_gen(str_to_uchar_ptr("__string"), false),
+                );
+                if !f.is_null()
+                    && (*(*f).t).kind == hl_type_kind_HFUN
+                    && (*(*f).t).__bindgen_anon_1.fun.as_ref().unwrap().nargs == 0
+                    && (*(*(*f).t).__bindgen_anon_1.fun.as_ref().unwrap().ret).kind
+                        == hl_type_kind_HBYTES
+                {
+                    let slot = (*o)
+                        .values
+                        .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize);
+                    let closure = *slot as *mut vclosure;
+                    if !closure.is_null() {
+                        hlp_buffer_str(b, call_closure_tostring_or_stub(closure));
+                        return;
+                    }
+                }
+
+                hlp_buffer_char(b, '{' as u16);
+                let mut indexes = [0i32; 128];
+                let indexes_ptr = if (*o).nfields <= 128 {
+                    indexes.as_mut_ptr()
+                } else {
+                    let size = ((*o).nfields as usize * std::mem::size_of::<i32>()) as usize;
+                    match crate::rt::alloc_locked(size) {
+                        Some(ptr) => ptr.as_ptr() as *mut i32,
+                        None => return, // Handle allocation failure
+                    }
+                };
+
+                for i in 0..(*o).nfields as usize {
+                    let f = (*o).lookup.add(i);
+                    *indexes_ptr.add((*f).field_index as usize >> HL_DYNOBJ_INDEX_SHIFT) = i as i32;
+                }
+
+                for i in 0..(*o).nfields as usize {
+                    let f = (*o).lookup.add(*indexes_ptr.add(i) as usize);
+                    if i > 0 {
+                        hlp_buffer_str_sub(b, str_to_uchar_ptr(", "), 2);
+                    }
+                    hlp_buffer_str(b, hlp_field_name((*f).hashed_name) as *const uchar);
+                    hlp_buffer_str_sub(b, str_to_uchar_ptr(" : "), 3);
+                    let ptr = if hl_is_ptr((*f).t) {
+                        (*o).values
+                            .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize)
+                            as *mut c_void
+                    } else {
+                        (*o).raw_data
+                            .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize)
+                            as *mut c_void
+                    };
+                    hlp_buffer_addr(b, ptr, (*f).t, &mut l as *mut vlist);
+                }
+
+                if (*o).nfields > 128 {
+                    // Instead of hl_gc_free, we don't need to explicitly free
+                    // Our GC will handle this automatically
+                }
+
+                hlp_buffer_char(b, '}' as u16);
+            }
+
+            hl_type_kind_HENUM => {
+                let e = v as *mut venum;
+                let c = (*(*(*v).t).__bindgen_anon_1.tenum)
+                    .constructs
+                    .add((*e).index as usize);
+                if (*c).nparams == 0 {
+                    hlp_buffer_str(b, (*c).name);
+                } else {
+                    let mut vtmp = stack;
+                    while !vtmp.is_null() {
+                        if (*vtmp).v == v {
+                            hlp_buffer_str_sub(b, str_to_uchar_ptr("..."), 3);
+                            return;
+                        }
+                        vtmp = (*vtmp).next;
+                    }
+
+                    let mut l = vlist { v, next: stack };
+
+                    hlp_buffer_str(b, (*c).name);
+                    hlp_buffer_char(b, '(' as u16);
+                    for i in 0..(*c).nparams as usize {
+                        if i > 0 {
+                            hlp_buffer_char(b, ',' as u16);
+                        }
+                        hlp_buffer_addr(
+                            b,
+                            (v as *mut c_void).add(*(*c).offsets.add(i) as usize),
+                            *(*c).params.add(i),
+                            &mut l as *mut vlist,
+                        );
+                    }
+                    hlp_buffer_char(b, ')' as u16);
+                }
+            }
+            hl_type_kind_HABSTRACT => {
+                hlp_buffer_char(b, '~' as u16);
+                hlp_buffer_str(b, (*(*v).t).__bindgen_anon_1.abs_name);
+                hlp_buffer_char(b, ':' as u16);
+                let ptr_str = format!("{:p}", (*v).v.ptr as *const c_void);
+                let uchar_ptr = str_to_uchar_ptr(&ptr_str);
+                hlp_buffer_str(b, uchar_ptr);
+            }
+            _ => {
+                let ptr_str = format!("{:p}H", v as *const c_void);
+                let uchar_ptr = str_to_uchar_ptr(&ptr_str);
+                hlp_buffer_str(b, uchar_ptr);
+            }
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_buffer_val(b: *mut hl_buffer, v: *mut vdynamic) {
-    hlp_buffer_rec(b, v, std::ptr::null_mut())
+    unsafe { hlp_buffer_rec(b, v, std::ptr::null_mut()) }
 }
 
 #[cfg(test)]
@@ -856,13 +884,15 @@ mod type_str_tests {
     };
 
     unsafe fn name_of(t: *mut hl_type) -> String {
-        let p = hlp_type_str(t);
-        assert!(!p.is_null(), "hlp_type_str handed back nothing");
-        let mut len = 0usize;
-        while *p.add(len) != 0 {
-            len += 1;
+        unsafe {
+            let p = hlp_type_str(t);
+            assert!(!p.is_null(), "hlp_type_str handed back nothing");
+            let mut len = 0usize;
+            while *p.add(len) != 0 {
+                len += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
         }
-        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
     }
 
     /// The kinds TSTR names outright, each read through the crate's own

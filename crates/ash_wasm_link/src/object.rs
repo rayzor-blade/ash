@@ -20,7 +20,7 @@
 //! step, and that step is the one that silently corrupts a module. Bodies are
 //! split out *after* patching, from bytes that are already correct.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use wasmparser::{
     Data, DataKind, Element, ElementItems, ElementKind, Export, FuncType, Global, Import, Linking,
     LinkingSectionReader, MemoryType, Parser, Payload, RelocSectionReader, RelocationEntry,

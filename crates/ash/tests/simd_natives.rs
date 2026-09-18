@@ -8,8 +8,9 @@ use std::path::PathBuf;
 #[test]
 fn simd_natives_resolve_from_the_runtime() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/tests/test_simd.hl");
-    // The runtime under test, not a libhl installed system-wide.
-    std::env::set_var("ASH_LIBHL", "embedded");
+    // The runtime under test, not a libhl installed system-wide. Set before
+    // any thread the runtime starts could read the environment.
+    unsafe { std::env::set_var("ASH_LIBHL", "embedded") };
     ash_core::native_lib::init_std_library().expect("starting the runtime");
     let code = ash_core::bytecode::BytecodeDecoder::decode(&fixture).expect("decoding the fixture");
     let resolver = ash_core::native_lib::NativeFunctionResolver::new();

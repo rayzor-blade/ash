@@ -58,8 +58,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use js_sys::Uint8Array;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
 /// WASI errno values this module reports. The guest compares against these

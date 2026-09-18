@@ -342,10 +342,10 @@ impl Wasi {
                 return errno::FAULT;
             }
         }
-        if let Some(millis) = longest {
-            if millis > 0.0 {
-                block_for(millis);
-            }
+        if let Some(millis) = longest
+            && millis > 0.0
+        {
+            block_for(millis);
         }
         if !guest.write_u32(out, n) {
             return errno::FAULT;

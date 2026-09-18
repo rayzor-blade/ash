@@ -88,7 +88,7 @@ pub extern "C" fn hl_detect_debugger() -> bool {
         }
         #[cfg(target_os = "macos")]
         {
-            use libc::{ptrace, PT_DENY_ATTACH};
+            use libc::{PT_DENY_ATTACH, ptrace};
 
             // Try to deny debugger attachment
             let result = ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0);
@@ -220,11 +220,13 @@ pub unsafe extern "C" fn hlp_debug_flush(_pid: i32, _addr: *mut vbyte, _size: i3
 /// instead of spinning it forever on a session that never existed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_wait(_pid: i32, thread: *mut i32, _timeout: i32) -> i32 {
-    note_unsupported("debug_wait");
-    if !thread.is_null() {
-        *thread = 0;
+    unsafe {
+        note_unsupported("debug_wait");
+        if !thread.is_null() {
+            *thread = 0;
+        }
+        0
     }
-    0
 }
 
 /// `DEFINE_PRIM(_BOOL, debug_resume, _I32 _I32)` — nothing was ever stopped.
@@ -274,11 +276,13 @@ pub unsafe extern "C" fn hlp_debug_call(_mode: i32, _v: *mut vdynamic) -> *mut v
 /// `DEFINE_PRIM(_I32, track_count, _REF(_I32))` — zero buckets, zero depth.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_count(depth: *mut i32) -> i32 {
-    note_unsupported("track_count");
-    if !depth.is_null() {
-        *depth = 0;
+    unsafe {
+        note_unsupported("track_count");
+        if !depth.is_null() {
+            *depth = 0;
+        }
+        0
     }
-    0
 }
 
 /// `DEFINE_PRIM(_I32, track_entry, _I32 _REF(_TYPE) _REF(_I32) _REF(_I32) _ARR)`

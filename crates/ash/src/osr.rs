@@ -195,8 +195,8 @@ pub fn analyze(f: &Function) -> OsrPlan {
 mod tests {
     use super::*;
     use air::opcodes::{Opcode, RefInt, Reg};
-    use air::v2::lower::lower;
     use air::v2::TypeRef;
+    use air::v2::lower::lower;
 
     fn tys(n: usize) -> Vec<TypeRef> {
         vec![TypeRef(0); n]

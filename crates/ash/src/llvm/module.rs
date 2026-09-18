@@ -1,9 +1,9 @@
 use crate::bytecode::{BytecodeDecoder, DecodedBytecode};
 use crate::hl::*;
-use crate::native_lib::{init_std_library, NativeFunctionResolver};
+use crate::native_lib::{NativeFunctionResolver, init_std_library};
 use crate::opcodes::Opcode;
 use crate::types::{HLType, HLTypeFun, HLTypeObj, TypeRef, ValueTypeKind};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -19,9 +19,9 @@ use inkwell::values::{
 use inkwell::{AddressSpace, OptimizationLevel};
 use num_enum::TryFromPrimitive;
 use std::cell::RefCell;
-use std::collections::btree_map::IntoValues;
 use std::collections::HashMap;
-use std::ffi::{c_void, CStr};
+use std::collections::btree_map::IntoValues;
+use std::ffi::{CStr, c_void};
 use std::mem;
 use std::ops::Add;
 use std::path::Path;
@@ -33,7 +33,7 @@ use super::function::FuncPtr;
 use ash_macro::load_symbol;
 
 #[load_symbol]
-extern "C" {
+unsafe extern "C" {
     fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_context);
     fn hlp_init_enum(vt: *mut hl_type, _ctx: *mut hl_module_context);
     fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut hl_obj_field;
@@ -262,8 +262,8 @@ pub(crate) fn run_middle_end_at(
     module: &inkwell::module::Module<'_>,
     default_spec: &str,
 ) -> Result<()> {
-    use inkwell::passes::PassBuilderOptions;
     use inkwell::OptimizationLevel;
+    use inkwell::passes::PassBuilderOptions;
 
     // O2 rather than O3: measured on this corpus O3 costs more compile time
     // than it returns (nbody 1.57s at O2 against 1.70s at O3, and it is slower

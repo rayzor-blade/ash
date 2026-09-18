@@ -38,11 +38,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use wasm_encoder::{Instruction, ValType};
 use wasmparser::Operator;
 
-use crate::cursor::{rewrite_module, Cursor};
+use crate::cursor::{Cursor, rewrite_module};
 
 /// What emptying the stack cost, over a whole module.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -314,11 +314,7 @@ const FUNCTION_FRAME: usize = usize::MAX;
 /// entry already lands, so the arm and the default would go to the same
 /// place.
 fn first_operator_of(key: usize) -> usize {
-    if key == FUNCTION_FRAME {
-        0
-    } else {
-        key + 1
-    }
+    if key == FUNCTION_FRAME { 0 } else { key + 1 }
 }
 
 /// One entry of the frame chain during a walk.
@@ -842,28 +838,28 @@ pub fn add_rewind_dispatch(
         // The body's own last `End`. Everything before it is inside the block
         // a suspending call site branches out of, so this is where that block
         // closes and where the one copy of the save sequence goes.
-        if matches!(op, Operator::End) && c.depth() == 1 {
-            if let (Some(m), Some(saved)) = (drive.machine(), &frame) {
-                // Reaching here normally means returning normally; falling
-                // through into the save sequence would be wrong.
-                c.emit_new(&Instruction::Return);
-                c.close_block()?;
-                emit_unwind_exit(c, m, saved)?;
-            }
+        if matches!(op, Operator::End)
+            && c.depth() == 1
+            && let (Some(m), Some(saved)) = (drive.machine(), &frame)
+        {
+            // Reaching here normally means returning normally; falling
+            // through into the save sequence would be wrong.
+            c.emit_new(&Instruction::Return);
+            c.close_block()?;
+            emit_unwind_exit(c, m, saved)?;
         }
 
         c.emit(op)?;
 
         // Coming back from a call that could have suspended, the state says
         // whether this frame is on its way out.
-        if let (Some(m), true) = (drive.machine(), suspends(op, instrument)) {
-            if let Some(saved) = &frame {
-                if !unreachable_here(c) {
-                    let ordinal = ordinals_seen;
-                    emit_epilogue(c, m, saved, ordinal)?;
-                    report.epilogues += 1;
-                }
-            }
+        if let (Some(m), true) = (drive.machine(), suspends(op, instrument))
+            && let Some(saved) = &frame
+            && !unreachable_here(c)
+        {
+            let ordinal = ordinals_seen;
+            emit_epilogue(c, m, saved, ordinal)?;
+            report.epilogues += 1;
         }
         if suspends(op, instrument) && !unreachable_here(c) {
             ordinals_seen += 1;
@@ -904,13 +900,13 @@ pub fn add_rewind_dispatch(
                 pending = p.frames.contains_key(&at).then_some(at);
             }
             Operator::End => {
-                if let Some(f) = chain.pop() {
-                    if f.open != 0 {
-                        bail!(
-                            "{} ladder block(s) still open at the end of a frame",
-                            f.open
-                        );
-                    }
+                if let Some(f) = chain.pop()
+                    && f.open != 0
+                {
+                    bail!(
+                        "{} ladder block(s) still open at the end of a frame",
+                        f.open
+                    );
                 }
                 pending = None;
             }

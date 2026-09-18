@@ -59,12 +59,12 @@ macro_rules! export_resolvers {
             /// `sign` must be writable, which is what a caller of a
             /// `DEFINE_PRIM` resolver passes.
             #[unsafe(no_mangle)]
-            pub unsafe extern "C" fn $export(sign: *mut *const c_char) -> *mut c_void {
+            pub unsafe extern "C" fn $export(sign: *mut *const c_char) -> *mut c_void { unsafe {
                 if !sign.is_null() {
                     *sign = concat!(sig!($shape), "\0").as_ptr() as *const c_char;
                 }
                 $body as *mut c_void
-            }
+            }}
         )*
     };
 }

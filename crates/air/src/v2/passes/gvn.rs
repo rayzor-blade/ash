@@ -2,10 +2,10 @@
 //! elimination.
 
 use super::{
-    clobber_free, compact_values, def_sites, feeds_handler_phi, handler_blocks, param_values,
-    privatize, replace_all_uses, DefSite, Pass, PassOptions, PassStats, RegClaims,
+    DefSite, Pass, PassOptions, PassStats, RegClaims, clobber_free, compact_values, def_sites,
+    feeds_handler_phi, handler_blocks, param_values, privatize, replace_all_uses,
 };
-use crate::v2::analysis::{read_class, AliasClass, CfgInfo};
+use crate::v2::analysis::{AliasClass, CfgInfo, read_class};
 use crate::v2::ir::*;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -210,24 +210,23 @@ impl Pass for GlobalValueNumbering {
                     continue;
                 };
 
-                if let Some(&prev) = table.get(&key) {
-                    if f.value_ty(prev) == f.value_ty(dst)
-                        && can_replace(f, &handlers, dst)
-                        && can_replace(f, &handlers, prev)
-                    {
-                        let ok = match (eff, read_class(&normalized)) {
-                            (Effect::ReadMem, Some(class)) => {
-                                dominating_load_is_live(f, &cfg, &defs, class, prev, (b, k))
-                            }
-                            (Effect::ReadMem, None) => false,
-                            _ => true,
-                        };
-                        if ok && privatize(f, prev, &mut claims, is_param[prev.idx()]) {
-                            subst.insert(dst, prev);
-                            rewrites.push((dst, prev));
-                            remove.insert((b, k));
-                            continue;
+                if let Some(&prev) = table.get(&key)
+                    && f.value_ty(prev) == f.value_ty(dst)
+                    && can_replace(f, &handlers, dst)
+                    && can_replace(f, &handlers, prev)
+                {
+                    let ok = match (eff, read_class(&normalized)) {
+                        (Effect::ReadMem, Some(class)) => {
+                            dominating_load_is_live(f, &cfg, &defs, class, prev, (b, k))
                         }
+                        (Effect::ReadMem, None) => false,
+                        _ => true,
+                    };
+                    if ok && privatize(f, prev, &mut claims, is_param[prev.idx()]) {
+                        subst.insert(dst, prev);
+                        rewrites.push((dst, prev));
+                        remove.insert((b, k));
+                        continue;
                     }
                 }
                 // Bind the key to this definition, remembering what it

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -97,7 +97,7 @@ type FnTrapSetup = unsafe extern "C" fn() -> *mut c_void;
 type FnTrapRemove = unsafe extern "C" fn();
 type FnTrapCallback = unsafe extern "C" fn(*mut c_void);
 
-extern "C" {
+unsafe extern "C" {
     fn ash_interp_run_with_hl_trap(
         setup: Option<FnTrapSetup>,
         remove: Option<FnTrapRemove>,
@@ -114,8 +114,10 @@ unsafe extern "C" fn invoke_trap_callback<F>(context: *mut c_void)
 where
     F: FnMut(),
 {
-    let context = &mut *context.cast::<TrapCallbackContext<F>>();
-    (&mut *context.callback)();
+    unsafe {
+        let context = &mut *context.cast::<TrapCallbackContext<F>>();
+        (&mut *context.callback)();
+    }
 }
 
 /// Invoke a callback while the C frame containing setjmp remains active.
@@ -294,35 +296,41 @@ pub(crate) fn ref_target_kind(
 /// Read a value of `kind` from raw HL memory at `p`, at the width HL gives
 /// it there. A register slot is not raw memory; see `ref_targets_register`.
 pub(crate) unsafe fn read_raw_kind(p: *const u8, kind: hl::hl_type_kind) -> NanBoxedValue {
-    match kind {
-        hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(p.read_unaligned() as i32),
-        hl::hl_type_kind_HUI16 => {
-            NanBoxedValue::from_i32((p as *const u16).read_unaligned() as i32)
+    unsafe {
+        match kind {
+            hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(p.read_unaligned() as i32),
+            hl::hl_type_kind_HUI16 => {
+                NanBoxedValue::from_i32((p as *const u16).read_unaligned() as i32)
+            }
+            hl::hl_type_kind_HI32 => NanBoxedValue::from_i32((p as *const i32).read_unaligned()),
+            hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(p.read_unaligned() != 0),
+            hl::hl_type_kind_HF32 => {
+                NanBoxedValue::from_f64((p as *const f32).read_unaligned() as f64)
+            }
+            hl::hl_type_kind_HF64 => NanBoxedValue::from_f64((p as *const f64).read_unaligned()),
+            hl::hl_type_kind_HI64 => NanBoxedValue::from_i64((p as *const i64).read_unaligned()),
+            _ => match (p as *const usize).read_unaligned() {
+                0 => NanBoxedValue::null(),
+                raw => NanBoxedValue::from_ptr(raw),
+            },
         }
-        hl::hl_type_kind_HI32 => NanBoxedValue::from_i32((p as *const i32).read_unaligned()),
-        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(p.read_unaligned() != 0),
-        hl::hl_type_kind_HF32 => NanBoxedValue::from_f64((p as *const f32).read_unaligned() as f64),
-        hl::hl_type_kind_HF64 => NanBoxedValue::from_f64((p as *const f64).read_unaligned()),
-        hl::hl_type_kind_HI64 => NanBoxedValue::from_i64((p as *const i64).read_unaligned()),
-        _ => match (p as *const usize).read_unaligned() {
-            0 => NanBoxedValue::null(),
-            raw => NanBoxedValue::from_ptr(raw),
-        },
     }
 }
 
 /// Write `v` as a value of `kind` to raw HL memory at `p`, at the width HL
 /// gives it there.
 pub(crate) unsafe fn write_raw_kind(p: *mut u8, kind: hl::hl_type_kind, v: NanBoxedValue) {
-    match kind {
-        hl::hl_type_kind_HUI8 => p.write_unaligned(v.as_i32() as u8),
-        hl::hl_type_kind_HUI16 => (p as *mut u16).write_unaligned(v.as_i32() as u16),
-        hl::hl_type_kind_HI32 => (p as *mut i32).write_unaligned(v.as_i32()),
-        hl::hl_type_kind_HBOOL => p.write_unaligned(v.as_bool() as u8),
-        hl::hl_type_kind_HF32 => (p as *mut f32).write_unaligned(v.as_f64() as f32),
-        hl::hl_type_kind_HF64 => (p as *mut f64).write_unaligned(v.as_f64()),
-        hl::hl_type_kind_HI64 => (p as *mut i64).write_unaligned(v.as_i64_lossy()),
-        _ => (p as *mut usize).write_unaligned(v.as_ptr()),
+    unsafe {
+        match kind {
+            hl::hl_type_kind_HUI8 => p.write_unaligned(v.as_i32() as u8),
+            hl::hl_type_kind_HUI16 => (p as *mut u16).write_unaligned(v.as_i32() as u16),
+            hl::hl_type_kind_HI32 => (p as *mut i32).write_unaligned(v.as_i32()),
+            hl::hl_type_kind_HBOOL => p.write_unaligned(v.as_bool() as u8),
+            hl::hl_type_kind_HF32 => (p as *mut f32).write_unaligned(v.as_f64() as f32),
+            hl::hl_type_kind_HF64 => (p as *mut f64).write_unaligned(v.as_f64()),
+            hl::hl_type_kind_HI64 => (p as *mut i64).write_unaligned(v.as_i64_lossy()),
+            _ => (p as *mut usize).write_unaligned(v.as_ptr()),
+        }
     }
 }
 
@@ -406,7 +414,7 @@ use instrument::CompileBlocking;
 use crate::tiering::env_flag;
 use crate::tiering::*;
 pub use crate::tiering::{
-    decline_report, install_call_counts, TierMode, TierPreset, TieredConfig, TieredStats,
+    TierMode, TierPreset, TieredConfig, TieredStats, decline_report, install_call_counts,
 };
 
 struct HlpName<'a>(&'a str);
@@ -831,15 +839,14 @@ impl HLInterpreter {
         // the write is dropped rather than killing a shipped game. The
         // runtime owns the switch because the AOT path has no interpreter.
         if let Ok(set_policy) = native_resolver.resolve_function("std", "hlp_set_null_write_raises")
+            && !set_policy.is_null()
         {
-            if !set_policy.is_null() {
-                type FnPolicy = unsafe extern "C" fn(bool);
-                unsafe {
-                    std::mem::transmute::<*mut std::ffi::c_void, FnPolicy>(set_policy)(
-                        bytecode.has_debug,
-                    )
-                };
-            }
+            type FnPolicy = unsafe extern "C" fn(bool);
+            unsafe {
+                std::mem::transmute::<*mut std::ffi::c_void, FnPolicy>(set_policy)(
+                    bytecode.has_debug,
+                )
+            };
         }
 
         // Resolve internal stdlib function pointers for object operations
@@ -1764,19 +1771,17 @@ impl HLInterpreter {
         field_idx: usize,
     ) -> Option<i32> {
         let ty = bytecode.types.get(obj_type_idx)?;
-        if let Some(obj) = ty.obj.as_ref() {
-            if let Some(f) = obj.fields.get(field_idx) {
-                if f.hashed_name != 0 {
-                    return Some(f.hashed_name);
-                }
-            }
+        if let Some(obj) = ty.obj.as_ref()
+            && let Some(f) = obj.fields.get(field_idx)
+            && f.hashed_name != 0
+        {
+            return Some(f.hashed_name);
         }
-        if let Some(virt) = ty.virt.as_ref() {
-            if let Some(f) = virt.fields.get(field_idx) {
-                if f.hashed_name != 0 {
-                    return Some(f.hashed_name);
-                }
-            }
+        if let Some(virt) = ty.virt.as_ref()
+            && let Some(f) = virt.fields.get(field_idx)
+            && f.hashed_name != 0
+        {
+            return Some(f.hashed_name);
         }
         None
     }
@@ -1798,37 +1803,36 @@ impl HLInterpreter {
         c_type_ptr: *mut c_void,
         field_idx: usize,
     ) -> Option<usize> {
-        if c_type_ptr.is_null() {
-            return None;
-        }
-        if obj_ptr.is_null() {
-            return None;
-        }
-        // Trust the runtime header: ToVirtual is a bare register copy, so an
-        // HVIRTUAL-typed register may hold a raw object.
-        let hdr = *(obj_ptr as *const *const hl_type);
-        if hdr.is_null()
-            || !(hdr as usize).is_multiple_of(std::mem::align_of::<usize>())
-            || (*hdr).kind != hl::hl_type_kind_HVIRTUAL
-        {
-            return None;
-        }
-        if !(*(obj_ptr as *const hl::vvirtual)).value.is_null() {
-            return None;
-        }
-        let t = c_type_ptr as *mut hl_type;
-        if t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL {
-            return None;
-        }
-        let virt = (*t).__bindgen_anon_1.virt;
-        if virt.is_null() || (*virt).indexes.is_null() || field_idx >= (*virt).nfields as usize {
-            return None;
-        }
-        let off = *(*virt).indexes.add(field_idx);
-        if off < 0 {
-            None
-        } else {
-            Some(off as usize)
+        unsafe {
+            if c_type_ptr.is_null() {
+                return None;
+            }
+            if obj_ptr.is_null() {
+                return None;
+            }
+            // Trust the runtime header: ToVirtual is a bare register copy, so an
+            // HVIRTUAL-typed register may hold a raw object.
+            let hdr = *(obj_ptr as *const *const hl_type);
+            if hdr.is_null()
+                || !(hdr as usize).is_multiple_of(std::mem::align_of::<usize>())
+                || (*hdr).kind != hl::hl_type_kind_HVIRTUAL
+            {
+                return None;
+            }
+            if !(*(obj_ptr as *const hl::vvirtual)).value.is_null() {
+                return None;
+            }
+            let t = c_type_ptr as *mut hl_type;
+            if t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL {
+                return None;
+            }
+            let virt = (*t).__bindgen_anon_1.virt;
+            if virt.is_null() || (*virt).indexes.is_null() || field_idx >= (*virt).nfields as usize
+            {
+                return None;
+            }
+            let off = *(*virt).indexes.add(field_idx);
+            if off < 0 { None } else { Some(off as usize) }
         }
     }
 
@@ -2226,11 +2230,7 @@ impl HLInterpreter {
                 if !fn_dyn_seti.is_null() {
                     let f: FnDynSetI = unsafe { std::mem::transmute(fn_dyn_seti) };
                     let i = if src_kind == hl::hl_type_kind_HBOOL {
-                        if src_val.as_bool() {
-                            1
-                        } else {
-                            0
-                        }
+                        if src_val.as_bool() { 1 } else { 0 }
                     } else {
                         src_val.as_i32()
                     };
@@ -2339,55 +2339,57 @@ impl HLInterpreter {
         findex: usize,
         err: anyhow::Error,
     ) -> ! {
-        // The exception itself is the report; this is the tier's own trace
-        // of the hand-off, once per findex, under `ASH_TIER_LOG` (`--jit-log`).
-        if env_flag!("ASH_TIER_LOG") {
-            static REPORTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
-            let first = REPORTED
-                .get_or_init(|| Mutex::new(HashSet::new()))
-                .lock()
-                .map(|mut s| s.insert(findex))
-                .unwrap_or(true);
-            if first {
-                eprintln!(
-                    "[tier] stub bridge: findex {} failed, raising into the HL trap chain: {:#}",
-                    findex, err
-                );
+        unsafe {
+            // The exception itself is the report; this is the tier's own trace
+            // of the hand-off, once per findex, under `ASH_TIER_LOG` (`--jit-log`).
+            if env_flag!("ASH_TIER_LOG") {
+                static REPORTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+                let first = REPORTED
+                    .get_or_init(|| Mutex::new(HashSet::new()))
+                    .lock()
+                    .map(|mut s| s.insert(findex))
+                    .unwrap_or(true);
+                if first {
+                    eprintln!(
+                        "[tier] stub bridge: findex {} failed, raising into the HL trap chain: {:#}",
+                        findex, err
+                    );
+                }
             }
-        }
 
-        let throw_fn = resolver
-            .resolve_function("std", "hlp_throw")
-            .unwrap_or(std::ptr::null_mut());
-        if let Some(hl_exc) = err.downcast_ref::<HLExceptionPropagation>() {
-            let val = hl_exc.value;
-            if val.is_ptr() && val.as_ptr() != 0 && !throw_fn.is_null() {
-                type FnThrow = unsafe extern "C" fn(*mut c_void) -> !;
-                let f: FnThrow = std::mem::transmute(throw_fn);
-                f(val.as_ptr() as *mut c_void);
+            let throw_fn = resolver
+                .resolve_function("std", "hlp_throw")
+                .unwrap_or(std::ptr::null_mut());
+            if let Some(hl_exc) = err.downcast_ref::<HLExceptionPropagation>() {
+                let val = hl_exc.value;
+                if val.is_ptr() && val.as_ptr() != 0 && !throw_fn.is_null() {
+                    type FnThrow = unsafe extern "C" fn(*mut c_void) -> !;
+                    let f: FnThrow = std::mem::transmute(throw_fn);
+                    f(val.as_ptr() as *mut c_void);
+                }
             }
-        }
 
-        // No throwable value: mint one from the message, as `hl_error` does.
-        let error_fn = resolver
-            .resolve_function("std", "hlp_error")
-            .unwrap_or(std::ptr::null_mut());
-        if !error_fn.is_null() {
-            let msg = Self::interned_utf16_message(&format!("{:#}", err));
-            // `hlp_error` is variadic (`printf`-style), but it is called here
-            // with only its fixed argument, and on AAPCS64 the fixed argument
-            // lands in x0 either way — the variadic tail lives on the stack.
-            type FnError = unsafe extern "C" fn(*const u16) -> !;
-            let f: FnError = std::mem::transmute(error_fn);
-            f(msg);
-        }
+            // No throwable value: mint one from the message, as `hl_error` does.
+            let error_fn = resolver
+                .resolve_function("std", "hlp_error")
+                .unwrap_or(std::ptr::null_mut());
+            if !error_fn.is_null() {
+                let msg = Self::interned_utf16_message(&format!("{:#}", err));
+                // `hlp_error` is variadic (`printf`-style), but it is called here
+                // with only its fixed argument, and on AAPCS64 the fixed argument
+                // lands in x0 either way — the variadic tail lives on the stack.
+                type FnError = unsafe extern "C" fn(*const u16) -> !;
+                let f: FnError = std::mem::transmute(error_fn);
+                f(msg);
+            }
 
-        eprintln!(
-            "[ash] FATAL: stub bridge cannot raise for findex {} (hlp_throw/hlp_error \
+            eprintln!(
+                "[ash] FATAL: stub bridge cannot raise for findex {} (hlp_throw/hlp_error \
              unresolvable); aborting rather than returning a poison value: {:#}",
-            findex, err
-        );
-        std::process::abort();
+                findex, err
+            );
+            std::process::abort();
+        }
     }
 
     /// Intern `msg` as a leaked, NUL-terminated UTF-16 buffer.
@@ -2463,24 +2465,26 @@ impl HLInterpreter {
         findex: usize,
         value: *mut c_void,
     ) -> NanBoxedValue {
-        let fun = (findex + 1) as *mut c_void;
-        if !alloc_closure_ptr.is_null() {
-            type FnAllocClosurePtr =
-                unsafe extern "C" fn(*mut hl_type, *mut c_void, *mut c_void) -> *mut _vclosure;
-            let f: FnAllocClosurePtr = std::mem::transmute(alloc_closure_ptr);
-            let c = f(closure_type, fun, value);
-            if !c.is_null() {
-                return NanBoxedValue::from_ptr(c as usize);
+        unsafe {
+            let fun = (findex + 1) as *mut c_void;
+            if !alloc_closure_ptr.is_null() {
+                type FnAllocClosurePtr =
+                    unsafe extern "C" fn(*mut hl_type, *mut c_void, *mut c_void) -> *mut _vclosure;
+                let f: FnAllocClosurePtr = std::mem::transmute(alloc_closure_ptr);
+                let c = f(closure_type, fun, value);
+                if !c.is_null() {
+                    return NanBoxedValue::from_ptr(c as usize);
+                }
             }
+            let closure = Box::new(_vclosure {
+                t: closure_type,
+                fun,
+                hasValue: 1,
+                stackCount: 0,
+                value,
+            });
+            NanBoxedValue::from_ptr(Box::into_raw(closure) as usize)
         }
-        let closure = Box::new(_vclosure {
-            t: closure_type,
-            fun,
-            hasValue: 1,
-            stackCount: 0,
-            value,
-        });
-        NanBoxedValue::from_ptr(Box::into_raw(closure) as usize)
     }
 
     fn format_hl_exception(&self, val: NanBoxedValue) -> HLExceptionPropagation {
@@ -2510,11 +2514,12 @@ impl HLInterpreter {
                 for field_name in ["__exceptionMessage", "message"] {
                     let h = self.hash_literal_name(field_name);
                     let msg_dyn = unsafe { get_field(dyn_ptr, h) };
-                    if let Some(inner) = self.value_to_string(msg_dyn) {
-                        if !inner.is_empty() && inner != "null" {
-                            extracted = Some(inner);
-                            break;
-                        }
+                    if let Some(inner) = self.value_to_string(msg_dyn)
+                        && !inner.is_empty()
+                        && inner != "null"
+                    {
+                        extracted = Some(inner);
+                        break;
                     }
                 }
                 if let Some(inner) = extracted {
@@ -2596,315 +2601,323 @@ impl HLInterpreter {
             args: *mut *mut c_void,
             nargs: i32,
         ) -> *mut c_void {
-            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
-                return std::ptr::null_mut();
-            };
-            let cl = c as *const hl::_vclosure;
-            if cl.is_null() {
-                return std::ptr::null_mut();
-            }
-            let fun = (*cl).fun as usize;
-            if fun == 0 {
-                eprintln!("[ash] fiber runner: null closure function");
-                return std::ptr::null_mut();
-            }
-            if fun >= ash_core::stub_bridge::STUB_SENTINEL_LIMIT as usize {
-                if ctx.jit_closure_runner.is_null() {
-                    eprintln!("[ash] fiber runner: compiled closure bridge unavailable");
+            unsafe {
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                    return std::ptr::null_mut();
+                };
+                let cl = c as *const hl::_vclosure;
+                if cl.is_null() {
                     return std::ptr::null_mut();
                 }
-                type JitClosureRunner =
-                    unsafe extern "C" fn(*mut c_void, *mut *mut c_void, i32) -> *mut c_void;
-                let run: JitClosureRunner = std::mem::transmute(ctx.jit_closure_runner);
-                return run(c, args, nargs);
-            }
-            let findex = fun.wrapping_sub(1);
-            let is_fiber_root = if ctx.fiber_is_root_closure.is_null() {
-                false
-            } else {
-                let is_root: unsafe extern "C" fn(*mut c_void) -> bool =
-                    std::mem::transmute(ctx.fiber_is_root_closure);
-                is_root(c)
-            };
-            let mut args_v = Vec::new();
-            if (*cl).hasValue != 0 && !(*cl).value.is_null() {
-                args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
-            }
-            let interp = &mut *ctx.interp;
-            let bytecode = &*ctx.bytecode;
-            // Marshal the caller's arguments. These were dropped outright
-            // until now — the parameters were literally named `_args` and
-            // `_nargs` — so every stub closure invoked from native code ran
-            // with `this` and nothing else, and the callee saw uninitialised
-            // parameters. ArrayDyn.__cast(t) compares `t` against a type and
-            // returned null for want of ever receiving one, which is what
-            // made Array<Dynamic> -> Array<Int> casts fail under the
-            // interpreter.
-            //
-            // The bridge contract is an array of `vdynamic*`, so each word is
-            // converted against the callee's declared parameter kind — the
-            // same rule try_handle_call_method_native applies.
-            let n = nargs.max(0) as usize;
-            // Stable backing for HREF arguments. The compiled/interpreted call
-            // is synchronous, so keeping these boxes alive through
-            // `call_function` gives the callee a real addressable cell.
-            let mut ref_cells: Vec<Box<u64>> = Vec::new();
-            if n > 0 && !args.is_null() {
-                let declared: Vec<usize> = func_of(&interp.targets, findex)
-                    .and_then(|fi| {
-                        bytecode.types[bytecode.functions[fi].type_.0]
-                            .fun
-                            .as_ref()
-                            .map(|f| f.args.iter().map(|a| a.0).collect())
-                    })
-                    .unwrap_or_default();
-                if env_flag!("ASH_DBG_FIBER") {
-                    let kinds: Vec<_> =
-                        declared.iter().map(|&ty| bytecode.types[ty].kind).collect();
-                    eprintln!(
-                        "[fiber-runner] findex={findex} has_value={} nargs={n} declared={kinds:?}",
-                        (*cl).hasValue
-                    );
+                let fun = (*cl).fun as usize;
+                if fun == 0 {
+                    eprintln!("[ash] fiber runner: null closure function");
+                    return std::ptr::null_mut();
                 }
-                // `this` already occupies slot 0 when the closure carries a
-                // value, so the caller's first argument is declared arg 1.
-                let shift = args_v.len();
-                for i in 0..n {
-                    let raw = *(args as *mut *mut hl::vdynamic).add(i);
-                    let expected_type_idx = declared.get(i + shift).copied();
-                    let kind = expected_type_idx
-                        .map(|ty| bytecode.types[ty].kind)
-                        .unwrap_or(hl::hl_type_kind_HDYN);
-                    if env_flag!("ASH_DBG_FIBER") {
-                        let raw_kind = if raw.is_null() || (*raw).t.is_null() {
-                            None
-                        } else {
-                            Some((*(*raw).t).kind)
-                        };
-                        eprintln!(
-                            "[fiber-runner] arg={i} raw={raw:p} raw_kind={raw_kind:?} expected={kind}"
-                        );
+                if fun >= ash_core::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+                    if ctx.jit_closure_runner.is_null() {
+                        eprintln!("[ash] fiber runner: compiled closure bridge unavailable");
+                        return std::ptr::null_mut();
                     }
-                    let value = if kind == hl::hl_type_kind_HNULL && !raw.is_null() {
-                        // Nullable parameters consume the vdynamic box itself;
-                        // its nullness is the default-argument discriminator.
-                        NanBoxedValue::from_ptr(raw as usize)
-                    } else if kind == hl::hl_type_kind_HREF && !raw.is_null() {
-                        if !(*raw).t.is_null() && (*(*raw).t).kind == hl::hl_type_kind_HREF {
-                            let cell = (*raw).v.ptr as usize;
-                            if cell == 0 {
-                                NanBoxedValue::null()
-                            } else {
-                                NanBoxedValue::from_ptr(cell)
-                            }
-                        } else {
-                            let inner_kind = expected_type_idx
-                                .and_then(|ty| bytecode.types[ty].tparam.as_ref())
-                                .map(|ty| bytecode.types[ty.0].kind)
-                                .unwrap_or(hl::hl_type_kind_HDYN);
-                            let inner = interp.dynamic_to_value_for_kind(raw, inner_kind);
-                            let mut cell = Box::new(0u64);
-                            HLInterpreter::write_value_to_ptr(
-                                (&mut *cell as *mut u64).cast::<u8>(),
-                                inner,
-                                inner_kind,
-                            );
-                            let cell_ptr = (&mut *cell as *mut u64) as usize;
-                            ref_cells.push(cell);
-                            NanBoxedValue::from_ptr(cell_ptr)
-                        }
-                    } else if kind == hl::hl_type_kind_HOBJ
-                        && !raw.is_null()
-                        && !interp.fn_dyn_castp.is_null()
-                    {
-                        // Native dynamic dispatch supplies a vdynamic*, but
-                        // an HOBJ parameter needs an exact object-type cast,
-                        // not merely a kind match. In particular,
-                        // Reflect.callMethod can pass ArrayDyn to a method
-                        // specialized for ArrayBytes<Int>; its __cast builds
-                        // the representation whose field layout the callee
-                        // uses. The ordinary interpreter CallMethod path does
-                        // this already; the native closure runner must honor
-                        // the same contract before entering compiled AIR V2.
-                        let target_type = expected_type_idx
-                            .map(|ty| interp.c_type_factory.get(ty))
-                            .unwrap_or(std::ptr::null_mut());
-                        let source_type = (*raw).t;
-                        if source_type == target_type
-                            || source_type.is_null()
-                            || target_type.is_null()
-                        {
-                            NanBoxedValue::from_ptr(raw as usize)
-                        } else if (*source_type).kind != hl::hl_type_kind_HOBJ {
-                            interp.dynamic_to_value_for_kind(raw, kind)
-                        } else {
-                            type FnCastp = unsafe extern "C" fn(
-                                *mut c_void,
-                                *mut c_void,
-                                *mut c_void,
-                            )
-                                -> *mut c_void;
-                            let castp: FnCastp = std::mem::transmute(interp.fn_dyn_castp);
-                            let mut data = raw as *mut c_void;
-                            let casted = castp(
-                                &mut data as *mut _ as *mut c_void,
-                                source_type.cast(),
-                                target_type.cast(),
-                            );
-                            if casted.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                NanBoxedValue::from_ptr(casted as usize)
-                            }
-                        }
-                    } else {
-                        interp.dynamic_to_value_for_kind(raw, kind)
-                    };
-                    args_v.push(value);
+                    type JitClosureRunner =
+                        unsafe extern "C" fn(*mut c_void, *mut *mut c_void, i32) -> *mut c_void;
+                    let run: JitClosureRunner = std::mem::transmute(ctx.jit_closure_runner);
+                    return run(c, args, nargs);
                 }
-            }
-            match interp.call_function(bytecode, &*ctx.resolver, findex, &args_v) {
-                Ok(v) => {
-                    let ret_idx = func_of(&interp.targets, findex)
+                let findex = fun.wrapping_sub(1);
+                let is_fiber_root = if ctx.fiber_is_root_closure.is_null() {
+                    false
+                } else {
+                    let is_root: unsafe extern "C" fn(*mut c_void) -> bool =
+                        std::mem::transmute(ctx.fiber_is_root_closure);
+                    is_root(c)
+                };
+                let mut args_v = Vec::new();
+                if (*cl).hasValue != 0 && !(*cl).value.is_null() {
+                    args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
+                }
+                let interp = &mut *ctx.interp;
+                let bytecode = &*ctx.bytecode;
+                // Marshal the caller's arguments. These were dropped outright
+                // until now — the parameters were literally named `_args` and
+                // `_nargs` — so every stub closure invoked from native code ran
+                // with `this` and nothing else, and the callee saw uninitialised
+                // parameters. ArrayDyn.__cast(t) compares `t` against a type and
+                // returned null for want of ever receiving one, which is what
+                // made Array<Dynamic> -> Array<Int> casts fail under the
+                // interpreter.
+                //
+                // The bridge contract is an array of `vdynamic*`, so each word is
+                // converted against the callee's declared parameter kind — the
+                // same rule try_handle_call_method_native applies.
+                let n = nargs.max(0) as usize;
+                // Stable backing for HREF arguments. The compiled/interpreted call
+                // is synchronous, so keeping these boxes alive through
+                // `call_function` gives the callee a real addressable cell.
+                let mut ref_cells: Vec<Box<u64>> = Vec::new();
+                if n > 0 && !args.is_null() {
+                    let declared: Vec<usize> = func_of(&interp.targets, findex)
                         .and_then(|fi| {
                             bytecode.types[bytecode.functions[fi].type_.0]
                                 .fun
                                 .as_ref()
-                                .map(|f| f.ret.0)
+                                .map(|f| f.args.iter().map(|a| a.0).collect())
                         })
-                        .unwrap_or(0);
-                    let kind = bytecode.types[ret_idx].kind;
-                    let scalar = matches!(
-                        kind,
-                        hl::hl_type_kind_HI32
-                            | hl::hl_type_kind_HUI8
-                            | hl::hl_type_kind_HUI16
-                            | hl::hl_type_kind_HI64
-                            | hl::hl_type_kind_HF32
-                            | hl::hl_type_kind_HF64
-                            | hl::hl_type_kind_HBOOL
-                    );
-                    // Box the result as a vdynamic* for the native caller.
-                    // Thread bodies ignore it, but the virtual-dispatch
-                    // fallback (hlp_vcall_virtual_hashed) needs real values —
-                    // silently returning null turned hasNext() into false.
-                    // Pointer-shaped return types remain raw: notably HBYTES
-                    // is carried by NanBox's distinct bytes tag, so testing
-                    // `is_ptr()` alone boxed an `__string` result and made the
-                    // buffer interpret the vdynamic header as UTF-16.
-                    if v.is_void() || v.is_null() {
-                        std::ptr::null_mut()
-                    } else if !scalar {
-                        v.as_ptr() as *mut c_void
-                    } else {
-                        // Primitive: box via hlp_make_dyn with the callee's
-                        // declared return type.
-                        let mut raw = interp.value_to_i64(v, kind);
-                        let c_t = interp.c_type_factory.get(ret_idx) as *mut c_void;
-                        if interp.fn_make_dyn.is_null() || c_t.is_null() {
-                            std::ptr::null_mut()
-                        } else {
-                            let make_dyn: unsafe extern "C" fn(
-                                *mut c_void,
-                                *mut c_void,
-                            )
-                                -> *mut c_void = std::mem::transmute(interp.fn_make_dyn);
-                            make_dyn(&mut raw as *mut i64 as *mut c_void, c_t)
+                        .unwrap_or_default();
+                    if env_flag!("ASH_DBG_FIBER") {
+                        let kinds: Vec<_> =
+                            declared.iter().map(|&ty| bytecode.types[ty].kind).collect();
+                        eprintln!(
+                            "[fiber-runner] findex={findex} has_value={} nargs={n} declared={kinds:?}",
+                            (*cl).hasValue
+                        );
+                    }
+                    // `this` already occupies slot 0 when the closure carries a
+                    // value, so the caller's first argument is declared arg 1.
+                    let shift = args_v.len();
+                    for i in 0..n {
+                        let raw = *(args as *mut *mut hl::vdynamic).add(i);
+                        let expected_type_idx = declared.get(i + shift).copied();
+                        let kind = expected_type_idx
+                            .map(|ty| bytecode.types[ty].kind)
+                            .unwrap_or(hl::hl_type_kind_HDYN);
+                        if env_flag!("ASH_DBG_FIBER") {
+                            let raw_kind = if raw.is_null() || (*raw).t.is_null() {
+                                None
+                            } else {
+                                Some((*(*raw).t).kind)
+                            };
+                            eprintln!(
+                                "[fiber-runner] arg={i} raw={raw:p} raw_kind={raw_kind:?} expected={kind}"
+                            );
                         }
+                        let value = if kind == hl::hl_type_kind_HNULL && !raw.is_null() {
+                            // Nullable parameters consume the vdynamic box itself;
+                            // its nullness is the default-argument discriminator.
+                            NanBoxedValue::from_ptr(raw as usize)
+                        } else if kind == hl::hl_type_kind_HREF && !raw.is_null() {
+                            if !(*raw).t.is_null() && (*(*raw).t).kind == hl::hl_type_kind_HREF {
+                                let cell = (*raw).v.ptr as usize;
+                                if cell == 0 {
+                                    NanBoxedValue::null()
+                                } else {
+                                    NanBoxedValue::from_ptr(cell)
+                                }
+                            } else {
+                                let inner_kind = expected_type_idx
+                                    .and_then(|ty| bytecode.types[ty].tparam.as_ref())
+                                    .map(|ty| bytecode.types[ty.0].kind)
+                                    .unwrap_or(hl::hl_type_kind_HDYN);
+                                let inner = interp.dynamic_to_value_for_kind(raw, inner_kind);
+                                let mut cell = Box::new(0u64);
+                                HLInterpreter::write_value_to_ptr(
+                                    (&mut *cell as *mut u64).cast::<u8>(),
+                                    inner,
+                                    inner_kind,
+                                );
+                                let cell_ptr = (&mut *cell as *mut u64) as usize;
+                                ref_cells.push(cell);
+                                NanBoxedValue::from_ptr(cell_ptr)
+                            }
+                        } else if kind == hl::hl_type_kind_HOBJ
+                            && !raw.is_null()
+                            && !interp.fn_dyn_castp.is_null()
+                        {
+                            // Native dynamic dispatch supplies a vdynamic*, but
+                            // an HOBJ parameter needs an exact object-type cast,
+                            // not merely a kind match. In particular,
+                            // Reflect.callMethod can pass ArrayDyn to a method
+                            // specialized for ArrayBytes<Int>; its __cast builds
+                            // the representation whose field layout the callee
+                            // uses. The ordinary interpreter CallMethod path does
+                            // this already; the native closure runner must honor
+                            // the same contract before entering compiled AIR V2.
+                            let target_type = expected_type_idx
+                                .map(|ty| interp.c_type_factory.get(ty))
+                                .unwrap_or(std::ptr::null_mut());
+                            let source_type = (*raw).t;
+                            if source_type == target_type
+                                || source_type.is_null()
+                                || target_type.is_null()
+                            {
+                                NanBoxedValue::from_ptr(raw as usize)
+                            } else if (*source_type).kind != hl::hl_type_kind_HOBJ {
+                                interp.dynamic_to_value_for_kind(raw, kind)
+                            } else {
+                                type FnCastp = unsafe extern "C" fn(
+                                    *mut c_void,
+                                    *mut c_void,
+                                    *mut c_void,
+                                )
+                                    -> *mut c_void;
+                                let castp: FnCastp = std::mem::transmute(interp.fn_dyn_castp);
+                                let mut data = raw as *mut c_void;
+                                let casted = castp(
+                                    &mut data as *mut _ as *mut c_void,
+                                    source_type.cast(),
+                                    target_type.cast(),
+                                );
+                                if casted.is_null() {
+                                    NanBoxedValue::null()
+                                } else {
+                                    NanBoxedValue::from_ptr(casted as usize)
+                                }
+                            }
+                        } else {
+                            interp.dynamic_to_value_for_kind(raw, kind)
+                        };
+                        args_v.push(value);
                     }
                 }
-                Err(e) => {
-                    if is_fiber_root {
-                        eprintln!("[ash] fiber thread uncaught exception: {:#}", e);
-                        std::ptr::null_mut()
-                    } else {
-                        // Native virtual/dynamic helpers re-enter AIR V2
-                        // through this same runner. Their call_native boundary
-                        // has an HL trap armed, so preserve normal Haxe
-                        // exception semantics instead of silently converting
-                        // the exception to null.
-                        HLInterpreter::raise_stub_bridge_failure(&*ctx.resolver, findex, e)
+                match interp.call_function(bytecode, &*ctx.resolver, findex, &args_v) {
+                    Ok(v) => {
+                        let ret_idx = func_of(&interp.targets, findex)
+                            .and_then(|fi| {
+                                bytecode.types[bytecode.functions[fi].type_.0]
+                                    .fun
+                                    .as_ref()
+                                    .map(|f| f.ret.0)
+                            })
+                            .unwrap_or(0);
+                        let kind = bytecode.types[ret_idx].kind;
+                        let scalar = matches!(
+                            kind,
+                            hl::hl_type_kind_HI32
+                                | hl::hl_type_kind_HUI8
+                                | hl::hl_type_kind_HUI16
+                                | hl::hl_type_kind_HI64
+                                | hl::hl_type_kind_HF32
+                                | hl::hl_type_kind_HF64
+                                | hl::hl_type_kind_HBOOL
+                        );
+                        // Box the result as a vdynamic* for the native caller.
+                        // Thread bodies ignore it, but the virtual-dispatch
+                        // fallback (hlp_vcall_virtual_hashed) needs real values —
+                        // silently returning null turned hasNext() into false.
+                        // Pointer-shaped return types remain raw: notably HBYTES
+                        // is carried by NanBox's distinct bytes tag, so testing
+                        // `is_ptr()` alone boxed an `__string` result and made the
+                        // buffer interpret the vdynamic header as UTF-16.
+                        if v.is_void() || v.is_null() {
+                            std::ptr::null_mut()
+                        } else if !scalar {
+                            v.as_ptr() as *mut c_void
+                        } else {
+                            // Primitive: box via hlp_make_dyn with the callee's
+                            // declared return type.
+                            let mut raw = interp.value_to_i64(v, kind);
+                            let c_t = interp.c_type_factory.get(ret_idx) as *mut c_void;
+                            if interp.fn_make_dyn.is_null() || c_t.is_null() {
+                                std::ptr::null_mut()
+                            } else {
+                                let make_dyn: unsafe extern "C" fn(
+                                    *mut c_void,
+                                    *mut c_void,
+                                )
+                                    -> *mut c_void = std::mem::transmute(interp.fn_make_dyn);
+                                make_dyn(&mut raw as *mut i64 as *mut c_void, c_t)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if is_fiber_root {
+                            eprintln!("[ash] fiber thread uncaught exception: {:#}", e);
+                            std::ptr::null_mut()
+                        } else {
+                            // Native virtual/dynamic helpers re-enter AIR V2
+                            // through this same runner. Their call_native boundary
+                            // has an HL trap armed, so preserve normal Haxe
+                            // exception semantics instead of silently converting
+                            // the exception to null.
+                            HLInterpreter::raise_stub_bridge_failure(&*ctx.resolver, findex, e)
+                        }
                     }
                 }
             }
         }
         unsafe extern "C" fn fiber_switch_runner(from: u32, to: u32) {
-            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
-                return;
-            };
-            let interp = &mut *ctx.interp;
-            let outgoing = std::mem::take(&mut interp.stack);
-            if !outgoing.is_empty() {
-                let replaced = interp.fiber_stacks.insert(from, outgoing);
-                debug_assert!(
-                    replaced.is_none(),
-                    "fiber {from} already had a suspended stack"
-                );
+            unsafe {
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                    return;
+                };
+                let interp = &mut *ctx.interp;
+                let outgoing = std::mem::take(&mut interp.stack);
+                if !outgoing.is_empty() {
+                    let replaced = interp.fiber_stacks.insert(from, outgoing);
+                    debug_assert!(
+                        replaced.is_none(),
+                        "fiber {from} already had a suspended stack"
+                    );
+                }
+                interp.stack = interp.fiber_stacks.remove(&to).unwrap_or_default();
+                interp.sync_gc_scan_roots();
             }
-            interp.stack = interp.fiber_stacks.remove(&to).unwrap_or_default();
-            interp.sync_gc_scan_roots();
         }
         unsafe extern "C" fn resolve_stack_symbol(
             symbol: *mut c_void,
             _buffer: *mut u8,
             buffer_len: *mut i32,
         ) -> *mut u8 {
-            if symbol.is_null() {
-                return std::ptr::null_mut();
+            unsafe {
+                if symbol.is_null() {
+                    return std::ptr::null_mut();
+                }
+                let symbol = symbol.cast::<u16>();
+                let mut len = 0usize;
+                while *symbol.add(len) != 0 {
+                    len += 1;
+                }
+                if !buffer_len.is_null() {
+                    *buffer_len = len.min(i32::MAX as usize) as i32;
+                }
+                symbol.cast::<u8>()
             }
-            let symbol = symbol.cast::<u16>();
-            let mut len = 0usize;
-            while *symbol.add(len) != 0 {
-                len += 1;
-            }
-            if !buffer_len.is_null() {
-                *buffer_len = len.min(i32::MAX as usize) as i32;
-            }
-            symbol.cast::<u8>()
         }
         unsafe extern "C" fn capture_stack_runner(output: *mut *mut c_void, capacity: i32) -> i32 {
-            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
-                return 0;
-            };
-            // `prepare_call_stack` owns scratch Vecs on the one
-            // `HLInterpreter`. Compiled AIR V2 workers have native frames and
-            // may throw concurrently, so touching that main-lane scratch
-            // storage here races both the interpreter and other workers.
-            // Returning an empty interpreted stack is correct for this lane;
-            // the native trap/JIT frames remain available to the ordinary
-            // exception machinery.
-            if !ctx.fiber_is_worker_lane.is_null() {
-                let is_worker: unsafe extern "C" fn() -> bool =
-                    std::mem::transmute(ctx.fiber_is_worker_lane);
-                if is_worker() {
+            unsafe {
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
                     return 0;
-                }
-            }
-            let interp = &mut *ctx.interp;
-            if output.is_null() {
-                let frame_hint = (&*ctx.resolver)
-                    .resolve_function("std", "hlp_call_stack_frame")
-                    .ok()
-                    .filter(|address| !address.is_null())
-                    .map_or(std::ptr::null(), |address| {
-                        let get_frame: unsafe extern "C" fn() -> *const usize =
-                            std::mem::transmute(address);
-                        get_frame()
-                    });
-                let count = interp.prepare_call_stack(&*ctx.bytecode, frame_hint) as i32;
-                // A throw's trace is also what `exceptionStack()` answers
-                // with, on a walker frame that catches a compiled callee's
-                // throw; the walker's own throws fill it directly.
-                if !ctx.capturing_exception.is_null() {
-                    let capturing: unsafe extern "C" fn() -> bool =
-                        std::mem::transmute(ctx.capturing_exception);
-                    if capturing() {
-                        interp.exception_stack_symbols = interp.call_stack_symbols.clone();
+                };
+                // `prepare_call_stack` owns scratch Vecs on the one
+                // `HLInterpreter`. Compiled AIR V2 workers have native frames and
+                // may throw concurrently, so touching that main-lane scratch
+                // storage here races both the interpreter and other workers.
+                // Returning an empty interpreted stack is correct for this lane;
+                // the native trap/JIT frames remain available to the ordinary
+                // exception machinery.
+                if !ctx.fiber_is_worker_lane.is_null() {
+                    let is_worker: unsafe extern "C" fn() -> bool =
+                        std::mem::transmute(ctx.fiber_is_worker_lane);
+                    if is_worker() {
+                        return 0;
                     }
                 }
-                count
-            } else {
-                interp.write_call_stack(output, capacity)
+                let interp = &mut *ctx.interp;
+                if output.is_null() {
+                    let frame_hint = (&*ctx.resolver)
+                        .resolve_function("std", "hlp_call_stack_frame")
+                        .ok()
+                        .filter(|address| !address.is_null())
+                        .map_or(std::ptr::null(), |address| {
+                            let get_frame: unsafe extern "C" fn() -> *const usize =
+                                std::mem::transmute(address);
+                            get_frame()
+                        });
+                    let count = interp.prepare_call_stack(&*ctx.bytecode, frame_hint) as i32;
+                    // A throw's trace is also what `exceptionStack()` answers
+                    // with, on a walker frame that catches a compiled callee's
+                    // throw; the walker's own throws fill it directly.
+                    if !ctx.capturing_exception.is_null() {
+                        let capturing: unsafe extern "C" fn() -> bool =
+                            std::mem::transmute(ctx.capturing_exception);
+                        if capturing() {
+                            interp.exception_stack_symbols = interp.call_stack_symbols.clone();
+                        }
+                    }
+                    count
+                } else {
+                    interp.write_call_stack(output, capacity)
+                }
             }
         }
         unsafe {
@@ -2990,25 +3003,27 @@ impl HLInterpreter {
         // JIT code only runs within execute_entrypoint's dynamic extent, on
         // this OS thread.
         unsafe extern "C" fn jit_stub_resolver(findex: i32) -> *mut () {
-            if findex < 0 {
-                return std::ptr::null_mut();
+            unsafe {
+                if findex < 0 {
+                    return std::ptr::null_mut();
+                }
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                    return std::ptr::null_mut();
+                };
+                let Some(shared) = ctx.compiled_stub_ctx.as_ref() else {
+                    return std::ptr::null_mut();
+                };
+                // The mutator must not park behind a broker's compile. A worker
+                // lane has no interpreter to fall back to, so it still waits.
+                let may_block = if ctx.fiber_is_worker_lane.is_null() {
+                    false
+                } else {
+                    let is_worker: unsafe extern "C" fn() -> bool =
+                        std::mem::transmute(ctx.fiber_is_worker_lane);
+                    is_worker()
+                };
+                resolve_worker_stub(shared, findex as usize, may_block)
             }
-            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
-                return std::ptr::null_mut();
-            };
-            let Some(shared) = ctx.compiled_stub_ctx.as_ref() else {
-                return std::ptr::null_mut();
-            };
-            // The mutator must not park behind a broker's compile. A worker
-            // lane has no interpreter to fall back to, so it still waits.
-            let may_block = if ctx.fiber_is_worker_lane.is_null() {
-                false
-            } else {
-                let is_worker: unsafe extern "C" fn() -> bool =
-                    std::mem::transmute(ctx.fiber_is_worker_lane);
-                is_worker()
-            };
-            resolve_worker_stub(shared, findex as usize, may_block)
         }
 
         unsafe extern "C" fn jit_stub_call_bridge(
@@ -3017,109 +3032,115 @@ impl HLInterpreter {
             args: *const i64,
             nargs: i32,
         ) -> i64 {
-            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
-                // Without the context there is no resolver to throw through
-                // and no interpreter to run the callee: the only honest
-                // outcomes are abort or a poison return, and a poison return
-                // is a delayed crash somewhere else.
-                eprintln!(
-                    "[ash] FATAL: stub bridge called for findex {} with no interpreter \
+            unsafe {
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                    // Without the context there is no resolver to throw through
+                    // and no interpreter to run the callee: the only honest
+                    // outcomes are abort or a poison return, and a poison return
+                    // is a delayed crash somewhere else.
+                    eprintln!(
+                        "[ash] FATAL: stub bridge called for findex {} with no interpreter \
                      context registered; aborting rather than returning a poison value",
-                    findex
-                );
-                std::process::abort();
-            };
-            if !ctx.fiber_is_worker_lane.is_null() {
-                let is_worker: unsafe extern "C" fn() -> bool =
-                    std::mem::transmute(ctx.fiber_is_worker_lane);
-                if is_worker() {
-                    HLInterpreter::raise_stub_bridge_failure(
-                        &*ctx.resolver,
-                        findex.max(0) as usize,
-                        anyhow!(
-                            "compiled worker reached unprepared JIT sentinel for findex {}",
-                            findex
-                        ),
+                        findex
                     );
-                }
-            }
-            let interp = &mut *ctx.interp;
-            let bytecode = &*ctx.bytecode;
-            let resolver = &*ctx.resolver;
-            let findex = findex as usize;
-
-            // The callee's declared signature drives raw-word decoding.
-            let type_idx = if let Some(fi) = func_of(&interp.targets, findex) {
-                bytecode.functions[fi].type_.0
-            } else if let Some(ni) = native_of(&interp.targets, findex) {
-                bytecode.natives[ni].type_.0
-            } else {
-                HLInterpreter::raise_stub_bridge_failure(
-                    resolver,
-                    findex,
-                    anyhow!("stub bridge: unknown findex {}", findex),
-                );
-            };
-            let Some(fun) = bytecode.types[type_idx].fun.as_ref() else {
-                HLInterpreter::raise_stub_bridge_failure(
-                    resolver,
-                    findex,
-                    anyhow!("stub bridge: findex {} has no function type", findex),
-                );
-            };
-
-            let nargs = nargs.max(0) as usize;
-            let raw_args: &[i64] = if nargs == 0 || args.is_null() {
-                &[]
-            } else {
-                std::slice::from_raw_parts(args, nargs)
-            };
-            let mut vals: Vec<NanBoxedValue> = Vec::with_capacity(raw_args.len());
-            for (i, &raw) in raw_args.iter().enumerate() {
-                let kind = fun
-                    .args
-                    .get(i)
-                    .map(|a| bytecode.types[a.0].kind)
-                    .unwrap_or(hl::hl_type_kind_HDYN);
-                vals.push(interp.wrap_native_result(raw, kind));
-            }
-            let ret_kind = bytecode.types[fun.ret.0].kind;
-
-            let caller = usize::try_from(caller_findex)
-                .ok()
-                .and_then(|caller| func_of(&interp.targets, caller));
-            if let Some(caller) = caller {
-                interp.jit_bridge_callers.push(caller);
-            }
-            let result = interp.call_function(bytecode, resolver, findex, &vals);
-            if caller.is_some() {
-                interp.jit_bridge_callers.pop();
-            }
-
-            match result {
-                Ok(v) => {
-                    // The bridge is the inverse of `call_compiled_function`:
-                    // interpreter Dynamic registers may carry primitives
-                    // inline, but compiled AIR V2 consumes and returns a
-                    // `vdynamic*`. Returning integer 2 as word 0x2 makes the
-                    // first compiled SafeCast dereference address 0x2.
-                    let v = if matches!(
-                        ret_kind,
-                        hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
-                    ) {
-                        interp.box_for_compiled_dynamic_value(v)
-                    } else {
-                        v
-                    };
-                    if crate::tiering::env_flag!("ASH_DBG_STUB") {
-                        eprintln!("[stub] call findex={findex} ret_kind={ret_kind} value={v:?}");
+                    std::process::abort();
+                };
+                if !ctx.fiber_is_worker_lane.is_null() {
+                    let is_worker: unsafe extern "C" fn() -> bool =
+                        std::mem::transmute(ctx.fiber_is_worker_lane);
+                    if is_worker() {
+                        HLInterpreter::raise_stub_bridge_failure(
+                            &*ctx.resolver,
+                            findex.max(0) as usize,
+                            anyhow!(
+                                "compiled worker reached unprepared JIT sentinel for findex {}",
+                                findex
+                            ),
+                        );
                     }
-                    interp.value_to_i64(v, ret_kind)
                 }
-                // Every failure leaves through the native trap chain — see
-                // `raise_stub_bridge_failure`. Returning a value here would
-                // hand compiled code a word it is about to use as a pointer.
-                Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
+                let interp = &mut *ctx.interp;
+                let bytecode = &*ctx.bytecode;
+                let resolver = &*ctx.resolver;
+                let findex = findex as usize;
+
+                // The callee's declared signature drives raw-word decoding.
+                let type_idx = if let Some(fi) = func_of(&interp.targets, findex) {
+                    bytecode.functions[fi].type_.0
+                } else if let Some(ni) = native_of(&interp.targets, findex) {
+                    bytecode.natives[ni].type_.0
+                } else {
+                    HLInterpreter::raise_stub_bridge_failure(
+                        resolver,
+                        findex,
+                        anyhow!("stub bridge: unknown findex {}", findex),
+                    );
+                };
+                let Some(fun) = bytecode.types[type_idx].fun.as_ref() else {
+                    HLInterpreter::raise_stub_bridge_failure(
+                        resolver,
+                        findex,
+                        anyhow!("stub bridge: findex {} has no function type", findex),
+                    );
+                };
+
+                let nargs = nargs.max(0) as usize;
+                let raw_args: &[i64] = if nargs == 0 || args.is_null() {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(args, nargs)
+                };
+                let mut vals: Vec<NanBoxedValue> = Vec::with_capacity(raw_args.len());
+                for (i, &raw) in raw_args.iter().enumerate() {
+                    let kind = fun
+                        .args
+                        .get(i)
+                        .map(|a| bytecode.types[a.0].kind)
+                        .unwrap_or(hl::hl_type_kind_HDYN);
+                    vals.push(interp.wrap_native_result(raw, kind));
+                }
+                let ret_kind = bytecode.types[fun.ret.0].kind;
+
+                let caller = usize::try_from(caller_findex)
+                    .ok()
+                    .and_then(|caller| func_of(&interp.targets, caller));
+                if let Some(caller) = caller {
+                    interp.jit_bridge_callers.push(caller);
+                }
+                let result = interp.call_function(bytecode, resolver, findex, &vals);
+                if caller.is_some() {
+                    interp.jit_bridge_callers.pop();
+                }
+
+                match result {
+                    Ok(v) => {
+                        // The bridge is the inverse of `call_compiled_function`:
+                        // interpreter Dynamic registers may carry primitives
+                        // inline, but compiled AIR V2 consumes and returns a
+                        // `vdynamic*`. Returning integer 2 as word 0x2 makes the
+                        // first compiled SafeCast dereference address 0x2.
+                        let v = if matches!(
+                            ret_kind,
+                            hl::hl_type_kind_HDYN
+                                | hl::hl_type_kind_HNULL
+                                | hl::hl_type_kind_HDYNOBJ
+                        ) {
+                            interp.box_for_compiled_dynamic_value(v)
+                        } else {
+                            v
+                        };
+                        if crate::tiering::env_flag!("ASH_DBG_STUB") {
+                            eprintln!(
+                                "[stub] call findex={findex} ret_kind={ret_kind} value={v:?}"
+                            );
+                        }
+                        interp.value_to_i64(v, ret_kind)
+                    }
+                    // Every failure leaves through the native trap chain — see
+                    // `raise_stub_bridge_failure`. Returning a value here would
+                    // hand compiled code a word it is about to use as a pointer.
+                    Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
+                }
             }
         }
         ash_core::stub_bridge::set_stub_resolver(jit_stub_resolver);
@@ -3159,7 +3180,7 @@ impl HLInterpreter {
                         None => {
                             return Err(anyhow!(
                                 "VM event loop closure has an unknown compiled target"
-                            ))
+                            ));
                         }
                     }
                 };
@@ -3988,17 +4009,17 @@ impl HLInterpreter {
         // register without changing how many there are, but a differently
         // sized image means the entry would read past the buffer this frame
         // is about to fill.
-        if let Some((_, built_regs)) = built {
-            if built_regs != regs.len() {
-                if osr_logging() {
-                    eprintln!(
-                        "[osr] REFUSED findex={findex} pc={header_pc}: entry was built over \
+        if let Some((_, built_regs)) = built
+            && built_regs != regs.len()
+        {
+            if osr_logging() {
+                eprintln!(
+                    "[osr] REFUSED findex={findex} pc={header_pc}: entry was built over \
                          {built_regs} registers, this frame has {}",
-                        regs.len()
-                    );
-                }
-                return Ok(None);
+                    regs.len()
+                );
             }
+            return Ok(None);
         }
         // Where each register's value sits in the walker's frame at THIS
         // header. A register no live value carries holds nothing the entry can
@@ -4086,15 +4107,13 @@ impl HLInterpreter {
                     .lock()
                     .expect("llvm_done mutex poisoned")
                     .contains(&findex);
-                if !already_llvm {
-                    if let Some(bound) = t.beads.get(findex).and_then(|b| b.as_ref()) {
-                        let ctx = Arc::clone(&t.shared_ctx);
-                        let submitted = t.adapter.force_promote(bound, 1, move |b| {
-                            tiered_compile_tier(&ctx, 1, findex, b, true)
-                        });
-                        if submitted && t.shared_ctx.tier_log {
-                            eprintln!("[tier] osr-transfer proposes findex={findex} tier=llvm");
-                        }
+                if !already_llvm && let Some(bound) = t.beads.get(findex).and_then(|b| b.as_ref()) {
+                    let ctx = Arc::clone(&t.shared_ctx);
+                    let submitted = t.adapter.force_promote(bound, 1, move |b| {
+                        tiered_compile_tier(&ctx, 1, findex, b, true)
+                    });
+                    if submitted && t.shared_ctx.tier_log {
+                        eprintln!("[tier] osr-transfer proposes findex={findex} tier=llvm");
                     }
                 }
             }
@@ -4201,10 +4220,10 @@ impl HLInterpreter {
             if compiled_only {
                 let entry = self.compiled_only_entry(bytecode, findex, func_idx)?;
                 let result = self.call_compiled_function(findex, &entry, args);
-                if result.is_ok() {
-                    if let Some(tiered) = self.tiered_runtime.as_mut() {
-                        tiered.stats.compiled_calls += 1;
-                    }
+                if result.is_ok()
+                    && let Some(tiered) = self.tiered_runtime.as_mut()
+                {
+                    tiered.stats.compiled_calls += 1;
                 }
                 // There is deliberately no execute_hl_function fallback in
                 // this mode. A lowering or invocation failure is a JIT error
@@ -4434,10 +4453,10 @@ impl HLInterpreter {
         // Steady state: the bead is already compiled and its entry is cached.
         // This is the path ~10M invocations take, so it must be a compare and a
         // copy — nothing refcounted, nothing rebuilt.
-        if let Some(entry) = tiered.entries[findex].as_ref() {
-            if entry.fn_addr == addr {
-                return Some(*entry);
-            }
+        if let Some(entry) = tiered.entries[findex].as_ref()
+            && entry.fn_addr == addr
+        {
+            return Some(*entry);
         }
         // Freshly installed (or newly swapped-in) code.
         //
@@ -4454,21 +4473,20 @@ impl HLInterpreter {
             .lock()
             .expect("pending_osr mutex poisoned")
             .remove(&findex)
+            && let Some(bound) = tiered.beads[findex].as_ref()
         {
-            if let Some(bound) = tiered.beads[findex].as_ref() {
-                let n = entries.len();
-                if bound
-                    .bead()
-                    .swap_compiled_with_osr(addr as *mut (), entries.clone())
-                    .is_some()
-                {
-                    self.osr_attached.insert(findex, entries);
-                    if osr_logging() {
-                        eprintln!("[osr] attached {n} entries findex={findex}");
-                    }
-                } else if osr_logging() {
-                    eprintln!("[osr] attach refused findex={findex} (bead not compiled)");
+            let n = entries.len();
+            if bound
+                .bead()
+                .swap_compiled_with_osr(addr as *mut (), entries.clone())
+                .is_some()
+            {
+                self.osr_attached.insert(findex, entries);
+                if osr_logging() {
+                    eprintln!("[osr] attached {n} entries findex={findex}");
                 }
+            } else if osr_logging() {
+                eprintln!("[osr] attach refused findex={findex} (bead not compiled)");
             }
         }
         let sig = tiered.sigs[findex]?;
@@ -4615,10 +4633,10 @@ impl HLInterpreter {
                             | air::v2::Instr::InstanceClosure { fun, .. } => Some(*fun),
                             _ => None,
                         };
-                        if let Some(target) = target {
-                            if !targets.contains(&target) {
-                                targets.push(target);
-                            }
+                        if let Some(target) = target
+                            && !targets.contains(&target)
+                        {
+                            targets.push(target);
                         }
                     }
                 }
@@ -4746,10 +4764,10 @@ impl HLInterpreter {
         if config.min_ops_for_promotion > 0 && func.ops.len() < config.min_ops_for_promotion {
             return Err("op_count_below_min".to_string());
         }
-        if !config.compiled_only {
-            if let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op)) {
-                return Err(format!("unsupported_opcode op={:?}", bad));
-            }
+        if !config.compiled_only
+            && let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op))
+        {
+            return Err(format!("unsupported_opcode op={:?}", bad));
         }
         // Do not run the classic opcode lowerer's gate here, even in
         // Cranelift-only mode. The mandatory AIR V2 path accepts operations
@@ -5229,10 +5247,10 @@ impl HLInterpreter {
         let prev_findex = ash_core::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.interpret_loop(bc, native_resolver, func_idx);
         ash_core::profile::leave_interp(prev_findex);
-        if let Some(f) = self.stack.pop() {
-            if self.reg_pool.len() < POOL_CAP {
-                self.reg_pool.push(f.into_buffer());
-            }
+        if let Some(f) = self.stack.pop()
+            && self.reg_pool.len() < POOL_CAP
+        {
+            self.reg_pool.push(f.into_buffer());
         }
         self.scan_roots_pop_frame(published);
         result
@@ -5457,72 +5475,72 @@ impl HLInterpreter {
     /// new bytecode. Polled after a native call returns, on both walkers,
     /// since `hl.Api.checkReload()` is the native that flags it.
     fn apply_pending_reload(&mut self, native_resolver: &NativeFunctionResolver) {
-        if ash_core::reload::take_reload_pending() {
-            if let Some(new_bc) = ash_core::reload::do_reload() {
-                // Leak the old utf16_strings cache — live NanBoxed registers
-                // in the current (old) frame hold raw pointers into those
-                // Vec<u16> buffers. Clearing would create dangling pointers.
-                let old_cache = std::mem::take(&mut self.utf16_strings);
-                Box::leak(Box::new(old_cache));
+        if ash_core::reload::take_reload_pending()
+            && let Some(new_bc) = ash_core::reload::do_reload()
+        {
+            // Leak the old utf16_strings cache — live NanBoxed registers
+            // in the current (old) frame hold raw pointers into those
+            // Vec<u16> buffers. Clearing would create dangling pointers.
+            let old_cache = std::mem::take(&mut self.utf16_strings);
+            Box::leak(Box::new(old_cache));
 
-                // Pre-populate the new cache from the new bytecode's string
-                // table. This ensures all Opcode::String hits return new
-                // strings regardless of which bytecode ref interpret_loop holds.
-                for (idx, s) in new_bc.strings.iter().enumerate() {
-                    let mut buf: Vec<u16> = s.encode_utf16().collect();
-                    buf.push(0);
-                    self.utf16_strings.insert(idx, buf);
-                }
-
-                self.field_hash_cache.clear();
-
-                // Invalidate tiered JIT cache — compiled functions still
-                // point to old code. Forces fallback to interpreter which
-                // uses the new bytecode. Beads reload (Compiled →
-                // Interpreted, will recompile); deopt'd beads are cleared
-                // so the gate re-registers them fresh.
-                if let Some(tiered) = self.tiered_runtime.as_mut() {
-                    for slot in tiered.entries.iter_mut() {
-                        *slot = None;
-                    }
-                    // Reset every bead to the interpreter
-                    // and clear all tier-promotion flags.
-                    for (findex, slot) in tiered.beads.iter_mut().enumerate() {
-                        let dead = slot
-                            .as_ref()
-                            .map(|b| {
-                                b.reset_to_interpreter();
-                                !b.bead().is_valid()
-                            })
-                            .unwrap_or(false);
-                        if dead {
-                            *slot = None;
-                            tiered.gate_checked[findex] = false;
-                        }
-                    }
-                    tiered
-                        .shared_ctx
-                        .llvm_done
-                        .lock()
-                        .expect("llvm_done mutex poisoned")
-                        .clear();
-                }
-
-                // Re-initialize constants from the new bytecode so that
-                // globals (string literals, class descriptors) reflect V2.
-                if let Err(e) = self.init_constants(&new_bc, native_resolver) {
-                    eprintln!("[hot-reload] warning: init_constants failed: {}", e);
-                }
-
-                // Bodies optimized from V1 describe V1's
-                // functions; a findex may not even be the
-                // same function in V2.
-                self.air.invalidate();
-                self.ssa.invalidate();
-
-                let leaked: &'static _ = Box::leak(Box::new(new_bc));
-                self.reloaded_bytecode = Some(leaked);
+            // Pre-populate the new cache from the new bytecode's string
+            // table. This ensures all Opcode::String hits return new
+            // strings regardless of which bytecode ref interpret_loop holds.
+            for (idx, s) in new_bc.strings.iter().enumerate() {
+                let mut buf: Vec<u16> = s.encode_utf16().collect();
+                buf.push(0);
+                self.utf16_strings.insert(idx, buf);
             }
+
+            self.field_hash_cache.clear();
+
+            // Invalidate tiered JIT cache — compiled functions still
+            // point to old code. Forces fallback to interpreter which
+            // uses the new bytecode. Beads reload (Compiled →
+            // Interpreted, will recompile); deopt'd beads are cleared
+            // so the gate re-registers them fresh.
+            if let Some(tiered) = self.tiered_runtime.as_mut() {
+                for slot in tiered.entries.iter_mut() {
+                    *slot = None;
+                }
+                // Reset every bead to the interpreter
+                // and clear all tier-promotion flags.
+                for (findex, slot) in tiered.beads.iter_mut().enumerate() {
+                    let dead = slot
+                        .as_ref()
+                        .map(|b| {
+                            b.reset_to_interpreter();
+                            !b.bead().is_valid()
+                        })
+                        .unwrap_or(false);
+                    if dead {
+                        *slot = None;
+                        tiered.gate_checked[findex] = false;
+                    }
+                }
+                tiered
+                    .shared_ctx
+                    .llvm_done
+                    .lock()
+                    .expect("llvm_done mutex poisoned")
+                    .clear();
+            }
+
+            // Re-initialize constants from the new bytecode so that
+            // globals (string literals, class descriptors) reflect V2.
+            if let Err(e) = self.init_constants(&new_bc, native_resolver) {
+                eprintln!("[hot-reload] warning: init_constants failed: {}", e);
+            }
+
+            // Bodies optimized from V1 describe V1's
+            // functions; a findex may not even be the
+            // same function in V2.
+            self.air.invalidate();
+            self.ssa.invalidate();
+
+            let leaked: &'static _ = Box::leak(Box::new(new_bc));
+            self.reloaded_bytecode = Some(leaked);
         }
     }
 
@@ -6116,7 +6134,13 @@ impl HLInterpreter {
                         if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[SETTHIS-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
-                                func_idx, frame.pc, obj_type_idx, obj_kind, field.0, src_kind, src_val
+                                func_idx,
+                                frame.pc,
+                                obj_type_idx,
+                                obj_kind,
+                                field.0,
+                                src_kind,
+                                src_val
                             );
                         }
                         unsafe {
@@ -6137,7 +6161,13 @@ impl HLInterpreter {
                             if env_flag!("ASH_DBG_FIELD") {
                                 eprintln!(
                                     "[SETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
-                                    func_idx, frame.pc, obj_type_idx, field.0, offset, src_kind, src_val
+                                    func_idx,
+                                    frame.pc,
+                                    obj_type_idx,
+                                    field.0,
+                                    offset,
+                                    src_kind,
+                                    src_val
                                 );
                             }
                             unsafe { Self::write_value_at(addr, src_kind, src_val) };
@@ -6907,10 +6937,10 @@ impl HLInterpreter {
         let prev_findex = ash_core::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.ssa_loop(bc, native_resolver, func_idx, prep, args);
         ash_core::profile::leave_interp(prev_findex);
-        if let Some(f) = self.stack.pop() {
-            if self.reg_pool.len() < POOL_CAP {
-                self.reg_pool.push(f.into_buffer());
-            }
+        if let Some(f) = self.stack.pop()
+            && self.reg_pool.len() < POOL_CAP
+        {
+            self.reg_pool.push(f.into_buffer());
         }
         self.scan_roots_pop_frame(published);
         result
@@ -6962,48 +6992,54 @@ impl HLInterpreter {
         d: *mut hl::vdynamic,
         dst_kind: hl::hl_type_kind,
     ) -> Option<NanBoxedValue> {
-        if !Self::is_derefable_dynamic(d) {
-            return None;
-        }
-        if d.is_null() || !Self::is_derefable_dynamic((*d).t.cast()) {
-            return None;
-        }
-        let sk = (*(*d).t).kind;
-        let as_i64 = match sk {
-            hl::hl_type_kind_HI32 => Some((*d).v.i as i64),
-            hl::hl_type_kind_HUI8 => Some((*d).v.ui8 as i64),
-            hl::hl_type_kind_HUI16 => Some((*d).v.ui16 as i64),
-            hl::hl_type_kind_HI64 => Some((*d).v.i64_),
-            hl::hl_type_kind_HF32 => Some((*d).v.f as i64),
-            hl::hl_type_kind_HF64 => Some((*d).v.d as i64),
-            hl::hl_type_kind_HBOOL => Some(if (*d).v.b { 1 } else { 0 }),
-            _ => None,
-        };
-        let as_f64 = match sk {
-            hl::hl_type_kind_HI32 => Some((*d).v.i as f64),
-            hl::hl_type_kind_HUI8 => Some((*d).v.ui8 as f64),
-            hl::hl_type_kind_HUI16 => Some((*d).v.ui16 as f64),
-            hl::hl_type_kind_HI64 => Some((*d).v.i64_ as f64),
-            hl::hl_type_kind_HF32 => Some((*d).v.f as f64),
-            hl::hl_type_kind_HF64 => Some((*d).v.d),
-            hl::hl_type_kind_HBOOL => Some(if (*d).v.b { 1.0 } else { 0.0 }),
-            _ => None,
-        };
-        match dst_kind {
-            hl::hl_type_kind_HI32 => as_i64.map(|v| NanBoxedValue::from_i32(v as i32)),
-            hl::hl_type_kind_HUI8 => as_i64.map(|v| NanBoxedValue::from_i32((v as u8) as i32)),
-            hl::hl_type_kind_HUI16 => as_i64.map(|v| NanBoxedValue::from_i32((v as u16) as i32)),
-            hl::hl_type_kind_HI64 => as_i64.map(NanBoxedValue::from_i64),
-            hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => as_f64.map(NanBoxedValue::from_f64),
-            hl::hl_type_kind_HBOOL => as_i64.map(|v| NanBoxedValue::from_bool(v != 0)),
-            hl::hl_type_kind_HBYTES => {
-                if sk == hl::hl_type_kind_HBYTES {
-                    Some(NanBoxedValue::from_bytes_ptr((*d).v.bytes as usize))
-                } else {
-                    None
-                }
+        unsafe {
+            if !Self::is_derefable_dynamic(d) {
+                return None;
             }
-            _ => None,
+            if d.is_null() || !Self::is_derefable_dynamic((*d).t.cast()) {
+                return None;
+            }
+            let sk = (*(*d).t).kind;
+            let as_i64 = match sk {
+                hl::hl_type_kind_HI32 => Some((*d).v.i as i64),
+                hl::hl_type_kind_HUI8 => Some((*d).v.ui8 as i64),
+                hl::hl_type_kind_HUI16 => Some((*d).v.ui16 as i64),
+                hl::hl_type_kind_HI64 => Some((*d).v.i64_),
+                hl::hl_type_kind_HF32 => Some((*d).v.f as i64),
+                hl::hl_type_kind_HF64 => Some((*d).v.d as i64),
+                hl::hl_type_kind_HBOOL => Some(if (*d).v.b { 1 } else { 0 }),
+                _ => None,
+            };
+            let as_f64 = match sk {
+                hl::hl_type_kind_HI32 => Some((*d).v.i as f64),
+                hl::hl_type_kind_HUI8 => Some((*d).v.ui8 as f64),
+                hl::hl_type_kind_HUI16 => Some((*d).v.ui16 as f64),
+                hl::hl_type_kind_HI64 => Some((*d).v.i64_ as f64),
+                hl::hl_type_kind_HF32 => Some((*d).v.f as f64),
+                hl::hl_type_kind_HF64 => Some((*d).v.d),
+                hl::hl_type_kind_HBOOL => Some(if (*d).v.b { 1.0 } else { 0.0 }),
+                _ => None,
+            };
+            match dst_kind {
+                hl::hl_type_kind_HI32 => as_i64.map(|v| NanBoxedValue::from_i32(v as i32)),
+                hl::hl_type_kind_HUI8 => as_i64.map(|v| NanBoxedValue::from_i32((v as u8) as i32)),
+                hl::hl_type_kind_HUI16 => {
+                    as_i64.map(|v| NanBoxedValue::from_i32((v as u16) as i32))
+                }
+                hl::hl_type_kind_HI64 => as_i64.map(NanBoxedValue::from_i64),
+                hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
+                    as_f64.map(NanBoxedValue::from_f64)
+                }
+                hl::hl_type_kind_HBOOL => as_i64.map(|v| NanBoxedValue::from_bool(v != 0)),
+                hl::hl_type_kind_HBYTES => {
+                    if sk == hl::hl_type_kind_HBYTES {
+                        Some(NanBoxedValue::from_bytes_ptr((*d).v.bytes as usize))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
         }
     }
 

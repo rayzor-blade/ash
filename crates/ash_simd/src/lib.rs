@@ -55,15 +55,15 @@ macro_rules! lane {
             const BYTES: usize = core::mem::size_of::<$t>();
             #[inline(always)]
             unsafe fn load(p: *const u8) -> Self {
-                read_unaligned(p as *const $t)
+                unsafe { read_unaligned(p as *const $t) }
             }
             #[inline(always)]
             unsafe fn store(p: *mut u8, v: Self) {
-                write_unaligned(p as *mut $t, v)
+                unsafe { write_unaligned(p as *mut $t, v) }
             }
             #[inline(always)]
             unsafe fn store_mask(p: *mut u8, set: bool) {
-                write_unaligned(p as *mut $bits, if set { <$bits>::MAX } else { 0 })
+                unsafe { write_unaligned(p as *mut $bits, if set { <$bits>::MAX } else { 0 }) }
             }
         }
     };
@@ -77,37 +77,43 @@ lane!(u8, u8);
 
 #[inline(always)]
 unsafe fn slot(p: *const u8, off: i32) -> *const u8 {
-    p.offset(off as isize)
+    unsafe { p.offset(off as isize) }
 }
 
 #[inline(always)]
 unsafe fn slot_mut(p: *mut u8, off: i32) -> *mut u8 {
-    p.offset(off as isize)
+    unsafe { p.offset(off as isize) }
 }
 
 #[inline(always)]
 unsafe fn read<T: Lane, const N: usize>(p: *const u8, off: i32) -> [T; N] {
-    let p = slot(p, off);
-    let mut v = [T::load(p); N];
-    for (i, lane) in v.iter_mut().enumerate() {
-        *lane = T::load(p.add(i * T::BYTES));
+    unsafe {
+        let p = slot(p, off);
+        let mut v = [T::load(p); N];
+        for (i, lane) in v.iter_mut().enumerate() {
+            *lane = T::load(p.add(i * T::BYTES));
+        }
+        v
     }
-    v
 }
 
 #[inline(always)]
 unsafe fn write<T: Lane, const N: usize>(p: *mut u8, off: i32, v: [T; N]) {
-    let p = slot_mut(p, off);
-    for (i, lane) in v.iter().enumerate() {
-        T::store(p.add(i * T::BYTES), *lane);
+    unsafe {
+        let p = slot_mut(p, off);
+        for (i, lane) in v.iter().enumerate() {
+            T::store(p.add(i * T::BYTES), *lane);
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn write_mask<T: Lane, const N: usize>(p: *mut u8, off: i32, m: [bool; N]) {
-    let p = slot_mut(p, off);
-    for (i, set) in m.iter().enumerate() {
-        T::store_mask(p.add(i * T::BYTES), *set);
+    unsafe {
+        let p = slot_mut(p, off);
+        for (i, set) in m.iter().enumerate() {
+            T::store_mask(p.add(i * T::BYTES), *set);
+        }
     }
 }
 
@@ -119,11 +125,13 @@ unsafe fn map1<T: Lane, const N: usize>(
     ai: i32,
     f: impl Fn(T) -> T,
 ) {
-    let mut v: [T; N] = read(a, ai);
-    for lane in v.iter_mut() {
-        *lane = f(*lane);
+    unsafe {
+        let mut v: [T; N] = read(a, ai);
+        for lane in v.iter_mut() {
+            *lane = f(*lane);
+        }
+        write(d, di, v);
     }
-    write(d, di, v);
 }
 
 #[inline(always)]
@@ -136,12 +144,14 @@ unsafe fn map2<T: Lane, const N: usize>(
     bi: i32,
     f: impl Fn(T, T) -> T,
 ) {
-    let mut x: [T; N] = read(a, ai);
-    let y: [T; N] = read(b, bi);
-    for (lane, y) in x.iter_mut().zip(y) {
-        *lane = f(*lane, y);
+    unsafe {
+        let mut x: [T; N] = read(a, ai);
+        let y: [T; N] = read(b, bi);
+        for (lane, y) in x.iter_mut().zip(y) {
+            *lane = f(*lane, y);
+        }
+        write(d, di, x);
     }
-    write(d, di, x);
 }
 
 #[inline(always)]
@@ -156,13 +166,15 @@ unsafe fn map3<T: Lane, const N: usize>(
     ci: i32,
     f: impl Fn(T, T, T) -> T,
 ) {
-    let mut x: [T; N] = read(a, ai);
-    let y: [T; N] = read(b, bi);
-    let z: [T; N] = read(c, ci);
-    for ((lane, y), z) in x.iter_mut().zip(y).zip(z) {
-        *lane = f(*lane, y, z);
+    unsafe {
+        let mut x: [T; N] = read(a, ai);
+        let y: [T; N] = read(b, bi);
+        let z: [T; N] = read(c, ci);
+        for ((lane, y), z) in x.iter_mut().zip(y).zip(z) {
+            *lane = f(*lane, y, z);
+        }
+        write(d, di, x);
     }
-    write(d, di, x);
 }
 
 #[inline(always)]
@@ -175,23 +187,27 @@ unsafe fn cmp<T: Lane, const N: usize>(
     bi: i32,
     f: impl Fn(T, T) -> bool,
 ) {
-    let x: [T; N] = read(a, ai);
-    let y: [T; N] = read(b, bi);
-    let mut m = [false; N];
-    for (i, (x, y)) in x.iter().zip(y).enumerate() {
-        m[i] = f(*x, y);
+    unsafe {
+        let x: [T; N] = read(a, ai);
+        let y: [T; N] = read(b, bi);
+        let mut m = [false; N];
+        for (i, (x, y)) in x.iter().zip(y).enumerate() {
+            m[i] = f(*x, y);
+        }
+        write_mask::<T, N>(d, di, m);
     }
-    write_mask::<T, N>(d, di, m);
 }
 
 #[inline(always)]
 unsafe fn fold<T: Lane, const N: usize>(a: *const u8, ai: i32, f: impl Fn(T, T) -> T) -> T {
-    let v: [T; N] = read(a, ai);
-    let mut acc = v[0];
-    for lane in &v[1..] {
-        acc = f(acc, *lane);
+    unsafe {
+        let v: [T; N] = read(a, ai);
+        let mut acc = v[0];
+        for lane in &v[1..] {
+            acc = f(acc, *lane);
+        }
+        acc
     }
-    acc
 }
 
 /// The header of a HashLink `varray`; the elements follow it.
@@ -205,20 +221,26 @@ struct VArray {
 
 #[inline(always)]
 unsafe fn array_elements<T: Lane>(arr: *const u8, index: i32) -> *const u8 {
-    arr.add(core::mem::size_of::<VArray>())
-        .offset(index as isize * T::BYTES as isize)
+    unsafe {
+        arr.add(core::mem::size_of::<VArray>())
+            .offset(index as isize * T::BYTES as isize)
+    }
 }
 
 #[inline(always)]
 unsafe fn load_arr<T: Lane, const N: usize>(d: *mut u8, di: i32, arr: *const u8, index: i32) {
-    let v: [T; N] = read(array_elements::<T>(arr, index), 0);
-    write(d, di, v);
+    unsafe {
+        let v: [T; N] = read(array_elements::<T>(arr, index), 0);
+        write(d, di, v);
+    }
 }
 
 #[inline(always)]
 unsafe fn store_arr<T: Lane, const N: usize>(arr: *mut u8, index: i32, a: *const u8, ai: i32) {
-    let v: [T; N] = read(a, ai);
-    write(array_elements::<T>(arr, index) as *mut u8, 0, v);
+    unsafe {
+        let v: [T; N] = read(a, ai);
+        write(array_elements::<T>(arr, index) as *mut u8, 0, v);
+    }
 }
 
 /// IEEE 754-2019 minimum/maximum, generic over the two float widths.
@@ -295,7 +317,7 @@ fn fmax<T: Float>(a: T, b: T) -> T {
 /// targets have their vector unit in the baseline.
 macro_rules! prim {
     (fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
-        pub unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? {
+        pub unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? { unsafe {
             #[cfg(target_arch = "x86_64")]
             {
                 use core::sync::atomic::{AtomicPtr, Ordering::Relaxed};
@@ -314,7 +336,7 @@ macro_rules! prim {
             }
             #[cfg(not(target_arch = "x86_64"))]
             $body
-        }
+        }}
     };
 }
 

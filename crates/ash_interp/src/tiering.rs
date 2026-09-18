@@ -10,9 +10,9 @@
 
 #[cfg(feature = "llvm")]
 use crate::interpreter::retier_abandoned;
+use anyhow::Result;
 #[cfg(feature = "llvm")]
 use anyhow::anyhow;
-use anyhow::Result;
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::hl_bindings::{self as hl, hl_type};
 #[cfg(feature = "llvm")]
@@ -884,21 +884,17 @@ fn tiered_compile_tier_inner(
             return std::ptr::null_mut();
         }
         #[cfg(feature = "llvm")]
-        if ash_core::llvm::air::promotion_gate_enabled() {
-            if let Some(bc) = ctx.bytecode_ptr() {
-                if let Some(raw) = bc.functions.iter().find(|f| f.findex as usize == findex) {
-                    if ash_core::llvm::air::llvm_ceiling(bc, raw)
-                        == ash_core::llvm::air::LlvmCeiling::None
-                    {
-                        remember_gate_rejection(findex);
-                        record_decline(findex, "no LLVM headroom (gate)");
-                        if ctx.tier_log {
-                            eprintln!("[tier] skip findex={findex} tier=llvm reason=no-headroom");
-                        }
-                        return std::ptr::null_mut();
-                    }
-                }
+        if ash_core::llvm::air::promotion_gate_enabled()
+            && let Some(bc) = ctx.bytecode_ptr()
+            && let Some(raw) = bc.functions.iter().find(|f| f.findex as usize == findex)
+            && ash_core::llvm::air::llvm_ceiling(bc, raw) == ash_core::llvm::air::LlvmCeiling::None
+        {
+            remember_gate_rejection(findex);
+            record_decline(findex, "no LLVM headroom (gate)");
+            if ctx.tier_log {
+                eprintln!("[tier] skip findex={findex} tier=llvm reason=no-headroom");
             }
+            return std::ptr::null_mut();
         }
     }
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
@@ -1877,21 +1873,21 @@ pub(crate) fn compile_with_llvm(
     // The same reasoning per function rather than per program: this waiter may
     // have sat behind a multi-second compile, and beadie's state is the
     // authority on whether its result is still wanted.
-    if let Some(bead) = bead {
-        if !bead.is_valid() || bead.is_blacklisted() {
-            if ctx.tier_log {
-                eprintln!(
-                    "[tier] dropping queued tier-{tier} compile for findex={findex}: \
+    if let Some(bead) = bead
+        && (!bead.is_valid() || bead.is_blacklisted())
+    {
+        if ctx.tier_log {
+            eprintln!(
+                "[tier] dropping queued tier-{tier} compile for findex={findex}: \
                      the bead is no longer {}",
-                    if bead.is_blacklisted() {
-                        "eligible"
-                    } else {
-                        "valid"
-                    }
-                );
-            }
-            return std::ptr::null_mut();
+                if bead.is_blacklisted() {
+                    "eligible"
+                } else {
+                    "valid"
+                }
+            );
         }
+        return std::ptr::null_mut();
     }
     // The OSR work this promotion should carry, computed before the compile
     // so its entries ride the promotion's own module -- one middle-end run,

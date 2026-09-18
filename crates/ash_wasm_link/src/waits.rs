@@ -4,7 +4,7 @@
 //! These thunks let the host register wait addresses before doing the SAME
 //! atomic wait, with its original timeout and notification semantics.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{EntityType, ImportSection, Instruction, SectionId, TypeSection, ValType};
 use wasmparser::{Operator, Parser, Payload, TypeRef};

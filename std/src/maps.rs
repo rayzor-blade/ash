@@ -53,128 +53,138 @@ fn allocate_map(initial_capacity: usize) -> Option<NonNull<hl::hl_hb_map>> {
 }
 
 unsafe fn hl_freelist_add_range(f: *mut hl::hl_free_list, pos: i32, count: i32) {
-    if (*f).buckets.is_null() {
-        // Special handling for continuous space
-        if (*f).nbuckets == 0 {
-            (*f).head = pos;
-            (*f).nbuckets = count;
-            return;
-        } else if (*f).head + (*f).nbuckets == pos {
-            (*f).nbuckets += count;
-            return;
-        } else if pos + count == (*f).head {
-            (*f).head -= count;
-            (*f).nbuckets += count;
-            return;
-        } else {
-            let cur_pos = (*f).head;
-            let cur_count = (*f).nbuckets;
-            (*f).head = 0;
-            (*f).nbuckets = 0;
-            hl_freelist_resize(f, 2);
-            if cur_count != 0 {
-                hl_freelist_add_range(f, cur_pos, cur_count);
+    unsafe {
+        if (*f).buckets.is_null() {
+            // Special handling for continuous space
+            if (*f).nbuckets == 0 {
+                (*f).head = pos;
+                (*f).nbuckets = count;
+                return;
+            } else if (*f).head + (*f).nbuckets == pos {
+                (*f).nbuckets += count;
+                return;
+            } else if pos + count == (*f).head {
+                (*f).head -= count;
+                (*f).nbuckets += count;
+                return;
+            } else {
+                let cur_pos = (*f).head;
+                let cur_count = (*f).nbuckets;
+                (*f).head = 0;
+                (*f).nbuckets = 0;
+                hl_freelist_resize(f, 2);
+                if cur_count != 0 {
+                    hl_freelist_add_range(f, cur_pos, cur_count);
+                }
             }
         }
-    }
 
-    let mut b = (*f).buckets;
-    let mut prev: *mut hl::hl_free_bucket = ptr::null_mut();
+        let mut b = (*f).buckets;
+        let mut prev: *mut hl::hl_free_bucket = ptr::null_mut();
 
-    while b < (*f).buckets.offset((*f).head as isize) {
-        if (*b).pos > pos {
-            break;
+        while b < (*f).buckets.offset((*f).head as isize) {
+            if (*b).pos > pos {
+                break;
+            }
+            prev = b;
+            b = b.offset(1);
         }
-        prev = b;
-        b = b.offset(1);
-    }
 
-    if b < (*f).buckets.offset((*f).head as isize) && (*b).pos == pos + count {
-        (*b).pos -= count;
-        (*b).count += count;
+        if b < (*f).buckets.offset((*f).head as isize) && (*b).pos == pos + count {
+            (*b).pos -= count;
+            (*b).count += count;
 
-        // Merge
-        if !prev.is_null() && (*prev).pos + (*prev).count == (*b).pos {
-            (*prev).count += (*b).count;
-            ptr::copy(
-                b.offset(1),
-                b,
-                ((*f)
-                    .buckets
-                    .offset((*f).head as isize)
-                    .offset_from(b.offset(1))) as usize,
-            );
-            (*f).head -= 1;
+            // Merge
+            if !prev.is_null() && (*prev).pos + (*prev).count == (*b).pos {
+                (*prev).count += (*b).count;
+                ptr::copy(
+                    b.offset(1),
+                    b,
+                    ((*f)
+                        .buckets
+                        .offset((*f).head as isize)
+                        .offset_from(b.offset(1))) as usize,
+                );
+                (*f).head -= 1;
+            }
+            return;
         }
-        return;
-    }
 
-    if !prev.is_null() && (*prev).pos + (*prev).count == pos {
-        (*prev).count += count;
-        return;
-    }
+        if !prev.is_null() && (*prev).pos + (*prev).count == pos {
+            (*prev).count += count;
+            return;
+        }
 
-    // Insert
-    if (*f).head == (*f).nbuckets {
-        let pos = b.offset_from((*f).buckets) as i32;
-        hl_freelist_resize(f, (((*f).nbuckets * 3) + 1) >> 1);
-        b = (*f).buckets.offset(pos as isize);
-    }
+        // Insert
+        if (*f).head == (*f).nbuckets {
+            let pos = b.offset_from((*f).buckets) as i32;
+            hl_freelist_resize(f, (((*f).nbuckets * 3) + 1) >> 1);
+            b = (*f).buckets.offset(pos as isize);
+        }
 
-    ptr::copy(
-        b,
-        b.offset(1),
-        ((*f).buckets.offset((*f).head as isize).offset_from(b)) as usize,
-    );
-    (*b).pos = pos;
-    (*b).count = count;
-    (*f).head += 1;
+        ptr::copy(
+            b,
+            b.offset(1),
+            ((*f).buckets.offset((*f).head as isize).offset_from(b)) as usize,
+        );
+        (*b).pos = pos;
+        (*b).count = count;
+        (*f).head += 1;
+    }
 }
 
 unsafe fn hl_freelist_add(f: *mut hl::hl_free_list, pos: i32) {
-    hl_freelist_add_range(f, pos, 1);
+    unsafe {
+        hl_freelist_add_range(f, pos, 1);
+    }
 }
 
 unsafe fn hl_freelist_get(f: *mut hl::hl_free_list) -> i32 {
-    if (*f).buckets.is_null() {
-        if (*f).nbuckets == 0 {
+    unsafe {
+        if (*f).buckets.is_null() {
+            if (*f).nbuckets == 0 {
+                return -1;
+            }
+            (*f).nbuckets -= 1;
+            (*f).head += 1;
+            return (*f).head - 1;
+        }
+
+        if (*f).head == 0 {
             return -1;
         }
-        (*f).nbuckets -= 1;
-        (*f).head += 1;
-        return (*f).head - 1;
-    }
 
-    if (*f).head == 0 {
-        return -1;
-    }
-
-    let b = (*f).buckets.offset(((*f).head - 1) as isize);
-    (*b).count -= 1;
-    let p = (*b).pos + (*b).count;
-    if (*b).count == 0 {
-        (*f).head -= 1;
-        if (*f).head < ((*f).nbuckets >> 1) {
-            hl_freelist_resize(f, (*f).nbuckets >> 1);
+        let b = (*f).buckets.offset(((*f).head - 1) as isize);
+        (*b).count -= 1;
+        let p = (*b).pos + (*b).count;
+        if (*b).count == 0 {
+            (*f).head -= 1;
+            if (*f).head < ((*f).nbuckets >> 1) {
+                hl_freelist_resize(f, (*f).nbuckets >> 1);
+            }
         }
+        p
     }
-    p
 }
 
 unsafe fn hl_freelist_init(f: *mut hl::hl_free_list) {
-    ptr::write_bytes(f, 0, 1);
+    unsafe {
+        ptr::write_bytes(f, 0, 1);
+    }
 }
 
 unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
-    let new_buckets =
-        crate::rt::alloc_locked(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
-            .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
-            .as_ptr() as *mut hl::hl_free_bucket;
+    unsafe {
+        let new_buckets =
+            crate::rt::alloc_locked(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
+                .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
+                .as_ptr() as *mut hl::hl_free_bucket;
 
-    ptr::copy_nonoverlapping((*f).buckets, new_buckets, (*f).head as usize);
+        ptr::copy_nonoverlapping((*f).buckets, new_buckets, (*f).head as usize);
 
-    (*f).buckets = new_buckets;
-    (*f).nbuckets = new_size;
+        (*f).buckets = new_buckets;
+        (*f).nbuckets = new_size;
+    }
 }
 
 pub mod hl_hb {
@@ -289,61 +299,63 @@ pub unsafe extern "C" fn hlp_hbset(
     key: *mut hl::uchar,
     value: *mut hl::vdynamic,
 ) {
-    use hl_hb::HbMap;
-    if env_flag!("ASH_MAP_TRACE") {
-        let k = if key.is_null() {
-            String::new()
-        } else {
-            let mut out = String::new();
-            let mut p = key;
-            while *p != 0 {
-                out.push(char::from_u32(*p as u32).unwrap_or('?'));
-                p = p.add(1);
-            }
-            out
-        };
-        eprintln!(
-            "[hbset] map={:#x} key={k:?} val={:#x}",
-            m as usize, value as usize
-        );
-    }
-
-    let mut c;
-    let hash = hl_hb::hb_hash(key);
-    let mut ckey = 0u32;
-    if !(*m).values.is_null() {
-        ckey = hash % (*m).ncells as u32;
-        c = m.m_index(ckey);
-        while c >= 0 {
-            if m.match_entry(c as usize, hash, key) {
-                (*(*m).values.wrapping_add(c as usize)).value = value;
-                return;
-            }
-            c = m.m_next(c as u32);
+    unsafe {
+        use hl_hb::HbMap;
+        if env_flag!("ASH_MAP_TRACE") {
+            let k = if key.is_null() {
+                String::new()
+            } else {
+                let mut out = String::new();
+                let mut p = key;
+                while *p != 0 {
+                    out.push(char::from_u32(*p as u32).unwrap_or('?'));
+                    p = p.add(1);
+                }
+                out
+            };
+            eprintln!(
+                "[hbset] map={:#x} key={k:?} val={:#x}",
+                m as usize, value as usize
+            );
         }
-    }
 
-    c = hl_freelist_get(&mut (*m).lfree);
-    if c < 0 {
-        hl_hb_resize(m);
-        ckey = hash % (*m).ncells as u32;
+        let mut c;
+        let hash = hl_hb::hb_hash(key);
+        let mut ckey = 0u32;
+        if !(*m).values.is_null() {
+            ckey = hash % (*m).ncells as u32;
+            c = m.m_index(ckey);
+            while c >= 0 {
+                if m.match_entry(c as usize, hash, key) {
+                    (*(*m).values.wrapping_add(c as usize)).value = value;
+                    return;
+                }
+                c = m.m_next(c as u32);
+            }
+        }
+
         c = hl_freelist_get(&mut (*m).lfree);
+        if c < 0 {
+            hl_hb_resize(m);
+            ckey = hash % (*m).ncells as u32;
+            c = hl_freelist_get(&mut (*m).lfree);
+        }
+        m.set_entry(c as usize, hash, key);
+        // nexts[c] = cells[ckey] (old head of chain), then cells[ckey] = c
+        if (*m).maxentries < _MLIMIT {
+            let src = ((*m).cells as *const i8).wrapping_add(ckey as usize);
+            let dst = ((*m).nexts as *mut i8).wrapping_add(c as usize);
+            ptr::write(dst, ptr::read(src));
+            ptr::write(((*m).cells as *mut i8).wrapping_add(ckey as usize), c as i8);
+        } else {
+            let src = ((*m).cells as *const i32).wrapping_add(ckey as usize);
+            let dst = ((*m).nexts as *mut i32).wrapping_add(c as usize);
+            ptr::write(dst, ptr::read(src));
+            ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), c);
+        }
+        (*(*m).values.wrapping_add(c as usize)).value = value;
+        (*m).nentries += 1;
     }
-    m.set_entry(c as usize, hash, key);
-    // nexts[c] = cells[ckey] (old head of chain), then cells[ckey] = c
-    if (*m).maxentries < _MLIMIT {
-        let src = ((*m).cells as *const i8).wrapping_add(ckey as usize);
-        let dst = ((*m).nexts as *mut i8).wrapping_add(c as usize);
-        ptr::write(dst, ptr::read(src));
-        ptr::write(((*m).cells as *mut i8).wrapping_add(ckey as usize), c as i8);
-    } else {
-        let src = ((*m).cells as *const i32).wrapping_add(ckey as usize);
-        let dst = ((*m).nexts as *mut i32).wrapping_add(c as usize);
-        ptr::write(dst, ptr::read(src));
-        ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), c);
-    }
-    (*(*m).values.wrapping_add(c as usize)).value = value;
-    (*m).nentries += 1;
 }
 
 pub static H_SIZE_INIT: i32 = 3;
@@ -356,106 +368,109 @@ pub static H_PRIMES: [u32; 28] = [
 ];
 
 unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
-    // save
-    let mut old = ptr::read(m);
-    let resize_trace = env_flag!("ASH_MAP_RESIZE_TRACE");
+    unsafe {
+        // save
+        let mut old = ptr::read(m);
+        let resize_trace = env_flag!("ASH_MAP_RESIZE_TRACE");
 
-    if (*m).nentries != (*m).maxentries {
-        panic!("assert");
-    }
+        if (*m).nentries != (*m).maxentries {
+            panic!("assert");
+        }
 
-    // resize
-    let mut i = 0;
-    let nentries = if (*m).maxentries != 0 {
-        (((*m).maxentries * 3) + 1) >> 1
-    } else {
-        H_SIZE_INIT
-    };
-    let mut ncells = nentries >> 2;
+        // resize
+        let mut i = 0;
+        let nentries = if (*m).maxentries != 0 {
+            (((*m).maxentries * 3) + 1) >> 1
+        } else {
+            H_SIZE_INIT
+        };
+        let mut ncells = nentries >> 2;
 
-    while H_PRIMES[i] < ncells as u32 {
-        i += 1;
-    }
-    ncells = H_PRIMES[i] as i32;
+        while H_PRIMES[i] < ncells as u32 {
+            i += 1;
+        }
+        ncells = H_PRIMES[i] as i32;
 
-    let ksize = if nentries < _MLIMIT {
-        1
-    } else {
-        mem::size_of::<i32>()
-    };
-    (*m).entries = crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
-        .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
-        .as_ptr() as *mut hl::hl_hb_entry;
-    (*m).values = crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_value>())
-        .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
-        .as_ptr() as *mut hl::hl_hb_value;
-    (*m).maxentries = nentries;
-
-    if old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) {
-        // simply expand
-        (*m).nexts = crate::rt::alloc_locked(nentries as usize * ksize)
+        let ksize = if nentries < _MLIMIT {
+            1
+        } else {
+            mem::size_of::<i32>()
+        };
+        (*m).entries =
+            crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
+                .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
+                .as_ptr() as *mut hl::hl_hb_entry;
+        (*m).values = crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_value>())
             .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
-            .as_ptr() as *mut c_void;
-        ptr::copy_nonoverlapping(old.entries, (*m).entries, old.maxentries as usize);
-        ptr::copy_nonoverlapping(old.values, (*m).values, old.maxentries as usize);
-        ptr::copy_nonoverlapping(old.nexts, (*m).nexts, old.maxentries as usize * ksize);
-        ptr::write_bytes(
-            (*m).values.add(old.maxentries as usize),
-            0,
-            (nentries - old.maxentries) as usize,
-        );
-        hl_freelist_add_range(
-            &mut (*m).lfree,
-            old.maxentries,
-            (*m).maxentries - old.maxentries,
-        );
-    } else {
-        // expand and remap
-        (*m).cells = crate::rt::alloc_locked((ncells + nentries) as usize * ksize)
-            .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
-            .as_ptr() as *mut c_void;
-        (*m).nexts = (*m).cells.add(ncells as usize * ksize);
-        (*m).ncells = ncells;
-        (*m).nentries = 0;
-        ptr::write_bytes((*m).cells, 0xFF, ncells as usize * ksize);
-        // Zero the values array — count is in ELEMENTS, not bytes
-        // (write_bytes multiplies by size_of::<T>() internally)
-        ptr::write_bytes((*m).values, 0, nentries as usize);
-        hl_freelist_init(&mut (*m).lfree);
-        hl_freelist_add_range(&mut (*m).lfree, 0, (*m).maxentries);
-        for i in 0..old.ncells {
-            let mut c = if old.maxentries < _MLIMIT {
-                *(old.cells as *const i8).add(i as usize) as i32
-            } else {
-                *(old.cells as *const i32).add(i as usize)
-            };
-            while c >= 0 {
-                let _old: *mut hl_hb_map = &mut old;
-                hlp_hbset(m, get_key(_old, c), (*old.values.add(c as usize)).value);
-                c = _old.m_next(c as u32);
+            .as_ptr() as *mut hl::hl_hb_value;
+        (*m).maxentries = nentries;
+
+        if old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) {
+            // simply expand
+            (*m).nexts = crate::rt::alloc_locked(nentries as usize * ksize)
+                .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
+                .as_ptr() as *mut c_void;
+            ptr::copy_nonoverlapping(old.entries, (*m).entries, old.maxentries as usize);
+            ptr::copy_nonoverlapping(old.values, (*m).values, old.maxentries as usize);
+            ptr::copy_nonoverlapping(old.nexts, (*m).nexts, old.maxentries as usize * ksize);
+            ptr::write_bytes(
+                (*m).values.add(old.maxentries as usize),
+                0,
+                (nentries - old.maxentries) as usize,
+            );
+            hl_freelist_add_range(
+                &mut (*m).lfree,
+                old.maxentries,
+                (*m).maxentries - old.maxentries,
+            );
+        } else {
+            // expand and remap
+            (*m).cells = crate::rt::alloc_locked((ncells + nentries) as usize * ksize)
+                .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
+                .as_ptr() as *mut c_void;
+            (*m).nexts = (*m).cells.add(ncells as usize * ksize);
+            (*m).ncells = ncells;
+            (*m).nentries = 0;
+            ptr::write_bytes((*m).cells, 0xFF, ncells as usize * ksize);
+            // Zero the values array — count is in ELEMENTS, not bytes
+            // (write_bytes multiplies by size_of::<T>() internally)
+            ptr::write_bytes((*m).values, 0, nentries as usize);
+            hl_freelist_init(&mut (*m).lfree);
+            hl_freelist_add_range(&mut (*m).lfree, 0, (*m).maxentries);
+            for i in 0..old.ncells {
+                let mut c = if old.maxentries < _MLIMIT {
+                    *(old.cells as *const i8).add(i as usize) as i32
+                } else {
+                    *(old.cells as *const i32).add(i as usize)
+                };
+                while c >= 0 {
+                    let _old: *mut hl_hb_map = &mut old;
+                    hlp_hbset(m, get_key(_old, c), (*old.values.add(c as usize)).value);
+                    c = _old.m_next(c as u32);
+                }
             }
         }
-    }
-    if resize_trace {
-        eprintln!(
-            "[hb-resize] map={:#x} maxentries {}->{} ncells {}->{} entries={:#x}+{:#x} values={:#x}+{:#x} cells={:#x} nexts={:#x}",
-            m as usize,
-            old.maxentries,
-            (*m).maxentries,
-            old.ncells,
-            (*m).ncells,
-            (*m).entries as usize,
-            (*m).maxentries as usize * mem::size_of::<hl::hl_hb_entry>(),
-            (*m).values as usize,
-            (*m).maxentries as usize * mem::size_of::<hl::hl_hb_value>(),
-            (*m).cells as usize,
-            (*m).nexts as usize,
-        );
+        if resize_trace {
+            eprintln!(
+                "[hb-resize] map={:#x} maxentries {}->{} ncells {}->{} entries={:#x}+{:#x} values={:#x}+{:#x} cells={:#x} nexts={:#x}",
+                m as usize,
+                old.maxentries,
+                (*m).maxentries,
+                old.ncells,
+                (*m).ncells,
+                (*m).entries as usize,
+                (*m).maxentries as usize * mem::size_of::<hl::hl_hb_entry>(),
+                (*m).values as usize,
+                (*m).maxentries as usize * mem::size_of::<hl::hl_hb_value>(),
+                (*m).cells as usize,
+                (*m).nexts as usize,
+            );
+        }
     }
 }
 
 unsafe fn get_key(m: *mut hl::hl_hb_map, c: i32) -> *mut hl::uchar {
-    (*((*m).values.add(c as usize))).key
+    unsafe { (*((*m).values.add(c as usize))).key }
 }
 
 #[unsafe(no_mangle)]
@@ -463,135 +478,145 @@ pub unsafe extern "C" fn hlp_hbget(
     m: *mut hl::hl_hb_map,
     key: *mut hl::uchar,
 ) -> *mut hl::vdynamic {
-    use hl_hb::HbMap;
+    unsafe {
+        use hl_hb::HbMap;
 
-    if m.is_null() || (*m).values.is_null() {
-        return ptr::null_mut();
-    }
-    let hash = hl_hb::hb_hash(key);
-    let ckey = hash % (*m).ncells as u32;
-    let mut c = m.m_index(ckey);
-    while c >= 0 {
-        if m.match_entry(c as usize, hash, key) {
-            return (*(*m).values.add(c as usize)).value;
+        if m.is_null() || (*m).values.is_null() {
+            return ptr::null_mut();
         }
-        c = m.m_next(c as u32);
+        let hash = hl_hb::hb_hash(key);
+        let ckey = hash % (*m).ncells as u32;
+        let mut c = m.m_index(ckey);
+        while c >= 0 {
+            if m.match_entry(c as usize, hash, key) {
+                return (*(*m).values.add(c as usize)).value;
+            }
+            c = m.m_next(c as u32);
+        }
+        ptr::null_mut()
     }
-    ptr::null_mut()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbexists(m: *mut hl::hl_hb_map, key: *mut hl::uchar) -> bool {
-    use hl_hb::HbMap;
+    unsafe {
+        use hl_hb::HbMap;
 
-    if m.is_null() || (*m).values.is_null() {
-        return false;
-    }
-    let hash = hl_hb::hb_hash(key);
-    let ckey = hash % (*m).ncells as u32;
-    let mut c = m.m_index(ckey);
-    while c >= 0 {
-        if m.match_entry(c as usize, hash, key) {
-            return true;
+        if m.is_null() || (*m).values.is_null() {
+            return false;
         }
-        c = m.m_next(c as u32);
+        let hash = hl_hb::hb_hash(key);
+        let ckey = hash % (*m).ncells as u32;
+        let mut c = m.m_index(ckey);
+        while c >= 0 {
+            if m.match_entry(c as usize, hash, key) {
+                return true;
+            }
+            c = m.m_next(c as u32);
+        }
+        false
     }
-    false
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::uchar) -> bool {
-    use hl_hb::HbMap;
+    unsafe {
+        use hl_hb::HbMap;
 
-    if m.is_null() || (*m).values.is_null() {
-        return false;
-    }
-    let hash = hl_hb::hb_hash(key);
-    let ckey = hash % (*m).ncells as u32;
-    let mut c = m.m_index(ckey);
-    let mut prev: i32 = -1;
-    while c >= 0 {
-        if m.match_entry(c as usize, hash, key) {
-            // Unlink from chain
-            let next = m.m_next(c as u32);
-            if prev < 0 {
-                // Head of chain: cells[ckey] = next
-                if (*m).maxentries < _MLIMIT {
-                    ptr::write(
-                        ((*m).cells as *mut i8).wrapping_add(ckey as usize),
-                        next as i8,
-                    );
-                } else {
-                    ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), next);
-                }
-            } else {
-                // Middle/end of chain: nexts[prev] = next
-                if (*m).maxentries < _MLIMIT {
-                    ptr::write(
-                        ((*m).nexts as *mut i8).wrapping_add(prev as usize),
-                        next as i8,
-                    );
-                } else {
-                    ptr::write(((*m).nexts as *mut i32).wrapping_add(prev as usize), next);
-                }
-            }
-            m.erase_entry(c as usize);
-            hl_freelist_add(&mut (*m).lfree, c);
-            (*m).nentries -= 1;
-            return true;
+        if m.is_null() || (*m).values.is_null() {
+            return false;
         }
-        prev = c;
-        c = m.m_next(c as u32);
+        let hash = hl_hb::hb_hash(key);
+        let ckey = hash % (*m).ncells as u32;
+        let mut c = m.m_index(ckey);
+        let mut prev: i32 = -1;
+        while c >= 0 {
+            if m.match_entry(c as usize, hash, key) {
+                // Unlink from chain
+                let next = m.m_next(c as u32);
+                if prev < 0 {
+                    // Head of chain: cells[ckey] = next
+                    if (*m).maxentries < _MLIMIT {
+                        ptr::write(
+                            ((*m).cells as *mut i8).wrapping_add(ckey as usize),
+                            next as i8,
+                        );
+                    } else {
+                        ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), next);
+                    }
+                } else {
+                    // Middle/end of chain: nexts[prev] = next
+                    if (*m).maxentries < _MLIMIT {
+                        ptr::write(
+                            ((*m).nexts as *mut i8).wrapping_add(prev as usize),
+                            next as i8,
+                        );
+                    } else {
+                        ptr::write(((*m).nexts as *mut i32).wrapping_add(prev as usize), next);
+                    }
+                }
+                m.erase_entry(c as usize);
+                hl_freelist_add(&mut (*m).lfree, c);
+                (*m).nentries -= 1;
+                return true;
+            }
+            prev = c;
+            c = m.m_next(c as u32);
+        }
+        false
     }
-    false
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbkeys(m: *mut hl::hl_hb_map) -> *mut hl::varray {
-    let count = if m.is_null() { 0 } else { (*m).nentries };
-    let a = crate::array::hlp_alloc_array(crate::types::hlt_bytes(), count);
-    if m.is_null() || count == 0 {
-        return a;
-    }
-    let mut p = 0;
-    for i in 0..(*m).ncells {
-        let mut c = if (*m).maxentries < _MLIMIT {
-            *((*m).cells as *const i8).add(i as usize) as i32
-        } else {
-            *((*m).cells as *const i32).add(i as usize)
-        };
-        while c >= 0 {
-            let key = (*(*m).values.add(c as usize)).key;
-            *(crate::types::hl_aptr::<*mut hl::vbyte>(a)).add(p) = key as *mut hl::vbyte;
-            p += 1;
-            c = m.m_next(c as u32);
+    unsafe {
+        let count = if m.is_null() { 0 } else { (*m).nentries };
+        let a = crate::array::hlp_alloc_array(crate::types::hlt_bytes(), count);
+        if m.is_null() || count == 0 {
+            return a;
         }
+        let mut p = 0;
+        for i in 0..(*m).ncells {
+            let mut c = if (*m).maxentries < _MLIMIT {
+                *((*m).cells as *const i8).add(i as usize) as i32
+            } else {
+                *((*m).cells as *const i32).add(i as usize)
+            };
+            while c >= 0 {
+                let key = (*(*m).values.add(c as usize)).key;
+                *(crate::types::hl_aptr::<*mut hl::vbyte>(a)).add(p) = key as *mut hl::vbyte;
+                p += 1;
+                c = m.m_next(c as u32);
+            }
+        }
+        a
     }
-    a
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray {
-    let count = if m.is_null() { 0 } else { (*m).nentries };
-    let a = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), count);
-    if m.is_null() || count == 0 {
-        return a;
-    }
-    let mut p = 0;
-    for i in 0..(*m).ncells {
-        let mut c = if (*m).maxentries < _MLIMIT {
-            *((*m).cells as *const i8).add(i as usize) as i32
-        } else {
-            *((*m).cells as *const i32).add(i as usize)
-        };
-        while c >= 0 {
-            let val = (*(*m).values.add(c as usize)).value;
-            *(crate::types::hl_aptr::<*mut hl::vdynamic>(a)).add(p) = val;
-            p += 1;
-            c = m.m_next(c as u32);
+    unsafe {
+        let count = if m.is_null() { 0 } else { (*m).nentries };
+        let a = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), count);
+        if m.is_null() || count == 0 {
+            return a;
         }
+        let mut p = 0;
+        for i in 0..(*m).ncells {
+            let mut c = if (*m).maxentries < _MLIMIT {
+                *((*m).cells as *const i8).add(i as usize) as i32
+            } else {
+                *((*m).cells as *const i32).add(i as usize)
+            };
+            while c >= 0 {
+                let val = (*(*m).values.add(c as usize)).value;
+                *(crate::types::hl_aptr::<*mut hl::vdynamic>(a)).add(p) = val;
+                p += 1;
+                c = m.m_next(c as u32);
+            }
+        }
+        a
     }
-    a
 }
 
 /// Upstream _MNAME(clear) (maps.h): zero the whole map header. That is also
@@ -600,20 +625,18 @@ pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray 
 /// dropped are ordinary GC allocations and are reclaimed by the collector.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbclear(m: *mut hl::hl_hb_map) {
-    if m.is_null() {
-        return;
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        ptr::write_bytes(m as *mut u8, 0, mem::size_of::<hl::hl_hb_map>());
     }
-    ptr::write_bytes(m as *mut u8, 0, mem::size_of::<hl::hl_hb_map>());
 }
 
 /// Upstream _MNAME(size) (maps.h).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbsize(m: *mut hl::hl_hb_map) -> i32 {
-    if m.is_null() {
-        0
-    } else {
-        (*m).nentries
-    }
+    unsafe { if m.is_null() { 0 } else { (*m).nentries } }
 }
 
 // ============================================================================
@@ -674,40 +697,44 @@ unsafe fn gc_alloc_zeroed(bytes: usize) -> *mut u8 {
 }
 
 unsafe fn rooted_alloc<K: std::hash::Hash + Eq>() -> *mut c_void {
-    let hdr = gc_alloc_zeroed(mem::size_of::<RootedMap>()) as *mut RootedMap;
-    if hdr.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let hdr = gc_alloc_zeroed(mem::size_of::<RootedMap>()) as *mut RootedMap;
+        if hdr.is_null() {
+            return ptr::null_mut();
+        }
+        (*hdr).index = Box::into_raw(Box::new(SlotIndex::<K>::new())) as *mut c_void;
+        hdr as *mut c_void
     }
-    (*hdr).index = Box::into_raw(Box::new(SlotIndex::<K>::new())) as *mut c_void;
-    hdr as *mut c_void
 }
 
 /// Grow `slots` to hold at least `need` pointers. The old array stays reachable
 /// through `rm.slots` until the new one is installed, so a collection triggered
 /// by this allocation cannot reclaim the entries being copied.
 unsafe fn slots_reserve(rm: *mut RootedMap, need: usize) -> bool {
-    if need <= (*rm).capacity {
-        return true;
+    unsafe {
+        if need <= (*rm).capacity {
+            return true;
+        }
+        let mut cap = if (*rm).capacity == 0 {
+            8
+        } else {
+            (*rm).capacity
+        };
+        while cap < need {
+            cap *= 2;
+        }
+        let fresh =
+            gc_alloc_zeroed(cap * mem::size_of::<*mut hl::vdynamic>()) as *mut *mut hl::vdynamic;
+        if fresh.is_null() {
+            return false;
+        }
+        if !(*rm).slots.is_null() {
+            ptr::copy_nonoverlapping((*rm).slots, fresh, (*rm).capacity);
+        }
+        (*rm).slots = fresh;
+        (*rm).capacity = cap;
+        true
     }
-    let mut cap = if (*rm).capacity == 0 {
-        8
-    } else {
-        (*rm).capacity
-    };
-    while cap < need {
-        cap *= 2;
-    }
-    let fresh =
-        gc_alloc_zeroed(cap * mem::size_of::<*mut hl::vdynamic>()) as *mut *mut hl::vdynamic;
-    if fresh.is_null() {
-        return false;
-    }
-    if !(*rm).slots.is_null() {
-        ptr::copy_nonoverlapping((*rm).slots, fresh, (*rm).capacity);
-    }
-    (*rm).slots = fresh;
-    (*rm).capacity = cap;
-    true
 }
 
 /// Reserve a slot run of `stride` pointers for a key not yet in the map.
@@ -716,127 +743,145 @@ unsafe fn slot_claim<K: std::hash::Hash + Eq>(
     idx: &mut SlotIndex<K>,
     stride: usize,
 ) -> Option<usize> {
-    let slot = match idx.free.pop() {
-        Some(s) => s,
-        None => {
-            let s = idx.high;
-            idx.high += 1;
-            s
+    unsafe {
+        let slot = match idx.free.pop() {
+            Some(s) => s,
+            None => {
+                let s = idx.high;
+                idx.high += 1;
+                s
+            }
+        };
+        if !slots_reserve(rm, (slot + 1) * stride) {
+            idx.free.push(slot);
+            return None;
         }
-    };
-    if !slots_reserve(rm, (slot + 1) * stride) {
-        idx.free.push(slot);
-        return None;
+        Some(slot)
     }
-    Some(slot)
 }
 
 type IntIndex = SlotIndex<i32>;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hialloc() -> *mut c_void {
-    rooted_alloc::<i32>()
+    unsafe { rooted_alloc::<i32>() }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiset(m: *mut c_void, key: i32, value: *mut hl::vdynamic) {
-    if m.is_null() {
-        return;
-    }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut IntIndex);
-    if let Some(&slot) = idx.slot_of.get(&key) {
-        *(*rm).slots.add(slot) = value;
-        return;
-    }
-    if let Some(slot) = slot_claim(rm, idx, 1) {
-        *(*rm).slots.add(slot) = value;
-        idx.slot_of.insert(key, slot);
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut IntIndex);
+        if let Some(&slot) = idx.slot_of.get(&key) {
+            *(*rm).slots.add(slot) = value;
+            return;
+        }
+        if let Some(slot) = slot_claim(rm, idx, 1) {
+            *(*rm).slots.add(slot) = value;
+            idx.slot_of.insert(key, slot);
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiexists(m: *mut c_void, key: i32) -> bool {
-    if m.is_null() {
-        return false;
+    unsafe {
+        if m.is_null() {
+            return false;
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const IntIndex);
+        idx.slot_of.contains_key(&key)
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const IntIndex);
-    idx.slot_of.contains_key(&key)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_higet(m: *mut c_void, key: i32) -> *mut hl::vdynamic {
-    if m.is_null() {
-        return ptr::null_mut();
-    }
-    let rm = m as *const RootedMap;
-    match (*((*rm).index as *const IntIndex)).slot_of.get(&key) {
-        Some(&slot) => *(*rm).slots.add(slot),
-        None => ptr::null_mut(),
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        match (*((*rm).index as *const IntIndex)).slot_of.get(&key) {
+            Some(&slot) => *(*rm).slots.add(slot),
+            None => ptr::null_mut(),
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiremove(m: *mut c_void, key: i32) -> bool {
-    if m.is_null() {
-        return false;
-    }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut IntIndex);
-    match idx.slot_of.remove(&key) {
-        Some(slot) => {
-            // Drop the reference so the value becomes collectable.
-            *(*rm).slots.add(slot) = ptr::null_mut();
-            idx.free.push(slot);
-            true
+    unsafe {
+        if m.is_null() {
+            return false;
         }
-        None => false,
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut IntIndex);
+        match idx.slot_of.remove(&key) {
+            Some(slot) => {
+                // Drop the reference so the value becomes collectable.
+                *(*rm).slots.add(slot) = ptr::null_mut();
+                idx.free.push(slot);
+                true
+            }
+            None => false,
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hikeys(m: *mut c_void) -> *mut hl::varray {
-    if m.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const IntIndex);
+        let arr = crate::array::hlp_alloc_array(crate::types::hlt_i32(), idx.slot_of.len() as i32);
+        for (i, &key) in idx.slot_of.keys().enumerate() {
+            *(crate::types::hl_aptr::<i32>(arr)).add(i) = key;
+        }
+        arr
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const IntIndex);
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_i32(), idx.slot_of.len() as i32);
-    for (i, &key) in idx.slot_of.keys().enumerate() {
-        *(crate::types::hl_aptr::<i32>(arr)).add(i) = key;
-    }
-    arr
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hivalues(m: *mut c_void) -> *mut hl::varray {
-    if m.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const IntIndex);
+        let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+        for (i, &slot) in idx.slot_of.values().enumerate() {
+            *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot);
+        }
+        arr
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const IntIndex);
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
-    for (i, &slot) in idx.slot_of.values().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot);
-    }
-    arr
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiclear(m: *mut c_void) {
-    if m.is_null() {
-        return;
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut IntIndex);
+        for &slot in idx.slot_of.values() {
+            *(*rm).slots.add(slot) = ptr::null_mut();
+        }
+        idx.slot_of.clear();
+        idx.free.clear();
+        idx.high = 0;
     }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut IntIndex);
-    for &slot in idx.slot_of.values() {
-        *(*rm).slots.add(slot) = ptr::null_mut();
-    }
-    idx.slot_of.clear();
-    idx.free.clear();
-    idx.high = 0;
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hisize(m: *mut c_void) -> i32 {
-    if m.is_null() {
-        return 0;
+    unsafe {
+        if m.is_null() {
+            return 0;
+        }
+        let rm = m as *const RootedMap;
+        (*((*rm).index as *const IntIndex)).slot_of.len() as i32
     }
-    let rm = m as *const RootedMap;
-    (*((*rm).index as *const IntIndex)).slot_of.len() as i32
 }
 
 // ============================================================================
@@ -853,110 +898,126 @@ type Int64Index = SlotIndex<i64>;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64alloc() -> *mut c_void {
-    rooted_alloc::<i64>()
+    unsafe { rooted_alloc::<i64>() }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64set(m: *mut c_void, key: i64, value: *mut hl::vdynamic) {
-    if m.is_null() {
-        return;
-    }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut Int64Index);
-    if let Some(&slot) = idx.slot_of.get(&key) {
-        *(*rm).slots.add(slot) = value;
-        return;
-    }
-    if let Some(slot) = slot_claim(rm, idx, 1) {
-        *(*rm).slots.add(slot) = value;
-        idx.slot_of.insert(key, slot);
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut Int64Index);
+        if let Some(&slot) = idx.slot_of.get(&key) {
+            *(*rm).slots.add(slot) = value;
+            return;
+        }
+        if let Some(slot) = slot_claim(rm, idx, 1) {
+            *(*rm).slots.add(slot) = value;
+            idx.slot_of.insert(key, slot);
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64exists(m: *mut c_void, key: i64) -> bool {
-    if m.is_null() {
-        return false;
+    unsafe {
+        if m.is_null() {
+            return false;
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const Int64Index);
+        idx.slot_of.contains_key(&key)
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const Int64Index);
-    idx.slot_of.contains_key(&key)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64get(m: *mut c_void, key: i64) -> *mut hl::vdynamic {
-    if m.is_null() {
-        return ptr::null_mut();
-    }
-    let rm = m as *const RootedMap;
-    match (*((*rm).index as *const Int64Index)).slot_of.get(&key) {
-        Some(&slot) => *(*rm).slots.add(slot),
-        None => ptr::null_mut(),
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        match (*((*rm).index as *const Int64Index)).slot_of.get(&key) {
+            Some(&slot) => *(*rm).slots.add(slot),
+            None => ptr::null_mut(),
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64remove(m: *mut c_void, key: i64) -> bool {
-    if m.is_null() {
-        return false;
-    }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut Int64Index);
-    match idx.slot_of.remove(&key) {
-        Some(slot) => {
-            // Drop the reference so the value becomes collectable.
-            *(*rm).slots.add(slot) = ptr::null_mut();
-            idx.free.push(slot);
-            true
+    unsafe {
+        if m.is_null() {
+            return false;
         }
-        None => false,
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut Int64Index);
+        match idx.slot_of.remove(&key) {
+            Some(slot) => {
+                // Drop the reference so the value becomes collectable.
+                *(*rm).slots.add(slot) = ptr::null_mut();
+                idx.free.push(slot);
+                true
+            }
+            None => false,
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64keys(m: *mut c_void) -> *mut hl::varray {
-    if m.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const Int64Index);
+        // hlt_i64, matching `#define hlt_key hlt_i64` for this map in maps.c:
+        // the caller indexes the result with an 8-byte stride.
+        let arr = crate::array::hlp_alloc_array(crate::types::hlt_i64(), idx.slot_of.len() as i32);
+        for (i, &key) in idx.slot_of.keys().enumerate() {
+            *(crate::types::hl_aptr::<i64>(arr)).add(i) = key;
+        }
+        arr
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const Int64Index);
-    // hlt_i64, matching `#define hlt_key hlt_i64` for this map in maps.c:
-    // the caller indexes the result with an 8-byte stride.
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_i64(), idx.slot_of.len() as i32);
-    for (i, &key) in idx.slot_of.keys().enumerate() {
-        *(crate::types::hl_aptr::<i64>(arr)).add(i) = key;
-    }
-    arr
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64values(m: *mut c_void) -> *mut hl::varray {
-    if m.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const Int64Index);
+        let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+        for (i, &slot) in idx.slot_of.values().enumerate() {
+            *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot);
+        }
+        arr
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const Int64Index);
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
-    for (i, &slot) in idx.slot_of.values().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot);
-    }
-    arr
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64clear(m: *mut c_void) {
-    if m.is_null() {
-        return;
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut Int64Index);
+        for &slot in idx.slot_of.values() {
+            *(*rm).slots.add(slot) = ptr::null_mut();
+        }
+        idx.slot_of.clear();
+        idx.free.clear();
+        idx.high = 0;
     }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut Int64Index);
-    for &slot in idx.slot_of.values() {
-        *(*rm).slots.add(slot) = ptr::null_mut();
-    }
-    idx.slot_of.clear();
-    idx.free.clear();
-    idx.high = 0;
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64size(m: *mut c_void) -> i32 {
-    if m.is_null() {
-        return 0;
+    unsafe {
+        if m.is_null() {
+            return 0;
+        }
+        let rm = m as *const RootedMap;
+        (*((*rm).index as *const Int64Index)).slot_of.len() as i32
     }
-    let rm = m as *const RootedMap;
-    (*((*rm).index as *const Int64Index)).slot_of.len() as i32
 }
 
 // ============================================================================
@@ -966,112 +1027,129 @@ type ObjIndex = SlotIndex<usize>;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoalloc() -> *mut c_void {
-    rooted_alloc::<usize>()
+    unsafe { rooted_alloc::<usize>() }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoset(m: *mut c_void, key: *mut hl::vdynamic, val: *mut hl::vdynamic) {
-    if m.is_null() || key.is_null() {
-        return;
-    }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut ObjIndex);
-    if let Some(&slot) = idx.slot_of.get(&(key as usize)) {
-        *(*rm).slots.add(slot * 2) = key;
-        *(*rm).slots.add(slot * 2 + 1) = val;
-        return;
-    }
-    if let Some(slot) = slot_claim(rm, idx, 2) {
-        *(*rm).slots.add(slot * 2) = key;
-        *(*rm).slots.add(slot * 2 + 1) = val;
-        idx.slot_of.insert(key as usize, slot);
+    unsafe {
+        if m.is_null() || key.is_null() {
+            return;
+        }
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut ObjIndex);
+        if let Some(&slot) = idx.slot_of.get(&(key as usize)) {
+            *(*rm).slots.add(slot * 2) = key;
+            *(*rm).slots.add(slot * 2 + 1) = val;
+            return;
+        }
+        if let Some(slot) = slot_claim(rm, idx, 2) {
+            *(*rm).slots.add(slot * 2) = key;
+            *(*rm).slots.add(slot * 2 + 1) = val;
+            idx.slot_of.insert(key as usize, slot);
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoexists(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
-    if m.is_null() || key.is_null() {
-        return false;
+    unsafe {
+        if m.is_null() || key.is_null() {
+            return false;
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const ObjIndex);
+        idx.slot_of.contains_key(&(key as usize))
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const ObjIndex);
-    idx.slot_of.contains_key(&(key as usize))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoget(m: *mut c_void, key: *mut hl::vdynamic) -> *mut hl::vdynamic {
-    if m.is_null() || key.is_null() {
-        return ptr::null_mut();
-    }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const ObjIndex);
-    match idx.slot_of.get(&(key as usize)) {
-        Some(&slot) => *(*rm).slots.add(slot * 2 + 1),
-        None => ptr::null_mut(),
+    unsafe {
+        if m.is_null() || key.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const ObjIndex);
+        match idx.slot_of.get(&(key as usize)) {
+            Some(&slot) => *(*rm).slots.add(slot * 2 + 1),
+            None => ptr::null_mut(),
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_horemove(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
-    if m.is_null() || key.is_null() {
-        return false;
-    }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut ObjIndex);
-    match idx.slot_of.remove(&(key as usize)) {
-        Some(slot) => {
-            *(*rm).slots.add(slot * 2) = ptr::null_mut();
-            *(*rm).slots.add(slot * 2 + 1) = ptr::null_mut();
-            idx.free.push(slot);
-            true
+    unsafe {
+        if m.is_null() || key.is_null() {
+            return false;
         }
-        None => false,
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut ObjIndex);
+        match idx.slot_of.remove(&(key as usize)) {
+            Some(slot) => {
+                *(*rm).slots.add(slot * 2) = ptr::null_mut();
+                *(*rm).slots.add(slot * 2 + 1) = ptr::null_mut();
+                idx.free.push(slot);
+                true
+            }
+            None => false,
+        }
     }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hokeys(m: *mut c_void) -> *mut hl::varray {
-    if m.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const ObjIndex);
+        let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+        for (i, &slot) in idx.slot_of.values().enumerate() {
+            *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot * 2);
+        }
+        arr
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const ObjIndex);
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
-    for (i, &slot) in idx.slot_of.values().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot * 2);
-    }
-    arr
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hovalues(m: *mut c_void) -> *mut hl::varray {
-    if m.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if m.is_null() {
+            return ptr::null_mut();
+        }
+        let rm = m as *const RootedMap;
+        let idx = &*((*rm).index as *const ObjIndex);
+        let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+        for (i, &slot) in idx.slot_of.values().enumerate() {
+            *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) =
+                *(*rm).slots.add(slot * 2 + 1);
+        }
+        arr
     }
-    let rm = m as *const RootedMap;
-    let idx = &*((*rm).index as *const ObjIndex);
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
-    for (i, &slot) in idx.slot_of.values().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot * 2 + 1);
-    }
-    arr
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoclear(m: *mut c_void) {
-    if m.is_null() {
-        return;
+    unsafe {
+        if m.is_null() {
+            return;
+        }
+        let rm = m as *mut RootedMap;
+        let idx = &mut *((*rm).index as *mut ObjIndex);
+        for &slot in idx.slot_of.values() {
+            *(*rm).slots.add(slot * 2) = ptr::null_mut();
+            *(*rm).slots.add(slot * 2 + 1) = ptr::null_mut();
+        }
+        idx.slot_of.clear();
+        idx.free.clear();
+        idx.high = 0;
     }
-    let rm = m as *mut RootedMap;
-    let idx = &mut *((*rm).index as *mut ObjIndex);
-    for &slot in idx.slot_of.values() {
-        *(*rm).slots.add(slot * 2) = ptr::null_mut();
-        *(*rm).slots.add(slot * 2 + 1) = ptr::null_mut();
-    }
-    idx.slot_of.clear();
-    idx.free.clear();
-    idx.high = 0;
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hosize(m: *mut c_void) -> i32 {
-    if m.is_null() {
-        return 0;
+    unsafe {
+        if m.is_null() {
+            return 0;
+        }
+        let rm = m as *const RootedMap;
+        (*((*rm).index as *const ObjIndex)).slot_of.len() as i32
     }
-    let rm = m as *const RootedMap;
-    (*((*rm).index as *const ObjIndex)).slot_of.len() as i32
 }
 
 // ============================================================================
@@ -1125,34 +1203,44 @@ mod hi64_tests {
     /// would put a non-heap word in a GC-visible slot, which is a crash rather
     /// than a failed assertion.
     unsafe fn dyn_i64(v: i64) -> *mut vdynamic {
-        let mut raw = v;
-        let d =
-            crate::cast::hlp_make_dyn(&mut raw as *mut i64 as *mut c_void, crate::types::hlt_i64());
-        assert!(!d.is_null(), "hlp_make_dyn returned null for {v}");
-        d
+        unsafe {
+            let mut raw = v;
+            let d = crate::cast::hlp_make_dyn(
+                &mut raw as *mut i64 as *mut c_void,
+                crate::types::hlt_i64(),
+            );
+            assert!(!d.is_null(), "hlp_make_dyn returned null for {v}");
+            d
+        }
     }
 
     unsafe fn unbox_i64(d: *mut vdynamic) -> i64 {
-        assert!(!d.is_null(), "expected a boxed value, got null");
-        (*d).v.i64_
+        unsafe {
+            assert!(!d.is_null(), "expected a boxed value, got null");
+            (*d).v.i64_
+        }
     }
 
     unsafe fn keys_of(m: *mut c_void) -> Vec<i64> {
-        let a = hlp_hi64keys(m);
-        assert!(!a.is_null(), "hi64keys returned null for a live map");
-        let n = (*a).size as usize;
-        (0..n)
-            .map(|i| *(crate::types::hl_aptr::<i64>(a)).add(i))
-            .collect()
+        unsafe {
+            let a = hlp_hi64keys(m);
+            assert!(!a.is_null(), "hi64keys returned null for a live map");
+            let n = (*a).size as usize;
+            (0..n)
+                .map(|i| *(crate::types::hl_aptr::<i64>(a)).add(i))
+                .collect()
+        }
     }
 
     unsafe fn values_of(m: *mut c_void) -> Vec<*mut vdynamic> {
-        let a = hlp_hi64values(m);
-        assert!(!a.is_null(), "hi64values returned null for a live map");
-        let n = (*a).size as usize;
-        (0..n)
-            .map(|i| *(crate::types::hl_aptr::<*mut vdynamic>(a)).add(i))
-            .collect()
+        unsafe {
+            let a = hlp_hi64values(m);
+            assert!(!a.is_null(), "hi64values returned null for a live map");
+            let n = (*a).size as usize;
+            (0..n)
+                .map(|i| *(crate::types::hl_aptr::<*mut vdynamic>(a)).add(i))
+                .collect()
+        }
     }
 
     /// Keys chosen to cover the width: a 64-bit map that quietly truncated to

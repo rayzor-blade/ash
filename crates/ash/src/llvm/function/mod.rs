@@ -15,8 +15,8 @@ use inkwell::values::{
     PointerValue,
 };
 use inkwell::{
-    basic_block::BasicBlock, builder::Builder, AddressSpace, AtomicOrdering, FloatPredicate,
-    IntPredicate,
+    AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate, basic_block::BasicBlock,
+    builder::Builder,
 };
 
 use super::module::{CompiledFunctionMeta, JITModule};
@@ -40,7 +40,7 @@ use crate::hl::{
     hl_obj_field, hl_runtime_obj, hl_type, hl_type_kind_HABSTRACT, hl_type_kind_HBOOL,
     hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32,
     hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ,
-    hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
+    hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI8, hl_type_kind_HUI16,
     hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, vdynobj, vvirtual,
 };
 use crate::opcodes::{
@@ -52,7 +52,7 @@ use crate::{
     hl::{hl_type_kind_HFUN, hl_type_kind_HMETHOD},
     types::HLFunction,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 mod air_emit;
 mod calls;
@@ -1136,7 +1136,10 @@ impl<'ctx> JITModule<'ctx> {
                 let (calls_after, instrs_after) = root_shape(target);
                 eprintln!(
                     "[inline] findex={findex} lowered={} parked={} root_calls={}->{} root_instrs={}->{} me={:.0}ms",
-                    self.module.get_functions().filter(|f| f.count_basic_blocks() > 0).count(),
+                    self.module
+                        .get_functions()
+                        .filter(|f| f.count_basic_blocks() > 0)
+                        .count(),
                     parked.len(),
                     calls_before,
                     calls_after,
@@ -2766,7 +2769,7 @@ impl<'ctx> JITModule<'ctx> {
                     return Err(anyhow!(
                         "unsupported argument value {:?} in stub-guarded call",
                         other
-                    ))
+                    ));
                 }
             };
             let slot = unsafe {
@@ -2842,7 +2845,7 @@ impl<'ctx> JITModule<'ctx> {
                 return Err(anyhow!(
                     "unsupported return type {:?} in stub-guarded call",
                     other
-                ))
+                ));
             }
         };
         self.builder.build_unconditional_branch(merge_bb)?;

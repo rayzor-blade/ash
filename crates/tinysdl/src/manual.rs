@@ -15,7 +15,7 @@ use hl_abi::*;
 const MAX: i32 = 256;
 
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     /// End a frame, and answer nothing this side reads.
     ///
     /// It returns a value only because the host has to be able to fail here:
@@ -33,7 +33,7 @@ extern "C" {
 ///
 /// # Safety
 /// Called by the VM through the resolver below.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_gl_get_string(name: i32) -> *mut vbyte {
     let buffer = hlp_alloc_bytes(MAX);
     if buffer.is_null() {
@@ -57,7 +57,7 @@ define_prim!(hlp_gl_get_string, sdl_gl_get_string, "Pi_B");
 ///
 /// # Safety
 /// Called by the VM through the resolver below.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sdl_win_swap_window(window: *mut c_void) {
     let _ = ash_host_sdl_win_swap_window(window as i32);
 }

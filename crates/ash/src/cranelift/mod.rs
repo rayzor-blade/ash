@@ -27,9 +27,9 @@ pub mod lower;
 
 pub use air::{AirMode, Body};
 pub use backend::{AshCraneliftBackend, CraneliftTierContext};
-pub use lower::{lowering_reject_reason, signature_reject_reason, LoweredFunction};
+pub use lower::{LoweredFunction, lowering_reject_reason, signature_reject_reason};
 
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value, types};
 use cranelift_frontend::FunctionBuilder;
 
 use crate::hl_bindings as hl;

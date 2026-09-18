@@ -291,46 +291,54 @@ impl Drop for FileState {
 /// therefore hands over NUL-terminated UTF-8 even on Windows, where upstream
 /// would have sent UTF-16 and gone through `_wfopen`.
 unsafe fn path_from_bytes(name: *const vbyte) -> Option<String> {
-    if name.is_null() {
-        return None;
+    unsafe {
+        if name.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *name.add(len) != 0 {
+            len += 1;
+        }
+        let raw = std::slice::from_raw_parts(name, len);
+        Some(String::from_utf8_lossy(raw).into_owned())
     }
-    let mut len = 0usize;
-    while *name.add(len) != 0 {
-        len += 1;
-    }
-    let raw = std::slice::from_raw_parts(name, len);
-    Some(String::from_utf8_lossy(raw).into_owned())
 }
 
 /// Closes the descriptor of a handle that became unreachable without
 /// `file_close`. `hlp_file_close` is already idempotent and already checks the
 /// magic, so a handle the program did close leaves nothing for this to do.
 unsafe extern "C" fn finalize_fdesc(block: *mut c_void) {
-    hlp_file_close(block);
+    unsafe {
+        hlp_file_close(block);
+    }
 }
 
 unsafe fn alloc_handle(state: FileState) -> *mut c_void {
-    let d =
-        crate::rt::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc) as *mut Fdesc;
-    if d.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let d = crate::rt::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc)
+            as *mut Fdesc;
+        if d.is_null() {
+            return ptr::null_mut();
+        }
+        (*d).magic = FDESC_MAGIC;
+        (*d).state = Box::into_raw(Box::new(Mutex::new(state)));
+        d as *mut c_void
     }
-    (*d).magic = FDESC_MAGIC;
-    (*d).state = Box::into_raw(Box::new(Mutex::new(state)));
-    d as *mut c_void
 }
 
 /// Lifetime is bounded by `file_close`, which the VM only reaches through a
 /// handle it is no longer using.
 unsafe fn state_of<'a>(f: *mut c_void) -> Option<&'a Mutex<FileState>> {
-    if f.is_null() {
-        return None;
+    unsafe {
+        if f.is_null() {
+            return None;
+        }
+        let d = f as *const Fdesc;
+        if (*d).magic != FDESC_MAGIC || (*d).state.is_null() {
+            return None;
+        }
+        Some(&*(*d).state)
     }
-    let d = f as *const Fdesc;
-    if (*d).magic != FDESC_MAGIC || (*d).state.is_null() {
-        return None;
-    }
-    Some(&*(*d).state)
 }
 
 // DEFINE_PRIM(_FILE, file_open, _BYTES _I32 _BOOL)
@@ -357,46 +365,50 @@ pub unsafe extern "C" fn hlp_file_open(
     mode: c_int,
     binary: bool,
 ) -> *mut c_void {
-    // Upstream indexes MODES[mode|(binary?4:0)] over
-    // { "r", "w", "a", "r+", "rb", "wb", "ab", "rb+" }; the `b` half differs
-    // only on Windows, where it suppresses a CRLF translation std::fs never
-    // performs in either direction.
-    let _ = binary;
-    let Some(path) = path_from_bytes(name) else {
-        return ptr::null_mut();
-    };
-    let mut opts = OpenOptions::new();
-    match mode {
-        0 => opts.read(true),
-        1 => opts.write(true).create(true).truncate(true),
-        2 => opts.append(true).create(true),
-        3 => opts.read(true).write(true),
-        // Out of range indexes MODES past its end upstream; there is no
-        // behaviour there to be compatible with.
-        _ => return ptr::null_mut(),
-    };
-    let Ok(file) = opts.open(&path) else {
-        return ptr::null_mut();
-    };
-    alloc_handle(FileState::new(Backing::File(file)))
+    unsafe {
+        // Upstream indexes MODES[mode|(binary?4:0)] over
+        // { "r", "w", "a", "r+", "rb", "wb", "ab", "rb+" }; the `b` half differs
+        // only on Windows, where it suppresses a CRLF translation std::fs never
+        // performs in either direction.
+        let _ = binary;
+        let Some(path) = path_from_bytes(name) else {
+            return ptr::null_mut();
+        };
+        let mut opts = OpenOptions::new();
+        match mode {
+            0 => opts.read(true),
+            1 => opts.write(true).create(true).truncate(true),
+            2 => opts.append(true).create(true),
+            3 => opts.read(true).write(true),
+            // Out of range indexes MODES past its end upstream; there is no
+            // behaviour there to be compatible with.
+            _ => return ptr::null_mut(),
+        };
+        let Ok(file) = opts.open(&path) else {
+            return ptr::null_mut();
+        };
+        alloc_handle(FileState::new(Backing::File(file)))
+    }
 }
 
 // DEFINE_PRIM(_VOID, file_close, _FILE)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_close(f: *mut c_void) {
-    if f.is_null() {
-        return;
+    unsafe {
+        if f.is_null() {
+            return;
+        }
+        let d = f as *mut Fdesc;
+        if (*d).magic != FDESC_MAGIC || (*d).state.is_null() {
+            return;
+        }
+        // Cleared before the drop, so a second close - or a call that outlives
+        // the Haxe wrapper nulling its field - finds a spent handle rather than
+        // a freed box. Upstream gets the same property from NULLing `f->f`.
+        let state = (*d).state;
+        (*d).state = ptr::null_mut();
+        drop(Box::from_raw(state));
     }
-    let d = f as *mut Fdesc;
-    if (*d).magic != FDESC_MAGIC || (*d).state.is_null() {
-        return;
-    }
-    // Cleared before the drop, so a second close - or a call that outlives
-    // the Haxe wrapper nulling its field - finds a spent handle rather than
-    // a freed box. Upstream gets the same property from NULLing `f->f`.
-    let state = (*d).state;
-    (*d).state = ptr::null_mut();
-    drop(Box::from_raw(state));
 }
 
 // DEFINE_PRIM(_I32, file_write, _FILE _BYTES _I32 _I32)
@@ -407,19 +419,21 @@ pub unsafe extern "C" fn hlp_file_write(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    let Some(m) = state_of(f) else {
-        return -1;
-    };
-    if buf.is_null() || pos < 0 || len <= 0 {
-        return 0;
-    }
-    let data = std::slice::from_raw_parts(buf.add(pos as usize), len as usize);
-    // fwrite reports the count that made it; a partial write behind the
-    // staging buffer cannot be attributed, so a failure reports none, which
-    // is the short count Haxe already turns into an Eof.
-    match blocking_io(|| lock(m).write(data)) {
-        Ok(n) => n as c_int,
-        Err(_) => 0,
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return -1;
+        };
+        if buf.is_null() || pos < 0 || len <= 0 {
+            return 0;
+        }
+        let data = std::slice::from_raw_parts(buf.add(pos as usize), len as usize);
+        // fwrite reports the count that made it; a partial write behind the
+        // staging buffer cannot be attributed, so a failure reports none, which
+        // is the short count Haxe already turns into an Eof.
+        match blocking_io(|| lock(m).write(data)) {
+            Ok(n) => n as c_int,
+            Err(_) => 0,
+        }
     }
 }
 
@@ -431,172 +445,192 @@ pub unsafe extern "C" fn hlp_file_read(
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    let Some(m) = state_of(f) else {
-        return -1;
-    };
-    if buf.is_null() || pos < 0 || len <= 0 {
-        return 0;
-    }
-    let out = std::slice::from_raw_parts_mut(buf.add(pos as usize), len as usize);
-    match blocking_io(|| lock(m).read(out)) {
-        Ok(n) => n as c_int,
-        Err(_) => 0,
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return -1;
+        };
+        if buf.is_null() || pos < 0 || len <= 0 {
+            return 0;
+        }
+        let out = std::slice::from_raw_parts_mut(buf.add(pos as usize), len as usize);
+        match blocking_io(|| lock(m).read(out)) {
+            Ok(n) => n as c_int,
+            Err(_) => 0,
+        }
     }
 }
 
 // DEFINE_PRIM(_BOOL, file_write_char, _FILE _I32)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_write_char(f: *mut c_void, c: c_int) -> bool {
-    let Some(m) = state_of(f) else {
-        return false;
-    };
-    let byte = [c as u8];
-    matches!(blocking_io(|| lock(m).write(&byte)), Ok(1))
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return false;
+        };
+        let byte = [c as u8];
+        matches!(blocking_io(|| lock(m).write(&byte)), Ok(1))
+    }
 }
 
 // DEFINE_PRIM(_I32, file_read_char, _FILE)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_read_char(f: *mut c_void) -> c_int {
-    let Some(m) = state_of(f) else {
-        return -2;
-    };
-    let mut byte = [0u8; 1];
-    match blocking_io(|| lock(m).read(&mut byte)) {
-        Ok(1) => byte[0] as c_int,
-        _ => -2,
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return -2;
+        };
+        let mut byte = [0u8; 1];
+        match blocking_io(|| lock(m).read(&mut byte)) {
+            Ok(1) => byte[0] as c_int,
+            _ => -2,
+        }
     }
 }
 
 // DEFINE_PRIM(_BOOL, file_seek, _FILE _I32 _I32)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_seek(f: *mut c_void, pos: c_int, kind: c_int) -> bool {
-    let Some(m) = state_of(f) else {
-        return false;
-    };
-    lock(m).seek(pos as i64, kind)
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return false;
+        };
+        lock(m).seek(pos as i64, kind)
+    }
 }
 
 // DEFINE_PRIM(_I32, file_tell, _FILE)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_tell(f: *mut c_void) -> c_int {
-    let Some(m) = state_of(f) else {
-        return -1;
-    };
-    // Upstream truncates ftell to int and hands back a wrong offset past
-    // 2GB; Haxe reads any negative as "tell() failure", so report that
-    // instead of a plausible-looking wrap.
-    match lock(m).tell() {
-        Some(p) if p >= 0 && p <= c_int::MAX as i64 => p as c_int,
-        _ => -1,
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return -1;
+        };
+        // Upstream truncates ftell to int and hands back a wrong offset past
+        // 2GB; Haxe reads any negative as "tell() failure", so report that
+        // instead of a plausible-looking wrap.
+        match lock(m).tell() {
+            Some(p) if p >= 0 && p <= c_int::MAX as i64 => p as c_int,
+            _ => -1,
+        }
     }
 }
 
 // DEFINE_PRIM(_BOOL, file_seek2, _FILE _F64 _I32)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_seek2(f: *mut c_void, pos: f64, kind: c_int) -> bool {
-    let Some(m) = state_of(f) else {
-        return false;
-    };
-    if !pos.is_finite() {
-        return false;
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return false;
+        };
+        if !pos.is_finite() {
+            return false;
+        }
+        lock(m).seek(pos as i64, kind)
     }
-    lock(m).seek(pos as i64, kind)
 }
 
 // DEFINE_PRIM(_F64, file_tell2, _FILE)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_tell2(f: *mut c_void) -> f64 {
-    let Some(m) = state_of(f) else {
-        return -1.0;
-    };
-    match lock(m).tell() {
-        Some(p) => p as f64,
-        None => -1.0,
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return -1.0;
+        };
+        match lock(m).tell() {
+            Some(p) => p as f64,
+            None => -1.0,
+        }
     }
 }
 
 // DEFINE_PRIM(_BOOL, file_eof, _FILE)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_eof(f: *mut c_void) -> bool {
-    match state_of(f) {
-        Some(m) => lock(m).eof,
-        None => true,
+    unsafe {
+        match state_of(f) {
+            Some(m) => lock(m).eof,
+            None => true,
+        }
     }
 }
 
 // DEFINE_PRIM(_BOOL, file_flush, _FILE)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_flush(f: *mut c_void) -> bool {
-    let Some(m) = state_of(f) else {
-        return false;
-    };
-    lock(m).flush()
+    unsafe {
+        let Some(m) = state_of(f) else {
+            return false;
+        };
+        lock(m).flush()
+    }
 }
 
 // DEFINE_PRIM(_FILE, file_stdin, _NO_ARG)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_stdin() -> *mut c_void {
-    alloc_handle(FileState::new(Backing::Stdin))
+    unsafe { alloc_handle(FileState::new(Backing::Stdin)) }
 }
 
 // DEFINE_PRIM(_FILE, file_stdout, _NO_ARG)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_stdout() -> *mut c_void {
-    alloc_handle(FileState::new(Backing::Stdout))
+    unsafe { alloc_handle(FileState::new(Backing::Stdout)) }
 }
 
 // DEFINE_PRIM(_FILE, file_stderr, _NO_ARG)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_stderr() -> *mut c_void {
-    alloc_handle(FileState::new(Backing::Stderr))
+    unsafe { alloc_handle(FileState::new(Backing::Stderr)) }
 }
 
 // DEFINE_PRIM(_BYTES, file_contents, _BYTES _REF(_I32))
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_contents(name: *const vbyte, size: *mut c_int) -> *mut vbyte {
-    let Some(path) = path_from_bytes(name) else {
-        return ptr::null_mut();
-    };
-    let Ok(mut f) = File::open(&path) else {
-        return ptr::null_mut();
-    };
-    // Sized by fseek/ftell rather than by stat, matching upstream: a stream
-    // whose metadata length lies (procfs, sysfs) reads as empty here exactly
-    // as it does there.
-    let Ok(end) = f.seek(SeekFrom::End(0)) else {
-        return ptr::null_mut();
-    };
-    if end > c_int::MAX as u64 {
-        return ptr::null_mut();
-    }
-    let len = end as usize;
-    if f.rewind().is_err() {
-        return ptr::null_mut();
-    }
-    if !size.is_null() {
-        *size = len as c_int;
-    }
-    // Without an out-param the caller is String.fromUTF8, which needs the
-    // trailing 0 upstream appends here.
-    let alloc = if size.is_null() { len + 1 } else { len.max(1) };
-    let content = hlp_alloc_bytes(alloc as c_int);
-    if content.is_null() {
-        return ptr::null_mut();
-    }
-    if size.is_null() {
-        *content.add(len) = 0;
-    }
-    let out = std::slice::from_raw_parts_mut(content, len);
-    let mut p = 0usize;
-    while p < len {
-        match f.read(&mut out[p..]) {
-            Ok(0) => return ptr::null_mut(),
-            Ok(d) => p += d,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return ptr::null_mut(),
+    unsafe {
+        let Some(path) = path_from_bytes(name) else {
+            return ptr::null_mut();
+        };
+        let Ok(mut f) = File::open(&path) else {
+            return ptr::null_mut();
+        };
+        // Sized by fseek/ftell rather than by stat, matching upstream: a stream
+        // whose metadata length lies (procfs, sysfs) reads as empty here exactly
+        // as it does there.
+        let Ok(end) = f.seek(SeekFrom::End(0)) else {
+            return ptr::null_mut();
+        };
+        if end > c_int::MAX as u64 {
+            return ptr::null_mut();
         }
+        let len = end as usize;
+        if f.rewind().is_err() {
+            return ptr::null_mut();
+        }
+        if !size.is_null() {
+            *size = len as c_int;
+        }
+        // Without an out-param the caller is String.fromUTF8, which needs the
+        // trailing 0 upstream appends here.
+        let alloc = if size.is_null() { len + 1 } else { len.max(1) };
+        let content = hlp_alloc_bytes(alloc as c_int);
+        if content.is_null() {
+            return ptr::null_mut();
+        }
+        if size.is_null() {
+            *content.add(len) = 0;
+        }
+        let out = std::slice::from_raw_parts_mut(content, len);
+        let mut p = 0usize;
+        while p < len {
+            match f.read(&mut out[p..]) {
+                Ok(0) => return ptr::null_mut(),
+                Ok(d) => p += d,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return ptr::null_mut(),
+            }
+        }
+        content
     }
-    content
 }
 
 /// Upstream asks Windows for the file with `dwShareMode` 0 and
@@ -623,9 +657,11 @@ fn file_locked(_path: &str) -> bool {
 // DEFINE_PRIM(_BOOL, file_is_locked, _BYTES)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_is_locked(name: *const vbyte) -> bool {
-    match path_from_bytes(name) {
-        Some(path) => file_locked(&path),
-        None => cfg!(windows),
+    unsafe {
+        match path_from_bytes(name) {
+            Some(path) => file_locked(&path),
+            None => cfg!(windows),
+        }
     }
 }
 
@@ -651,11 +687,13 @@ mod file_error_code_tests {
     /// `std::fs`, because std may allocate or retry on the way out and the
     /// point here is what the *last* failing call left behind.
     unsafe fn errno_after_failed_open(path: &str) -> c_int {
-        let mut p = path.as_bytes().to_vec();
-        p.push(0);
-        let fd = libc::open(p.as_ptr() as *const libc::c_char, libc::O_RDONLY);
-        assert_eq!(fd, -1, "{path} unexpectedly opened");
-        hlp_file_error_code()
+        unsafe {
+            let mut p = path.as_bytes().to_vec();
+            p.push(0);
+            let fd = libc::open(p.as_ptr() as *const libc::c_char, libc::O_RDONLY);
+            assert_eq!(fd, -1, "{path} unexpectedly opened");
+            hlp_file_error_code()
+        }
     }
 
     fn missing_path(tag: &str) -> String {

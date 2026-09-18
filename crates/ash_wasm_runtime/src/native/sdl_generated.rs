@@ -9,9 +9,9 @@
 
 use wasmtime::{Caller, Linker};
 
+use super::Host;
 use super::fibers::YIELD_MODULE as FIBER_YIELD_MODULE;
 use super::sdl::Arg;
-use super::Host;
 
 /// Install all sixty-seven.
 pub(crate) fn install(linker: &mut Linker<Host>) -> anyhow::Result<()> {

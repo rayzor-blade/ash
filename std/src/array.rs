@@ -8,33 +8,35 @@ use crate::{
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_array_type(a: *mut varray) -> *mut hl_type {
-    (*a).at
+    unsafe { (*a).at }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut varray {
-    if size < 0 {
-        hlp_error("Invalid array size".as_ptr() as *const uchar);
+    unsafe {
+        if size < 0 {
+            hlp_error("Invalid array size".as_ptr() as *const uchar);
+        }
+
+        let esize = hlp_type_size(at);
+        let total_size = std::mem::size_of::<varray>() + (esize as usize) * (size as usize);
+
+        // let flag = if hl_is_ptr(at) {
+        //     MEM_KIND_DYNAMIC
+        // } else {
+        //     MEM_KIND_NOPTR
+        // } | MEM_ZERO;
+
+        let a = crate::rt::gc_alloc(total_size)
+            .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
+            .as_ptr() as *mut varray;
+
+        (*a).t = crate::types::hlt_array();
+        (*a).at = at;
+        (*a).size = size;
+
+        a
     }
-
-    let esize = hlp_type_size(at);
-    let total_size = std::mem::size_of::<varray>() + (esize as usize) * (size as usize);
-
-    // let flag = if hl_is_ptr(at) {
-    //     MEM_KIND_DYNAMIC
-    // } else {
-    //     MEM_KIND_NOPTR
-    // } | MEM_ZERO;
-
-    let a = crate::rt::gc_alloc(total_size)
-        .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
-        .as_ptr() as *mut varray;
-
-    (*a).t = crate::types::hlt_array();
-    (*a).at = at;
-    (*a).size = size;
-
-    a
 }
 
 pub fn array_blit<T: Copy>(dst: &mut [T], dpos: usize, src: &[T], spos: usize, len: usize) {
@@ -54,43 +56,45 @@ pub unsafe extern "C" fn hlp_array_blit(
     spos: i32,
     len: i32,
 ) {
-    if dst.is_null() || src.is_null() || len <= 0 {
-        return;
-    }
-    let dst_at = (*dst).at;
-    let src_at = (*src).at;
-    if dst_at.is_null() || src_at.is_null() {
-        return;
-    }
-    // Guard against misaligned or invalid type pointers
-    if (dst_at as usize) < 0x10000
-        || !(dst_at as usize).is_multiple_of(std::mem::align_of::<usize>())
-    {
-        eprintln!(
-            "[WARN] array_blit: invalid dst.at={:#x} dst={:p}",
-            dst_at as usize, dst
-        );
-        return;
-    }
-    if (src_at as usize) < 0x10000
-        || !(src_at as usize).is_multiple_of(std::mem::align_of::<usize>())
-    {
-        eprintln!(
-            "[WARN] array_blit: invalid src.at={:#x} src={:p}",
-            src_at as usize, src
-        );
-        return;
-    }
-    let size = hlp_type_size(dst_at);
+    unsafe {
+        if dst.is_null() || src.is_null() || len <= 0 {
+            return;
+        }
+        let dst_at = (*dst).at;
+        let src_at = (*src).at;
+        if dst_at.is_null() || src_at.is_null() {
+            return;
+        }
+        // Guard against misaligned or invalid type pointers
+        if (dst_at as usize) < 0x10000
+            || !(dst_at as usize).is_multiple_of(std::mem::align_of::<usize>())
+        {
+            eprintln!(
+                "[WARN] array_blit: invalid dst.at={:#x} dst={:p}",
+                dst_at as usize, dst
+            );
+            return;
+        }
+        if (src_at as usize) < 0x10000
+            || !(src_at as usize).is_multiple_of(std::mem::align_of::<usize>())
+        {
+            eprintln!(
+                "[WARN] array_blit: invalid src.at={:#x} src={:p}",
+                src_at as usize, src
+            );
+            return;
+        }
+        let size = hlp_type_size(dst_at);
 
-    let dst_ptr = hl_aptr::<vbyte>(dst).add((dpos as usize) * (size as usize));
-    let src_ptr = hl_aptr::<vbyte>(src as *mut varray).add((spos as usize) * (size as usize));
+        let dst_ptr = hl_aptr::<vbyte>(dst).add((dpos as usize) * (size as usize));
+        let src_ptr = hl_aptr::<vbyte>(src as *mut varray).add((spos as usize) * (size as usize));
 
-    ptr::copy(
-        src_ptr,
-        dst_ptr as *mut vbyte,
-        (len as usize) * (size as usize),
-    );
+        ptr::copy(
+            src_ptr,
+            dst_ptr as *mut vbyte,
+            (len as usize) * (size as usize),
+        );
+    }
 }
 
 // DEFINE_PRIM(_BYTES, array_bytes, _ARR)
@@ -101,10 +105,12 @@ pub unsafe extern "C" fn hlp_array_blit(
 // `hlp_array_blit` skips.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_array_bytes(a: *mut varray) -> *mut vbyte {
-    if a.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if a.is_null() {
+            return ptr::null_mut();
+        }
+        hl_aptr::<vbyte>(a)
     }
-    hl_aptr::<vbyte>(a)
 }
 
 // DEFINE_PRIM(_CARRAY, alloc_carray, _TYPE _I32)
@@ -116,65 +122,67 @@ pub unsafe extern "C" fn hlp_array_bytes(a: *mut varray) -> *mut vbyte {
 // left by the zeroing allocator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_carray(at: *mut hl_type, size: i32) -> *mut std::ffi::c_void {
-    if at.is_null() || ((*at).kind != hl_type_kind_HOBJ && (*at).kind != hl_type_kind_HSTRUCT) {
-        hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
-        return ptr::null_mut();
-    }
-    if size < 0 {
-        hlp_error(crate::strings::str_to_uchar_ptr("Invalid array size"));
-        return ptr::null_mut();
-    }
+    unsafe {
+        if at.is_null() || ((*at).kind != hl_type_kind_HOBJ && (*at).kind != hl_type_kind_HSTRUCT) {
+            hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
+            return ptr::null_mut();
+        }
+        if size < 0 {
+            hlp_error(crate::strings::str_to_uchar_ptr("Invalid array size"));
+            return ptr::null_mut();
+        }
 
-    let obj = (*at).__bindgen_anon_1.obj;
-    if obj.is_null() {
-        return ptr::null_mut();
-    }
-    let mut rt = (*obj).rt;
-    if rt.is_null() || (*rt).methods.is_null() {
-        rt = crate::obj::hl_get_obj_proto(at);
-    }
-    if rt.is_null() {
-        return ptr::null_mut();
-    }
+        let obj = (*at).__bindgen_anon_1.obj;
+        if obj.is_null() {
+            return ptr::null_mut();
+        }
+        let mut rt = (*obj).rt;
+        if rt.is_null() || (*rt).methods.is_null() {
+            rt = crate::obj::hl_get_obj_proto(at);
+        }
+        if rt.is_null() {
+            return ptr::null_mut();
+        }
 
-    let stride = (*rt).size as usize;
-    // Upstream multiplies these as ints and hands the wrapped product to the
-    // allocator, so an absurd size buys a small block and then writes past
-    // it; refusing is the only answer that stays inside the allocation.
-    let Some(total) = stride.checked_mul(size as usize) else {
-        return ptr::null_mut();
-    };
-    let Some(arr) = crate::rt::gc_alloc(total) else {
-        return ptr::null_mut();
-    };
-    let arr = arr.as_ptr();
+        let stride = (*rt).size as usize;
+        // Upstream multiplies these as ints and hands the wrapped product to the
+        // allocator, so an absurd size buys a small block and then writes past
+        // it; refusing is the only answer that stays inside the allocation.
+        let Some(total) = stride.checked_mul(size as usize) else {
+            return ptr::null_mut();
+        };
+        let Some(arr) = crate::rt::gc_alloc(total) else {
+            return ptr::null_mut();
+        };
+        let arr = arr.as_ptr();
 
-    if (*at).kind == hl_type_kind_HOBJ || (*rt).nbindings > 0 {
-        for k in 0..(size as usize) {
-            let o = arr.add(stride * k);
-            // Structs are laid out without the type header; only HOBJ carries
-            // one, and writing it into a struct slot would clobber field 0.
-            if (*at).kind == hl_type_kind_HOBJ {
-                (*(o as *mut vobj)).t = at;
-            }
-            for i in 0..(*rt).nbindings as usize {
-                let b = (*rt).bindings.add(i);
-                let offset = *(*rt).fields_indexes.add((*b).fid as usize);
-                let slot = o.add(offset as usize) as *mut *mut std::ffi::c_void;
-                *slot = if (*b).closure.is_null() {
-                    (*b).ptr
-                } else {
-                    crate::fun::hlp_alloc_closure_ptr(
-                        (*b).closure,
-                        (*b).ptr,
-                        o as *mut std::ffi::c_void,
-                    ) as *mut std::ffi::c_void
-                };
+        if (*at).kind == hl_type_kind_HOBJ || (*rt).nbindings > 0 {
+            for k in 0..(size as usize) {
+                let o = arr.add(stride * k);
+                // Structs are laid out without the type header; only HOBJ carries
+                // one, and writing it into a struct slot would clobber field 0.
+                if (*at).kind == hl_type_kind_HOBJ {
+                    (*(o as *mut vobj)).t = at;
+                }
+                for i in 0..(*rt).nbindings as usize {
+                    let b = (*rt).bindings.add(i);
+                    let offset = *(*rt).fields_indexes.add((*b).fid as usize);
+                    let slot = o.add(offset as usize) as *mut *mut std::ffi::c_void;
+                    *slot = if (*b).closure.is_null() {
+                        (*b).ptr
+                    } else {
+                        crate::fun::hlp_alloc_closure_ptr(
+                            (*b).closure,
+                            (*b).ptr,
+                            o as *mut std::ffi::c_void,
+                        ) as *mut std::ffi::c_void
+                    };
+                }
             }
         }
-    }
 
-    arr as *mut std::ffi::c_void
+        arr as *mut std::ffi::c_void
+    }
 }
 
 /// Move `len` elements between two C arrays of `at`.
@@ -193,32 +201,34 @@ pub unsafe extern "C" fn hlp_carray_blit(
     spos: i32,
     len: i32,
 ) {
-    if at.is_null()
-        || ((*at).kind != crate::hl::hl_type_kind_HOBJ
-            && (*at).kind != crate::hl::hl_type_kind_HSTRUCT)
-    {
-        crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
-        return;
+    unsafe {
+        if at.is_null()
+            || ((*at).kind != crate::hl::hl_type_kind_HOBJ
+                && (*at).kind != crate::hl::hl_type_kind_HSTRUCT)
+        {
+            crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
+            return;
+        }
+        if dpos < 0 || spos < 0 || len < 0 {
+            crate::error::hlp_error(crate::strings::str_to_uchar_ptr(
+                "Invalid array pos or length",
+            ));
+            return;
+        }
+        let rt = crate::obj::hlp_get_obj_rt(at);
+        if rt.is_null() {
+            return;
+        }
+        let size = (*rt).size as usize;
+        if size == 0 || dst.is_null() || src.is_null() {
+            return;
+        }
+        std::ptr::copy(
+            (src as *const u8).add(spos as usize * size),
+            (dst as *mut u8).add(dpos as usize * size),
+            len as usize * size,
+        );
     }
-    if dpos < 0 || spos < 0 || len < 0 {
-        crate::error::hlp_error(crate::strings::str_to_uchar_ptr(
-            "Invalid array pos or length",
-        ));
-        return;
-    }
-    let rt = crate::obj::hlp_get_obj_rt(at);
-    if rt.is_null() {
-        return;
-    }
-    let size = (*rt).size as usize;
-    if size == 0 || dst.is_null() || src.is_null() {
-        return;
-    }
-    std::ptr::copy(
-        (src as *const u8).add(spos as usize * size),
-        (dst as *mut u8).add(dpos as usize * size),
-        len as usize * size,
-    );
 }
 
 #[cfg(test)]

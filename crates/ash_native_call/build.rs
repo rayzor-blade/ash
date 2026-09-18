@@ -75,11 +75,11 @@ fn main() {
                 };
                 let _ = write!(
                     arms,
-                    "        ({arity}, {ret_code}, {pattern}) => {{\n\
+                    "        ({arity}, {ret_code}, {pattern}) => unsafe {{\n\
                      \x20           let f: unsafe extern \"C\" fn({params}) -> {} =\n\
                      \x20               std::mem::transmute(func_ptr);\n\
                      \x20           {call}\n\
-                     \x20       }}\n",
+                     \x20       }},\n",
                     ret.rust()
                 );
                 // The same arm over one word array: each argument's bits
@@ -101,11 +101,11 @@ fn main() {
                 };
                 let _ = write!(
                     word_arms,
-                    "        ({arity}, {ret_code}, {pattern}) => {{\n\
+                    "        ({arity}, {ret_code}, {pattern}) => unsafe {{\n\
                      \x20           let f: unsafe extern \"C\" fn({params}) -> {} =\n\
                      \x20               std::mem::transmute(func_ptr);\n\
                      \x20           {word_call}\n\
-                     \x20       }}\n",
+                     \x20       }},\n",
                     ret.rust()
                 );
                 count += 1;

@@ -35,7 +35,7 @@ use crate::types::hl_aptr;
 // The host side of a spawn. It refuses unless the operator allowed it, and
 // answers exactly as a native `Process` would once it has.
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     /// Run `argv` -- NUL-separated, command first -- to completion with
     /// `stdin` as its input, and keep what it said. With `shell` set there
     /// are no separators and the whole of `argv` is one line for the
@@ -76,11 +76,13 @@ struct Proc {
 }
 
 unsafe fn proc_of<'a>(p: *mut c_void) -> Option<&'a mut Proc> {
-    let q = p as *mut Proc;
-    if q.is_null() || (*q).magic != MAGIC {
-        return None;
+    unsafe {
+        let q = p as *mut Proc;
+        if q.is_null() || (*q).magic != MAGIC {
+            return None;
+        }
+        Some(&mut *q)
     }
-    Some(&mut *q)
 }
 
 /// Run it, if it has not run already.
@@ -88,176 +90,186 @@ unsafe fn proc_of<'a>(p: *mut c_void) -> Option<&'a mut Proc> {
 /// Every accessor goes through here, so the child starts at whichever of them
 /// the caller reaches first and never more than once.
 unsafe fn ensure_started(p: &mut Proc) -> i32 {
-    if let Some(h) = p.started {
-        return h;
+    unsafe {
+        if let Some(h) = p.started {
+            return h;
+        }
+        let h = ash_host_process_start(
+            p.argv.as_ptr(),
+            p.argv.len() as i32,
+            p.stdin.as_ptr(),
+            p.stdin.len() as i32,
+            p.shell as i32,
+        );
+        p.started = Some(h);
+        h
     }
-    let h = ash_host_process_start(
-        p.argv.as_ptr(),
-        p.argv.len() as i32,
-        p.stdin.as_ptr(),
-        p.stdin.len() as i32,
-        p.shell as i32,
-    );
-    p.started = Some(h);
-    h
 }
 
 unsafe fn pchar_bytes(p: *const vbyte) -> Vec<u8> {
-    if p.is_null() {
-        return Vec::new();
+    unsafe {
+        if p.is_null() {
+            return Vec::new();
+        }
+        let mut n = 0usize;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        std::slice::from_raw_parts(p, n).to_vec()
     }
-    let mut n = 0usize;
-    while *p.add(n) != 0 {
-        n += 1;
-    }
-    std::slice::from_raw_parts(p, n).to_vec()
 }
 
 // DEFINE_PRIM(_PROCESS, process_run, _BYTES _ARR _BOOL)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_run(
     cmd: *mut vbyte,
     vargs: *mut varray,
     _detached: bool,
 ) -> *mut c_void {
-    if cmd.is_null() {
-        return std::ptr::null_mut();
-    }
-    let mut argv = pchar_bytes(cmd);
-    if argv.is_empty() {
-        return std::ptr::null_mut();
-    }
-    // No argument array at all means the command is a shell line, which is
-    // what `Process` is documented to do and what the native side does.
-    let shell = vargs.is_null();
-    if !vargs.is_null() {
-        let n = (*vargs).size;
-        if n > 0 {
-            let slots = hl_aptr::<*mut vbyte>(vargs);
-            for i in 0..n as usize {
-                let a = *slots.add(i);
-                // A NULL entry is upstream's argv terminator: everything
-                // after it is dropped.
-                if a.is_null() {
-                    break;
+    unsafe {
+        if cmd.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut argv = pchar_bytes(cmd);
+        if argv.is_empty() {
+            return std::ptr::null_mut();
+        }
+        // No argument array at all means the command is a shell line, which is
+        // what `Process` is documented to do and what the native side does.
+        let shell = vargs.is_null();
+        if !vargs.is_null() {
+            let n = (*vargs).size;
+            if n > 0 {
+                let slots = hl_aptr::<*mut vbyte>(vargs);
+                for i in 0..n as usize {
+                    let a = *slots.add(i);
+                    // A NULL entry is upstream's argv terminator: everything
+                    // after it is dropped.
+                    if a.is_null() {
+                        break;
+                    }
+                    argv.push(0);
+                    argv.extend_from_slice(&pchar_bytes(a));
                 }
-                argv.push(0);
-                argv.extend_from_slice(&pchar_bytes(a));
             }
         }
+        Box::into_raw(Box::new(Proc {
+            magic: MAGIC,
+            argv,
+            stdin: Vec::new(),
+            started: None,
+            shell,
+        })) as *mut c_void
     }
-    Box::into_raw(Box::new(Proc {
-        magic: MAGIC,
-        argv,
-        stdin: Vec::new(),
-        started: None,
-        shell,
-    })) as *mut c_void
 }
 
 unsafe fn read_into(p: *mut c_void, which: i32, str: *mut vbyte, pos: c_int, len: c_int) -> c_int {
-    let Some(proc) = proc_of(p) else {
-        return -1;
-    };
-    if str.is_null() || pos < 0 || len <= 0 {
-        return -1;
-    }
-    let h = ensure_started(proc);
-    if h < 0 {
-        return -1;
-    }
-    // Upstream reports end of stream as -1, which is what `haxe.io.Input`
-    // turns into an Eof.
-    if ash_host_process_len(h, which) <= 0 {
-        return -1;
-    }
-    let got = ash_host_process_read(h, which, str.add(pos as usize), len);
-    if got <= 0 {
-        -1
-    } else {
-        got
+    unsafe {
+        let Some(proc) = proc_of(p) else {
+            return -1;
+        };
+        if str.is_null() || pos < 0 || len <= 0 {
+            return -1;
+        }
+        let h = ensure_started(proc);
+        if h < 0 {
+            return -1;
+        }
+        // Upstream reports end of stream as -1, which is what `haxe.io.Input`
+        // turns into an Eof.
+        if ash_host_process_len(h, which) <= 0 {
+            return -1;
+        }
+        let got = ash_host_process_read(h, which, str.add(pos as usize), len);
+        if got <= 0 { -1 } else { got }
     }
 }
 
 // DEFINE_PRIM(_I32, process_stdout_read, _PROCESS _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdout_read(
     p: *mut c_void,
     str: *mut vbyte,
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    read_into(p, 0, str, pos, len)
+    unsafe { read_into(p, 0, str, pos, len) }
 }
 
 // DEFINE_PRIM(_I32, process_stderr_read, _PROCESS _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stderr_read(
     p: *mut c_void,
     str: *mut vbyte,
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    read_into(p, 1, str, pos, len)
+    unsafe { read_into(p, 1, str, pos, len) }
 }
 
 // DEFINE_PRIM(_I32, process_stdin_write, _PROCESS _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdin_write(
     p: *mut c_void,
     str: *mut vbyte,
     pos: c_int,
     len: c_int,
 ) -> c_int {
-    let Some(proc) = proc_of(p) else {
-        return -1;
-    };
-    if str.is_null() || pos < 0 || len <= 0 {
-        return -1;
+    unsafe {
+        let Some(proc) = proc_of(p) else {
+            return -1;
+        };
+        if str.is_null() || pos < 0 || len <= 0 {
+            return -1;
+        }
+        // Once it has run, its input is closed: there is nobody left to read.
+        if proc.started.is_some() {
+            return -1;
+        }
+        let src = std::slice::from_raw_parts(str.add(pos as usize), len as usize);
+        proc.stdin.extend_from_slice(src);
+        len
     }
-    // Once it has run, its input is closed: there is nobody left to read.
-    if proc.started.is_some() {
-        return -1;
-    }
-    let src = std::slice::from_raw_parts(str.add(pos as usize), len as usize);
-    proc.stdin.extend_from_slice(src);
-    len
 }
 
 // DEFINE_PRIM(_BOOL, process_stdin_close, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdin_close(p: *mut c_void) -> bool {
-    let Some(proc) = proc_of(p) else {
-        return false;
-    };
-    // Closing input is the usual signal that the child may now finish, so it
-    // is as good a moment as any to run it.
-    ensure_started(proc) >= 0
+    unsafe {
+        let Some(proc) = proc_of(p) else {
+            return false;
+        };
+        // Closing input is the usual signal that the child may now finish, so it
+        // is as good a moment as any to run it.
+        ensure_started(proc) >= 0
+    }
 }
 
 // DEFINE_PRIM(_I32, process_exit, _PROCESS _REF(_BOOL))
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_exit(p: *mut c_void, running: *mut bool) -> c_int {
-    let Some(proc) = proc_of(p) else {
+    unsafe {
+        let Some(proc) = proc_of(p) else {
+            if !running.is_null() {
+                *running = false;
+            }
+            return -1;
+        };
+        let h = ensure_started(proc);
+        // It ran to completion inside `ensure_started`, so it is never still
+        // going by the time anyone can ask.
         if !running.is_null() {
             *running = false;
         }
-        return -1;
-    };
-    let h = ensure_started(proc);
-    // It ran to completion inside `ensure_started`, so it is never still
-    // going by the time anyone can ask.
-    if !running.is_null() {
-        *running = false;
+        if h < 0 {
+            return -1;
+        }
+        ash_host_process_code(h)
     }
-    if h < 0 {
-        return -1;
-    }
-    ash_host_process_code(h)
 }
 
 // DEFINE_PRIM(_I32, process_pid, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_pid(p: *mut c_void) -> c_int {
     // The child is gone by the time anything could use its id, and inventing
     // one would be worse than saying so.
@@ -266,22 +278,24 @@ pub unsafe extern "C" fn hlp_process_pid(p: *mut c_void) -> c_int {
 }
 
 // DEFINE_PRIM(_VOID, process_close, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_close(p: *mut c_void) {
-    let Some(proc) = proc_of(p) else {
-        return;
-    };
-    if let Some(h) = proc.started {
-        if h >= 0 {
+    unsafe {
+        let Some(proc) = proc_of(p) else {
+            return;
+        };
+        if let Some(h) = proc.started
+            && h >= 0
+        {
             ash_host_process_free(h);
         }
+        proc.magic = 0;
+        drop(Box::from_raw(p as *mut Proc));
     }
-    proc.magic = 0;
-    drop(Box::from_raw(p as *mut Proc));
 }
 
 // DEFINE_PRIM(_VOID, process_kill, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_kill(p: *mut c_void) {
     // Nothing to signal: it has either not started or already finished.
     let _ = p;

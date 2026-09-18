@@ -8,7 +8,7 @@
 //! Not to be confused with [`crate::ssa`], which prepares and caches the IR
 //! this runs.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::ffi::c_void;
 
 use ash_core::bytecode::DecodedBytecode;
@@ -24,8 +24,8 @@ use crate::tiering::env_flag;
 use crate::values::{CmpOp, FloatBinOp, IntBinOp};
 
 use super::{
-    narrow_to_reg, read_raw_kind, ref_elem_size, ref_target_kind, write_raw_kind,
-    HLExceptionPropagation, HLInterpreter, StepResult, POOL_CAP,
+    HLExceptionPropagation, HLInterpreter, POOL_CAP, StepResult, narrow_to_reg, read_raw_kind,
+    ref_elem_size, ref_target_kind, write_raw_kind,
 };
 
 impl HLInterpreter {
@@ -55,32 +55,30 @@ impl HLInterpreter {
             // hybrid run stayed interpreted no matter how hot it got. A
             // branch to a block at or before this one is the same signal the
             // opcode loop reads from a negative jump offset.
-            if let Some(prev) = prev_block {
-                if block <= prev as usize {
-                    let frame = self.stack.last_mut().unwrap();
-                    frame.backedges = frame.backedges.wrapping_add(1);
-                    // Every 64th, for the reason the opcode loop gives: there
-                    // are two thresholds to cross, so one signal would stall
-                    // the ladder at Cranelift.
-                    let hot = frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0;
-                    // Named by the header's bytecode pc, which is what the
-                    // tiering map and `compile_osr_entry` both key on -- the
-                    // block index would look up a different block, or none.
-                    if hot {
-                        if let Some(&header_pc) = prep.block_pcs.get(block) {
-                            self.note_hot_loop(bc, func_idx, header_pc);
-                            // Promotion swaps a pointer, which only the next
-                            // call observes; a loop entered once would keep
-                            // interpreting past its own compile without this.
-                            if let Some(ret) = self.try_osr_transfer(
-                                bc,
-                                func_idx,
-                                header_pc,
-                                Some((prep, block, prev_block)),
-                            )? {
-                                return Ok(ret);
-                            }
-                        }
+            if let Some(prev) = prev_block
+                && block <= prev as usize
+            {
+                let frame = self.stack.last_mut().unwrap();
+                frame.backedges = frame.backedges.wrapping_add(1);
+                // Every 64th, for the reason the opcode loop gives: there
+                // are two thresholds to cross, so one signal would stall
+                // the ladder at Cranelift.
+                let hot = frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0;
+                // Named by the header's bytecode pc, which is what the
+                // tiering map and `compile_osr_entry` both key on -- the
+                // block index would look up a different block, or none.
+                if hot && let Some(&header_pc) = prep.block_pcs.get(block) {
+                    self.note_hot_loop(bc, func_idx, header_pc);
+                    // Promotion swaps a pointer, which only the next
+                    // call observes; a loop entered once would keep
+                    // interpreting past its own compile without this.
+                    if let Some(ret) = self.try_osr_transfer(
+                        bc,
+                        func_idx,
+                        header_pc,
+                        Some((prep, block, prev_block)),
+                    )? {
+                        return Ok(ret);
                     }
                 }
             }
@@ -110,18 +108,18 @@ impl HLInterpreter {
                 lane_buf.clear();
                 let frame = self.stack.last().unwrap();
                 for phi in &blk.phis {
-                    if let Some(pb) = prev_block {
-                        if let Some(&(_, v)) = phi.incoming.iter().find(|(b, _)| b.0 == pb) {
-                            // A vectorized accumulator is carried as a phi
-                            // like any other, and its value lives in the lane
-                            // side-table rather than in a register. Copying
-                            // only the register left the destination with no
-                            // lanes at all, which is how the widened
-                            // reduction first arrived here.
-                            match frame.vec_lanes.get(&v.0) {
-                                Some(lanes) => lane_buf.push((phi.dst.0, lanes.clone())),
-                                None => phi_buf.push((phi.dst.0, frame.registers.get(v.0))),
-                            }
+                    if let Some(pb) = prev_block
+                        && let Some(&(_, v)) = phi.incoming.iter().find(|(b, _)| b.0 == pb)
+                    {
+                        // A vectorized accumulator is carried as a phi
+                        // like any other, and its value lives in the lane
+                        // side-table rather than in a register. Copying
+                        // only the register left the destination with no
+                        // lanes at all, which is how the widened
+                        // reduction first arrived here.
+                        match frame.vec_lanes.get(&v.0) {
+                            Some(lanes) => lane_buf.push((phi.dst.0, lanes.clone())),
+                            None => phi_buf.push((phi.dst.0, frame.registers.get(v.0))),
                         }
                     }
                 }

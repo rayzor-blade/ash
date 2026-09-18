@@ -1733,10 +1733,11 @@ impl Function {
                 out.push(s);
             }
         }
-        if let Some(h) = blk.handler {
-            if self.block_may_throw(b) && !out.contains(&h) {
-                out.push(h);
-            }
+        if let Some(h) = blk.handler
+            && self.block_may_throw(b)
+            && !out.contains(&h)
+        {
+            out.push(h);
         }
         out
     }

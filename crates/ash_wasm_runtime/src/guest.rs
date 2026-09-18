@@ -104,7 +104,7 @@ pub enum FiberState {
 // it, the function becomes `(import "env" "ash_host_fiber_yield")`, which is
 // exactly what a host binds.
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     /// Suspend the running fiber until the host resumes it.
     fn ash_host_fiber_yield();
     /// What the transform's state global says: running, unwinding or
@@ -150,7 +150,7 @@ extern "C" {
 /// be the edge and nothing left for the linker to find by name -- the unwind
 /// would run straight through the scheduler and out of the guest.
 #[inline(never)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_fiber_enter(body: extern "C" fn(*mut c_void), arg: *mut c_void) {
     body(arg)
 }

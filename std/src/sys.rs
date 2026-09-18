@@ -15,11 +15,11 @@ use crate::array::hlp_alloc_array;
 use crate::bytes::hlp_alloc_bytes;
 use crate::hl::{varray, vbyte};
 use crate::types::{hl_aptr, hlt_bytes, hlt_i32};
-use std::ffi::{c_void, OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_void};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use std::time::SystemTime;
 
 // ============================================================================
@@ -28,20 +28,24 @@ use std::time::SystemTime;
 
 /// Bytes of a NUL-terminated `pchar*`, excluding the terminator.
 unsafe fn pchar_slice<'a>(p: *const vbyte) -> &'a [u8] {
-    let mut len = 0usize;
-    while *p.add(len) != 0 {
-        len += 1;
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(p, len)
     }
-    std::slice::from_raw_parts(p, len)
 }
 
 /// Units of a NUL-terminated `uchar*`, excluding the terminator.
 unsafe fn uchar_slice<'a>(p: *const u16) -> &'a [u16] {
-    let mut len = 0usize;
-    while *p.add(len) != 0 {
-        len += 1;
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(p, len)
     }
-    std::slice::from_raw_parts(p, len)
 }
 
 /// This process's id, where there is one.
@@ -65,32 +69,36 @@ pub(crate) fn process_id() -> u32 {
 /// filesystem encoding and are taken verbatim, so a path the OS accepts but
 /// UTF-8 cannot describe still round-trips.
 unsafe fn pchar_to_os(p: *const vbyte) -> Option<OsString> {
-    if p.is_null() {
-        return None;
-    }
-    let bytes = pchar_slice(p);
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        Some(OsString::from_vec(bytes.to_vec()))
-    }
-    #[cfg(windows)]
-    {
-        Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
-    }
-    // WASI paths are UTF-8 by definition, so the lossy conversion is lossless
-    // for anything the host will accept.
-    #[cfg(not(any(unix, windows)))]
-    {
-        Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+    unsafe {
+        if p.is_null() {
+            return None;
+        }
+        let bytes = pchar_slice(p);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            Some(OsString::from_vec(bytes.to_vec()))
+        }
+        #[cfg(windows)]
+        {
+            Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+        }
+        // WASI paths are UTF-8 by definition, so the lossy conversion is lossless
+        // for anything the host will accept.
+        #[cfg(not(any(unix, windows)))]
+        {
+            Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+        }
     }
 }
 
 unsafe fn pchar_to_path(p: *const vbyte) -> Option<PathBuf> {
-    let path = pchar_to_os(p).map(PathBuf::from)?;
-    #[cfg(target_family = "wasm")]
-    let path = wasi_cwd::resolve(&path);
-    Some(path)
+    unsafe {
+        let path = pchar_to_os(p).map(PathBuf::from)?;
+        #[cfg(target_family = "wasm")]
+        let path = wasi_cwd::resolve(&path);
+        Some(path)
+    }
 }
 
 /// A working directory for a target that has none.
@@ -249,39 +257,45 @@ fn os_to_pbytes(s: &OsStr) -> Vec<u8> {
 /// GC-allocated NUL-terminated copy, the `pstrdup` of sys.c. The VM owns the
 /// result, so it cannot come from the Rust heap.
 unsafe fn alloc_pbytes(data: &[u8]) -> *mut vbyte {
-    let out = hlp_alloc_bytes(data.len() as i32 + 1);
-    if out.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let out = hlp_alloc_bytes(data.len() as i32 + 1);
+        if out.is_null() {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), out, data.len());
+        *out.add(data.len()) = 0;
+        out
     }
-    std::ptr::copy_nonoverlapping(data.as_ptr(), out, data.len());
-    *out.add(data.len()) = 0;
-    out
 }
 
 /// GC-allocated NUL-terminated UTF-16, for the `uchar*`-returning prims.
 unsafe fn alloc_ubytes(s: &str) -> *mut vbyte {
-    let units: Vec<u16> = s.encode_utf16().collect();
-    let out = hlp_alloc_bytes(((units.len() + 1) * 2) as i32);
-    if out.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let out = hlp_alloc_bytes(((units.len() + 1) * 2) as i32);
+        if out.is_null() {
+            return std::ptr::null_mut();
+        }
+        let u = out as *mut u16;
+        std::ptr::copy_nonoverlapping(units.as_ptr(), u, units.len());
+        *u.add(units.len()) = 0;
+        out
     }
-    let u = out as *mut u16;
-    std::ptr::copy_nonoverlapping(units.as_ptr(), u, units.len());
-    *u.add(units.len()) = 0;
-    out
 }
 
 /// Build an `_ARR` of `_BYTES` from already-marshalled entries.
 unsafe fn alloc_bytes_array(entries: &[Vec<u8>]) -> *mut varray {
-    let a = hlp_alloc_array(hlt_bytes(), entries.len() as i32);
-    if a.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let a = hlp_alloc_array(hlt_bytes(), entries.len() as i32);
+        if a.is_null() {
+            return std::ptr::null_mut();
+        }
+        let slots = hl_aptr::<*mut vbyte>(a);
+        for (i, e) in entries.iter().enumerate() {
+            *slots.add(i) = alloc_pbytes(e);
+        }
+        a
     }
-    let slots = hl_aptr::<*mut vbyte>(a);
-    for (i, e) in entries.iter().enumerate() {
-        *slots.add(i) = alloc_pbytes(e);
-    }
-    a
 }
 
 // ============================================================================
@@ -309,32 +323,34 @@ pub extern "C" fn hlp_sys_is64() -> bool {
 /// on every platform.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_string() -> *mut vbyte {
-    let name = if cfg!(target_os = "windows") {
-        "Windows"
-    } else if cfg!(target_os = "macos") {
-        "Mac"
-    } else if cfg!(target_os = "ios") {
-        "iOS"
-    } else if cfg!(target_os = "tvos") {
-        "tvOS"
-    } else if cfg!(target_os = "android") {
-        "Android"
-    } else if cfg!(target_os = "linux") {
-        "Linux"
-    } else if cfg!(any(
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    )) {
-        "BSD"
-    } else {
-        // Upstream #errors here. Reporting the target's own name is more
-        // useful than a wrong-but-familiar one; the Haxe callers that branch
-        // on this only ever test for "Windows".
-        std::env::consts::OS
-    };
-    alloc_ubytes(name)
+    unsafe {
+        let name = if cfg!(target_os = "windows") {
+            "Windows"
+        } else if cfg!(target_os = "macos") {
+            "Mac"
+        } else if cfg!(target_os = "ios") {
+            "iOS"
+        } else if cfg!(target_os = "tvos") {
+            "tvOS"
+        } else if cfg!(target_os = "android") {
+            "Android"
+        } else if cfg!(target_os = "linux") {
+            "Linux"
+        } else if cfg!(any(
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )) {
+            "BSD"
+        } else {
+            // Upstream #errors here. Reporting the target's own name is more
+            // useful than a wrong-but-familiar one; the Haxe callers that branch
+            // on this only ever test for "Windows".
+            std::env::consts::OS
+        };
+        alloc_ubytes(name)
+    }
 }
 
 /// `getenv("LANG")` upstream; the system default locale name on Windows,
@@ -342,26 +358,28 @@ pub unsafe extern "C" fn hlp_sys_string() -> *mut vbyte {
 /// friends fall back to "en" on null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_locale() -> *mut vbyte {
-    #[cfg(not(windows))]
-    {
-        match std::env::var_os("LANG") {
-            Some(v) => alloc_pbytes(&os_to_pbytes(&v)),
-            None => std::ptr::null_mut(),
+    unsafe {
+        #[cfg(not(windows))]
+        {
+            match std::env::var_os("LANG") {
+                Some(v) => alloc_pbytes(&os_to_pbytes(&v)),
+                None => std::ptr::null_mut(),
+            }
         }
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Globalization::GetSystemDefaultLocaleName;
-        // LOCALE_NAME_MAX_LENGTH
-        let mut buf = [0u16; 85];
-        let len = GetSystemDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32);
-        if len <= 0 {
-            return std::ptr::null_mut();
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Globalization::GetSystemDefaultLocaleName;
+            // LOCALE_NAME_MAX_LENGTH
+            let mut buf = [0u16; 85];
+            let len = GetSystemDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32);
+            if len <= 0 {
+                return std::ptr::null_mut();
+            }
+            // Upstream hands back the UTF-16 directly because Windows pchar is
+            // uchar there; ours is UTF-8 (see the module note), so re-encode.
+            let s = String::from_utf16_lossy(&buf[..(len as usize - 1)]);
+            alloc_pbytes(s.as_bytes())
         }
-        // Upstream hands back the UTF-16 directly because Windows pchar is
-        // uchar there; ours is UTF-8 (see the module note), so re-encode.
-        let s = String::from_utf16_lossy(&buf[..(len as usize - 1)]);
-        alloc_pbytes(s.as_bytes())
     }
 }
 
@@ -383,16 +401,18 @@ pub unsafe extern "C" fn hlp_sys_set_flags(flags: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_print(msg: *const vbyte) {
-    if msg.is_null() {
-        return;
-    }
-    let s = String::from_utf16_lossy(uchar_slice(msg as *const u16));
-    // print! panics on a write error; a panic crossing back into VM frames is
-    // undefined behaviour, so the error is swallowed the way fputs would.
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(s.as_bytes());
-    if PRINT_FLAGS.load(Ordering::Relaxed) & PR_AUTO_FLUSH != 0 {
-        let _ = out.flush();
+    unsafe {
+        if msg.is_null() {
+            return;
+        }
+        let s = String::from_utf16_lossy(uchar_slice(msg as *const u16));
+        // print! panics on a write error; a panic crossing back into VM frames is
+        // undefined behaviour, so the error is swallowed the way fputs would.
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(s.as_bytes());
+        if PRINT_FLAGS.load(Ordering::Relaxed) & PR_AUTO_FLUSH != 0 {
+            let _ = out.flush();
+        }
     }
 }
 
@@ -413,12 +433,14 @@ pub unsafe extern "C" fn hlp_setup_profiler(profile_event: *mut c_void, before_e
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_profile_event(code: i32, data: *mut vbyte, data_len: i32) {
-    let f = PROFILE_EVENT.load(Ordering::Relaxed);
-    if f.is_null() {
-        return;
+    unsafe {
+        let f = PROFILE_EVENT.load(Ordering::Relaxed);
+        if f.is_null() {
+            return;
+        }
+        let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, *mut vbyte, i32)>(f);
+        f(code, data, data_len);
     }
-    let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, *mut vbyte, i32)>(f);
-    f(code, data, data_len);
 }
 
 #[unsafe(no_mangle)]
@@ -430,8 +452,10 @@ pub extern "C" fn hlp_sys_getpid() -> i32 {
 /// non-mobile targets; ash has no mobile target, so every key errors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_special(_key: *const vbyte) -> *mut vbyte {
-    crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Unknown sys_special key"));
-    std::ptr::null_mut()
+    unsafe {
+        crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Unknown sys_special key"));
+        std::ptr::null_mut()
+    }
 }
 
 // ============================================================================
@@ -539,9 +563,11 @@ fn filetime_ticks(ft: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
-    let duration = std::time::Duration::from_secs_f64(seconds.max(0.0));
-    // The runtime's to spend: its scheduler's when it has one to drive.
-    crate::rt::sleep_for(duration);
+    unsafe {
+        let duration = std::time::Duration::from_secs_f64(seconds.max(0.0));
+        // The runtime's to spend: its scheduler's when it has one to drive.
+        crate::rt::sleep_for(duration);
+    }
 }
 
 /// Upstream installs an LC_TIME locale for `strftime`. ash's date formatting
@@ -550,45 +576,47 @@ pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
 /// the benefit of hdll natives that do call strftime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_time_locale(l: *const vbyte) -> bool {
-    if l.is_null() {
-        return false;
-    }
-    let name = std::ffi::CString::new(pchar_slice(l).to_vec());
-    let Ok(name) = name else {
-        return false;
-    };
-    // No locale API to hand it to, and the call still reports whether the
-    // name was usable at all.
-    #[cfg(not(any(unix, windows)))]
-    let _ = &name;
-    #[cfg(unix)]
-    {
-        // LC_GLOBAL_LOCALE, which libc does not name.
-        let lc_global = usize::MAX as libc::locale_t;
-        let lc = libc::newlocale(libc::LC_TIME_MASK, name.as_ptr(), std::ptr::null_mut());
-        if lc.is_null() {
+    unsafe {
+        if l.is_null() {
             return false;
         }
-        let old = libc::uselocale(lc);
-        if old.is_null() {
-            libc::freelocale(lc);
+        let name = std::ffi::CString::new(pchar_slice(l).to_vec());
+        let Ok(name) = name else {
             return false;
+        };
+        // No locale API to hand it to, and the call still reports whether the
+        // name was usable at all.
+        #[cfg(not(any(unix, windows)))]
+        let _ = &name;
+        #[cfg(unix)]
+        {
+            // LC_GLOBAL_LOCALE, which libc does not name.
+            let lc_global = usize::MAX as libc::locale_t;
+            let lc = libc::newlocale(libc::LC_TIME_MASK, name.as_ptr(), std::ptr::null_mut());
+            if lc.is_null() {
+                return false;
+            }
+            let old = libc::uselocale(lc);
+            if old.is_null() {
+                libc::freelocale(lc);
+                return false;
+            }
+            if old != lc_global {
+                libc::freelocale(old);
+            }
+            true
         }
-        if old != lc_global {
-            libc::freelocale(old);
+        #[cfg(windows)]
+        {
+            !libc::setlocale(libc::LC_TIME, name.as_ptr()).is_null()
         }
-        true
-    }
-    #[cfg(windows)]
-    {
-        !libc::setlocale(libc::LC_TIME, name.as_ptr()).is_null()
-    }
-    // No C locale to set: nothing here consults one, and no hdll can be
-    // loaded to care.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = l;
-        false
+        // No C locale to set: nothing here consults one, and no hdll can be
+        // loaded to care.
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = l;
+            false
+        }
     }
 }
 
@@ -598,87 +626,91 @@ pub unsafe extern "C" fn hlp_sys_set_time_locale(l: *const vbyte) -> bool {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_env(name: *const vbyte) -> *mut vbyte {
-    let Some(key) = pchar_to_os(name) else {
-        return std::ptr::null_mut();
-    };
-    match std::env::var_os(&key) {
-        Some(v) => alloc_pbytes(&os_to_pbytes(&v)),
-        None => std::ptr::null_mut(),
+    unsafe {
+        let Some(key) = pchar_to_os(name) else {
+            return std::ptr::null_mut();
+        };
+        match std::env::var_os(&key) {
+            Some(v) => alloc_pbytes(&os_to_pbytes(&v)),
+            None => std::ptr::null_mut(),
+        }
     }
 }
 
 /// A null value unsets, matching upstream's `unsetenv` branch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte) -> bool {
-    if name.is_null() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        // setenv/unsetenv rather than std::env, so the C `environ` that
-        // std::env::var_os and any loaded hdll both read stays the one
-        // authority on this process's environment.
-        let Ok(key) = std::ffi::CString::new(pchar_slice(name).to_vec()) else {
+    unsafe {
+        if name.is_null() {
             return false;
-        };
-        if value.is_null() {
-            return libc::unsetenv(key.as_ptr()) == 0;
         }
-        let Ok(val) = std::ffi::CString::new(pchar_slice(value).to_vec()) else {
-            return false;
-        };
-        libc::setenv(key.as_ptr(), val.as_ptr(), 1) == 0
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
-        let wide = |s: &[u8]| -> Vec<u16> {
-            String::from_utf8_lossy(s)
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect()
-        };
-        let wkey = wide(pchar_slice(name));
-        if value.is_null() {
-            return SetEnvironmentVariableW(wkey.as_ptr(), std::ptr::null()) != 0;
-        }
-        let wval = wide(pchar_slice(value));
-        SetEnvironmentVariableW(wkey.as_ptr(), wval.as_ptr()) != 0
-    }
-    // WASI hands the environment to the module at startup and offers no way
-    // to tell the HOST about a change, so the module's own view is set here
-    // and the host is told separately, through an import ash's runner
-    // supplies. Both halves are needed: the first is what `Sys.putEnv`
-    // promises on any target -- set a variable, read it back, see it in
-    // `Sys.environment()` -- and the second is what makes a child process
-    // started afterwards inherit it, since the child is spawned by the host
-    // and inherits the host's environment rather than the module's.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let Some(key) = pchar_to_os(name) else {
-            return false;
-        };
-        let bytes = pchar_slice(name);
-        match value.is_null() {
-            true => {
-                std::env::remove_var(&key);
-                ash_host_put_env(bytes.as_ptr(), bytes.len() as i32, std::ptr::null(), -1);
+        #[cfg(unix)]
+        {
+            // setenv/unsetenv rather than std::env, so the C `environ` that
+            // std::env::var_os and any loaded hdll both read stays the one
+            // authority on this process's environment.
+            let Ok(key) = std::ffi::CString::new(pchar_slice(name).to_vec()) else {
+                return false;
+            };
+            if value.is_null() {
+                return libc::unsetenv(key.as_ptr()) == 0;
             }
-            false => match pchar_to_os(value) {
-                Some(v) => {
-                    std::env::set_var(&key, &v);
-                    let val = pchar_slice(value);
-                    ash_host_put_env(
-                        bytes.as_ptr(),
-                        bytes.len() as i32,
-                        val.as_ptr(),
-                        val.len() as i32,
-                    );
-                }
-                None => return false,
-            },
+            let Ok(val) = std::ffi::CString::new(pchar_slice(value).to_vec()) else {
+                return false;
+            };
+            libc::setenv(key.as_ptr(), val.as_ptr(), 1) == 0
         }
-        true
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
+            let wide = |s: &[u8]| -> Vec<u16> {
+                String::from_utf8_lossy(s)
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect()
+            };
+            let wkey = wide(pchar_slice(name));
+            if value.is_null() {
+                return SetEnvironmentVariableW(wkey.as_ptr(), std::ptr::null()) != 0;
+            }
+            let wval = wide(pchar_slice(value));
+            SetEnvironmentVariableW(wkey.as_ptr(), wval.as_ptr()) != 0
+        }
+        // WASI hands the environment to the module at startup and offers no way
+        // to tell the HOST about a change, so the module's own view is set here
+        // and the host is told separately, through an import ash's runner
+        // supplies. Both halves are needed: the first is what `Sys.putEnv`
+        // promises on any target -- set a variable, read it back, see it in
+        // `Sys.environment()` -- and the second is what makes a child process
+        // started afterwards inherit it, since the child is spawned by the host
+        // and inherits the host's environment rather than the module's.
+        #[cfg(not(any(unix, windows)))]
+        {
+            let Some(key) = pchar_to_os(name) else {
+                return false;
+            };
+            let bytes = pchar_slice(name);
+            match value.is_null() {
+                true => {
+                    std::env::remove_var(&key);
+                    ash_host_put_env(bytes.as_ptr(), bytes.len() as i32, std::ptr::null(), -1);
+                }
+                false => match pchar_to_os(value) {
+                    Some(v) => {
+                        std::env::set_var(&key, &v);
+                        let val = pchar_slice(value);
+                        ash_host_put_env(
+                            bytes.as_ptr(),
+                            bytes.len() as i32,
+                            val.as_ptr(),
+                            val.len() as i32,
+                        );
+                    }
+                    None => return false,
+                },
+            }
+            true
+        }
     }
 }
 
@@ -686,19 +718,21 @@ pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte
 // environment, so a process the host starts afterwards inherits it.
 #[cfg(target_family = "wasm")]
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     fn ash_host_put_env(name: *const u8, name_len: i32, value: *const u8, value_len: i32);
 }
 
 /// Flat key/value array: 2*n entries, key at 2i, value at 2i+1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_env() -> *mut varray {
-    let mut entries: Vec<Vec<u8>> = Vec::new();
-    for (k, v) in std::env::vars_os() {
-        entries.push(os_to_pbytes(&k));
-        entries.push(os_to_pbytes(&v));
+    unsafe {
+        let mut entries: Vec<Vec<u8>> = Vec::new();
+        for (k, v) in std::env::vars_os() {
+            entries.push(os_to_pbytes(&k));
+            entries.push(os_to_pbytes(&v));
+        }
+        alloc_bytes_array(&entries)
     }
-    alloc_bytes_array(&entries)
 }
 
 // ============================================================================
@@ -713,27 +747,29 @@ static HL_FILE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// `hlp_sys_args` and `hlp_sys_hl_file` fall back to reading the real argv.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile: *mut vbyte) {
-    // Before any native library has had a chance to start a thread of its own.
-    crate::rt::mark_main_thread();
-    let mut collected = Vec::new();
-    if !args.is_null() {
-        for i in 0..nargs.max(0) as usize {
-            let a = *args.add(i);
-            if a.is_null() {
-                continue;
+    unsafe {
+        // Before any native library has had a chance to start a thread of its own.
+        crate::rt::mark_main_thread();
+        let mut collected = Vec::new();
+        if !args.is_null() {
+            for i in 0..nargs.max(0) as usize {
+                let a = *args.add(i);
+                if a.is_null() {
+                    continue;
+                }
+                collected.push(pchar_slice(a).to_vec());
             }
-            collected.push(pchar_slice(a).to_vec());
         }
-    }
-    if let Ok(mut g) = SYS_ARGS.lock() {
-        *g = Some(collected);
-    }
-    if let Ok(mut g) = HL_FILE.lock() {
-        *g = if hlfile.is_null() {
-            None
-        } else {
-            Some(pchar_slice(hlfile).to_vec())
-        };
+        if let Ok(mut g) = SYS_ARGS.lock() {
+            *g = Some(collected);
+        }
+        if let Ok(mut g) = HL_FILE.lock() {
+            *g = if hlfile.is_null() {
+                None
+            } else {
+                Some(pchar_slice(hlfile).to_vec())
+            };
+        }
     }
 }
 
@@ -743,42 +779,46 @@ pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile:
 /// pick the bytecode out of their own argv.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_args() -> *mut varray {
-    if let Ok(g) = SYS_ARGS.lock() {
-        if let Some(args) = g.as_ref() {
+    unsafe {
+        if let Ok(g) = SYS_ARGS.lock()
+            && let Some(args) = g.as_ref()
+        {
             return alloc_bytes_array(args);
         }
+        let argv: Vec<OsString> = std::env::args_os().collect();
+        let start = argv
+            .iter()
+            .position(|a| a.to_string_lossy().to_ascii_lowercase().ends_with(".hl"))
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        let entries: Vec<Vec<u8>> = argv
+            .iter()
+            .skip(start.min(argv.len()))
+            .map(|a| os_to_pbytes(a))
+            .collect();
+        alloc_bytes_array(&entries)
     }
-    let argv: Vec<OsString> = std::env::args_os().collect();
-    let start = argv
-        .iter()
-        .position(|a| a.to_string_lossy().to_ascii_lowercase().ends_with(".hl"))
-        .map(|i| i + 1)
-        .unwrap_or(1);
-    let entries: Vec<Vec<u8>> = argv
-        .iter()
-        .skip(start.min(argv.len()))
-        .map(|a| os_to_pbytes(a))
-        .collect();
-    alloc_bytes_array(&entries)
 }
 
 /// Null when no bytecode path is known — Sys.programPath treats that as
 /// "use the executable path", which is the right answer for an embedded run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_hl_file() -> *mut vbyte {
-    if let Ok(g) = HL_FILE.lock() {
-        if let Some(f) = g.as_ref() {
+    unsafe {
+        if let Ok(g) = HL_FILE.lock()
+            && let Some(f) = g.as_ref()
+        {
             return alloc_pbytes(f);
         }
-    }
-    // The hot-reload path registers the bytecode file for mtime watching; if
-    // it ran, it knows the same thing hl_sys_init would have been told.
-    if let Ok(g) = RELOAD_STATE.lock() {
-        if let Some(state) = g.as_ref() {
+        // The hot-reload path registers the bytecode file for mtime watching; if
+        // it ran, it knows the same thing hl_sys_init would have been told.
+        if let Ok(g) = RELOAD_STATE.lock()
+            && let Some(state) = g.as_ref()
+        {
             return alloc_pbytes(&os_to_pbytes(state.bytecode_path.as_os_str()));
         }
+        std::ptr::null_mut()
     }
-    std::ptr::null_mut()
 }
 
 /// Upstream reads `_NSGetExecutablePath` / `GetModuleFileNameW` / `/proc`.
@@ -790,12 +830,14 @@ pub unsafe extern "C" fn hlp_sys_hl_file() -> *mut vbyte {
 /// than a path it can judge for itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
-    if let Ok(exe) = std::env::current_exe() {
-        return alloc_pbytes(&os_to_pbytes(exe.as_os_str()));
-    }
-    match std::env::args_os().next() {
-        Some(argv0) => alloc_pbytes(&os_to_pbytes(&argv0)),
-        None => std::ptr::null_mut(),
+    unsafe {
+        if let Ok(exe) = std::env::current_exe() {
+            return alloc_pbytes(&os_to_pbytes(exe.as_os_str()));
+        }
+        match std::env::args_os().next() {
+            Some(argv0) => alloc_pbytes(&os_to_pbytes(&argv0)),
+            None => std::ptr::null_mut(),
+        }
     }
 }
 
@@ -805,26 +847,32 @@ pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_exists(path: *const vbyte) -> bool {
-    match pchar_to_path(path) {
-        // stat(), not lstat(): a symlink to a live target exists.
-        Some(p) => std::fs::metadata(p).is_ok(),
-        None => false,
+    unsafe {
+        match pchar_to_path(path) {
+            // stat(), not lstat(): a symlink to a live target exists.
+            Some(p) => std::fs::metadata(p).is_ok(),
+            None => false,
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_is_dir(path: *const vbyte) -> bool {
-    match pchar_to_path(path) {
-        Some(p) => std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false),
-        None => false,
+    unsafe {
+        match pchar_to_path(path) {
+            Some(p) => std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false),
+            None => false,
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_delete(path: *const vbyte) -> bool {
-    match pchar_to_path(path) {
-        Some(p) => std::fs::remove_file(p).is_ok(),
-        None => false,
+    unsafe {
+        match pchar_to_path(path) {
+            Some(p) => std::fs::remove_file(p).is_ok(),
+            None => false,
+        }
     }
 }
 
@@ -850,75 +898,85 @@ fn without_trailing_separator(path: &std::path::Path) -> std::path::PathBuf {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_remove_dir(path: *const vbyte) -> bool {
-    match pchar_to_path(path) {
-        Some(p) => std::fs::remove_dir(without_trailing_separator(&p)).is_ok(),
-        None => false,
+    unsafe {
+        match pchar_to_path(path) {
+            Some(p) => std::fs::remove_dir(without_trailing_separator(&p)).is_ok(),
+            None => false,
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_rename(path: *const vbyte, newname: *const vbyte) -> bool {
-    let (Some(from), Some(to)) = (pchar_to_path(path), pchar_to_path(newname)) else {
-        return false;
-    };
-    std::fs::rename(from, to).is_ok()
+    unsafe {
+        let (Some(from), Some(to)) = (pchar_to_path(path), pchar_to_path(newname)) else {
+            return false;
+        };
+        std::fs::rename(from, to).is_ok()
+    }
 }
 
 /// `mode` is the POSIX permission word; Windows has no equivalent and
 /// `_wmkdir` drops it, as this does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_create_dir(path: *const vbyte, mode: i32) -> bool {
-    let Some(p) = pchar_to_path(path) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .mode(mode as u32)
-            .create(p)
-            .is_ok()
-    }
-    #[cfg(windows)]
-    {
-        let _ = mode;
-        std::fs::create_dir(p).is_ok()
-    }
-    // WASI has directories, through a preopened capability rather than a
-    // path namespace, and no mode bits to set on one.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = mode;
-        std::fs::create_dir(p).is_ok()
+    unsafe {
+        let Some(p) = pchar_to_path(path) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(mode as u32)
+                .create(p)
+                .is_ok()
+        }
+        #[cfg(windows)]
+        {
+            let _ = mode;
+            std::fs::create_dir(p).is_ok()
+        }
+        // WASI has directories, through a preopened capability rather than a
+        // path namespace, and no mode bits to set on one.
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = mode;
+            std::fs::create_dir(p).is_ok()
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_cwd() -> *mut vbyte {
-    #[cfg(target_family = "wasm")]
-    let dir = wasi_cwd::get();
-    #[cfg(not(target_family = "wasm"))]
-    let Ok(dir) = std::env::current_dir() else {
-        return std::ptr::null_mut();
-    };
-    let mut bytes = os_to_pbytes(dir.as_os_str());
-    // Callers concatenate onto this without inserting a separator.
-    if !matches!(bytes.last(), Some(b'/') | Some(b'\\')) {
-        bytes.push(b'/');
+    unsafe {
+        #[cfg(target_family = "wasm")]
+        let dir = wasi_cwd::get();
+        #[cfg(not(target_family = "wasm"))]
+        let Ok(dir) = std::env::current_dir() else {
+            return std::ptr::null_mut();
+        };
+        let mut bytes = os_to_pbytes(dir.as_os_str());
+        // Callers concatenate onto this without inserting a separator.
+        if !matches!(bytes.last(), Some(b'/') | Some(b'\\')) {
+            bytes.push(b'/');
+        }
+        alloc_pbytes(&bytes)
     }
-    alloc_pbytes(&bytes)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_cwd(dir: *const vbyte) -> bool {
-    match pchar_to_path(dir) {
-        // Already resolved against the working directory by the line above,
-        // so a relative move lands where it should.
-        #[cfg(target_family = "wasm")]
-        Some(p) => wasi_cwd::set(&p),
-        #[cfg(not(target_family = "wasm"))]
-        Some(p) => std::env::set_current_dir(p).is_ok(),
-        None => false,
+    unsafe {
+        match pchar_to_path(dir) {
+            // Already resolved against the working directory by the line above,
+            // so a relative move lands where it should.
+            #[cfg(target_family = "wasm")]
+            Some(p) => wasi_cwd::set(&p),
+            #[cfg(not(target_family = "wasm"))]
+            Some(p) => std::env::set_current_dir(p).is_ok(),
+            None => false,
+        }
     }
 }
 
@@ -926,25 +984,27 @@ pub unsafe extern "C" fn hlp_sys_set_cwd(dir: *const vbyte) -> bool {
 /// did not resolve.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *mut vbyte {
-    let Some(p) = pchar_to_path(path) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(full) = std::fs::canonicalize(&p) else {
-        return std::ptr::null_mut();
-    };
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut bytes = os_to_pbytes(full.as_os_str());
-    #[cfg(windows)]
-    {
-        // canonicalize returns an extended-length path; upstream's
-        // GetFullPathNameW does not, and Haxe code splits these on ':'.
-        if bytes.starts_with(br"\\?\UNC\") {
-            bytes.splice(0..8, br"\\".iter().copied());
-        } else if bytes.starts_with(br"\\?\") {
-            bytes.drain(0..4);
+    unsafe {
+        let Some(p) = pchar_to_path(path) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(full) = std::fs::canonicalize(&p) else {
+            return std::ptr::null_mut();
+        };
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut bytes = os_to_pbytes(full.as_os_str());
+        #[cfg(windows)]
+        {
+            // canonicalize returns an extended-length path; upstream's
+            // GetFullPathNameW does not, and Haxe code splits these on ':'.
+            if bytes.starts_with(br"\\?\UNC\") {
+                bytes.splice(0..8, br"\\".iter().copied());
+            } else if bytes.starts_with(br"\\?\") {
+                bytes.drain(0..4);
+            }
         }
+        alloc_pbytes(&bytes)
     }
-    alloc_pbytes(&bytes)
 }
 
 /// Twelve i32 slots, of which upstream fills eleven and leaves the last
@@ -953,140 +1013,144 @@ pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *mut vbyte {
 /// a SysError.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_stat(path: *const vbyte) -> *mut varray {
-    let Some(p) = pchar_to_path(path) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(md) = std::fs::metadata(&p) else {
-        return std::ptr::null_mut();
-    };
+    unsafe {
+        let Some(p) = pchar_to_path(path) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(md) = std::fs::metadata(&p) else {
+            return std::ptr::null_mut();
+        };
 
-    #[cfg(unix)]
-    let fields: [i32; 11] = {
-        use std::os::unix::fs::MetadataExt;
-        [
-            md.gid() as i32,
-            md.uid() as i32,
-            md.atime() as i32,
-            md.mtime() as i32,
-            md.ctime() as i32,
-            md.size() as i32,
-            md.dev() as i32,
-            md.ino() as i32,
-            md.nlink() as i32,
-            md.rdev() as i32,
-            md.mode() as i32,
-        ]
-    };
+        #[cfg(unix)]
+        let fields: [i32; 11] = {
+            use std::os::unix::fs::MetadataExt;
+            [
+                md.gid() as i32,
+                md.uid() as i32,
+                md.atime() as i32,
+                md.mtime() as i32,
+                md.ctime() as i32,
+                md.size() as i32,
+                md.dev() as i32,
+                md.ino() as i32,
+                md.nlink() as i32,
+                md.rdev() as i32,
+                md.mode() as i32,
+            ]
+        };
 
-    #[cfg(windows)]
-    let fields: [i32; 11] = {
-        use std::os::windows::fs::MetadataExt;
-        // _wstat32's view of a Windows file: no owner, no inode, one link,
-        // times as 32-bit unix seconds, dev/rdev the 0-based drive index.
-        let unix_time = |ft: u64| -> i32 {
-            if ft == 0 {
-                0
-            } else {
-                ((ft / 10_000_000) as i64 - 11_644_473_600) as i32
+        #[cfg(windows)]
+        let fields: [i32; 11] = {
+            use std::os::windows::fs::MetadataExt;
+            // _wstat32's view of a Windows file: no owner, no inode, one link,
+            // times as 32-bit unix seconds, dev/rdev the 0-based drive index.
+            let unix_time = |ft: u64| -> i32 {
+                if ft == 0 {
+                    0
+                } else {
+                    ((ft / 10_000_000) as i64 - 11_644_473_600) as i32
+                }
+            };
+            let drive = p
+                .to_string_lossy()
+                .as_bytes()
+                .first()
+                .filter(|_| p.to_string_lossy().as_bytes().get(1) == Some(&b':'))
+                .map(|c| (c.to_ascii_uppercase() - b'A') as i32)
+                .unwrap_or(0);
+            // The CRT's _S_* bits, then the owner triplet mirrored into group
+            // and other exactly as _wstat32 does.
+            let mut mode: i32 = if md.is_dir() { 0x4000 } else { 0x8000 };
+            mode |= 0o400;
+            // FILE_ATTRIBUTE_READONLY
+            if md.file_attributes() & 0x1 == 0 {
+                mode |= 0o200;
             }
+            let executable = md.is_dir()
+                || matches!(
+                    p.extension()
+                        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                        .as_deref(),
+                    Some("exe") | Some("com") | Some("bat") | Some("cmd")
+                );
+            if executable {
+                mode |= 0o100;
+            }
+            mode |= (mode & 0o700) >> 3 | (mode & 0o700) >> 6;
+            [
+                0,
+                0,
+                unix_time(md.last_access_time()),
+                unix_time(md.last_write_time()),
+                unix_time(md.creation_time()),
+                md.file_size() as i32,
+                drive,
+                0,
+                1,
+                drive,
+                mode,
+            ]
         };
-        let drive = p
-            .to_string_lossy()
-            .as_bytes()
-            .first()
-            .filter(|_| p.to_string_lossy().as_bytes().get(1) == Some(&b':'))
-            .map(|c| (c.to_ascii_uppercase() - b'A') as i32)
-            .unwrap_or(0);
-        // The CRT's _S_* bits, then the owner triplet mirrored into group
-        // and other exactly as _wstat32 does.
-        let mut mode: i32 = if md.is_dir() { 0x4000 } else { 0x8000 };
-        mode |= 0o400;
-        // FILE_ATTRIBUTE_READONLY
-        if md.file_attributes() & 0x1 == 0 {
-            mode |= 0o200;
-        }
-        let executable = md.is_dir()
-            || matches!(
-                p.extension()
-                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
-                    .as_deref(),
-                Some("exe") | Some("com") | Some("bat") | Some("cmd")
-            );
-        if executable {
-            mode |= 0o100;
-        }
-        mode |= (mode & 0o700) >> 3 | (mode & 0o700) >> 6;
-        [
-            0,
-            0,
-            unix_time(md.last_access_time()),
-            unix_time(md.last_write_time()),
-            unix_time(md.creation_time()),
-            md.file_size() as i32,
-            drive,
-            0,
-            1,
-            drive,
-            mode,
-        ]
-    };
 
-    let a = hlp_alloc_array(hlt_i32(), 12);
-    if a.is_null() {
-        return std::ptr::null_mut();
-    }
-    let slots = hl_aptr::<i32>(a);
-    // WASI reports a file's size and times and nothing else: no owner, no
-    // device, no inode, and no mode bits worth reporting. The shape stays the
-    // same so a caller indexes it identically; the absent fields are zero,
-    // which is what the Windows arm does for the ones Windows lacks too.
-    #[cfg(not(any(unix, windows)))]
-    let fields: [i32; 11] = {
-        let secs = |t: std::io::Result<std::time::SystemTime>| -> i32 {
-            t.ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i32)
-                .unwrap_or(0)
+        let a = hlp_alloc_array(hlt_i32(), 12);
+        if a.is_null() {
+            return std::ptr::null_mut();
+        }
+        let slots = hl_aptr::<i32>(a);
+        // WASI reports a file's size and times and nothing else: no owner, no
+        // device, no inode, and no mode bits worth reporting. The shape stays the
+        // same so a caller indexes it identically; the absent fields are zero,
+        // which is what the Windows arm does for the ones Windows lacks too.
+        #[cfg(not(any(unix, windows)))]
+        let fields: [i32; 11] = {
+            let secs = |t: std::io::Result<std::time::SystemTime>| -> i32 {
+                t.ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i32)
+                    .unwrap_or(0)
+            };
+            [
+                0,
+                0,
+                secs(md.accessed()),
+                secs(md.modified()),
+                secs(md.created()),
+                md.len() as i32,
+                0,
+                0,
+                1,
+                0,
+                if md.is_dir() { 0o040_755 } else { 0o100_644 },
+            ]
         };
-        [
-            0,
-            0,
-            secs(md.accessed()),
-            secs(md.modified()),
-            secs(md.created()),
-            md.len() as i32,
-            0,
-            0,
-            1,
-            0,
-            if md.is_dir() { 0o040_755 } else { 0o100_644 },
-        ]
-    };
 
-    for (i, v) in fields.iter().enumerate() {
-        *slots.add(i) = *v;
+        for (i, v) in fields.iter().enumerate() {
+            *slots.add(i) = *v;
+        }
+        a
     }
-    a
 }
 
 /// Entry names only, "." and ".." excluded. Null when the directory cannot be
 /// opened — sys.FileSystem.readDirectory turns that into a SysError.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_read_dir(path: *const vbyte) -> *mut varray {
-    let Some(p) = pchar_to_path(path) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(dir) = std::fs::read_dir(&p) else {
-        return std::ptr::null_mut();
-    };
-    // Marshalled up front: every alloc_pbytes below can collect, and a name
-    // read after that point would come from an iterator holding an open
-    // directory handle across the collection.
-    let mut entries: Vec<Vec<u8>> = Vec::new();
-    for e in dir.flatten() {
-        entries.push(os_to_pbytes(&e.file_name()));
+    unsafe {
+        let Some(p) = pchar_to_path(path) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(dir) = std::fs::read_dir(&p) else {
+            return std::ptr::null_mut();
+        };
+        // Marshalled up front: every alloc_pbytes below can collect, and a name
+        // read after that point would come from an iterator holding an open
+        // directory handle across the collection.
+        let mut entries: Vec<Vec<u8>> = Vec::new();
+        for e in dir.flatten() {
+            entries.push(os_to_pbytes(&e.file_name()));
+        }
+        alloc_bytes_array(&entries)
     }
-    alloc_bytes_array(&entries)
 }
 
 // ============================================================================
@@ -1101,48 +1165,50 @@ pub unsafe extern "C" fn hlp_sys_read_dir(path: *const vbyte) -> *mut varray {
 /// upstream would have decoded that -1 as a status word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_command(cmd: *const vbyte) -> i32 {
-    let Some(cmdline) = pchar_to_os(cmd) else {
-        return -1;
-    };
-
-    #[cfg(unix)]
-    {
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&cmdline)
-            .status();
-        let Ok(status) = status else {
+    unsafe {
+        let Some(cmdline) = pchar_to_os(cmd) else {
             return -1;
         };
-        use std::os::unix::process::ExitStatusExt;
-        status.code().unwrap_or(0) | (status.signal().unwrap_or(0) << 8)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe"));
-        // raw_arg, not arg: cmd.exe does not parse its command line by the
-        // MSVC rules Command::arg quotes for, so anything the Haxe side
-        // quoted would be re-quoted into a different command.
-        let status = std::process::Command::new(shell)
-            .raw_arg("/C")
-            .raw_arg(&cmdline)
-            .status();
-        match status {
-            Ok(s) => s.code().unwrap_or(-1),
-            Err(_) => -1,
+
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&cmdline)
+                .status();
+            let Ok(status) = status else {
+                return -1;
+            };
+            use std::os::unix::process::ExitStatusExt;
+            status.code().unwrap_or(0) | (status.signal().unwrap_or(0) << 8)
         }
-    }
-    // A sandbox cannot spawn anything itself, so the host is asked. It
-    // refuses unless it has been told to allow it, and then this returns -1 --
-    // what the unix arm returns when the shell cannot be spawned, so a caller
-    // already has a path for it.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let bytes = os_to_pbytes(&cmdline);
-        // Safety: the host reads `len` bytes from `ptr` during the call and
-        // keeps nothing.
-        unsafe { ash_host_command(bytes.as_ptr(), bytes.len() as i32) }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe"));
+            // raw_arg, not arg: cmd.exe does not parse its command line by the
+            // MSVC rules Command::arg quotes for, so anything the Haxe side
+            // quoted would be re-quoted into a different command.
+            let status = std::process::Command::new(shell)
+                .raw_arg("/C")
+                .raw_arg(&cmdline)
+                .status();
+            match status {
+                Ok(s) => s.code().unwrap_or(-1),
+                Err(_) => -1,
+            }
+        }
+        // A sandbox cannot spawn anything itself, so the host is asked. It
+        // refuses unless it has been told to allow it, and then this returns -1 --
+        // what the unix arm returns when the shell cannot be spawned, so a caller
+        // already has a path for it.
+        #[cfg(not(any(unix, windows)))]
+        {
+            let bytes = os_to_pbytes(&cmdline);
+            // The host reads `len` bytes from `ptr` during the call and keeps
+            // nothing.
+            ash_host_command(bytes.as_ptr(), bytes.len() as i32)
+        }
     }
 }
 
@@ -1150,7 +1216,7 @@ pub unsafe extern "C" fn hlp_sys_command(cmd: *const vbyte) -> i32 {
 // the host's to grant and the host's to refuse.
 #[cfg(not(any(unix, windows)))]
 #[link(wasm_import_module = "env")]
-extern "C" {
+unsafe extern "C" {
     /// Run `len` bytes of shell command line, returning what the platform's
     /// `Sys.command` would: the exit status, or -1 if it could not be run --
     /// which is also the answer when the host has not been told to allow it.
@@ -1158,7 +1224,7 @@ extern "C" {
 }
 
 #[cfg(windows)]
-extern "C" {
+unsafe extern "C" {
     fn _getch() -> std::ffi::c_int;
     fn _getche() -> std::ffi::c_int;
 }
@@ -1166,44 +1232,47 @@ extern "C" {
 /// One raw byte from stdin, -1 at end of input. `echo` writes it back out.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_char(echo: bool) -> i32 {
-    #[cfg(unix)]
-    {
-        let fd = libc::STDIN_FILENO;
-        let mut old: libc::termios = std::mem::zeroed();
-        // Not a terminal (a pipe, say): no mode to change, just read. Upstream
-        // reaches the same behaviour by ignoring the failure and letting the
-        // tcsetattr calls fail too.
-        let is_tty = libc::tcgetattr(fd, &mut old) == 0;
-        if is_tty {
-            let mut term = old;
-            libc::cfmakeraw(&mut term);
-            libc::tcsetattr(fd, libc::TCSANOW, &term);
-        }
-        let c = libc::getchar();
-        if is_tty {
-            libc::tcsetattr(fd, libc::TCSANOW, &old);
-        }
-        if echo && c >= 0 {
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(&[c as u8]);
-            let _ = out.flush();
-        }
-        c
-    }
-    #[cfg(windows)]
-    {
-        if echo {
-            _getche() as i32
-        } else {
-            _getch() as i32
-        }
-    }
     // Terminal control is not something a sandbox has. -1 is end of input,
     // which is what a caller reading a closed stdin already expects.
     #[cfg(not(any(unix, windows)))]
     {
         let _ = echo;
         -1
+    }
+    #[cfg(any(unix, windows))]
+    unsafe {
+        #[cfg(unix)]
+        {
+            let fd = libc::STDIN_FILENO;
+            let mut old: libc::termios = std::mem::zeroed();
+            // Not a terminal (a pipe, say): no mode to change, just read. Upstream
+            // reaches the same behaviour by ignoring the failure and letting the
+            // tcsetattr calls fail too.
+            let is_tty = libc::tcgetattr(fd, &mut old) == 0;
+            if is_tty {
+                let mut term = old;
+                libc::cfmakeraw(&mut term);
+                libc::tcsetattr(fd, libc::TCSANOW, &term);
+            }
+            let c = libc::getchar();
+            if is_tty {
+                libc::tcsetattr(fd, libc::TCSANOW, &old);
+            }
+            if echo && c >= 0 {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(&[c as u8]);
+                let _ = out.flush();
+            }
+            c
+        }
+        #[cfg(windows)]
+        {
+            if echo {
+                _getche() as i32
+            } else {
+                _getch() as i32
+            }
+        }
     }
 }
 
@@ -1292,14 +1361,14 @@ pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
         }
         // Invoke the reload callback if registered
         drop(guard); // release RELOAD_STATE lock before calling back
-        if let Ok(cb_guard) = RELOAD_CALLBACK.lock() {
-            if let Some(cb) = *cb_guard {
-                let path_str: String = check_path.to_string_lossy().into();
-                let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
-                utf16.push(0);
-                drop(cb_guard); // release callback lock before invoking
-                unsafe { cb(utf16.as_ptr()) };
-            }
+        if let Ok(cb_guard) = RELOAD_CALLBACK.lock()
+            && let Some(cb) = *cb_guard
+        {
+            let path_str: String = check_path.to_string_lossy().into();
+            let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
+            utf16.push(0);
+            drop(cb_guard); // release callback lock before invoking
+            unsafe { cb(utf16.as_ptr()) };
         }
         true
     } else {
@@ -1317,16 +1386,18 @@ static mut SYS_LOOP_FUNC: *mut std::ffi::c_void = std::ptr::null_mut();
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_loop(func: *mut std::ffi::c_void) {
-    if env_flag!("ASH_DBG_LOOP") {
-        eprintln!("[ash] hlp_sys_set_loop called with {:p}", func);
+    unsafe {
+        if env_flag!("ASH_DBG_LOOP") {
+            eprintln!("[ash] hlp_sys_set_loop called with {:p}", func);
+        }
+        SYS_LOOP_FUNC = func;
     }
-    SYS_LOOP_FUNC = func;
 }
 
 /// Returns the registered loop function (for the interpreter to call after main).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_loop() -> *mut std::ffi::c_void {
-    SYS_LOOP_FUNC
+    unsafe { SYS_LOOP_FUNC }
 }
 
 /// Upstream returns this thread's `hl_thread_info`. ash keeps no thread
@@ -1428,18 +1499,22 @@ mod tests {
 
     /// Read back a pchar the prim handed us.
     unsafe fn unpc(p: *const vbyte) -> Option<String> {
-        if p.is_null() {
-            return None;
+        unsafe {
+            if p.is_null() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(pchar_slice(p)).into_owned())
         }
-        Some(String::from_utf8_lossy(pchar_slice(p)).into_owned())
     }
 
     unsafe fn array_strings(a: *mut varray) -> Vec<String> {
-        assert!(!a.is_null());
-        let slots = hl_aptr::<*mut vbyte>(a);
-        (0..(*a).size as usize)
-            .map(|i| unpc(*slots.add(i)).unwrap())
-            .collect()
+        unsafe {
+            assert!(!a.is_null());
+            let slots = hl_aptr::<*mut vbyte>(a);
+            (0..(*a).size as usize)
+                .map(|i| unpc(*slots.add(i)).unwrap())
+                .collect()
+        }
     }
 
     /// One test, not several: these all allocate from the process-wide GC,
@@ -1590,14 +1665,16 @@ mod process_memory_tests {
 #[allow(clippy::unnecessary_cast)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) != 0 {
-        return 0; // upstream returns 0 rather than failing
+    unsafe {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) != 0 {
+            return 0; // upstream returns 0 rather than failing
+        }
+        ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
     }
-    ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
 }
 
 /// The same clock where `libc` has no `clock_gettime` -- Windows, which

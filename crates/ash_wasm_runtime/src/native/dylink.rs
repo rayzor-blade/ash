@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use wasmtime::{
     AsContextMut, Extern, Global, GlobalType, Instance, Module, Mutability, Ref, Store, Val,
 };
@@ -335,10 +335,10 @@ fn data_address(
     name: &str,
 ) -> Option<i32> {
     for owner in [instance, main] {
-        if let Some(Extern::Global(g)) = owner.get_export(&mut *store, name) {
-            if let Some(v) = g.get(&mut *store).i32() {
-                return Some(v);
-            }
+        if let Some(Extern::Global(g)) = owner.get_export(&mut *store, name)
+            && let Some(v) = g.get(&mut *store).i32()
+        {
+            return Some(v);
         }
     }
     None

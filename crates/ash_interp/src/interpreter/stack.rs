@@ -256,9 +256,16 @@ impl HLInterpreter {
             .and_then(|idx| bytecode.debug_files.get(idx))
             .map(String::as_str)
             .unwrap_or("unknown");
-        let mut symbol: Vec<u16> = format!("fun${findex}({file}:{line})")
-            .encode_utf16()
-            .collect();
+        // Named as HashLink names it, `Type.method` from the proto and
+        // binding tables, so `haxe.CallStack` reads a method rather than a
+        // local function; `fun$N` only for a function with no declaring type.
+        let bc = self.reloaded_bytecode.unwrap_or(bytecode);
+        let name = self
+            .function_name_table(bc)
+            .get(&findex)
+            .cloned()
+            .unwrap_or_else(|| format!("fun${findex}"));
+        let mut symbol: Vec<u16> = format!("{name}({file}:{line})").encode_utf16().collect();
         symbol.push(0);
         self.stack_symbols_interned
             .entry(key)
@@ -288,6 +295,49 @@ impl HLInterpreter {
                 ok.then(|| (base as usize, (base as usize).saturating_add(size)))
             })
         })
+    }
+
+    /// The native stack by unwind table: `(pc, rbp)` per frame, innermost
+    /// first, as many as `out` holds.
+    ///
+    /// libgcc reports the frame it has no table for -- the first compiled
+    /// one -- before it stops, with the registers restored through every
+    /// runtime frame above it. Frames are collected first and classified by
+    /// the caller, because classification asks the loader and the unwinder
+    /// is already holding its lock.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn unwind_frames(out: &mut [(usize, usize)]) -> usize {
+        unsafe extern "C" {
+            fn _Unwind_Backtrace(
+                trace: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
+                argument: *mut c_void,
+            ) -> i32;
+            fn _Unwind_GetIP(context: *mut c_void) -> usize;
+            fn _Unwind_GetGR(context: *mut c_void, index: i32) -> usize;
+        }
+        const URC_NO_REASON: i32 = 0;
+        const URC_END_OF_STACK: i32 = 5;
+        /// DWARF register number of rbp on x86-64.
+        const RBP: i32 = 6;
+        struct Walk<'a> {
+            out: &'a mut [(usize, usize)],
+            len: usize,
+        }
+        unsafe extern "C" fn visit(context: *mut c_void, argument: *mut c_void) -> i32 {
+            unsafe {
+                let walk = &mut *(argument as *mut Walk);
+                let pc = _Unwind_GetIP(context);
+                if pc == 0 || walk.len == walk.out.len() {
+                    return URC_END_OF_STACK;
+                }
+                walk.out[walk.len] = (pc, _Unwind_GetGR(context, RBP));
+                walk.len += 1;
+                URC_NO_REASON
+            }
+        }
+        let mut walk = Walk { out, len: 0 };
+        unsafe { _Unwind_Backtrace(visit, &mut walk as *mut Walk as *mut c_void) };
+        walk.len
     }
 
     /// Return true when the loader owns `pc` as part of the executable or a
@@ -359,26 +409,36 @@ impl HLInterpreter {
             // frame itself: it steps through the runtime's own frames by
             // their unwind tables and stops at the first compiled one,
             // reporting the return address into it.
-            let mut inner = [std::ptr::null_mut::<c_void>(); 64];
-            let count = unsafe { libc::backtrace(inner.as_mut_ptr(), 64).max(0) as usize };
+            //
+            // The unwinder also restores the callee-saved registers frame by
+            // frame, so at the compiled frame it holds that frame's own rbp,
+            // whatever the runtime frames in between did with the register.
+            // The chain starts there; the boundary's frame pointer is only
+            // a fallback for a throw the unwinder could not follow.
+            let mut inner = [(0usize, 0usize); 64];
+            let count = Self::unwind_frames(&mut inner);
             let mut innermost_pc = 0usize;
-            for pc in inner.iter().take(count) {
-                if Self::native_image_owns_pc(*pc as usize) {
+            let mut chain_start = _frame_hint as usize;
+            for &(pc, rbp) in inner.iter().take(count) {
+                if Self::native_image_owns_pc(pc) {
                     continue;
                 }
                 // Waiting on the map, not trying it: an install on a broker
                 // thread holds the lock briefly, and losing to it here would
                 // drop the throwing frame from the trace.
-                if ash_core::jit_map::lookup_wait(*pc as usize).is_some() {
-                    self.push_jit_frames(&mut functions, *pc as usize);
-                    innermost_pc = *pc as usize;
+                if ash_core::jit_map::lookup_wait(pc).is_some() {
+                    self.push_jit_frames(&mut functions, pc);
+                    innermost_pc = pc;
+                    if rbp != 0 {
+                        chain_start = rbp;
+                    }
                     break;
                 }
             }
             unsafe {
                 if let Some((stack_low, stack_high)) = Self::thread_stack_bounds() {
                     let stack_size = stack_high - stack_low;
-                    let mut frame = _frame_hint as usize;
+                    let mut frame = chain_start;
                     for _ in 0..MAX_FRAMES {
                         if frame < stack_low
                             || frame > stack_high.saturating_sub(2 * std::mem::size_of::<usize>())

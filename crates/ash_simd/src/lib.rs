@@ -317,26 +317,32 @@ fn fmax<T: Float>(a: T, b: T) -> T {
 /// targets have their vector unit in the baseline.
 macro_rules! prim {
     (fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
-        pub unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? { unsafe {
+        pub unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? {
             #[cfg(target_arch = "x86_64")]
             {
                 use core::sync::atomic::{AtomicPtr, Ordering::Relaxed};
                 type Entry = unsafe extern "C" fn($($ty),*) $(-> $ret)?;
-                unsafe extern "C" fn narrow($($arg: $ty),*) $(-> $ret)? $body
+                unsafe extern "C" fn narrow($($arg: $ty),*) $(-> $ret)? {
+                    unsafe { $body }
+                }
                 #[target_feature(enable = "avx2,fma")]
-                unsafe extern "C" fn wide($($arg: $ty),*) $(-> $ret)? $body
+                unsafe extern "C" fn wide($($arg: $ty),*) $(-> $ret)? {
+                    unsafe { $body }
+                }
                 unsafe extern "C" fn resolve($($arg: $ty),*) $(-> $ret)? {
                     let chosen: Entry = if x86_wide() { wide } else { narrow };
                     ENTRY.store(chosen as *mut (), Relaxed);
-                    chosen($($arg),*)
+                    unsafe { chosen($($arg),*) }
                 }
                 static ENTRY: AtomicPtr<()> = AtomicPtr::new(resolve as *mut ());
-                let entry: Entry = core::mem::transmute(ENTRY.load(Relaxed));
-                entry($($arg),*)
+                let entry: Entry = unsafe { core::mem::transmute(ENTRY.load(Relaxed)) };
+                unsafe { entry($($arg),*) }
             }
             #[cfg(not(target_arch = "x86_64"))]
-            $body
-        }}
+            unsafe {
+                $body
+            }
+        }
     };
 }
 

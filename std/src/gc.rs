@@ -1779,14 +1779,14 @@ fn usable_ram_bytes() -> usize {
                 }
                 for d in probe {
                     for name in ["memory.max", "memory/memory.limit_in_bytes"] {
-                        if let Ok(t) = std::fs::read_to_string(d.join(name)) {
-                            if let Ok(n) = t.trim().parse::<usize>() {
-                                // v1 uses a sentinel near usize::MAX for
-                                // "no limit"; v2 writes the word "max",
-                                // which fails the parse and is skipped.
-                                if n > 0 && n < (1 << 60) {
-                                    limit = limit.min(n);
-                                }
+                        if let Ok(t) = std::fs::read_to_string(d.join(name))
+                            && let Ok(n) = t.trim().parse::<usize>()
+                        {
+                            // v1 uses a sentinel near usize::MAX for
+                            // "no limit"; v2 writes the word "max",
+                            // which fails the parse and is skipped.
+                            if n > 0 && n < (1 << 60) {
+                                limit = limit.min(n);
                             }
                         }
                     }
@@ -1798,12 +1798,11 @@ fn usable_ram_bytes() -> usize {
         }
         if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
             for line in t.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb) = rest.split_whitespace().next() {
-                        if let Ok(kb) = kb.parse::<usize>() {
-                            return kb * 1024;
-                        }
-                    }
+                if let Some(rest) = line.strip_prefix("MemTotal:")
+                    && let Some(kb) = rest.split_whitespace().next()
+                    && let Ok(kb) = kb.parse::<usize>()
+                {
+                    return kb * 1024;
                 }
             }
         }

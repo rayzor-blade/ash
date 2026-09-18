@@ -13,15 +13,11 @@ inkwell = { version = "0.8.0", features = ["llvm21-1-prefer-static"] }
 beadie = { git = "https://github.com/darmie/beadie", rev = "868d1069eeda1ea162460273869597a9b0866ebf", features = ["cranelift"] }
 flexstr = { version = "0.9" }
 num_enum = {version = "0.7.3"}
-ash_std ={ path = "std" }
-ash_hdll_sqlite = { path = "crates/ash_hdll_sqlite" }
 ash_simd = { path = "crates/ash_simd" }
 # Its own repository: the HashLink C ABI is not specific to this VM, and the
 # libraries that use it are not all here. https://github.com/rayzor-blade/hl_abi
 hl_abi = { git = "https://github.com/rayzor-blade/hl_abi" }
 ash_native_call = { path = "crates/ash_native_call" }
-tinysdl = { path = "crates/tinysdl" }
-ash_browser = { path = "crates/ash_browser" }
 ash_macro ={ path = "crates/ash_macro" }
 once_cell = "1.20.2"
 byteorder = "1.5.0"

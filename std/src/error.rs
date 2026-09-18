@@ -999,53 +999,57 @@ unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) 
 /// take from inside a walk the loader is servicing.
 #[cfg(target_os = "linux")]
 unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
-    unsafe extern "C" {
-        fn _Unwind_Backtrace(
-            trace: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
-            argument: *mut c_void,
-        ) -> i32;
-        fn _Unwind_GetIP(context: *mut c_void) -> usize;
-    }
-    // `_Unwind_Reason_Code`: NO_REASON asks for the next frame, END_OF_STACK
-    // ends the walk. The bound matches the frame-pointer walker's.
-    const URC_NO_REASON: i32 = 0;
-    const URC_END_OF_STACK: i32 = 5;
-    const MAX_FRAMES: usize = 256;
-    struct Walk {
-        pcs: [usize; MAX_FRAMES],
-        len: usize,
-    }
-    unsafe extern "C" fn visit(context: *mut c_void, argument: *mut c_void) -> i32 {
-        let walk = &mut *(argument as *mut Walk);
-        // For every frame but the innermost this is the return address, which
-        // is what the frame-pointer walk records too.
-        let pc = _Unwind_GetIP(context);
-        if pc == 0 || walk.len == MAX_FRAMES {
-            return URC_END_OF_STACK;
+    unsafe {
+        unsafe extern "C" {
+            fn _Unwind_Backtrace(
+                trace: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
+                argument: *mut c_void,
+            ) -> i32;
+            fn _Unwind_GetIP(context: *mut c_void) -> usize;
         }
-        walk.pcs[walk.len] = pc;
-        walk.len += 1;
-        URC_NO_REASON
-    }
-    let mut walk = Walk {
-        pcs: [0; MAX_FRAMES],
-        len: 0,
-    };
-    _Unwind_Backtrace(visit, &mut walk as *mut Walk as *mut c_void);
-    let mut written = 0i32;
-    for &pc in &walk.pcs[..walk.len] {
-        if !aot_frame_in_program(pc) {
-            continue;
+        // `_Unwind_Reason_Code`: NO_REASON asks for the next frame, END_OF_STACK
+        // ends the walk. The bound matches the frame-pointer walker's.
+        const URC_NO_REASON: i32 = 0;
+        const URC_END_OF_STACK: i32 = 5;
+        const MAX_FRAMES: usize = 256;
+        struct Walk {
+            pcs: [usize; MAX_FRAMES],
+            len: usize,
         }
-        if !output.is_null() {
-            if written >= capacity {
-                break;
+        unsafe extern "C" fn visit(context: *mut c_void, argument: *mut c_void) -> i32 {
+            unsafe {
+                let walk = &mut *(argument as *mut Walk);
+                // For every frame but the innermost this is the return address, which
+                // is what the frame-pointer walk records too.
+                let pc = _Unwind_GetIP(context);
+                if pc == 0 || walk.len == MAX_FRAMES {
+                    return URC_END_OF_STACK;
+                }
+                walk.pcs[walk.len] = pc;
+                walk.len += 1;
+                URC_NO_REASON
             }
-            *output.add(written as usize) = pc as *mut c_void;
         }
-        written += 1;
+        let mut walk = Walk {
+            pcs: [0; MAX_FRAMES],
+            len: 0,
+        };
+        _Unwind_Backtrace(visit, &mut walk as *mut Walk as *mut c_void);
+        let mut written = 0i32;
+        for &pc in &walk.pcs[..walk.len] {
+            if !aot_frame_in_program(pc) {
+                continue;
+            }
+            if !output.is_null() {
+                if written >= capacity {
+                    break;
+                }
+                *output.add(written as usize) = pc as *mut c_void;
+            }
+            written += 1;
+        }
+        written
     }
-    written
 }
 
 /// Map a return address back to the function that contains it and hand back

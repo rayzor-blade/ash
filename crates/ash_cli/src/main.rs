@@ -773,7 +773,7 @@ unsafe fn errno() -> i32 {
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 unsafe fn errno() -> i32 {
-    *libc::__errno_location()
+    unsafe { *libc::__errno_location() }
 }
 
 /// Write a byte slice straight to fd 2, retrying short writes and `EINTR`.
@@ -931,19 +931,21 @@ unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64,
 /// dereferencing a possibly-garbage frame pointer inside a signal handler.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
-    if ctx.is_null() {
-        return None;
+    unsafe {
+        if ctx.is_null() {
+            return None;
+        }
+        const REG_RBP: usize = 10;
+        const REG_RSP: usize = 15;
+        const REG_RIP: usize = 16;
+        let gregs = &(*(ctx as *const libc::ucontext_t)).uc_mcontext.gregs;
+        Some((
+            gregs[REG_RIP] as u64,
+            0,
+            gregs[REG_RBP] as u64,
+            gregs[REG_RSP] as u64,
+        ))
     }
-    const REG_RBP: usize = 10;
-    const REG_RSP: usize = 15;
-    const REG_RIP: usize = 16;
-    let gregs = &(*(ctx as *const libc::ucontext_t)).uc_mcontext.gregs;
-    Some((
-        gregs[REG_RIP] as u64,
-        0,
-        gregs[REG_RBP] as u64,
-        gregs[REG_RSP] as u64,
-    ))
 }
 
 #[cfg(all(

@@ -343,7 +343,12 @@ fn main() {
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let text = bindings
         .to_string()
-        .replace("\nextern \"C\" {", "\nunsafe extern \"C\" {")
+        .lines()
+        .map(|l| match l.strip_prefix("extern \"C\" {") {
+            Some(rest) => format!("unsafe extern \"C\" {{{rest}\n"),
+            None => format!("{l}\n"),
+        })
+        .collect::<String>()
         .replace(
             "::std::slice::from_raw_parts(self.as_ptr(), len)",
             "unsafe { ::std::slice::from_raw_parts(self.as_ptr(), len) }",

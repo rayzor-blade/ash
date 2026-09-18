@@ -187,6 +187,7 @@ dependencies = [
  "cranelift-frontend 0.136.0-dev",
  "cranelift-module",
  "flexstr",
+ "gimli",
  "inkwell",
  "libc",
  "libloading",

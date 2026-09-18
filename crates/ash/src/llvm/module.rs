@@ -167,6 +167,12 @@ pub struct JITModule<'ctx> {
     /// each `Ret` pops the frame. `None` on every other target and between
     /// bodies.
     pub(crate) shadow_slot: Option<PointerValue<'ctx>>,
+    /// Whether bodies carry the line table a trace reads back (`lines.rs`).
+    /// The tiers set it when positions are asked for; AOT never does.
+    pub(crate) trace_lines: bool,
+    /// The debug-info state of the module being lowered into, while
+    /// `trace_lines` and a body has opened it.
+    pub(crate) lines: Option<super::lines::ModuleLines<'ctx>>,
 }
 
 /// Per-phase init timing: printed inline when ASH_TIERED_TIMING=1, and always
@@ -418,6 +424,8 @@ impl<'ctx> JITModule<'ctx> {
             inline_alloc: std::cell::OnceCell::new(),
             current_findex: usize::MAX,
             shadow_slot: None,
+            trace_lines: false,
+            lines: None,
         };
 
         module.create_constant_pool_globals();
@@ -859,7 +867,12 @@ impl<'ctx> JITModule<'ctx> {
             inline_alloc: std::cell::OnceCell::new(),
             current_findex: usize::MAX,
             shadow_slot: None,
+            trace_lines: crate::air_pipeline::trace_positions(),
+            lines: None,
         };
+        if module.trace_lines {
+            super::lines::track(&module.execution_engine);
+        }
 
         // NOT the whole pool. Promotion is per function, and both paths that
         // need a constant already materialize it: `create_constant_pool_

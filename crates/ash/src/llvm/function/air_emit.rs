@@ -547,7 +547,11 @@ impl<'ctx> JITModule<'ctx> {
                 continue;
             }
             for (ii, instr) in block.instrs.iter().enumerate() {
-                if !marker_emits && matches!(instr, AirInstr::Pos { .. }) {
+                if let AirInstr::Pos { file, line, site } = instr
+                    && !marker_emits
+                {
+                    // No code; what follows is at this position.
+                    self.lines_mark(air, *file, *line, *site);
                     continue;
                 }
                 let current = blocks[bi][ii];
@@ -1033,6 +1037,7 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                     }
                     AirInstr::Pos { file, line, site } => {
+                        self.lines_mark(air, *file, *line, *site);
                         // The frame's position, as the runtime reads it back:
                         // `(file << 32) | line`. Only a shadow-stack body has a
                         // slot. The frame is this function's, so a marker

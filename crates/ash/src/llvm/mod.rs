@@ -4,6 +4,7 @@ pub mod aot_link;
 pub mod aot_shard;
 pub mod aot_trampoline;
 pub mod function;
+pub mod lines;
 pub mod module;
 pub mod object;
 pub mod tbaa;

@@ -667,24 +667,28 @@ impl<'ctx> JITModule<'ctx> {
 
             let basic_block = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(basic_block);
-            self.emit_purity_barrier()?;
-
-            self.translate_air_v2(&f, &air, function)?;
-
-            if self
-                .builder
-                .get_insert_block()
-                .unwrap()
-                .get_terminator()
-                .is_none()
-            {
-                let ret_type = function.get_type().get_return_type();
-                if let Some(ret_type) = ret_type {
-                    self.builder.build_return(Some(&ret_type.const_zero()))?;
-                } else {
-                    self.builder.build_return(None)?;
+            self.lines_begin_function(function, &f);
+            let body = (|| -> Result<()> {
+                self.emit_purity_barrier()?;
+                self.translate_air_v2(&f, &air, function)?;
+                if self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_terminator()
+                    .is_none()
+                {
+                    let ret_type = function.get_type().get_return_type();
+                    if let Some(ret_type) = ret_type {
+                        self.builder.build_return(Some(&ret_type.const_zero()))?;
+                    } else {
+                        self.builder.build_return(None)?;
+                    }
                 }
-            }
+                Ok(())
+            })();
+            self.lines_end_function();
+            body?;
 
             if !function.verify(true) {
                 // Function verification failed (non-fatal) — stub will be used
@@ -810,6 +814,7 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.clear_insertion_position();
 
         let host_module = std::mem::replace(&mut self.module, promo_module);
+        let host_lines = self.lines.take();
         let host_funcs = std::mem::take(&mut self.func_cache);
         let host_ints = std::mem::take(&mut self.int_globals);
         let host_floats = std::mem::take(&mut self.float_globals);
@@ -837,7 +842,9 @@ impl<'ctx> JITModule<'ctx> {
         })();
 
         self.builder.clear_insertion_position();
+        self.lines_finalize();
         let promo_module = std::mem::replace(&mut self.module, host_module);
+        self.lines = host_lines;
         // Kept, not dropped: this is the module's findex -> value map, and it
         // is the only exact identity for the callees it left as declarations.
         let promo_funcs = std::mem::replace(&mut self.func_cache, host_funcs);
@@ -902,6 +909,13 @@ impl<'ctx> JITModule<'ctx> {
         if let Err(e) = promo_module.verify() {
             return Err(anyhow!("promote module {modname} failed verification: {e}"));
         }
+        // The same panel the shared path prints, for a body promoted alone.
+        if Self::fn_ir_dump_wanted_impl(findex) {
+            eprintln!(
+                "=== LLVM IR (promote, own module) findex={findex} ===\n{}",
+                promo_module.print_to_string().to_string()
+            );
+        }
 
         self.bind_module_declarations(
             &promo_module,
@@ -939,6 +953,7 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
         register_batch(found, "own");
+        super::lines::attach_loaded();
         Ok(addr)
     }
 
@@ -1075,6 +1090,7 @@ impl<'ctx> JITModule<'ctx> {
         // `optimize_module`.
         if !self.aot {
             let _phase = crate::profile::scope("llvm middle-end (promote)");
+            self.lines_finalize();
             let excluded = self.shield_trap_functions_from_optimization();
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             let target = *self.func_cache.get(&findex).ok_or_else(|| {
@@ -1256,6 +1272,7 @@ impl<'ctx> JITModule<'ctx> {
         // size each body has by construction -- bodies of one batch are laid
         // out back to back, so a body ends where the next one starts.
         self.register_shared_bodies();
+        super::lines::attach_loaded();
 
         self.compiled_meta_for(findex, fn_addr)
     }
@@ -1390,6 +1407,7 @@ impl<'ctx> JITModule<'ctx> {
         // is not a live block, so leave it pointing at nothing.
         self.builder.clear_insertion_position();
         let host_module = std::mem::replace(&mut self.module, osr_module);
+        let host_lines = self.lines.take();
         let host_funcs = std::mem::take(&mut self.func_cache);
         let host_ints = std::mem::take(&mut self.int_globals);
         let host_floats = std::mem::take(&mut self.float_globals);
@@ -1424,7 +1442,9 @@ impl<'ctx> JITModule<'ctx> {
         );
 
         self.builder.clear_insertion_position();
+        self.lines_finalize();
         let osr_module = std::mem::replace(&mut self.module, host_module);
+        self.lines = host_lines;
         let osr_funcs = std::mem::replace(&mut self.func_cache, host_funcs);
         self.int_globals = host_ints;
         self.float_globals = host_floats;

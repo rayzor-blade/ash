@@ -11,7 +11,7 @@ keywords = ["Virtual Machine", "VM", "JIT", "Compiler", "Haxe", "HashLink"]
 # interpreter and Cranelift tier build alone and nothing links LLVM.
 [features]
 default = ["llvm"]
-llvm = ["dep:inkwell", "dep:ash_wasm_link"]
+llvm = ["dep:inkwell", "dep:ash_wasm_link", "dep:gimli"]
 
 [dependencies]
 inkwell = { workspace = true, optional = true }
@@ -32,6 +32,9 @@ byteorder = {workspace=true}
 ash_macro = {workspace=true}
 air = { path = "../air" }
 libc = "0.2.158"
+# Reading the line table MCJIT loads beside a promoted body (llvm/lines.rs).
+# The same version wasmtime already pins, so no second copy.
+gimli = { version = "0.33", default-features = false, features = ["read"], optional = true }
 # Symbolizing the sampling profiler's frames: dladdr returns mangled names, and
 # ash_std's are v0-mangled, which is not readable by inspection.
 rustc-demangle = "0.1"

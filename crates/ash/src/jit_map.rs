@@ -15,6 +15,7 @@
 //! lookup answers by containment when a size is known, otherwise by the
 //! nearest start bounded by the next one. `ASH_JIT_MAP=1` dumps it at exit.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 pub use crate::profile::Tier;
@@ -60,7 +61,7 @@ pub struct SourceRun {
 }
 
 /// One frame of a [`SourceRun`]: a line of a function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SourceFrame {
     pub findex: u32,
     pub file: u32,
@@ -155,6 +156,68 @@ pub fn set_positions(start: usize, runs: Vec<SourceRun>) {
         if r.start == start && r.positions.is_empty() {
             r.positions = Box::leak(runs.into_boxed_slice());
         }
+    }
+}
+
+/// The frame chains a tier's positions name, by id.
+///
+/// The LLVM tier cannot carry a chain through emission the way Cranelift
+/// carries a srcloc, so it carries the id as a DWARF line number and reads
+/// it back off the line table. Ids start at 1: DWARF reads line 0 as
+/// "no source", and so does the reader here.
+fn chains() -> &'static Mutex<(Vec<&'static [SourceFrame]>, HashMap<Vec<SourceFrame>, u32>)> {
+    static C: OnceLock<Mutex<(Vec<&'static [SourceFrame]>, HashMap<Vec<SourceFrame>, u32>)>> =
+        OnceLock::new();
+    C.get_or_init(|| Mutex::new((Vec::new(), HashMap::new())))
+}
+
+/// The id of `frames`, minting one the first time it is seen.
+pub fn intern_chain(frames: Vec<SourceFrame>) -> u32 {
+    let mut c = chains().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&id) = c.1.get(&frames) {
+        return id;
+    }
+    let leaked: &'static [SourceFrame] = Box::leak(frames.clone().into_boxed_slice());
+    c.0.push(leaked);
+    let id = c.0.len() as u32;
+    c.1.insert(frames, id);
+    id
+}
+
+fn chain(id: u32) -> Option<&'static [SourceFrame]> {
+    let c = chains().lock().ok()?;
+    c.0.get(id.checked_sub(1)? as usize).copied()
+}
+
+/// Attach address runs `(start, end, chain id)` to the registered bodies
+/// they fall in: the LLVM tier's positions, read off a loaded line table
+/// after the bodies were registered. A run lands on the nearest body at or
+/// below its start, which is the same answer a lookup gives for its pcs.
+pub fn attach_runs(runs: &[(usize, usize, u32)]) {
+    let Ok(mut m) = map().lock() else { return };
+    let mut per_range: HashMap<usize, Vec<SourceRun>> = HashMap::new();
+    for &(start, end, id) in runs {
+        let Some(frames) = chain(id) else { continue };
+        let at = m.partition_point(|r| r.start <= start);
+        let Some(index) = at.checked_sub(1) else { continue };
+        let r = m[index];
+        if r.size > 0 && start - r.start >= r.size {
+            continue;
+        }
+        let (Ok(s), Ok(e)) = (u32::try_from(start - r.start), u32::try_from(end - r.start)) else {
+            continue;
+        };
+        per_range.entry(index).or_default().push(SourceRun {
+            start: s,
+            end: e,
+            frames,
+        });
+    }
+    for (index, mut new) in per_range {
+        let r = &mut m[index];
+        new.extend_from_slice(r.positions);
+        new.sort_by_key(|run| run.start);
+        r.positions = Box::leak(new.into_boxed_slice());
     }
 }
 

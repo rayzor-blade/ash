@@ -2177,9 +2177,14 @@ pub(crate) fn compile_with_llvm(
             meta.fn_addr as *mut ()
         }
         Err(reason) => {
-            // Same policy as the Cranelift sink: a verifier failure is an ash
-            // codegen bug and must be visible without any logging flag.
-            if ctx.log_promotions || reason.contains("did not verify") {
+            // Same policy as the Cranelift sink: a verifier failure or a fault
+            // inside the compiler is an ash codegen bug and must be visible
+            // without any logging flag.
+            if ctx.log_promotions
+                || reason.contains("did not verify")
+                || reason.contains("native fault")
+                || reason.contains("panicked")
+            {
                 eprintln!("[tiered] {on_fail} findex={findex} reason={reason}");
             }
             ctx.llvm_failed

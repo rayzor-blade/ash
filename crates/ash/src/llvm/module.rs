@@ -298,12 +298,28 @@ pub(crate) fn run_middle_end_at(
             module.get_name().to_string_lossy()
         );
     }
-    let abi = crate::target_abi::TargetAbi::for_triple(&triple)?;
-    let (_, machine) = abi.target_machine(OptimizationLevel::Aggressive)?;
-
-    module
-        .run_passes(&spec, &machine, PassBuilderOptions::create())
-        .map_err(|e| anyhow!("run_passes({spec}): {}", e))
+    // One machine per triple per thread: building one rebuilds the subtarget,
+    // a measurable share of a small module's middle end, and the pass
+    // pipeline only reads it. Per thread because a machine is not shared
+    // across threads, and each broker runs its own compiles.
+    thread_local! {
+        static MACHINES: std::cell::RefCell<HashMap<String, inkwell::targets::TargetMachine>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    MACHINES.with(|cell| -> Result<()> {
+        let mut machines = cell.borrow_mut();
+        let machine = match machines.entry(triple.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let abi = crate::target_abi::TargetAbi::for_triple(&triple)?;
+                let (_, machine) = abi.target_machine(OptimizationLevel::Aggressive)?;
+                v.insert(machine)
+            }
+        };
+        module
+            .run_passes(&spec, machine, PassBuilderOptions::create())
+            .map_err(|e| anyhow!("run_passes({spec}): {}", e))
+    })
 }
 
 fn timing_enabled() -> bool {

@@ -1402,6 +1402,7 @@ impl HLInterpreter {
             gate_checked: Vec::new(),
             entries: Vec::new(),
             sigs: Vec::new(),
+            calls: Vec::new(),
             shared_ctx,
             stats: TieredStats::default(),
         });
@@ -3725,7 +3726,7 @@ impl HLInterpreter {
         // point and is deliberately dropped: calling it would restart the
         // function from the top, which is the one thing a mid-loop transfer
         // must not do. Only the tick matters here.
-        let _ = self.tiered_on_invoke(bytecode, findex, func_idx);
+        let _ = self.tiered_on_invoke(bytecode, findex, func_idx, false);
     }
 
     /// Build and attach ONE OSR entry for a header that turned hot after its
@@ -4154,8 +4155,9 @@ impl HLInterpreter {
                     .contains(&findex);
                 if !already_llvm && let Some(bound) = t.beads.get(findex).and_then(|b| b.as_ref()) {
                     let ctx = Arc::clone(&t.shared_ctx);
+                    let calls = t.calls.get(findex).copied().unwrap_or(0);
                     let submitted = t.adapter.force_promote(bound, 1, move |b| {
-                        tiered_compile_tier(&ctx, 1, findex, b, true)
+                        tiered_compile_tier(&ctx, 1, findex, b, true, calls)
                     });
                     if submitted && t.shared_ctx.tier_log {
                         eprintln!("[tier] osr-transfer proposes findex={findex} tier=llvm");
@@ -4295,7 +4297,7 @@ impl HLInterpreter {
                 if under_loop && !self.demand_seen(findex, DEMAND_UNDER_LOOP) {
                     self.note_demand(findex, DEMAND_UNDER_LOOP);
                 }
-                if let Some(entry) = self.tiered_on_invoke(bytecode, findex, func_idx) {
+                if let Some(entry) = self.tiered_on_invoke(bytecode, findex, func_idx, true) {
                     // ASH_TIERED_SHADOW=1,2,3: run the listed findexes through
                     // BOTH the compiled entry and the interpreter, compare the
                     // NaN-boxed results bit for bit, and log any divergence
@@ -4431,6 +4433,7 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         findex: usize,
         func_idx: usize,
+        is_call: bool,
     ) -> Option<CompiledFunctionEntry> {
         // One-time registration gate: untierable findexes get no bead.
         {
@@ -4443,6 +4446,11 @@ impl HLInterpreter {
                 tiered.gate_checked.resize(findex + 1, false);
                 tiered.entries.resize_with(findex + 1, || None);
                 tiered.sigs.resize_with(findex + 1, || None);
+                tiered.calls.resize(findex + 1, 0);
+            }
+            // An entry, as opposed to a back-edge tick.
+            if is_call {
+                tiered.calls[findex] = tiered.calls[findex].saturating_add(1);
             }
             if !tiered.gate_checked[findex] {
                 tiered.gate_checked[findex] = true;
@@ -4488,8 +4496,9 @@ impl HLInterpreter {
             let tiered = self.tiered_runtime.as_ref()?;
             let bound = tiered.beads[findex].as_ref()?;
             let ctx = Arc::clone(&tiered.shared_ctx);
+            let calls = tiered.calls[findex];
             tiered.adapter.on_invoke(bound, move |tier, bead| {
-                tiered_compile_tier(&ctx, tier, findex, bead, true)
+                tiered_compile_tier(&ctx, tier, findex, bead, true, calls)
             })?
         };
 
@@ -4615,7 +4624,7 @@ impl HLInterpreter {
         // `tiered_on_invoke` owns the one-time bead registration and cached
         // ABI metadata. Its primary threshold is unreachable in this mode,
         // so this first call can only register and tick.
-        let _ = self.tiered_on_invoke(bytecode, findex, func_idx);
+        let _ = self.tiered_on_invoke(bytecode, findex, func_idx, true);
 
         let (ctx, bead) = {
             let tiered = self
@@ -4631,7 +4640,7 @@ impl HLInterpreter {
         };
 
         if bead.compiled().is_none() {
-            let code = tiered_compile_tier(&ctx, 0, findex, &bead, true);
+            let code = tiered_compile_tier(&ctx, 0, findex, &bead, true, u32::MAX);
             if code.is_null() {
                 return Err(anyhow!(
                     "JIT tier 0 failed to compile findex {} ({})",
@@ -4652,7 +4661,7 @@ impl HLInterpreter {
         // builds the typed call entry and keeps all pointer-change handling in
         // one place.
         let entry = self
-            .tiered_on_invoke(bytecode, findex, func_idx)
+            .tiered_on_invoke(bytecode, findex, func_idx, true)
             .ok_or_else(|| anyhow!("JIT installed no callable entry for findex {}", findex))?;
 
         // A direct or closure call made by compiled code can use the guarded
@@ -4740,7 +4749,7 @@ impl HLInterpreter {
                     .ok_or_else(|| anyhow!("JIT lost bead for findex {}", findex))?;
                 let promote_ctx = Arc::clone(&tiered.shared_ctx);
                 tiered.adapter.force_promote(bound, 1, move |promote_bead| {
-                    tiered_compile_tier(&promote_ctx, 1, findex, promote_bead, true)
+                    tiered_compile_tier(&promote_ctx, 1, findex, promote_bead, true, u32::MAX)
                 })
             };
             if !queued && config.log_promotions {

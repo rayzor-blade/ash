@@ -1761,7 +1761,41 @@ impl<'ctx> JITModule<'ctx> {
             // bodies.
             let excluded = self.shield_trap_functions_from_optimization();
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
+            self.lines_finalize();
+            // The copied callees and thunks exist for the entry to inline.
+            // Internal for the middle end, so a body it folded in is dropped
+            // instead of emitted; whatever survives is made visible again,
+            // because the engine hands bodies back by name and the jit map
+            // registers them that way.
+            let bodies: Vec<FunctionValue<'ctx>> = self
+                .module
+                .get_functions()
+                .filter(|f| f.count_basic_blocks() > 0 && f.get_name().to_bytes() != name.as_bytes())
+                .collect();
+            for f in &bodies {
+                f.set_linkage(inkwell::module::Linkage::Internal);
+            }
+            // A body the middle end deletes leaves its handle in `func_cache`
+            // dangling, and the first touch of one is a fault inside the
+            // promotion. The names are read before, and only the entries the
+            // module still answers for are kept after.
+            let named: Vec<(usize, String)> = self
+                .func_cache
+                .iter()
+                .filter_map(|(&fi, f)| Some((fi, f.get_name().to_str().ok()?.to_string())))
+                .collect();
             super::module::run_middle_end(&self.module)?;
+            self.func_cache.clear();
+            for (fi, fname) in named {
+                if let Some(f) = self.module.get_function(&fname) {
+                    self.func_cache.insert(fi, f);
+                }
+            }
+            for f in self.module.get_functions() {
+                if f.count_basic_blocks() > 0 && f.get_name().to_bytes() != name.as_bytes() {
+                    f.set_linkage(inkwell::module::Linkage::External);
+                }
+            }
         }
         if std::env::var_os("ASH_OSR_LOG").is_some() {
             eprintln!(

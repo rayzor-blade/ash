@@ -674,6 +674,10 @@ pub(crate) struct TieredRuntime {
     /// findex-indexed marshaling signature, derived from the bytecode and
     /// therefore identical for every tier.
     pub(crate) sigs: Vec<Option<CallSignature>>,
+    /// Interpreted calls per findex: entries, not back-edge ticks. What a
+    /// promote consults to tell a function called once from one called in
+    /// a loop, which the bead's count (ticks included) cannot.
+    pub(crate) calls: Vec<u32>,
     pub(crate) shared_ctx: Arc<TieredSharedCtx>,
     /// Interp-side counters; broker-side counters live in `shared_ctx`.
     pub(crate) stats: TieredStats,
@@ -908,12 +912,13 @@ pub(crate) fn tiered_compile_tier(
     findex: usize,
     bead: &Arc<Bead>,
     may_block: bool,
+    calls: u32,
 ) -> *mut () {
     // SAFETY: the primitive only touches this thread's own mutator record.
     unsafe { ash_core::hl_bindings::hl_blocking(true) };
     let began = std::time::Instant::now();
     let generation = ctx.reload_generation();
-    let mut code = tiered_compile_tier_inner(ctx, tier, findex, bead, may_block);
+    let mut code = tiered_compile_tier_inner(ctx, tier, findex, bead, may_block, calls);
     let took = began.elapsed();
     unsafe { ash_core::hl_bindings::hl_blocking(false) };
     // Lowered from a program that has since been reloaded: the reload has
@@ -948,6 +953,7 @@ fn tiered_compile_tier_inner(
     findex: usize,
     bead: &Arc<Bead>,
     may_block: bool,
+    calls: u32,
 ) -> *mut () {
     use std::sync::atomic::Ordering;
     // Whoever compiled it first publishes through `functions_ptrs`, and that
@@ -1048,13 +1054,13 @@ fn tiered_compile_tier_inner(
             {
                 return std::ptr::null_mut();
             }
-            compile_with_llvm(ctx, 0, findex, may_block, Some(bead))
+            compile_with_llvm(ctx, 0, findex, may_block, Some(bead), calls)
         }
         #[cfg(feature = "llvm")]
         (TierMode::Auto, 0) => {
             let cl = compile_with_cranelift(ctx, findex, bead);
             if cl.is_null() {
-                compile_with_llvm(ctx, 0, findex, may_block, Some(bead))
+                compile_with_llvm(ctx, 0, findex, may_block, Some(bead), calls)
             } else {
                 cl
             }
@@ -1103,7 +1109,7 @@ fn tiered_compile_tier_inner(
             // 8ms and 15ms and took the run from 94ms to 400ms. A signal that
             // cannot be read must not be treated as a signal that is absent.
             if ctx.compiled_only || crate::ssa::enabled() {
-                return compile_with_llvm(ctx, 1, findex, may_block, Some(bead));
+                return compile_with_llvm(ctx, 1, findex, may_block, Some(bead), calls);
             }
             // Refusing leaves the bead on Cranelift and is a postponement,
             // not a veto: beadie lowers the tier-1 queued flag when a compile
@@ -1120,7 +1126,7 @@ fn tiered_compile_tier_inner(
                 }
                 return std::ptr::null_mut();
             }
-            compile_with_llvm(ctx, 1, findex, may_block, Some(bead))
+            compile_with_llvm(ctx, 1, findex, may_block, Some(bead), calls)
         }
         _ => {
             // Not a rung this mode has. With the ladder pinned there is only
@@ -1451,7 +1457,7 @@ pub(crate) fn resolve_worker_stub(
             if let Some(code) = bead.compiled() {
                 code
             } else {
-                let code = tiered_compile_tier(ctx, 0, findex, &bead, may_block);
+                let code = tiered_compile_tier(ctx, 0, findex, &bead, may_block, u32::MAX);
                 if code.is_null() {
                     return code;
                 }
@@ -1852,8 +1858,10 @@ pub(crate) fn osr_plan_for(
 }
 
 #[cfg(feature = "llvm")]
-fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, findex: usize) {
+/// Returns how many exits were published by this call.
+fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, findex: usize) -> usize {
     let program = ctx.bytecode();
+    let mut published = 0;
     for site in ash_core::cranelift::retier_targets(findex, &*program as *const _ as usize) {
         if site.target() != 0 {
             continue;
@@ -1862,6 +1870,9 @@ fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, fin
         let compiled = module
             .compile_retier_entry(layout)
             .and_then(|code| site.publish(layout, code));
+        if compiled.is_ok() {
+            published += 1;
+        }
         if osr_logging() {
             match compiled {
                 Ok(()) => eprintln!(
@@ -1874,6 +1885,7 @@ fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, fin
             }
         }
     }
+    published
 }
 
 #[cfg(feature = "llvm")]
@@ -1901,7 +1913,7 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
             }
         }
     }
-    publish_retier_entries(ctx, &mut module.0, findex);
+    let _ = publish_retier_entries(ctx, &mut module.0, findex);
     drop(guard);
     if entries.is_empty() {
         return;
@@ -1952,6 +1964,7 @@ pub(crate) fn compile_with_llvm(
     findex: usize,
     may_block: bool,
     bead: Option<&Arc<Bead>>,
+    calls: u32,
 ) -> *mut () {
     // A tier-0 failure permanently invalidates the bead (beadie's primary
     // broker); a tier-1 failure is silent and the bead keeps its current tier.
@@ -2064,7 +2077,19 @@ pub(crate) fn compile_with_llvm(
         // the frame waited 43ms for the whole promote when the entry alone
         // was ready at ~15ms, and it ran the middle tier for every one of
         // those iterations.
-        publish_retier_entries(ctx, module, findex);
+        let published = publish_retier_entries(ctx, module, findex);
+        // The exit just published is what the running frame leaves through.
+        // Everything below serves frames that do not exist yet -- a second
+        // interpreter activation reaching the header, a future call -- and a
+        // loop owner entered once, `main`, has neither, so the entry and
+        // the promote were pure compile cost on the thread its loop shares
+        // a core with. A function that has been called more than once is
+        // promoted as before: its next call may come from compiled code,
+        // which ticks nothing, so a postponed promote could never be asked
+        // for again.
+        if published > 0 && tier == 1 && !ctx.compiled_only && calls <= 1 {
+            return Ok(None);
+        }
         if let Some((sites, optimized, cfg)) = osr_plan.as_ref() {
             let mut entries: Vec<OsrEntry> = Vec::new();
             for &pc in sites.iter() {
@@ -2103,19 +2128,26 @@ pub(crate) fn compile_with_llvm(
                     .insert(findex, entries);
             }
         }
-        module.promote_function_strict(findex)
+        module.promote_function_strict(findex).map(Some)
     }));
     crate::native_recovery::disarm_tiered_recovery();
-    let result: std::result::Result<CompiledFunctionMeta, String> = match compile_result {
-        Ok(Ok(meta)) if meta.fn_addr != 0 => Ok(meta),
-        Ok(Ok(_)) => Err("promotion returned null fn_addr".to_string()),
+    let result: std::result::Result<Option<CompiledFunctionMeta>, String> = match compile_result {
+        Ok(Ok(Some(meta))) if meta.fn_addr != 0 => Ok(Some(meta)),
+        Ok(Ok(Some(_))) => Err("promotion returned null fn_addr".to_string()),
+        Ok(Ok(None)) => Ok(None),
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("promotion panicked".to_string()),
     };
     drop(guard);
 
     match result {
-        Ok(meta) => {
+        Ok(None) => {
+            if ctx.tier_log {
+                eprintln!("[tier] defer findex={findex} tier=llvm reason=handed-off");
+            }
+            std::ptr::null_mut()
+        }
+        Ok(Some(meta)) => {
             ctx.llvm_done
                 .lock()
                 .expect("llvm_done mutex poisoned")

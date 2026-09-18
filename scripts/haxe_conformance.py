@@ -623,7 +623,7 @@ def wasm_runner(ash: str) -> str:
 # here and not in engine_env.
 WASM_ARMS = {
     "wasm": {},
-    # The link-time fiber transform (docs/wasm/fibers.md). Reporting-only: it
+    # The link-time fiber transform (docs/internals/wasm-fibers.md). Reporting-only: it
     # says whether instrumenting every function in the suspend set changes any
     # answer, which validation cannot.
     "wasm-fibers": {"ASH_WASM_FIBERS": "1"},

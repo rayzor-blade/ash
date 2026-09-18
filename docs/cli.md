@@ -1,67 +1,79 @@
-# CLI
-
-One binary runs programs and compiles them.
+# Command line
 
 ```
-ash [OPTIONS] [<file.hl>] [PROGRAM_ARGS]...
+ash [OPTIONS] <file.hl> [PROGRAM_ARGS]...
+ash wasm [--validate] <module.wasm>
 ```
+
+Everything after the `.hl` file is the program's `Sys.args()`, as with `hl`.
 
 ```bash
-ash program.hl                              # interpret
-ash --mode hybrid program.hl                # interpret, promote hot functions
-ash --build myprogram program.hl            # compile to a native binary
-ash --build game.wasm --target wasm32-wasip1 game.hl
+ash main.hl                                  # hybrid: interpret, compile hot functions
+ash --mode interp main.hl                    # interpreter only
+ash --build mygame main.hl                   # native executable
+ash --build mygame.wasm --target wasm32-wasip1 main.hl
 ```
 
-Anything after the `.hl` file is passed to the program.
+## Execution
 
-## Running
+| Option | Values | Default | |
+|--------|--------|---------|---|
+| `--mode` | `interp`, `hybrid`, `jit` | `hybrid` | see below |
+| `--preset` | `script`, `application`, `game`, `server`, `benchmark`, `development`, `interpreter` | `application` | promotion thresholds for the program's shape |
+| `--jit-threshold` | integer | 100 | calls before Cranelift compiles a function |
+| `--opt-threshold` | integer | 1000 | calls before LLVM recompiles it; counted on interpreted calls only |
+| `--jit-tier` | `auto`, `cranelift`, `llvm`, `off` | `auto` | restrict the ladder to one compiler, or disable promotion |
+| `--jit-log` | flag | | log every promotion, decline and tier transfer to stderr |
+| `--quiet` | flag | | suppress everything ash prints that the program did not |
 
-| Option | Values | Description |
-|--------|--------|-------------|
-| `--mode` | `interp`, `hybrid`, `jit` | Execution mode (default: `interp`) |
-| `--quiet` | flag | Suppress non-program output |
+**`interp`** executes bytecode and compiles nothing. It is the reference
+semantics: every compiled mode is checked against it, and a difference is a
+bug in ASH.
 
-`interp` runs everything in the bytecode interpreter. `hybrid` adds tiered
-promotion, which is what a long-running program wants. `jit` is the same
-ladder with no interpreter: every function is compiled at its first call.
+**`hybrid`** starts in the interpreter and promotes functions as they get
+hot. Cranelift compiles a function after `--jit-threshold` calls; LLVM
+recompiles it after `--opt-threshold` interpreted calls. Compilation runs on
+background threads. The new code is installed at the function's next call,
+or — for a loop that never returns — at the loop header. A short program
+finishes before any of this pays off; use `interp` or `--preset script`.
+
+**`jit`** never interprets: each function is compiled by Cranelift the first
+time it is reached, and the LLVM tier still takes over the hottest ones. Cold
+code pays its compile time up front, so this is for benchmarks and for
+isolating the interpreter from a problem, not for ordinary use.
+
+`--jit-tier cranelift` and `--jit-tier llvm` pin one compiler; `off` keeps
+the tiering machinery and disables promotion. Explicit thresholds override
+the preset. `ASH_TIER` supplies `--jit-tier` when the flag is absent.
 
 ## Compiling
 
-`--build` produces a native binary that needs no bytecode, no interpreter and
-no JIT at run time.
+| Option | | |
+|--------|---|---|
+| `--build <OUT>` | path | compile and link an executable (or a `.wasm` for a wasm target) |
+| `--emit-aot <OUT.o>` | path | the same compile, stopping at the object file |
+| `--target <TRIPLE>` | triple | target; defaults to the host. A non-host triple is compiled for a generic CPU |
+| `--runtime <PATH>` | path | the runtime library or object to link, instead of searching |
+| `--abi-version <N>` | 1 or 2 | which `libhl.N.dylib` name the program's HDLLs import (default 1) |
+| `--allow-refused` | flag | emit even when a function could not be lowered; each becomes a throw |
+| `--pgo[=<PROFILE>]` | path | devirtualise from a call-site profile |
 
-```bash
-ash --build myprogram myprogram.hl
-./myprogram
-```
+Executables link on the host only; a cross build stops at `--emit-aot` and
+you link. `--pgo` reads a profile written by running the program once with
+`ASH_AOT_PROFILE_OUT` set; without a value it reads `<file>.prof` beside the
+bytecode. Every devirtualised call is guarded, so a stale profile costs a
+compare, never a wrong answer. The value must be attached with `=`.
 
-| Option | Values | Description |
-|--------|--------|-------------|
-| `--build` | path | Compile and link in one step |
-| `--emit-aot` | path | The same compile, stopping at the object file |
-| `--target` | triple | Target to compile for; defaults to this machine |
-| `--runtime` | path | Runtime to link against instead of searching |
-| `--pgo[=<profile>]` | path | Devirtualise from a call-site profile |
+[aot.md](aot.md) covers what a build costs, the dials, and the failure modes.
 
-Executables are host-only, because linking one needs that platform's linker —
-a cross build asks for the object with `--emit-aot`.
+## Tools
 
-`--pgo` takes a profile produced by running the program once with
-`ASH_AOT_PROFILE_OUT` set. Every guard it emits re-checks its target at run
-time, so a stale profile costs a compare and never a wrong answer. The `=` is
-required.
+| Option | |
+|--------|---|
+| `--emit-optimized <PATH>` | run the AIR optimiser over every function and write a plain `.hl` that stock `hl` or HL/C runs; ash as an optimiser rather than a runtime |
+| `--hot-reload` | route direct calls through indirect dispatch so a function can be replaced at run time |
+| `ash wasm <module>` | list a wasm module's functions, tables, exports and imports, grouped by who supplies them |
+| `ash wasm --validate <module>` | exit non-zero and name what a host would still have to provide |
 
-[aot.md](aot.md) covers the runtime, the shard dial and the failure modes.
-
-## Reading a wasm module
-
-```bash
-ash wasm prog.wasm             # functions, tables, exports, imports
-ash wasm --validate prog.wasm  # exit non-zero and name what is missing
-```
-
----
-
-Flags for tuning promotion, tracing what the JIT did, and profiling a run are
-in [debugging.md](debugging.md).
+Tuning flags beyond these, environment variables and the profiler are in
+[debugging.md](debugging.md).

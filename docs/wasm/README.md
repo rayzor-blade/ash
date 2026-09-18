@@ -1,111 +1,97 @@
 # The wasm target
 
-ash compiles HL bytecode to a `.wasm` module through the same AIR and AOT
-pipeline the native target uses. `wasm32-wasip1` is the target; a browser runs
-the same core module through a WASI preview-1 shim.
-
-The route is **AIR → LLVM IR → wasm32 object → WASI link**. LLVM's WebAssembly
-backend supplies structured control flow and function-table lowering, so a
-direct AIR→wasm backend would add CFG structuring, instruction selection, ABI
-lowering, relocations and debug metadata while leaving every runtime problem
-below untouched.
-
-Native `.hdll` files cannot load in a sandbox. A wasm build rejects non-`std`
-natives; framework authors guard them with `#if wasm` or supply a host import.
-
-## The documents
-
-| | |
-|---|---|
-| [abi.md](abi.md) | target layouts, relocations, and how a call is made |
-| [exceptions.md](exceptions.md) | setjmp as a codegen mode, and the LLVM gap ash patches |
-| [host-abi.md](host-abi.md) | what a host must implement: the runtime crate and the socket imports |
-| [fibers.md](fibers.md) | the link-time transform that suspends a fiber with no engine feature |
-| [threads.md](threads.md) | shared memory, Workers, and how ash's threads work here |
-| [hdlls.md](hdlls.md) | native libraries as `dylink.0` side modules |
-
-## Building and inspecting
-
-`ash --build game.wasm --target wasm32-wasip1 game.hl` does the whole thing;
-[aot.md](../aot.md#webassembly) covers it. `ash-wasm-run` runs the result.
-
-`ash wasm prog.wasm` reports functions, indirect call sites, tables, exports
-and imports grouped by whether a host can supply them. `ash wasm --validate`
-exits non-zero and names what is missing. It uses ash's own parser, so a build
-machine needs nothing installed.
-
-## Rebuilding `ash_runtime.o`
-
-`ash_runtime.o` is ash_std, wasi libc and libsetjmp joined into one relocatable
-object. Nothing rebuilds it automatically, so it goes stale the moment ash_std
-gains an export `ash_module_init` calls — the module links, then fails at
-instantiate with `unknown import: env::<name>`.
-`crates/ash/tests/wasm_runtime_fresh.rs` fails first, naming the symbol.
-
-```bash
-cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
-
-rust-lld -flavor wasm -r -o target/release/wasm32-wasip1/ash_runtime.o \
-  --whole-archive target/wasm32-wasip1/release/libash_std.a --no-whole-archive \
-  -L$(brew --prefix wasi-libc)/share/wasi-sysroot/lib/wasm32-wasip1 -lc -lsetjmp
+```sh
+ash --build game.wasm --target wasm32-wasip1 game.hl
 ```
 
-`--no-whole-archive` is load-bearing. Without it libc's `crt1` and the
-long-double `printf` are force-included, the module imports `__main_argc_argv`
-and `__multc3`, and there is no wasm compiler-rt to satisfy the latter. A
-correct object is about 6.35 MB; the broken one was 6.89 MB.
+ash compiles HL bytecode to a WebAssembly module through the same AIR and
+AOT pipeline as the native target: AIR → LLVM IR → wasm32 object → link.
+The linker is built into `ash`, and the libc was joined into the runtime
+object at build time, so the command above needs no other toolchain. The
+target is `wasm32-wasip1`; a browser runs the same core module through a
+WASI preview-1 shim.
 
-Two toolchain requirements: `rust-lld` must be no older than the installed
-wasi-libc, or it fails on the linker-defined `__wasm_first_page_end`; and the
-engine needs the exceptions proposal (`wasmtime -W exceptions`, or
-`Config::wasm_exceptions`, which `ash-wasm-run` sets).
+What works: the language, the standard library, exceptions (`setjmp`-based,
+as natively), `sys.thread` threads that block and resume inside the module
+(`ASH_WASM_FIBERS=1`), real parallel threads via Workers or wasmtime
+threads, sockets through host imports. Native `.hdll` files do not load; a
+library ships a `.wasm` side module instead ([hdlls.md](hdlls.md)), and Haxe
+code that needs a native library guards it with `#if wasm`.
 
-## GC roots are the open correctness problem
+## Running the result
 
-Linear-memory allocation is easy; root discovery is not. The collector scans
-native stacks and callee-saved registers conservatively, but WebAssembly locals
-and operand-stack values are not addresses in linear memory, so scanning the
-LLVM shadow stack finds only spills and address-taken values.
+The module is a library, not a command. It exports `main` and
+`ash_module_init` and imports what a sandbox cannot do for itself. Something
+has to instantiate it and answer those imports — a **host**.
 
-The work is explicit roots for pointer-bearing AIR values, plus scoped roots
-for raw pointers Rust holds across an allocating call. Optimisation must not
-promote a live pointer out of the root set, and "works with optimisation off"
-is not proof — the backend may still place values in wasm locals.
+Two hosts ship with ash, both in `crates/ash_wasm_runtime`:
 
-krio supplies the rendezvous half: `cluster.stop_the_world(agent, || ...)`
-guarantees no other agent is inside a task step. krio decides *when* it is safe
-to scan; ash still decides *what*.
+- **`ash-wasm-run`**, a wasmtime host. `ash-wasm-run game.wasm` runs the
+  module from a terminal; the conformance suite runs on it. wasmtime's own
+  fibers answer the suspending import.
+- **The browser host** (`crates/ash_browser`, `examples/browser/`): the same
+  contract behind a WASI shim, with Workers for threads and WebSocket for
+  the socket client half. `examples/browser/README.md` walks through
+  serving a module.
 
-## Threads and fibers
+Writing your own host: [host-abi.md](host-abi.md) is the contract — the
+imports, the socket API, and the one import every host must supply.
 
-A wasm module cannot switch its own stack, so `std/src/fiber_host.rs` routes
-the one operation that must suspend to `ash_host_fiber_yield`. There are three
-ways to implement that and they trade differently. [threads.md](threads.md)
-has the comparison, what krio built under the worker row, and how ash's own
-threads work here. [fibers.md](fibers.md) is the transform that needs no engine
-feature at all.
+## Inspecting a module
+
+```bash
+ash wasm game.wasm             # functions, indirect call sites, tables, exports, imports
+ash wasm --validate game.wasm  # exit non-zero and name what a host would still have to supply
+```
+
+Imports are grouped by who answers them: the program itself, WASI, or the
+host. `ash wasm` uses ash's own parser, so a build machine needs nothing
+installed.
+
+## Size
+
+Only reachable code is emitted — about a third of a module is dropped.
+Reachability is generous on purpose: all data is kept, so any function whose
+address appears in data survives, because compiled code reaches most of the
+runtime through tables built in data. Debug sections are dropped.
+
+A hello world is a few megabytes, nearly all of it runtime. A library
+compiled into the runtime is in every module whether used or not, which is
+why SQLite became a side module (1.9 MB out of a 3.96 MB hello world).
+
+## Threads
+
+`sys.thread` on wasm has two modes:
+
+- **Fibers** (`ASH_WASM_FIBERS=1` at build time): threads are cooperative,
+  on one agent. A worker blocked in `Deque.pop(true)` suspends inside the
+  module and resumes where it stopped when the main thread pushes. No
+  parallelism; the whole `threads` suite passes.
+- **Workers / wasmtime threads**: each Haxe thread is another instance of the
+  same module over shared memory, and they run at the same time. A page
+  needs cross-origin isolation (COOP/COEP) for shared memory, and Workers
+  must be created before the program starts because a Worker created from
+  inside a synchronous wasm call never loads.
+
+Design and measurements: [internals/wasm-fibers.md](../internals/wasm-fibers.md),
+[internals/wasm-threads.md](../internals/wasm-threads.md).
 
 ## Conformance
 
-**1,186 of 1,195 cases are in scope, 99.2%.** A case can run on wasm if every
-native it calls can, which is observable without a wasm runtime: run it under
-the interpreter with `ASH_TRACE_NATIVE=1` and take the union.
+1,186 of the 1,195 Haxe suite cases are in scope for wasm and all pass. The
+nine out of scope: eight need the `fmt` HDLL's compression and hashing
+primitives, and `unit.spec.sys.net.TestSocket` passes only on a host that
+implements the socket imports.
 
-Two subtractions decide the answer. The suite's own startup is not the case —
-running a nonexistent case name gives a 38-native baseline including
-`hlp_ssl_init` and `hlp_socket_init`, and counting those against every case
-excludes every case. And a mutex is not a thread: `hlp_mutex_*`, `hlp_lock_*`,
-thread-locals and atomics are all implementable single-threaded. Treating all
-109 natives of `thread.rs` as impossible put the answer at 10.5%.
+## Not this
 
-The nine out of scope: eight need the `fmt` HDLL (compression and hashing, not
-language semantics — they return the day `fmt`'s primitives are provided by the
-wasm build), and `unit.spec.sys.net.TestSocket` passes only on a host that
-implements the socket imports. Report against 1,186 with these named, never
-quietly dropped.
-
-## What this is not
-
-- Not a wasm interpreter for HL. It emits compiled wasm.
-- Not a replacement for the interpreter, Cranelift, LLVM JIT or native AOT.
+- Not a wasm interpreter for HL bytecode. It emits compiled wasm.
 - Not a way to load native `.hdll` files in a sandbox.
+- Not a replacement for the native tiers; the same program runs natively
+  through the interpreter, the JIT or an AOT binary.
+
+## Internals
+
+The pieces that make this work — the 32-bit ABI, the setjmp lowering and the
+LLVM patch it needs, the fiber transform, shared memory — are contributor
+material under [docs/internals/](../internals/).

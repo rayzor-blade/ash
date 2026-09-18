@@ -16,4 +16,5 @@ nothing is shipped beside the program, the compiled tiers turn the calls
 into vector instructions, and a value that stays inside one function lives
 in a register with no allocation at all.
 
-Build with `-lib ash-simd`, or `-cp` pointing at this directory.
+Build with `-lib ash-simd`, or `-cp` pointing at this directory. The API and
+the lane semantics are documented in `docs/simd.md` of the ash repository.

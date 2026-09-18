@@ -288,12 +288,12 @@ unsafe fn alloc_bytes_array(entries: &[Vec<u8>]) -> *mut varray {
 // Platform identity
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_utf8_path() -> bool {
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_is64() -> bool {
     #[cfg(target_pointer_width = "64")]
     {
@@ -307,7 +307,7 @@ pub extern "C" fn hlp_sys_is64() -> bool {
 
 /// UTF-16 always: Sys.systemName decodes this with `String.fromUCS2`,
 /// on every platform.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_string() -> *mut vbyte {
     let name = if cfg!(target_os = "windows") {
         "Windows"
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn hlp_sys_string() -> *mut vbyte {
 /// `getenv("LANG")` upstream; the system default locale name on Windows,
 /// where there is no LANG. Returns null when neither is set — heaps and
 /// friends fall back to "en" on null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_locale() -> *mut vbyte {
     #[cfg(not(windows))]
     {
@@ -375,13 +375,13 @@ pub unsafe extern "C" fn hlp_sys_locale() -> *mut vbyte {
 const PR_AUTO_FLUSH: i32 = 2;
 static PRINT_FLAGS: AtomicI32 = AtomicI32::new(PR_AUTO_FLUSH);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_flags(flags: i32) -> i32 {
     PRINT_FLAGS.store(flags, Ordering::Relaxed);
     flags
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_print(msg: *const vbyte) {
     if msg.is_null() {
         return;
@@ -405,13 +405,13 @@ static BEFORE_EXIT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Upstream `hl_setup_profiler`. `before_exit` is recorded but nothing calls
 /// it yet: `hlp_sys_exit` lives in thread.rs, which this file does not own.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_setup_profiler(profile_event: *mut c_void, before_exit: *mut c_void) {
     PROFILE_EVENT.store(profile_event, Ordering::Relaxed);
     BEFORE_EXIT.store(before_exit, Ordering::Relaxed);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_profile_event(code: i32, data: *mut vbyte, data_len: i32) {
     let f = PROFILE_EVENT.load(Ordering::Relaxed);
     if f.is_null() {
@@ -421,14 +421,14 @@ pub unsafe extern "C" fn hlp_sys_profile_event(code: i32, data: *mut vbyte, data
     f(code, data, data_len);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_getpid() -> i32 {
     process_id() as i32
 }
 
 /// Upstream errors out with "Unknown sys_special key" for every key on
 /// non-mobile targets; ash has no mobile target, so every key errors.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_special(_key: *const vbyte) -> *mut vbyte {
     crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Unknown sys_special key"));
     std::ptr::null_mut()
@@ -438,7 +438,7 @@ pub unsafe extern "C" fn hlp_sys_special(_key: *const vbyte) -> *mut vbyte {
 // Time
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_time() -> f64 {
     use std::time::UNIX_EPOCH;
     SystemTime::now()
@@ -448,7 +448,7 @@ pub extern "C" fn hlp_sys_time() -> f64 {
 }
 
 /// Process CPU time, user + system.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_cpu_time() -> f64 {
     #[cfg(unix)]
     unsafe {
@@ -494,7 +494,7 @@ pub extern "C" fn hlp_sys_cpu_time() -> f64 {
 /// Upstream refuses on macOS ("not implemented on this platform"); that branch
 /// predates macOS 10.12, which added CLOCK_THREAD_CPUTIME_ID. Answering is
 /// strictly better than throwing, so this returns a real number everywhere.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_thread_cpu_time() -> f64 {
     #[cfg(unix)]
     unsafe {
@@ -537,7 +537,7 @@ fn filetime_ticks(ft: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
     let duration = std::time::Duration::from_secs_f64(seconds.max(0.0));
     // The runtime's to spend: its scheduler's when it has one to drive.
@@ -548,7 +548,7 @@ pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
 /// (date.rs) goes through chrono and never consults the C locale, so a
 /// successful call here changes nothing ash prints — the C locale is set for
 /// the benefit of hdll natives that do call strftime.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_time_locale(l: *const vbyte) -> bool {
     if l.is_null() {
         return false;
@@ -596,7 +596,7 @@ pub unsafe extern "C" fn hlp_sys_set_time_locale(l: *const vbyte) -> bool {
 // Environment
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_env(name: *const vbyte) -> *mut vbyte {
     let Some(key) = pchar_to_os(name) else {
         return std::ptr::null_mut();
@@ -608,7 +608,7 @@ pub unsafe extern "C" fn hlp_sys_get_env(name: *const vbyte) -> *mut vbyte {
 }
 
 /// A null value unsets, matching upstream's `unsetenv` branch.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte) -> bool {
     if name.is_null() {
         return false;
@@ -691,7 +691,7 @@ extern "C" {
 }
 
 /// Flat key/value array: 2*n entries, key at 2i, value at 2i+1.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_env() -> *mut varray {
     let mut entries: Vec<Vec<u8>> = Vec::new();
     for (k, v) in std::env::vars_os() {
@@ -711,7 +711,7 @@ static HL_FILE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// Upstream `hl_sys_init`, for a host that wants to hand over the exact argv
 /// slice and bytecode path it parsed. Nothing in ash calls it yet, so both
 /// `hlp_sys_args` and `hlp_sys_hl_file` fall back to reading the real argv.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile: *mut vbyte) {
     // Before any native library has had a chance to start a thread of its own.
     crate::rt::mark_main_thread();
@@ -741,7 +741,7 @@ pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile:
 /// arguments *after* the .hl file. Reconstructed here by dropping everything
 /// up to and including the first `.hl` argument, mirroring how the ash CLIs
 /// pick the bytecode out of their own argv.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_args() -> *mut varray {
     if let Ok(g) = SYS_ARGS.lock() {
         if let Some(args) = g.as_ref() {
@@ -764,7 +764,7 @@ pub unsafe extern "C" fn hlp_sys_args() -> *mut varray {
 
 /// Null when no bytecode path is known — Sys.programPath treats that as
 /// "use the executable path", which is the right answer for an embedded run.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_hl_file() -> *mut vbyte {
     if let Ok(g) = HL_FILE.lock() {
         if let Some(f) = g.as_ref() {
@@ -788,7 +788,7 @@ pub unsafe extern "C" fn hlp_sys_hl_file() -> *mut vbyte {
 /// null. Null is worse than a relative path: `Sys.programPath` hands it
 /// straight to `haxe.io.Path`, and the caller gets a null dereference rather
 /// than a path it can judge for itself.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
     if let Ok(exe) = std::env::current_exe() {
         return alloc_pbytes(&os_to_pbytes(exe.as_os_str()));
@@ -803,7 +803,7 @@ pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
 // Filesystem
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_exists(path: *const vbyte) -> bool {
     match pchar_to_path(path) {
         // stat(), not lstat(): a symlink to a live target exists.
@@ -812,7 +812,7 @@ pub unsafe extern "C" fn hlp_sys_exists(path: *const vbyte) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_is_dir(path: *const vbyte) -> bool {
     match pchar_to_path(path) {
         Some(p) => std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false),
@@ -820,7 +820,7 @@ pub unsafe extern "C" fn hlp_sys_is_dir(path: *const vbyte) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_delete(path: *const vbyte) -> bool {
     match pchar_to_path(path) {
         Some(p) => std::fs::remove_file(p).is_ok(),
@@ -848,7 +848,7 @@ fn without_trailing_separator(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_remove_dir(path: *const vbyte) -> bool {
     match pchar_to_path(path) {
         Some(p) => std::fs::remove_dir(without_trailing_separator(&p)).is_ok(),
@@ -856,7 +856,7 @@ pub unsafe extern "C" fn hlp_sys_remove_dir(path: *const vbyte) -> bool {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_rename(path: *const vbyte, newname: *const vbyte) -> bool {
     let (Some(from), Some(to)) = (pchar_to_path(path), pchar_to_path(newname)) else {
         return false;
@@ -866,7 +866,7 @@ pub unsafe extern "C" fn hlp_sys_rename(path: *const vbyte, newname: *const vbyt
 
 /// `mode` is the POSIX permission word; Windows has no equivalent and
 /// `_wmkdir` drops it, as this does.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_create_dir(path: *const vbyte, mode: i32) -> bool {
     let Some(p) = pchar_to_path(path) else {
         return false;
@@ -893,7 +893,7 @@ pub unsafe extern "C" fn hlp_sys_create_dir(path: *const vbyte, mode: i32) -> bo
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_cwd() -> *mut vbyte {
     #[cfg(target_family = "wasm")]
     let dir = wasi_cwd::get();
@@ -909,7 +909,7 @@ pub unsafe extern "C" fn hlp_sys_get_cwd() -> *mut vbyte {
     alloc_pbytes(&bytes)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_cwd(dir: *const vbyte) -> bool {
     match pchar_to_path(dir) {
         // Already resolved against the working directory by the line above,
@@ -924,7 +924,7 @@ pub unsafe extern "C" fn hlp_sys_set_cwd(dir: *const vbyte) -> bool {
 
 /// `realpath` / `GetFullPathNameW`: the target must exist, and null means it
 /// did not resolve.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *mut vbyte {
     let Some(p) = pchar_to_path(path) else {
         return std::ptr::null_mut();
@@ -951,7 +951,7 @@ pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *mut vbyte {
 /// zeroed: gid, uid, atime, mtime, ctime, size, dev, ino, nlink, rdev, mode.
 /// Null when the path cannot be stat'ed — sys.FileSystem.stat turns that into
 /// a SysError.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_stat(path: *const vbyte) -> *mut varray {
     let Some(p) = pchar_to_path(path) else {
         return std::ptr::null_mut();
@@ -1071,7 +1071,7 @@ pub unsafe extern "C" fn hlp_sys_stat(path: *const vbyte) -> *mut varray {
 
 /// Entry names only, "." and ".." excluded. Null when the directory cannot be
 /// opened — sys.FileSystem.readDirectory turns that into a SysError.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_read_dir(path: *const vbyte) -> *mut varray {
     let Some(p) = pchar_to_path(path) else {
         return std::ptr::null_mut();
@@ -1099,7 +1099,7 @@ pub unsafe extern "C" fn hlp_sys_read_dir(path: *const vbyte) -> *mut varray {
 /// `WEXITSTATUS(status) | (WTERMSIG(status) << 8)` does. -1 means the shell
 /// could not be started at all, where C's system() would have returned -1 and
 /// upstream would have decoded that -1 as a status word.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_command(cmd: *const vbyte) -> i32 {
     let Some(cmdline) = pchar_to_os(cmd) else {
         return -1;
@@ -1164,7 +1164,7 @@ extern "C" {
 }
 
 /// One raw byte from stdin, -1 at end of input. `echo` writes it back out.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_char(echo: bool) -> i32 {
     #[cfg(unix)]
     {
@@ -1225,14 +1225,14 @@ type ReloadCallback = unsafe extern "C" fn(*const u16) -> bool;
 static RELOAD_CALLBACK: Mutex<Option<ReloadCallback>> = Mutex::new(None);
 
 /// Register a callback to be invoked when a bytecode file change is detected.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_set_reload_callback(cb: ReloadCallback) {
     *RELOAD_CALLBACK.lock().unwrap() = Some(cb);
 }
 
 /// Register the bytecode file path for reload monitoring.
 /// Called once during runtime initialization.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_setup_reload_check(path_utf16: *const u16) {
     if path_utf16.is_null() {
         return;
@@ -1259,7 +1259,7 @@ pub extern "C" fn hlp_setup_reload_check(path_utf16: *const u16) {
 /// Called per-frame by user code via `hl.Api.checkReload()`.
 /// If `debug_alt_file` is non-null, uses that path instead of the registered one.
 /// Returns `true` if the file changed (caller should trigger reload).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
     let mut guard = match RELOAD_STATE.lock() {
         Ok(g) => g,
@@ -1315,7 +1315,7 @@ pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
 // After main() returns, the interpreter should call this in a loop.
 static mut SYS_LOOP_FUNC: *mut std::ffi::c_void = std::ptr::null_mut();
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_set_loop(func: *mut std::ffi::c_void) {
     if env_flag!("ASH_DBG_LOOP") {
         eprintln!("[ash] hlp_sys_set_loop called with {:p}", func);
@@ -1324,7 +1324,7 @@ pub unsafe extern "C" fn hlp_sys_set_loop(func: *mut std::ffi::c_void) {
 }
 
 /// Returns the registered loop function (for the interpreter to call after main).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_get_loop() -> *mut std::ffi::c_void {
     SYS_LOOP_FUNC
 }
@@ -1332,7 +1332,7 @@ pub unsafe extern "C" fn hlp_sys_get_loop() -> *mut std::ffi::c_void {
 /// Upstream returns this thread's `hl_thread_info`. ash keeps no thread
 /// registry, but it does keep the one field native code reads -- see
 /// `thread::ThreadInfo` for why null is not an option here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_thread_info() -> *mut c_void {
     crate::thread::thread_info() as *mut c_void
 }
@@ -1343,7 +1343,7 @@ pub unsafe extern "C" fn hlp_get_thread_info() -> *mut c_void {
 /// and an unresolved native is a hard failure at startup rather than at the
 /// call. ash has no debugger protocol, so the honest answer is false; see
 /// std/src/debugger.rs for what does exist.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_has_debugger() -> bool {
     false
 }
@@ -1356,7 +1356,7 @@ pub unsafe extern "C" fn hlp_sys_has_debugger() -> bool {
 /// `pti_resident_size` on Darwin, the resident column of /proc/self/statm on
 /// Linux. That is pages the kernel has actually backed, not the GC heap,
 /// which is the figure a profiler weighs against the machine's RAM.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_process_memory() -> f64 {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     unsafe {
@@ -1588,7 +1588,7 @@ mod process_memory_tests {
 // redundant on this target and load-bearing on others.
 #[cfg(unix)]
 #[allow(clippy::unnecessary_cast)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -1604,7 +1604,7 @@ pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
 /// failed every CI job that compiled this crate. Monotonic since the first
 /// call: the origin is arbitrary upstream too, only the differences matter.
 #[cfg(not(unix))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
     use std::sync::OnceLock;
     use std::time::Instant;
@@ -1619,7 +1619,7 @@ pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
 /// false is upstream's own behaviour for a runtime without the hook, not a
 /// stub pretending -- and a caller that treats the result as authoritative
 /// gets a correct answer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_load_plugin(_file: *mut crate::hl::vbyte) -> bool {
     false
 }
@@ -1627,7 +1627,7 @@ pub unsafe extern "C" fn hlp_sys_load_plugin(_file: *mut crate::hl::vbyte) -> bo
 /// Resolve a type through the embedder's hook. Always null, for the same
 /// reason `hlp_sys_load_plugin` is always false: upstream returns NULL when
 /// `hl_setup.resolve_type` is unset.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_resolve_type(
     _t: *mut crate::hl::hl_type,
     _gt: *mut crate::hl::hl_type,

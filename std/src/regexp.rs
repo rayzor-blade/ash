@@ -92,7 +92,7 @@ fn build_regex(pattern: &str, options: &str) -> Option<Regex> {
     builder.build().ok()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_regexp_new_options(
     bytes: *const vbyte,
     options: *const vbyte,
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn hlp_regexp_new_options(
     state as *mut c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_regexp_match(
     r: *mut c_void,
     str_bytes: *const vbyte,
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn hlp_regexp_match(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_regexp_matched_pos(r: *mut c_void, n: i32, size: *mut i32) -> i32 {
     if r.is_null() || n < 0 {
         if !size.is_null() {
@@ -202,7 +202,7 @@ pub unsafe extern "C" fn hlp_regexp_matched_pos(r: *mut c_void, n: i32, size: *m
 }
 
 // DEFINE_PRIM(_I32, regexp_matched_num, _EREG)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_regexp_matched_num(r: *mut c_void) -> i32 {
     if r.is_null() {
         return -1;

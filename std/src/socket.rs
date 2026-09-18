@@ -56,7 +56,7 @@ mod sys {
         pub h_addr_list: *mut *mut libc::c_char,
     }
 
-    extern "C" {
+    unsafe extern "C" {
         fn gethostbyaddr(addr: *const c_void, len: libc::socklen_t, ty: c_int) -> *mut Hostent;
     }
 
@@ -1309,13 +1309,13 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 // ============================================================================
 
 /// `DEFINE_PRIM(_VOID, socket_init, _NO_ARG)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_socket_init() {
     sys::startup();
 }
 
 /// `DEFINE_PRIM(_SOCK, socket_new, _BOOL)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_new(udp: bool) -> *mut hl_socket {
     let s = sys::create(udp);
     if !sys::is_valid(s) {
@@ -1327,7 +1327,7 @@ pub unsafe extern "C" fn hlp_socket_new(udp: bool) -> *mut hl_socket {
 }
 
 /// `DEFINE_PRIM(_VOID, socket_close, _SOCK)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_close(s: *mut hl_socket) {
     if s.is_null() {
         return;
@@ -1339,7 +1339,7 @@ pub unsafe extern "C" fn hlp_socket_close(s: *mut hl_socket) {
 }
 
 /// `DEFINE_PRIM(_I32, socket_send_char, _SOCK _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_send_char(s: *mut hl_socket, c: c_int) -> c_int {
     if s.is_null() {
         return -2;
@@ -1358,7 +1358,7 @@ pub unsafe extern "C" fn hlp_socket_send_char(s: *mut hl_socket, c: c_int) -> c_
 }
 
 /// `DEFINE_PRIM(_I32, socket_send, _SOCK _BYTES _I32 _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_send(
     s: *mut hl_socket,
     buf: *mut vbyte,
@@ -1393,7 +1393,7 @@ pub unsafe extern "C" fn hlp_socket_send(
 }
 
 /// `DEFINE_PRIM(_I32, socket_recv, _SOCK _BYTES _I32 _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_recv(
     s: *mut hl_socket,
     buf: *mut vbyte,
@@ -1422,7 +1422,7 @@ pub unsafe extern "C" fn hlp_socket_recv(
 }
 
 /// `DEFINE_PRIM(_I32, socket_recv_char, _SOCK)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_recv_char(s: *mut hl_socket) -> c_int {
     if s.is_null() {
         return -2;
@@ -1449,7 +1449,7 @@ pub unsafe extern "C" fn hlp_socket_recv_char(s: *mut hl_socket) -> c_int {
 /// `host` is a NUL-terminated UTF-8 char*, not a uchar*: `sys.net.Host` calls
 /// `utf16ToUtf8` before crossing. Returns -1 when the name does not resolve,
 /// which Haxe reports as "Unresolved host".
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_resolve(host: *mut vbyte) -> c_int {
     if host.is_null() {
         return -1;
@@ -1464,7 +1464,7 @@ pub unsafe extern "C" fn hlp_host_resolve(host: *mut vbyte) -> c_int {
 }
 
 /// `DEFINE_PRIM(_BYTES, host_to_string, _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_to_string(ip: c_int) -> *mut vbyte {
     // The int is a raw `s_addr`, so its native byte order already is the
     // wire order; upstream reaches the same digits through inet_ntoa.
@@ -1474,7 +1474,7 @@ pub unsafe extern "C" fn hlp_host_to_string(ip: c_int) -> *mut vbyte {
 }
 
 /// `DEFINE_PRIM(_BYTES, host_reverse, _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_reverse(ip: c_int) -> *mut vbyte {
     hl_blocking(true);
     let name = sys::reverse_ipv4(ip);
@@ -1486,7 +1486,7 @@ pub unsafe extern "C" fn hlp_host_reverse(ip: c_int) -> *mut vbyte {
 }
 
 /// `DEFINE_PRIM(_BYTES, host_local, _NO_ARG)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_host_local() -> *mut vbyte {
     match sys::local_name() {
         Some(n) => gc_cstring(&n),
@@ -1596,7 +1596,7 @@ mod trace {
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_connect, _SOCK _I32 _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_connect(s: *mut hl_socket, host: c_int, port: c_int) -> bool {
     if s.is_null() {
         return false;
@@ -1613,7 +1613,7 @@ pub unsafe extern "C" fn hlp_socket_connect(s: *mut hl_socket, host: c_int, port
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_listen, _SOCK _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_listen(s: *mut hl_socket, n: c_int) -> bool {
     if s.is_null() {
         return false;
@@ -1622,7 +1622,7 @@ pub unsafe extern "C" fn hlp_socket_listen(s: *mut hl_socket, n: c_int) -> bool 
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_bind, _SOCK _I32 _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_bind(s: *mut hl_socket, host: c_int, port: c_int) -> bool {
     if s.is_null() {
         return false;
@@ -1632,7 +1632,7 @@ pub unsafe extern "C" fn hlp_socket_bind(s: *mut hl_socket, host: c_int, port: c
 }
 
 /// `DEFINE_PRIM(_SOCK, socket_accept, _SOCK)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_accept(s: *mut hl_socket) -> *mut hl_socket {
     if s.is_null() {
         return ptr::null_mut();
@@ -1649,7 +1649,7 @@ pub unsafe extern "C" fn hlp_socket_accept(s: *mut hl_socket) -> *mut hl_socket 
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_peer, _SOCK _REF(_I32) _REF(_I32))`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_peer(
     s: *mut hl_socket,
     host: *mut c_int,
@@ -1674,7 +1674,7 @@ pub unsafe extern "C" fn hlp_socket_peer(
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_host, _SOCK _REF(_I32) _REF(_I32))`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_host(
     s: *mut hl_socket,
     host: *mut c_int,
@@ -1699,7 +1699,7 @@ pub unsafe extern "C" fn hlp_socket_host(
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_set_timeout, _SOCK _F64)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_timeout(s: *mut hl_socket, t: f64) -> bool {
     if s.is_null() {
         return false;
@@ -1708,7 +1708,7 @@ pub unsafe extern "C" fn hlp_socket_set_timeout(s: *mut hl_socket, t: f64) -> bo
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_shutdown, _SOCK _BOOL _BOOL)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_shutdown(s: *mut hl_socket, r: bool, w: bool) -> bool {
     if s.is_null() {
         return false;
@@ -1720,7 +1720,7 @@ pub unsafe extern "C" fn hlp_socket_shutdown(s: *mut hl_socket, r: bool, w: bool
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_set_blocking, _SOCK _BOOL)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_blocking(s: *mut hl_socket, b: bool) -> bool {
     if s.is_null() {
         return false;
@@ -1729,7 +1729,7 @@ pub unsafe extern "C" fn hlp_socket_set_blocking(s: *mut hl_socket, b: bool) -> 
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_set_fast_send, _SOCK _BOOL)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_fast_send(s: *mut hl_socket, b: bool) -> bool {
     if s.is_null() {
         return false;
@@ -1741,7 +1741,7 @@ pub unsafe extern "C" fn hlp_socket_set_fast_send(s: *mut hl_socket, b: bool) ->
 ///
 /// Not in socket.c, but `sys.net.UdpSocket.setBroadcast` binds it and upstream
 /// therefore fails to resolve it. Implemented so UDP broadcast works here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_set_broadcast(s: *mut hl_socket, b: bool) -> bool {
     if s.is_null() {
         return false;
@@ -1752,7 +1752,7 @@ pub unsafe extern "C" fn hlp_socket_set_broadcast(s: *mut hl_socket, b: bool) ->
 /// `DEFINE_PRIM(_I32, socket_send_to, _SOCK _BYTES _I32 _I32 _I32)`
 ///
 /// No `pos` argument here: `UdpSocket` offsets the bytes on the Haxe side.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_send_to(
     s: *mut hl_socket,
     data: *mut vbyte,
@@ -1772,7 +1772,7 @@ pub unsafe extern "C" fn hlp_socket_send_to(
 }
 
 /// `DEFINE_PRIM(_I32, socket_recv_from, _SOCK _BYTES _I32 _REF(_I32) _REF(_I32))`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_recv_from(
     s: *mut hl_socket,
     data: *mut vbyte,
@@ -1810,7 +1810,7 @@ pub unsafe extern "C" fn hlp_socket_recv_from(
 }
 
 /// `DEFINE_PRIM(_I32, socket_fd_size, _I32)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_socket_fd_size(size: c_int) -> c_int {
     sys::fd_size(size)
 }
@@ -1890,7 +1890,7 @@ unsafe fn make_array_result(set: &sys::FdSet, a: *mut varray) {
 }
 
 /// `DEFINE_PRIM(_BOOL, socket_select, _ARR _ARR _ARR _BYTES _I32 _F64)`
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_socket_select(
     ra: *mut varray,
     wa: *mut varray,

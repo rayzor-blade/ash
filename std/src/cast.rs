@@ -42,7 +42,7 @@ pub unsafe extern "C" fn invalid_cast(from: *mut hl_type, to: *mut hl_type) {
     )));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
     let kind = (*t).kind;
     match kind {
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_casti(
     data: *mut c_void,
     t: *mut hl_type,
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn hlp_dyn_casti(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_castf(data: *mut c_void, t: *mut hl_type) -> f32 {
     // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
     let mut t = t;
@@ -226,7 +226,7 @@ pub unsafe extern "C" fn hlp_dyn_castf(data: *mut c_void, t: *mut hl_type) -> f3
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_castd(data: *mut c_void, t: *mut hl_type) -> f64 {
     // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
     let mut t = t;
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn hlp_dyn_castd(data: *mut c_void, t: *mut hl_type) -> f6
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_casti64(data: *mut c_void, t: *mut hl_type) -> i64 {
     // hl_track_call(HL_TRACK_CAST, on_cast(t, &hlt_i64));
     let mut t = t;
@@ -338,7 +338,7 @@ pub unsafe extern "C" fn hlp_dyn_casti64(data: *mut c_void, t: *mut hl_type) -> 
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_castp(
     data: *mut c_void,
     t: *mut hl_type,
@@ -661,7 +661,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_value_cast(
     v: *mut hl::vdynamic,
     t: *mut hl::hl_type,
@@ -679,12 +679,12 @@ pub unsafe extern "C" fn hlp_value_cast(
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_safe_cast(a: *mut hl::hl_type, b: *mut hl::hl_type) -> bool {
     hlp_safe_cast(a, b)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic) -> i32 {
     match (a as usize).cmp(&(b as usize)) {
         Ordering::Equal => 0,
@@ -693,7 +693,7 @@ pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic)
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
     if a == b {
         return 0;
@@ -856,7 +856,7 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 /// in. Only the shifts and bitwise operators produce an i32. Matching that
 /// exactly matters more than it looks — Haxe code that adds two Dynamics and
 /// then checks `Std.isOfType(v, Int)` observes the difference.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_op(op: i32, a: *mut vdynamic, b: *mut vdynamic) -> *mut vdynamic {
     const OP_ADD: i32 = 0;
     const OP_SUB: i32 = 1;
@@ -979,7 +979,7 @@ pub unsafe extern "C" fn hlp_dyn_op(op: i32, a: *mut vdynamic, b: *mut vdynamic)
 // They exist so emitted code never has to materialize a dyn type pointer
 // of its own — the singletons live here.
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_toint(v: *mut vdynamic) -> i32 {
     let mut slot = v;
     hlp_dyn_casti(
@@ -989,19 +989,19 @@ pub unsafe extern "C" fn hlp_dyn_toint(v: *mut vdynamic) -> i32 {
     )
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_tofloat(v: *mut vdynamic) -> f32 {
     let mut slot = v;
     hlp_dyn_castf(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_todouble(v: *mut vdynamic) -> f64 {
     let mut slot = v;
     hlp_dyn_castd(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_toi64(v: *mut vdynamic) -> i64 {
     let mut slot = v;
     hlp_dyn_casti64(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
@@ -1013,7 +1013,7 @@ pub unsafe extern "C" fn hlp_dyn_toi64(v: *mut vdynamic) -> i64 {
 /// and anything already dynamic answers with itself. Haxe uses this to give an
 /// object a stable identity, so returning the box for a boxed value would make
 /// two views of one object compare unequal.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_value_address(v: *mut vdynamic) -> i64 {
     if v.is_null() {
         return 0;

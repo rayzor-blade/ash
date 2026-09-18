@@ -30,7 +30,7 @@ use crate::hl::vbyte;
 /// # Safety
 ///
 /// `data` must point at `width * height * 4` readable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_canvas_present(data: *mut vbyte, width: i32, height: i32) -> bool {
     if data.is_null() || width <= 0 || height <= 0 {
         return false;

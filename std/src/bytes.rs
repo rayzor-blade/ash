@@ -7,7 +7,7 @@ use std::ffi::*;
 
 use crate::{hl, sort::hl_bsort};
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_blit(
     dst: *mut c_char,
     dpos: c_int,
@@ -29,7 +29,7 @@ pub unsafe extern "C" fn hlp_bytes_blit(
     );
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
     if size < 0 {
         panic!("invalid size for bytes allocation")
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
         .as_ptr() as *mut hl::vbyte
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_compare(
     a: *const hl::vbyte,
     apos: c_int,
@@ -67,7 +67,7 @@ pub unsafe extern "C" fn hlp_bytes_compare(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_compare16(
     a: *const hl::vbyte,
     b: *const hl::vbyte,
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn hlp_bytes_compare16(
 
 /// Upstream hl_string_compare (bytes.c): memcmp over len UTF-16 chars.
 /// Byte-wise memcmp, exactly like upstream — NOT a u16-wise compare.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_string_compare(
     a: *const hl::vbyte,
     b: *const hl::vbyte,
@@ -109,7 +109,7 @@ pub unsafe extern "C" fn hlp_string_compare(
     )
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_offset(bytes: *mut hl::vbyte, offset: c_int) -> *mut hl::vbyte {
     if bytes.is_null() {
         return std::ptr::null_mut();
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn hlp_bytes_offset(bytes: *mut hl::vbyte, offset: c_int) 
 }
 
 /// Upstream hl_bytes_subtract (bytes.c): `(int)(a - b)`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_subtract(a: *const hl::vbyte, b: *const hl::vbyte) -> c_int {
     // Deliberately NOT `offset_from`: Haxe hands this pair of pointers to us
     // with no promise they came from one allocation (hl.Bytes wraps arbitrary
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn hlp_bytes_subtract(a: *const hl::vbyte, b: *const hl::v
 }
 
 /// Upstream hl_bytes_address64 (bytes.c): the pointer as an integer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_address64(a: *const hl::vbyte) -> i64 {
     // Upstream returns `int_val` (intptr_t), but the DEFINE_PRIM declares
     // _I64, so the value the VM sees is 64 bits wide on every host. Going
@@ -141,7 +141,7 @@ pub unsafe extern "C" fn hlp_bytes_address64(a: *const hl::vbyte) -> i64 {
 
 /// Upstream hl_bytes_address (bytes.c): pointer split into two i32 halves,
 /// low returned, high written through the `_REF(_I32)` out-parameter.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_address(a: *const hl::vbyte, high: *mut c_int) -> c_int {
     let addr = a as usize as u64;
     if !high.is_null() {
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn hlp_bytes_address(a: *const hl::vbyte, high: *mut c_int
 
 /// Upstream hl_bytes_from_address (bytes.c): rebuild a pointer from the two
 /// i32 halves produced by hlp_bytes_address.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_from_address(low: c_int, high: c_int) -> *mut hl::vbyte {
     // Upstream fills a `struct { int low; int high; }` and reinterprets it as
     // a pointer, purely to dodge an MSVC bug shifting by 32; on the
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn hlp_bytes_from_address(low: c_int, high: c_int) -> *mut
 }
 
 /// Upstream hl_bytes_from_address64 (bytes.c): integer address back to pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_from_address64(v: i64) -> *mut hl::vbyte {
     // Declared _I64 by the prim even though upstream types the parameter
     // `int_val`, so the argument arrives 64 bits wide whatever the host; the
@@ -253,7 +253,7 @@ pub fn memfind_rb(block: &[u8], pattern: &[u8], repeat_find: &mut bool) -> Optio
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_find(
     r#where: *const hl::vbyte,
     pos: c_int,
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn hlp_bytes_find(
 /// `which[0..wlen]` inside `where[0..len]`, or -1. Unlike hl_bytes_find there
 /// is no start offset — the scan begins at the last position where the needle
 /// still fits, `len - wlen`, and walks down to 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_rfind(
     r#where: *const hl::vbyte,
     len: c_int,
@@ -329,7 +329,7 @@ pub unsafe extern "C" fn hlp_bytes_rfind(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_fill(
     bytes: *mut hl::vbyte,
     pos: c_int,
@@ -348,7 +348,7 @@ pub unsafe extern "C" fn hlp_bytes_fill(
     slice.fill(value as u8);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bsort_i32(
     bytes: *mut hl::vbyte,
     pos: i32,
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn hlp_bsort_i32(
     hl_bsort::<i32>(bytes, pos, len, cmp);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bsort_i64(
     bytes: *mut hl::vbyte,
     pos: i32,
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn hlp_bsort_i64(
     hl_bsort::<i64>(bytes, pos, len, cmp);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bsort_f32(
     bytes: *mut hl::vbyte,
     pos: i32,
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn hlp_bsort_f32(
     hl_bsort::<f32>(bytes, pos, len, cmp);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bsort_f64(
     bytes: *mut hl::vbyte,
     pos: i32,
@@ -388,7 +388,7 @@ pub unsafe extern "C" fn hlp_bsort_f64(
     hl_bsort::<f64>(bytes, pos, len, cmp);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bsort_bool(
     bytes: *mut hl::vbyte,
     pos: i32,
@@ -466,7 +466,7 @@ fn url_decode_utf8(input: &[u8]) -> Vec<u8> {
     out
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_url_encode(
     bytes: *const hl::vbyte,
     out_size: *mut c_int,
@@ -479,7 +479,7 @@ pub unsafe extern "C" fn hlp_url_encode(
     alloc_utf16_bytes(&out_units, out_size)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_url_decode(
     bytes: *const hl::vbyte,
     out_size: *mut c_int,
@@ -501,7 +501,7 @@ mod bytes_tests {
     /// C name — `format!("hlp_{}", native.name)`, see
     /// crates/ash_interp/src/interpreter/natives.rs — and calls the result
     /// through the signature the upstream DEFINE_PRIM declares. A renamed
-    /// export, a dropped `#[no_mangle]`, or a signature that drifted from the
+    /// export, a dropped `#[unsafe(no_mangle)]`, or a signature that drifted from the
     /// prim is therefore a *runtime* failure, never a build error; that is the
     /// missing-symbol shape a user hit in production.
     ///
@@ -513,7 +513,7 @@ mod bytes_tests {
         use crate::hl::vbyte;
         use std::ffi::c_int;
 
-        extern "C" {
+        unsafe extern "C" {
             /// `DEFINE_PRIM(_I32,bytes_rfind,_BYTES _I32 _BYTES _I32)`
             pub fn hlp_bytes_rfind(
                 r#where: *const vbyte,
@@ -974,7 +974,7 @@ mod bytes_tests {
 }
 
 /// Bytes the collector reserved for this block, as `hl_gc_get_memsize` does.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_bytes_get_memsize(ptr: *mut hl::vbyte) -> i32 {
     if ptr.is_null() {
         return 0;

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static DEBUGGER_PRESENT: AtomicBool = AtomicBool::new(false);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[inline(never)]
 #[cold]
 pub extern "C" fn hlp_breakpoint() {
@@ -62,7 +62,7 @@ pub fn hl_debug_break() {
 /// Exported under its HashLink name as well: ui.hdll imports
 /// `hl_detect_debugger`, and on Windows every import has to resolve before the
 /// library will map at all.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hl_detect_debugger() -> bool {
     if DEBUGGER_PRESENT.load(Ordering::Relaxed) {
         return true;
@@ -159,20 +159,20 @@ fn note_unsupported(what: &str) {
 // std/debug.c. `pid` is the *target* process; ash never attaches to one.
 
 /// `DEFINE_PRIM(_BOOL, debug_start, _I32)` — refuse to attach.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_start(_pid: i32) -> bool {
     note_unsupported("debug_start");
     false
 }
 
 /// `DEFINE_PRIM(_VOID, debug_stop, _I32)` — no session to detach from.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_stop(_pid: i32) {
     note_unsupported("debug_stop");
 }
 
 /// `DEFINE_PRIM(_BOOL, debug_breakpoint, _I32)` — could not interrupt.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_breakpoint(_pid: i32) -> bool {
     note_unsupported("debug_breakpoint");
     false
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn hlp_debug_breakpoint(_pid: i32) -> bool {
 /// `buffer` is deliberately left untouched: a caller that ignores the `false`
 /// and reads it anyway sees its own uninitialised bytes rather than zeros we
 /// invented and passed off as the target's memory.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_read(
     _pid: i32,
     _addr: *mut vbyte,
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn hlp_debug_read(
 }
 
 /// `DEFINE_PRIM(_BOOL, debug_write, _I32 _BYTES _BYTES _I32)` — wrote nothing.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_write(
     _pid: i32,
     _addr: *mut vbyte,
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn hlp_debug_write(
 }
 
 /// `DEFINE_PRIM(_BOOL, debug_flush, _I32 _BYTES _I32)` — no i-cache to flush.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_flush(_pid: i32, _addr: *mut vbyte, _size: i32) -> bool {
     note_unsupported("debug_flush");
     false
@@ -218,7 +218,7 @@ pub unsafe extern "C" fn hlp_debug_flush(_pid: i32, _addr: *mut vbyte, _size: i3
 /// Returns `0`, which HashLink's own no-debug-support build returns and which
 /// the protocol reads as "target exited". That ends a debugger's event loop
 /// instead of spinning it forever on a session that never existed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_wait(_pid: i32, thread: *mut i32, _timeout: i32) -> i32 {
     note_unsupported("debug_wait");
     if !thread.is_null() {
@@ -228,14 +228,14 @@ pub unsafe extern "C" fn hlp_debug_wait(_pid: i32, thread: *mut i32, _timeout: i
 }
 
 /// `DEFINE_PRIM(_BOOL, debug_resume, _I32 _I32)` — nothing was ever stopped.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_resume(_pid: i32, _thread: i32) -> bool {
     note_unsupported("debug_resume");
     false
 }
 
 /// `DEFINE_PRIM(_BYTES, debug_read_register, _I32 _I32 _I32 _BOOL)` — no value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_read_register(
     _pid: i32,
     _thread: i32,
@@ -247,7 +247,7 @@ pub unsafe extern "C" fn hlp_debug_read_register(
 }
 
 /// `DEFINE_PRIM(_BOOL, debug_write_register, _I32 _I32 _I32 _BYTES _BOOL)`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_write_register(
     _pid: i32,
     _thread: i32,
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn hlp_debug_write_register(
 
 /// `DEFINE_PRIM(_DYN, debug_call, _I32 _DYN)` — the debugger's in-process
 /// callback trampoline. HashLink's own body is `return NULL;`; so is ours.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_debug_call(_mode: i32, _v: *mut vdynamic) -> *mut vdynamic {
     note_unsupported("debug_call");
     std::ptr::null_mut()
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn hlp_debug_call(_mode: i32, _v: *mut vdynamic) -> *mut v
 // reports an empty table and every setter is dropped.
 
 /// `DEFINE_PRIM(_I32, track_count, _REF(_I32))` — zero buckets, zero depth.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_count(depth: *mut i32) -> i32 {
     note_unsupported("track_count");
     if !depth.is_null() {
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn hlp_track_count(depth: *mut i32) -> i32 {
 /// `-1` is HashLink's "id out of range" answer, and upstream returns it before
 /// touching any out-parameter — so neither do we. With `track_count` at 0
 /// every id is out of range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_entry(
     _id: i32,
     _t: *mut *mut hl_type,
@@ -300,34 +300,34 @@ pub unsafe extern "C" fn hlp_track_entry(
 
 /// `DEFINE_PRIM(_I32, track_get_bits, _BOOL)` — no flags set, exactly what
 /// HashLink returns when `HL_TRACK_ENABLE` is off.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_get_bits(_thread: bool) -> i32 {
     note_unsupported("track_get_bits");
     0
 }
 
 /// `DEFINE_PRIM(_VOID, track_lock, _BOOL)` — no bucket table to guard.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_lock(_lock: bool) {
     note_unsupported("track_lock");
 }
 
 /// `DEFINE_PRIM(_VOID, track_reset, _NO_ARG)` — nothing recorded to clear.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_reset() {
     note_unsupported("track_reset");
 }
 
 /// `DEFINE_PRIM(_VOID, track_set_bits, _I32 _BOOL)` — dropped. A following
 /// `track_get_bits` still reports 0, so a caller sees the request did not take.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_set_bits(_flags: i32, _thread: bool) {
     note_unsupported("track_set_bits");
 }
 
 /// `DEFINE_PRIM(_VOID, track_set_depth, _I32)` — dropped; `track_count`
 /// keeps reporting depth 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_set_depth(_d: i32) {
     note_unsupported("track_set_depth");
 }
@@ -336,7 +336,7 @@ pub unsafe extern "C" fn hlp_track_set_depth(_d: i32) {
 
 /// `DEFINE_PRIM(_VOID, sys_vtune_init, _NO_ARG)` — no VTune JIT API is wired
 /// up. HashLink's body is also a no-op unless `hl_setup_vtune` ran first.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_vtune_init() {
     note_unsupported("sys_vtune_init");
 }

@@ -268,7 +268,7 @@ impl HbMapExt for *mut hl::hl_hb_map {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
     let allocated_map = allocate_map(0).expect("could not allocate bytes map");
     // Deliberately NOT pre-marked. Setting mark bits at allocation time
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
     allocated_map.as_ptr()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbset(
     mut m: *mut hl::hl_hb_map,
     key: *mut hl::uchar,
@@ -458,7 +458,7 @@ unsafe fn get_key(m: *mut hl::hl_hb_map, c: i32) -> *mut hl::uchar {
     (*((*m).values.add(c as usize))).key
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbget(
     m: *mut hl::hl_hb_map,
     key: *mut hl::uchar,
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn hlp_hbget(
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbexists(m: *mut hl::hl_hb_map, key: *mut hl::uchar) -> bool {
     use hl_hb::HbMap;
 
@@ -499,7 +499,7 @@ pub unsafe extern "C" fn hlp_hbexists(m: *mut hl::hl_hb_map, key: *mut hl::uchar
     false
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::uchar) -> bool {
     use hl_hb::HbMap;
 
@@ -546,7 +546,7 @@ pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::u
     false
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbkeys(m: *mut hl::hl_hb_map) -> *mut hl::varray {
     let count = if m.is_null() { 0 } else { (*m).nentries };
     let a = crate::array::hlp_alloc_array(crate::types::hlt_bytes(), count);
@@ -570,7 +570,7 @@ pub unsafe extern "C" fn hlp_hbkeys(m: *mut hl::hl_hb_map) -> *mut hl::varray {
     a
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray {
     let count = if m.is_null() { 0 } else { (*m).nentries };
     let a = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), count);
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray 
 /// the shape `allocate_map(0)` hands back, so the cleared map takes the same
 /// resize-on-first-set path a fresh one does; the cell/entry/value arrays it
 /// dropped are ordinary GC allocations and are reclaimed by the collector.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbclear(m: *mut hl::hl_hb_map) {
     if m.is_null() {
         return;
@@ -607,7 +607,7 @@ pub unsafe extern "C" fn hlp_hbclear(m: *mut hl::hl_hb_map) {
 }
 
 /// Upstream _MNAME(size) (maps.h).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hbsize(m: *mut hl::hl_hb_map) -> i32 {
     if m.is_null() {
         0
@@ -733,11 +733,11 @@ unsafe fn slot_claim<K: std::hash::Hash + Eq>(
 
 type IntIndex = SlotIndex<i32>;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hialloc() -> *mut c_void {
     rooted_alloc::<i32>()
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiset(m: *mut c_void, key: i32, value: *mut hl::vdynamic) {
     if m.is_null() {
         return;
@@ -753,7 +753,7 @@ pub unsafe extern "C" fn hlp_hiset(m: *mut c_void, key: i32, value: *mut hl::vdy
         idx.slot_of.insert(key, slot);
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiexists(m: *mut c_void, key: i32) -> bool {
     if m.is_null() {
         return false;
@@ -762,7 +762,7 @@ pub unsafe extern "C" fn hlp_hiexists(m: *mut c_void, key: i32) -> bool {
     let idx = &*((*rm).index as *const IntIndex);
     idx.slot_of.contains_key(&key)
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_higet(m: *mut c_void, key: i32) -> *mut hl::vdynamic {
     if m.is_null() {
         return ptr::null_mut();
@@ -773,7 +773,7 @@ pub unsafe extern "C" fn hlp_higet(m: *mut c_void, key: i32) -> *mut hl::vdynami
         None => ptr::null_mut(),
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiremove(m: *mut c_void, key: i32) -> bool {
     if m.is_null() {
         return false;
@@ -790,7 +790,7 @@ pub unsafe extern "C" fn hlp_hiremove(m: *mut c_void, key: i32) -> bool {
         None => false,
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hikeys(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
@@ -803,7 +803,7 @@ pub unsafe extern "C" fn hlp_hikeys(m: *mut c_void) -> *mut hl::varray {
     }
     arr
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hivalues(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
@@ -816,7 +816,7 @@ pub unsafe extern "C" fn hlp_hivalues(m: *mut c_void) -> *mut hl::varray {
     }
     arr
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hiclear(m: *mut c_void) {
     if m.is_null() {
         return;
@@ -830,7 +830,7 @@ pub unsafe extern "C" fn hlp_hiclear(m: *mut c_void) {
     idx.free.clear();
     idx.high = 0;
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hisize(m: *mut c_void) -> i32 {
     if m.is_null() {
         return 0;
@@ -851,11 +851,11 @@ pub unsafe extern "C" fn hlp_hisize(m: *mut c_void) -> i32 {
 // ============================================================================
 type Int64Index = SlotIndex<i64>;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64alloc() -> *mut c_void {
     rooted_alloc::<i64>()
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64set(m: *mut c_void, key: i64, value: *mut hl::vdynamic) {
     if m.is_null() {
         return;
@@ -871,7 +871,7 @@ pub unsafe extern "C" fn hlp_hi64set(m: *mut c_void, key: i64, value: *mut hl::v
         idx.slot_of.insert(key, slot);
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64exists(m: *mut c_void, key: i64) -> bool {
     if m.is_null() {
         return false;
@@ -880,7 +880,7 @@ pub unsafe extern "C" fn hlp_hi64exists(m: *mut c_void, key: i64) -> bool {
     let idx = &*((*rm).index as *const Int64Index);
     idx.slot_of.contains_key(&key)
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64get(m: *mut c_void, key: i64) -> *mut hl::vdynamic {
     if m.is_null() {
         return ptr::null_mut();
@@ -891,7 +891,7 @@ pub unsafe extern "C" fn hlp_hi64get(m: *mut c_void, key: i64) -> *mut hl::vdyna
         None => ptr::null_mut(),
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64remove(m: *mut c_void, key: i64) -> bool {
     if m.is_null() {
         return false;
@@ -908,7 +908,7 @@ pub unsafe extern "C" fn hlp_hi64remove(m: *mut c_void, key: i64) -> bool {
         None => false,
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64keys(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
@@ -923,7 +923,7 @@ pub unsafe extern "C" fn hlp_hi64keys(m: *mut c_void) -> *mut hl::varray {
     }
     arr
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64values(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
@@ -936,7 +936,7 @@ pub unsafe extern "C" fn hlp_hi64values(m: *mut c_void) -> *mut hl::varray {
     }
     arr
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64clear(m: *mut c_void) {
     if m.is_null() {
         return;
@@ -950,7 +950,7 @@ pub unsafe extern "C" fn hlp_hi64clear(m: *mut c_void) {
     idx.free.clear();
     idx.high = 0;
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hi64size(m: *mut c_void) -> i32 {
     if m.is_null() {
         return 0;
@@ -964,11 +964,11 @@ pub unsafe extern "C" fn hlp_hi64size(m: *mut c_void) -> i32 {
 // ============================================================================
 type ObjIndex = SlotIndex<usize>;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoalloc() -> *mut c_void {
     rooted_alloc::<usize>()
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoset(m: *mut c_void, key: *mut hl::vdynamic, val: *mut hl::vdynamic) {
     if m.is_null() || key.is_null() {
         return;
@@ -986,7 +986,7 @@ pub unsafe extern "C" fn hlp_hoset(m: *mut c_void, key: *mut hl::vdynamic, val: 
         idx.slot_of.insert(key as usize, slot);
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoexists(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
     if m.is_null() || key.is_null() {
         return false;
@@ -995,7 +995,7 @@ pub unsafe extern "C" fn hlp_hoexists(m: *mut c_void, key: *mut hl::vdynamic) ->
     let idx = &*((*rm).index as *const ObjIndex);
     idx.slot_of.contains_key(&(key as usize))
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoget(m: *mut c_void, key: *mut hl::vdynamic) -> *mut hl::vdynamic {
     if m.is_null() || key.is_null() {
         return ptr::null_mut();
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn hlp_hoget(m: *mut c_void, key: *mut hl::vdynamic) -> *m
         None => ptr::null_mut(),
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_horemove(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
     if m.is_null() || key.is_null() {
         return false;
@@ -1024,7 +1024,7 @@ pub unsafe extern "C" fn hlp_horemove(m: *mut c_void, key: *mut hl::vdynamic) ->
         None => false,
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hokeys(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
@@ -1037,7 +1037,7 @@ pub unsafe extern "C" fn hlp_hokeys(m: *mut c_void) -> *mut hl::varray {
     }
     arr
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hovalues(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
@@ -1050,7 +1050,7 @@ pub unsafe extern "C" fn hlp_hovalues(m: *mut c_void) -> *mut hl::varray {
     }
     arr
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hoclear(m: *mut c_void) {
     if m.is_null() {
         return;
@@ -1065,7 +1065,7 @@ pub unsafe extern "C" fn hlp_hoclear(m: *mut c_void) {
     idx.free.clear();
     idx.high = 0;
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hosize(m: *mut c_void) -> i32 {
     if m.is_null() {
         return 0;

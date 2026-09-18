@@ -337,7 +337,7 @@ pub(crate) fn seal() {
 /// Returns false, changing nothing, when `table` is null, was built against
 /// another table version or size, or the heap already exists -- either
 /// `hlp_gc_init` has run or ash's heap was created lazily by an allocation.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_install(table: *const RuntimeVTable) -> bool {
     if table.is_null() {
         return false;
@@ -355,20 +355,20 @@ pub unsafe extern "C" fn hlp_rt_install(table: *const RuntimeVTable) -> bool {
 }
 
 /// Whether a host table has been installed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_rt_installed() -> bool {
     INSTALLED.load(Ordering::Acquire)
 }
 
 /// The fiber switch hook the host registered with `hlp_set_fiber_switch_hook`,
 /// for a scheduler that replaces ash's and must call it around every switch.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_switch_hook() -> Option<crate::fiber::FiberSwitchHook> {
     crate::fiber::switch_hook()
 }
 
 /// The closure runner registered with `hlp_set_closure_runner`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_closure_runner() -> Option<crate::fiber::ClosureRunner> {
     crate::fiber::closure_runner()
 }
@@ -376,7 +376,7 @@ pub unsafe extern "C" fn hlp_rt_closure_runner() -> Option<crate::fiber::Closure
 /// Swap this thread's live exception state (trap chain head, exception
 /// value) with `*trap` and `*exc`: a replacement scheduler's per-fiber
 /// switch.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rt_exc_swap(trap: *mut *mut TrapContext, exc: *mut *mut vdynamic) {
     crate::gc::gc_swap_exc_state(&mut *trap, &mut *exc);
 }

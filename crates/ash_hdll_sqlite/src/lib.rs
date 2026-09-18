@@ -409,7 +409,7 @@ macro_rules! define_prim {
         /// # Safety
         /// `sign` must be a writable pointer, which is what the caller of a
         /// `DEFINE_PRIM` resolver passes.
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $resolver(sign: *mut *const c_char) -> *mut c_void {
             if !sign.is_null() {
                 *sign = concat!($signature, "\0").as_ptr() as *const c_char;

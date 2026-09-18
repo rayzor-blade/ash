@@ -2,7 +2,7 @@ use crate::hl::uchar;
 use std::alloc::{alloc, Layout};
 use std::ptr;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ucmp(a: *const uchar, b: *const uchar) -> i32 {
     let mut a_ptr = a;
     let mut b_ptr = b;
@@ -25,7 +25,7 @@ pub unsafe extern "C" fn ucmp(a: *const uchar, b: *const uchar) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ustrdup(str: *const uchar) -> *mut uchar {
     if str.is_null() {
         // println!("Input string is null");

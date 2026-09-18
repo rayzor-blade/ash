@@ -153,7 +153,7 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
 /// AOT binary uses an equivalent generated wrapper and calls back here
 /// once the longjmp has landed. Keeping the defensive value decoding beside
 /// `hlp_throw` also prevents the JIT runner from dereferencing GC objects.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_print_uncaught_exception(v: *mut hl::vdynamic) {
     let message = describe_exception(v);
     // Over the source when it is reachable, which is the same choice the CLI
@@ -297,7 +297,7 @@ impl TrapContext {
 
 /// Nothing records a current `HLException`, so there is never a stack to
 /// return; the NativeStackTrace primitives below are the working path.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
     std::ptr::null_mut()
 }
@@ -331,7 +331,7 @@ static AOT_POSITIONS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::ne
 #[cfg(not(target_family = "wasm"))]
 static AOT_FINDEX_BY_START: std::sync::Mutex<Vec<(usize, u32)>> = std::sync::Mutex::new(Vec::new());
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_register_aot_symbols(
     starts: *const *const c_void,
     names: *const *const std::os::raw::c_char,
@@ -401,7 +401,7 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
 /// `file` an index into this table, which is how HashLink's bytecode itself
 /// spells positions; the emitter only hands the table over for a target whose
 /// frames record positions at all.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_register_aot_debug_files(
     files: *const *const std::os::raw::c_char,
     count: usize,
@@ -433,7 +433,7 @@ pub unsafe extern "C" fn hlp_register_aot_debug_files(
 /// A native frame is named from the machine stack, which says which function
 /// a pc is in and not where in it, so a whole body reports one position. It
 /// is what `--mode jit` reports for a compiled frame, for the same reason.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_register_aot_positions(positions: *const u64, count: usize) {
     #[cfg(not(target_family = "wasm"))]
     if !positions.is_null() {
@@ -676,14 +676,14 @@ mod shadow {
 /// (crates/ash/build.rs) leaves it out of a native binary, where it does not
 /// exist.
 #[cfg(target_family = "wasm")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_shadow_push(findex: u32) -> *mut u64 {
     shadow::push(findex)
 }
 
 /// Close the innermost shadow frame; every `Ret` of a wasm module calls it.
 #[cfg(target_family = "wasm")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_shadow_pop() {
     shadow::pop()
 }
@@ -1073,7 +1073,7 @@ unsafe extern "C" fn aot_resolve_symbol(
     text.as_ptr() as *mut u8
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_setup_exception(
     resolve_symbol: Option<ResolveSymbol>,
     capture_stack: Option<CaptureStack>,
@@ -1089,7 +1089,7 @@ pub unsafe extern "C" fn hlp_setup_exception(
 }
 
 /// Resolve an opaque `hl_symbol` returned by the raw stack APIs.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_resolve_symbol(
     symbol: *mut c_void,
     buffer: *mut u8,
@@ -1103,7 +1103,7 @@ pub unsafe extern "C" fn hlp_resolve_symbol(
     callback(symbol, buffer, buffer_len)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_exception_stack_raw(arr: *mut varray) -> i32 {
     EXCEPTION_STACK.with(|saved| {
         let saved = saved.borrow();
@@ -1131,7 +1131,7 @@ unsafe fn call_stack_raw(arr: *mut varray) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
@@ -1143,7 +1143,7 @@ pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_call_stack_raw_from_frame(
     arr: *mut varray,
     frame: *mut *mut c_void,
@@ -1156,7 +1156,7 @@ pub unsafe extern "C" fn hlp_call_stack_raw_from_frame(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_call_stack_frame() -> *const usize {
     CALL_STACK_FRAME.with(|frame| frame.get() as *const usize)
 }
@@ -1169,7 +1169,7 @@ thread_local! {
 
 /// Whether the capture callback is running for a throw rather than for a
 /// call-stack request.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_capturing_exception() -> bool {
     CAPTURING_EXCEPTION.with(|c| c.get())
 }
@@ -1230,7 +1230,7 @@ static THROW_SITES: std::sync::Mutex<Vec<ThrowSite>> = std::sync::Mutex::new(Vec
 /// Interpreted code never reaches `hlp_throw`: it raises a Rust error that the
 /// throwing frame's own trap catches, so it counts from where it raises and
 /// passes the symbol token for that site itself.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_note_throw_site(site: usize, v: *mut vdynamic) {
     if site != 0 {
         note_throw_site_at(site, v);
@@ -1318,7 +1318,7 @@ extern "C" {
 /// [`capture_exception_stack`] with the frame pointer of the C boundary
 /// that called it, for the walker on the one platform whose runtime keeps
 /// no frame pointers of its own; see `stack_boundary.c`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_capture_exception_stack_from_frame(frame: *mut *mut c_void) {
     CALL_STACK_FRAME.with(|saved| {
         let previous = saved.replace(frame as usize);
@@ -1472,7 +1472,7 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     hl::longjmp(buf_copy.as_mut_ptr(), 1);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     throw_impl(v, true)
 }
@@ -1481,7 +1481,7 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
 /// distinct entry point so stack-trace capture can distinguish the original
 /// throw site; ash's stack metadata is already retained separately, while
 /// trap unwinding is identical for both operations.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rethrow(v: *mut vdynamic) {
     throw_impl(v, false)
 }
@@ -1517,7 +1517,7 @@ pub(crate) fn setup_trap() -> *mut TrapContext {
 /// a host that calls in holding nothing says 0 and saves the lookup. The
 /// buffer to `setjmp`. Null when the storage is too small:
 /// `hlp_trap_context_size` says how much.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_setup_trap_in(
     storage: *mut c_void,
     size: usize,
@@ -1545,7 +1545,7 @@ pub unsafe extern "C" fn hlp_setup_trap_in(
 /// Pop the trap `hlp_setup_trap_in` armed in `storage`, after a normal
 /// return from under it. It must be the innermost trap, on the thread
 /// that armed it; a throw pops it itself.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_remove_trap_in(storage: *mut c_void) {
     let trap = storage as *mut TrapContext;
     let st = (*trap).state;
@@ -1558,7 +1558,7 @@ pub unsafe extern "C" fn hlp_remove_trap_in(storage: *mut c_void) {
 }
 
 /// The bytes `hlp_setup_trap_in` wants, at pointer alignment.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_trap_context_size() -> usize {
     mem::size_of::<TrapContext>()
 }
@@ -1593,7 +1593,7 @@ unsafe fn retire_trap(st: &mut crate::gc::ExcState, trap: *mut TrapContext) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     // The depth held by this thread outside this call, at the setjmp site
     // the caller is about to establish, is what `setup_trap` records.
@@ -1608,12 +1608,12 @@ pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     (*trap).buf.as_mut_ptr().cast()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_remove_trap_jit() {
     remove_trap();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
     crate::gc::with_exc(|st| {
         if throw_trace_enabled() {
@@ -1626,7 +1626,7 @@ pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_clear_exc_value() {
     crate::gc::with_exc(|st| {
         if throw_trace_enabled() {
@@ -1657,7 +1657,7 @@ thread_local! {
         const { std::cell::UnsafeCell::new(unsafe { mem::zeroed() }) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
     let room = crate::rt::alloc_locked(mem::size_of::<hl::vdynamic>());
     let d = match room {
@@ -1675,7 +1675,7 @@ pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
 static ERROR_HANDLER: std::sync::atomic::AtomicPtr<vclosure> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_error_handler(handler: *mut vclosure) {
     ERROR_HANDLER.store(handler, Ordering::Release);
 }

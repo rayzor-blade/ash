@@ -1,6 +1,6 @@
 //! Resolving HDLL primitives inside an ahead-of-time binary.
 //!
-//! A `std` primitive is a plain `#[no_mangle]` export of the runtime the
+//! A `std` primitive is a plain `#[unsafe(no_mangle)]` export of the runtime the
 //! object links against, so the symbol IS the name and the linker binds it.
 //! An HDLL primitive is not: it lives in a shared library reached through a
 //! `DEFINE_PRIM` table, and at emit time there is no library to bind to. So
@@ -251,7 +251,7 @@ fn sandbox_primitive(lib: &str, name: &str) -> *mut c_void {
 ///
 /// # Safety
 /// `lib` and `name` must be valid NUL-terminated C strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char) -> *mut c_void {
     if lib.is_null() || name.is_null() {
         return std::ptr::null_mut();
@@ -303,7 +303,7 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
 ///
 /// # Safety
 /// `lib` and `name` must be valid NUL-terminated C strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_aot_native_missing(lib: *const c_char, name: *const c_char) {
     let show = |p: *const c_char| {
         if p.is_null() {

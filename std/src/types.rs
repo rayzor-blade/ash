@@ -164,7 +164,7 @@ pub static T_SIZES: [isize; 23] = [
 /// So they are handed out by name. One per kind a primitive returns.
 macro_rules! persistent_type_accessor {
     ($name:ident, $singleton:ident) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $name() -> *mut hl_type {
             $singleton()
         }
@@ -177,12 +177,12 @@ persistent_type_accessor!(hlp_type_bytes, hlt_bytes);
 persistent_type_accessor!(hlp_type_array, hlt_array);
 persistent_type_accessor!(hlp_type_dyn, hlt_dyn);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_size(t: *mut hl_type) -> isize {
     T_SIZES[(*t).kind as usize]
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_pad_struct(size: i32, t: *mut hl_type) -> i32 {
     let align = match (*t).kind {
         hl::hl_type_kind_HVOID => return 0,
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn hlp_pad_struct(size: i32, t: *mut hl_type) -> i32 {
     (-(size as isize) & (align as isize - 1)) as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_same_type(a: *mut hl::hl_type, b: *mut hl::hl_type) -> bool {
     if a == b {
         return true;
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn hlp_same_type(a: *mut hl::hl_type, b: *mut hl::hl_type)
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type) -> bool {
     if t.is_null() || to.is_null() {
         return false;
@@ -406,7 +406,7 @@ static T_IS_DYNAMIC: [bool; 23] = [
     false, // HPACKED
 ];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_is_dynamic(t: *const hl::hl_type) -> bool {
     if t.is_null() {
         return false;
@@ -418,7 +418,7 @@ pub unsafe extern "C" fn hlp_is_dynamic(t: *const hl::hl_type) -> bool {
     T_IS_DYNAMIC[kind]
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_name(t: *const hl::hl_type) -> *mut vbyte {
     match (*t).kind {
         hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => (*(*t).__bindgen_anon_1.obj).name as *mut vbyte,
@@ -428,7 +428,7 @@ pub unsafe extern "C" fn hlp_type_name(t: *const hl::hl_type) -> *mut vbyte {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_set_global(t: *const hl::hl_type, v: *mut vdynamic) -> bool {
     match (*t).kind {
         hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
@@ -444,7 +444,7 @@ pub unsafe extern "C" fn hlp_type_set_global(t: *const hl::hl_type, v: *mut vdyn
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_type_get_global(t: *mut hl::hl_type) -> *mut hl::vdynamic {
     if t.is_null() {
         return std::ptr::null_mut();
@@ -490,7 +490,7 @@ static GUID_NAMES: OnceLock<std::sync::Mutex<std::collections::HashMap<i64, Box<
 // anyway: dropping a name the program handed over would make the day someone
 // adds the reader look like a registration bug. A null name deregisters,
 // matching upstream's hi64remove branch.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_register_guid_name(guid: i64, name: *mut vbyte) {
     let names = GUID_NAMES.get_or_init(Default::default);
     let mut names = names.lock().unwrap_or_else(|e| e.into_inner());
@@ -503,7 +503,7 @@ pub unsafe extern "C" fn hlp_register_guid_name(guid: i64, name: *mut vbyte) {
     names.insert(guid, std::slice::from_raw_parts(s, len).into());
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
     if t.is_null() {
         return 0;
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut venum {
     let tenum = (*t).__bindgen_anon_1.tenum;
     if tenum.is_null() {
@@ -549,7 +549,7 @@ pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut ven
 }
 
 /// Upstream hl_type_super (types.c): super type of HOBJ/HSTRUCT, else &hlt_void.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_super(t: *mut hl_type) -> *mut hl_type {
     if !t.is_null() && ((*t).kind == hl_type_kind_HOBJ || (*t).kind == hl_type_kind_HSTRUCT) {
         let obj = (*t).__bindgen_anon_1.obj;
@@ -562,7 +562,7 @@ pub unsafe extern "C" fn hlp_type_super(t: *mut hl_type) -> *mut hl_type {
 
 /// Upstream hl_type_enum_eq (types.c): structural equality of two enum
 /// values — same type, same constructor, recursively equal parameters.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_enum_eq(a: *mut venum, b: *mut venum) -> bool {
     if a == b {
         return true;
@@ -612,7 +612,7 @@ pub unsafe extern "C" fn hlp_type_enum_eq(a: *mut venum, b: *mut venum) -> bool 
 
 /// Upstream hl_alloc_enum_dyn (types.c): allocate an enum value from a
 /// dynamic argument array, allowing missing trailing nullable params.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_enum_dyn(
     t: *mut hl_type,
     index: i32,
@@ -664,7 +664,7 @@ pub unsafe extern "C" fn hlp_alloc_enum_dyn(
 /// over any dynamic — including one that is not an enum. Upstream would walk
 /// a garbage `tenum` there; an empty array is the answer that cannot corrupt
 /// the heap.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_enum_parameters(e: *mut venum) -> *mut varray {
     if e.is_null() || (*e).t.is_null() || (*(*e).t).kind != hl_type_kind_HENUM {
         return hlp_alloc_array(hlt_dyn(), 0);
@@ -682,7 +682,7 @@ pub unsafe extern "C" fn hlp_enum_parameters(e: *mut venum) -> *mut varray {
     a
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varray {
     // Use persistent hlt_bytes() so the at pointer does not dangle after return
     let tenum = (*t).__bindgen_anon_1.tenum;
@@ -698,7 +698,7 @@ pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varra
     array
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_enum_values(t: *mut hl::hl_type) -> *mut varray {
     let tenum = (*t).__bindgen_anon_1.tenum;
     let nconstructs = (*tenum).nconstructs;
@@ -718,7 +718,7 @@ pub unsafe extern "C" fn hlp_type_enum_values(t: *mut hl::hl_type) -> *mut varra
     array
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_mem_compact(
     _d: *mut vdynamic,
     _exclude: *mut varray,
@@ -728,7 +728,7 @@ pub extern "C" fn hlp_mem_compact(
     unimplemented!()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_init_enum(et: *mut hl_type, _m: *mut hl_module_context) {
     let tenum = (*et).__bindgen_anon_1.tenum;
     if tenum.is_null() {
@@ -957,7 +957,7 @@ mod guid_name_tests {
 }
 
 /// Instance size of an object type, or -1 for anything without one.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_data_size(t: *mut hl_type) -> i32 {
     if t.is_null() {
         return -1;

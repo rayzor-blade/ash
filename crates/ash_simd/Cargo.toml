@@ -1,7 +1,7 @@
 [package]
 name = "ash_simd"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
 description = "The ash-simd primitives: 128-bit lane operations over hl.Bytes slots"

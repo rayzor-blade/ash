@@ -35,7 +35,7 @@ unsafe fn alloc_utf16_string(s: &str, out_len: *mut i32) -> *mut vbyte {
     out as *mut vbyte
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_date_new(y: i32, mo: i32, d: i32, h: i32, m: i32, s: i32) -> i32 {
     let month = match mo.checked_add(1) {
         Some(v) if v > 0 => v as u32,
@@ -52,12 +52,12 @@ pub extern "C" fn hlp_date_new(y: i32, mo: i32, d: i32, h: i32, m: i32, s: i32) 
     local_naive_to_timestamp(NaiveDateTime::new(naive_date, naive_time)).unwrap_or(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_date_now() -> i32 {
     i32::try_from(Local::now().timestamp()).unwrap_or(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_date_from_time(t: f64) -> i32 {
     let secs = (t / 1000.0).trunc();
     if !secs.is_finite() {
@@ -66,7 +66,7 @@ pub extern "C" fn hlp_date_from_time(t: f64) -> i32 {
     i32::try_from(secs as i64).unwrap_or(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_date_from_string(bytes: *const vbyte, len: i32) -> i32 {
     let s = utf16_to_string_with_len(bytes, len);
     let s = s.trim();
@@ -94,12 +94,12 @@ pub unsafe extern "C" fn hlp_date_from_string(bytes: *const vbyte, len: i32) -> 
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_date_get_time(t: i32) -> f64 {
     (t as f64) * 1000.0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_date_get_inf(
     t: i32,
     year: *mut i32,
@@ -143,7 +143,7 @@ pub unsafe extern "C" fn hlp_date_get_inf(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_date_get_utc_inf(
     t: i32,
     year: *mut i32,
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn hlp_date_get_utc_inf(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_date_to_string(t: i32, len: *mut i32) -> *mut vbyte {
     let dt = Local
         .timestamp_opt(t as i64, 0)

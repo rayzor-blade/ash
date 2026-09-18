@@ -32,11 +32,11 @@ pub static INIT_SEEDS: &[::std::os::raw::c_ulong] = &[
     0xa6b7aadb,
 ];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_alloc() -> *mut hl::rnd {
     allocate_rnd().expect("could not allocate hl::rnd").as_ptr()
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {
     let r = hlp_rnd_alloc();
     let pid = crate::sys::process_id();
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {
     hlp_rnd_set_seed(r, (time ^ (pid | (pid << 16))) as i32);
     r
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
     if r.is_null() {
         return;
@@ -76,7 +76,7 @@ pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
 /// tempered into a 32-bit result. `unsigned long` on the seeds is the C
 /// declaration, so the table mixes at 64 bits on unix and 32 on MSVC exactly
 /// as upstream does; only the tempering is fixed at 32 bits.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_int(r: *mut hl::rnd) -> c_uint {
     if r.is_null() {
         return 0;
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn hlp_rnd_int(r: *mut hl::rnd) -> c_uint {
 
 /// Upstream hl_rnd_float (random.c): three 32-bit draws folded into the
 /// [0,1) mantissa, most significant draw last.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_rnd_float(r: *mut hl::rnd) -> f64 {
     const BIG: f64 = 4294967296.0;
     let a = hlp_rnd_int(r) as f64;

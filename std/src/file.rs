@@ -351,7 +351,7 @@ fn blocking_io<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_open(
     name: *const vbyte,
     mode: c_int,
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn hlp_file_open(
 }
 
 // DEFINE_PRIM(_VOID, file_close, _FILE)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_close(f: *mut c_void) {
     if f.is_null() {
         return;
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn hlp_file_close(f: *mut c_void) {
 }
 
 // DEFINE_PRIM(_I32, file_write, _FILE _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_write(
     f: *mut c_void,
     buf: *mut vbyte,
@@ -424,7 +424,7 @@ pub unsafe extern "C" fn hlp_file_write(
 }
 
 // DEFINE_PRIM(_I32, file_read, _FILE _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_read(
     f: *mut c_void,
     buf: *mut vbyte,
@@ -445,7 +445,7 @@ pub unsafe extern "C" fn hlp_file_read(
 }
 
 // DEFINE_PRIM(_BOOL, file_write_char, _FILE _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_write_char(f: *mut c_void, c: c_int) -> bool {
     let Some(m) = state_of(f) else {
         return false;
@@ -455,7 +455,7 @@ pub unsafe extern "C" fn hlp_file_write_char(f: *mut c_void, c: c_int) -> bool {
 }
 
 // DEFINE_PRIM(_I32, file_read_char, _FILE)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_read_char(f: *mut c_void) -> c_int {
     let Some(m) = state_of(f) else {
         return -2;
@@ -468,7 +468,7 @@ pub unsafe extern "C" fn hlp_file_read_char(f: *mut c_void) -> c_int {
 }
 
 // DEFINE_PRIM(_BOOL, file_seek, _FILE _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_seek(f: *mut c_void, pos: c_int, kind: c_int) -> bool {
     let Some(m) = state_of(f) else {
         return false;
@@ -477,7 +477,7 @@ pub unsafe extern "C" fn hlp_file_seek(f: *mut c_void, pos: c_int, kind: c_int) 
 }
 
 // DEFINE_PRIM(_I32, file_tell, _FILE)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_tell(f: *mut c_void) -> c_int {
     let Some(m) = state_of(f) else {
         return -1;
@@ -492,7 +492,7 @@ pub unsafe extern "C" fn hlp_file_tell(f: *mut c_void) -> c_int {
 }
 
 // DEFINE_PRIM(_BOOL, file_seek2, _FILE _F64 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_seek2(f: *mut c_void, pos: f64, kind: c_int) -> bool {
     let Some(m) = state_of(f) else {
         return false;
@@ -504,7 +504,7 @@ pub unsafe extern "C" fn hlp_file_seek2(f: *mut c_void, pos: f64, kind: c_int) -
 }
 
 // DEFINE_PRIM(_F64, file_tell2, _FILE)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_tell2(f: *mut c_void) -> f64 {
     let Some(m) = state_of(f) else {
         return -1.0;
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn hlp_file_tell2(f: *mut c_void) -> f64 {
 }
 
 // DEFINE_PRIM(_BOOL, file_eof, _FILE)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_eof(f: *mut c_void) -> bool {
     match state_of(f) {
         Some(m) => lock(m).eof,
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn hlp_file_eof(f: *mut c_void) -> bool {
 }
 
 // DEFINE_PRIM(_BOOL, file_flush, _FILE)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_flush(f: *mut c_void) -> bool {
     let Some(m) = state_of(f) else {
         return false;
@@ -534,25 +534,25 @@ pub unsafe extern "C" fn hlp_file_flush(f: *mut c_void) -> bool {
 }
 
 // DEFINE_PRIM(_FILE, file_stdin, _NO_ARG)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_stdin() -> *mut c_void {
     alloc_handle(FileState::new(Backing::Stdin))
 }
 
 // DEFINE_PRIM(_FILE, file_stdout, _NO_ARG)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_stdout() -> *mut c_void {
     alloc_handle(FileState::new(Backing::Stdout))
 }
 
 // DEFINE_PRIM(_FILE, file_stderr, _NO_ARG)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_stderr() -> *mut c_void {
     alloc_handle(FileState::new(Backing::Stderr))
 }
 
 // DEFINE_PRIM(_BYTES, file_contents, _BYTES _REF(_I32))
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_contents(name: *const vbyte, size: *mut c_int) -> *mut vbyte {
     let Some(path) = path_from_bytes(name) else {
         return ptr::null_mut();
@@ -621,7 +621,7 @@ fn file_locked(_path: &str) -> bool {
 }
 
 // DEFINE_PRIM(_BOOL, file_is_locked, _BYTES)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_is_locked(name: *const vbyte) -> bool {
     match path_from_bytes(name) {
         Some(path) => file_locked(&path),
@@ -637,7 +637,7 @@ pub unsafe extern "C" fn hlp_file_is_locked(name: *const vbyte) -> bool {
 // errno belongs to the thread, not to the handle, and the staging above can
 // interpose a call between a failed read and this query. Haxe only asks
 // after a primitive already reported failure, which is where the two agree.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_file_error_code() -> c_int {
     io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }

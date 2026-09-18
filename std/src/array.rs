@@ -6,12 +6,12 @@ use crate::{
     types::{hl_aptr, hlp_type_size},
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_array_type(a: *mut varray) -> *mut hl_type {
     (*a).at
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut varray {
     if size < 0 {
         hlp_error("Invalid array size".as_ptr() as *const uchar);
@@ -46,7 +46,7 @@ pub fn array_blit<T: Copy>(dst: &mut [T], dpos: usize, src: &[T], spos: usize, l
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_array_blit(
     dst: *mut varray,
     dpos: i32,
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn hlp_array_blit(
 // primitive: the bytes view a caller gets back has to see writes made
 // through the array, and the header it skips is the same 24 bytes
 // `hlp_array_blit` skips.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_array_bytes(a: *mut varray) -> *mut vbyte {
     if a.is_null() {
         return ptr::null_mut();
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn hlp_array_bytes(a: *mut varray) -> *mut vbyte {
 // bindings `hlp_alloc_obj` writes have to be written per element as well:
 // a bound method read out of element k otherwise dispatches through the null
 // left by the zeroing allocator.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_carray(at: *mut hl_type, size: i32) -> *mut std::ffi::c_void {
     if at.is_null() || ((*at).kind != hl_type_kind_HOBJ && (*at).kind != hl_type_kind_HSTRUCT) {
         hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn hlp_alloc_carray(at: *mut hl_type, size: i32) -> *mut s
 /// `hlp_array_blit`. `memmove`, not `memcpy`: upstream permits the two arrays
 /// to be the same one, and a self-blit with overlapping ranges is the ordinary
 /// way to open or close a gap.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_carray_blit(
     dst: *mut std::ffi::c_void,
     at: *mut hl_type,

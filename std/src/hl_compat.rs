@@ -23,7 +23,7 @@ unsafe impl Sync for SyncHlType {}
 
 macro_rules! hlt_global {
     ($name:ident, $kind:expr) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub static $name: SyncHlType = SyncHlType(hl_type {
             kind: $kind,
             __bindgen_anon_1: hl_type__bindgen_ty_1 {
@@ -53,12 +53,12 @@ use crate::hl::{self, hl_buffer, hl_type, hl_type__bindgen_ty_1, varray, vdynami
 // Direct aliases: forward hl_XXX to hlp_XXX
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_array(t: *mut hl_type, size: i32) -> *mut varray {
     crate::array::hlp_alloc_array(t, size)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     let result = crate::obj::hlp_alloc_dynamic(t);
     if env_flag!("ASH_DBG_ALLOC") {
@@ -68,22 +68,22 @@ pub unsafe extern "C" fn hl_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_dynobj() -> *mut vdynamic {
     crate::obj::hlp_alloc_dynobj() as *mut vdynamic
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64) {
     crate::obj::hlp_dyn_setd(d, hfield, value);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_type, value: i32) {
     crate::obj::hlp_dyn_seti(d, hfield, t, value);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_setp(
     d: *mut vdynamic,
     hfield: i32,
@@ -93,12 +93,12 @@ pub unsafe extern "C" fn hl_dyn_setp(
     crate::obj::hlp_dyn_setp(d, hfield, t, value);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32) {
     crate::obj::hlp_dyn_setf(d, hfield, value);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64) {
     crate::obj::hlp_dyn_seti64(d, hfield, value);
 }
@@ -107,27 +107,27 @@ pub unsafe extern "C" fn hl_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64
 // before it will map a module at all, so ui.hdll's hl_dyn_geti/hl_dyn_getp
 // failed the whole load rather than the call that needed them.
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_type) -> i32 {
     crate::obj::hlp_dyn_geti(d, hfield, t)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
     crate::obj::hlp_dyn_geti64(d, hfield)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
     crate::obj::hlp_dyn_getf(d, hfield)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
     crate::obj::hlp_dyn_getd(d, hfield)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_getp(
     d: *mut vdynamic,
     hfield: i32,
@@ -140,27 +140,27 @@ pub unsafe extern "C" fn hl_dyn_getp(
 /// registry, so the answer is the null `hlp_get_thread_info` documents — but
 /// the symbol has to exist, because ui.hdll imports it whether or not the
 /// program ever builds a `ui.Sentinel`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_get_thread() -> *mut c_void {
     crate::sys::hlp_get_thread_info()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_hash_gen(name: *const hl::uchar, cache_name: bool) -> i32 {
     crate::obj::hlp_hash_gen(name, cache_name)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
     crate::cast::hlp_make_dyn(data, t)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_throw(v: *mut vdynamic) {
     crate::error::hlp_throw(v);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_rethrow(v: *mut vdynamic) {
     crate::error::hlp_rethrow(v);
 }
@@ -181,7 +181,7 @@ pub unsafe extern "C" fn hl_rethrow(v: *mut vdynamic) {
 /// closure it rebuilds an unbound one from the parent type and boxes
 /// `c->value` as argument zero. Forwarding is therefore the whole fix — the
 /// implementation was never missing, only unreachable from C.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_dyn_call(
     c: *mut hl::vclosure,
     args: *mut *mut vdynamic,
@@ -194,22 +194,22 @@ pub unsafe extern "C" fn hl_dyn_call(
 // Buffer functions (forward to existing hlp_buffer_*)
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_buffer(_init: *const hl::uchar) -> *mut c_void {
     crate::buffer::hlp_alloc_buffer() as *mut c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_char(b: *mut c_void, c: u16) {
     crate::buffer::hlp_buffer_char(b as *mut hl_buffer, c);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_str(b: *mut c_void, s: *const hl::uchar) {
     crate::buffer::hlp_buffer_str(b as *mut hl_buffer, s);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_cstr(b: *mut c_void, s: *const u8) {
     if s.is_null() {
         return;
@@ -221,12 +221,12 @@ pub unsafe extern "C" fn hl_buffer_cstr(b: *mut c_void, s: *const u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_content(b: *mut c_void, len: *mut i32) -> *const hl::uchar {
     crate::buffer::hlp_buffer_content(b as *mut hl_buffer, len)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
     crate::buffer::hlp_buffer_val(b as *mut hl_buffer, v);
 }
@@ -235,7 +235,7 @@ pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
 // GC functions
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32) -> *mut c_void {
     // A Mach-O HDLL binds these `hl_*` imports to its `libhl.dylib`
     // dependency by install-name ordinal, even when ash exports the same ABI
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
 ///
 /// Registering a slot costs nothing if it holds null or a non-heap value --
 /// the collector's conservative read ignores those exactly as upstream does.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
     crate::rt::add_root_slot(ptr as usize);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
 // String/encoding functions
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
     if str.is_null() {
         return ptr::null();
@@ -353,7 +353,7 @@ pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
     ptr::null()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
     if env_flag!("ASH_DBG_SHADER") {
         if !str.is_null() && (str as usize) > 0x10000 {
@@ -385,7 +385,7 @@ pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
     ptr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uchar {
     if str.is_null() {
         return ptr::null();
@@ -402,7 +402,7 @@ pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uc
 /// particular, hlsdl expands `hl_error("... %s", value)` to
 /// `hl_throw(hl_alloc_strbytes(...))`, so changing either the arguments or
 /// return type turns an ordinary catchable exception into memory corruption.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_strbytes(fmt: *const hl::uchar, mut args: ...) -> *mut vdynamic {
     if fmt.is_null() {
         return ptr::null_mut();
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn hl_alloc_strbytes(fmt: *const hl::uchar, mut args: ...)
     d
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
     // Hash UTF-8 bytes by first converting to UTF-16
     if name.is_null() {
@@ -535,12 +535,12 @@ pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
 // Misc
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_alloc_bytes(size: i32) -> *mut u8 {
     crate::bytes::hlp_alloc_bytes(size)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_copy_bytes(src: *const u8, size: i32) -> *mut u8 {
     let dst = hl_alloc_bytes(size);
     if size > 0 {
@@ -549,7 +549,7 @@ pub unsafe extern "C" fn hl_copy_bytes(src: *const u8, size: i32) -> *mut u8 {
     dst
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
     // Convert buffer content to a string and throw as exception
     let mut len: i32 = 0;
@@ -564,7 +564,7 @@ pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_blocking(enter: bool) {
     crate::thread::hlp_blocking(enter);
 }
@@ -575,7 +575,7 @@ pub unsafe extern "C" fn hl_blocking(enter: bool) {
 
 // ustrdup is in ucs2.rs
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ustrlen(s: *const u16) -> usize {
     if s.is_null() {
         return 0;
@@ -587,17 +587,17 @@ pub unsafe extern "C" fn ustrlen(s: *const u16) -> usize {
     len
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uprintf(_fmt: *const u16, _: ...) {
     // Stub: UTF-16 printf
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn usprintf(_out: *mut u16, _size: i32, _fmt: *const u16, _: ...) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn uvszprintf(
     _out: *mut u16,
     _size: i32,

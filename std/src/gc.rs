@@ -1037,7 +1037,7 @@ fn stop_mutator_world() -> StoppedWorld {
 ///
 /// # Safety
 /// `out` must be valid for `cap` `u64` writes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_registered_threads(out: *mut u64, cap: usize) -> usize {
     crate::rt::gc_registered_threads(out, cap)
 }
@@ -1245,7 +1245,7 @@ fn inline_alloc_locator() -> (u32, i64) {
 
 /// Fill `out` with how compiled code may bump-allocate into this thread's
 /// region. `kind` 0 says it may not.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_inline_alloc_layout(out: *mut InlineAllocLayout) {
     let (kind, offset) = inline_alloc_locator();
     *out = InlineAllocLayout {
@@ -1954,7 +1954,7 @@ extern "C" fn gc_stats_atexit() {
 }
 
 /// On-demand GC stats dump (also printed at exit when ASH_GC_STATS=1).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_gc_print_stats() {
     unsafe { crate::rt::gc_print_stats() }
 }
@@ -1975,7 +1975,7 @@ pub fn print_stats_if_enabled() {
 // ── macOS return-to-OS hooks ────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-extern "C" {
+unsafe extern "C" {
     /// Asks all malloc zones to release free pages back to the OS
     /// (forces MADV_FREE_REUSABLE internally — wren_lift gc.rs:1493-1515).
     fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
@@ -2366,13 +2366,13 @@ pub(crate) fn gc_lock_unwind_to(target: usize) {
 
 /// Manually acquire the GC lock (reentrant). Used by the tiered-JIT worker
 /// to hold the lock across its whole module init.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_lock() {
     crate::rt::gc_lock();
 }
 
 /// Manually release one level of the GC lock.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_unlock() {
     crate::rt::gc_unlock();
 }
@@ -4646,7 +4646,7 @@ impl ImmixAllocator {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_register_root(ptr: *mut hl::vdynamic) {
     if ptr.is_null() {
         return;
@@ -4654,7 +4654,7 @@ pub unsafe extern "C" fn hlp_gc_register_root(ptr: *mut hl::vdynamic) {
     crate::rt::gc_add_persistent(ptr);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_zalloc(size: i32) -> *mut std::os::raw::c_void {
     if size < 0 {
         return ptr::null_mut();
@@ -4670,7 +4670,7 @@ pub unsafe extern "C" fn hlp_zalloc(size: i32) -> *mut std::os::raw::c_void {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_mark_size(data_size: i32) -> i32 {
     unsafe { crate::rt::mark_size(data_size) }
 }
@@ -4685,7 +4685,7 @@ pub(crate) unsafe extern "C" fn mark_size(data_size: i32) -> i32 {
 
 /// Walk all live heap objects, calling `visitor(obj_ptr, type_ptr)` for each.
 /// Used by hot-reload to propagate field updates to existing objects.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_walk_heap(
     visitor: unsafe extern "C" fn(*mut hl::vdynamic, *mut hl::hl_type, *mut c_void),
     ctx: *mut c_void,
@@ -4756,14 +4756,14 @@ pub(crate) unsafe fn allocation_size(ptr: *const c_void) -> usize {
 /// can still be stopped by a collection. ash's own safepoint is the same
 /// rendezvous the mutator registry uses; a thread the collector was never told
 /// about passes straight through, exactly as upstream allows.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_safepoint() {
     crate::rt::gc_safepoint();
 }
 
 /// Initialize the garbage collector. Must be called before any allocation.
 /// Seals the runtime table: `hlp_rt_install` is refused from here on.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_init() {
     crate::rt::seal();
     crate::rt::gc_init();
@@ -4775,7 +4775,7 @@ pub(crate) unsafe extern "C" fn gc_init() {
 
 /// Record the stack top for conservative scanning.
 /// Called once at JIT entry before running user code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
     crate::rt::gc_set_stack_top(top);
 }
@@ -4787,7 +4787,7 @@ pub(crate) unsafe extern "C" fn gc_set_stack_top(top: usize) {
 /// HashLink-compatible OS-mutator registration used by HDLL-created worker
 /// threads. `hlp_gc_set_stack_top` is the idempotent host-runtime spelling;
 /// both feed the same per-thread registry.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_register_thread(stack_top: *mut c_void) {
     crate::rt::register_thread(stack_top);
 }
@@ -4799,7 +4799,7 @@ pub(crate) unsafe extern "C" fn register_thread(stack_top: *mut c_void) {
     register_current_mutator(stack_top as usize, "hdll");
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_unregister_thread() {
     crate::rt::unregister_thread();
 }
@@ -4813,7 +4813,7 @@ pub(crate) unsafe extern "C" fn unregister_thread() {
 
 /// Register the globals_data array for conservative scanning.
 /// Called after init_constants with pointer to globals array and count.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_globals(ptr: *const *mut c_void, count: usize) {
     crate::rt::gc_set_globals(ptr, count);
 }
@@ -4824,7 +4824,7 @@ pub(crate) unsafe extern "C" fn gc_set_globals(ptr: *const *mut c_void, count: u
 }
 
 /// Clear interpreter-provided conservative scan ranges.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_scan_roots_done() {
     crate::rt::gc_scan_roots_done();
 }
@@ -4834,7 +4834,7 @@ pub(crate) unsafe extern "C" fn gc_scan_roots_done() {
     gc.scan_roots_done();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
     crate::rt::gc_clear_scan_roots();
 }
@@ -4845,7 +4845,7 @@ pub(crate) unsafe extern "C" fn gc_clear_scan_roots() {
 }
 
 /// Add an interpreter-provided conservative scan range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
     crate::rt::gc_add_scan_root(ptr, size);
 }
@@ -4873,7 +4873,7 @@ pub(crate) unsafe extern "C" fn gc_add_scan_root(ptr: *const c_void, size: usize
 /// Called once; afterwards the mutator maintains the table itself and the
 /// collector reads it when it stops the world. Replaces a per-call copy under
 /// two locks -- on a recursive program that copy was most of the run.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_scan_roots_live(
     ranges: *const (usize, usize),
     len: *const usize,
@@ -4899,7 +4899,7 @@ pub(crate) unsafe extern "C" fn gc_set_scan_roots_live(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_scan_roots(ranges: *const (usize, usize), count: usize) {
     crate::rt::gc_set_scan_roots(ranges, count);
 }
@@ -4924,7 +4924,7 @@ pub(crate) unsafe extern "C" fn gc_set_scan_roots(ranges: *const (usize, usize),
 /// Charge off-heap memory (fiber stacks, native buffers, JIT structures) as
 /// GC allocation pressure. The charge participates in the byte-driven
 /// collection trigger and resets after every collection.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_track_external(bytes: u64) {
     crate::rt::gc_track_external(bytes);
 }
@@ -4942,7 +4942,7 @@ pub(crate) unsafe extern "C" fn gc_track_external(bytes: u64) {
 /// disables the GC and never re-enables it loses collections, not the heap.
 /// Nothing here takes a lock, so it cannot deadlock against a collection in
 /// flight on another thread.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_enable(b: bool) {
     crate::rt::gc_enable(b);
 }
@@ -4952,7 +4952,7 @@ pub(crate) unsafe extern "C" fn gc_enable(b: bool) {
 }
 
 /// `hl.Gc.flags` getter.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_get_flags() -> i32 {
     crate::rt::gc_get_flags()
 }
@@ -4980,7 +4980,7 @@ pub(crate) unsafe extern "C" fn gc_get_flags() -> i32 {
 /// would have to write the heap from inside the allocator, which already
 /// holds the GC lock the dumper takes; `Gc.dumpMemory()` produces the same
 /// file from a caller that can.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_set_flags(f: i32) {
     crate::rt::gc_set_flags(f);
 }
@@ -5003,7 +5003,7 @@ pub(crate) unsafe extern "C" fn gc_set_flags(f: i32) {
 /// covers, and the other mutators stop through the usual handshake. The GC
 /// lock is reentrant, so a caller already holding it gets its collection
 /// rather than a deadlock.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_major() {
     crate::rt::gc_major();
 }
@@ -5045,7 +5045,7 @@ pub(crate) unsafe extern "C" fn gc_major() {
 /// The null checks are for the C side: a `hl.Ref` from Haxe is never null,
 /// but an HDLL caller that wants one field can pass NULL for the others, and
 /// that must not be a store to address 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_stats(
     total_allocated: *mut f64,
     allocation_count: *mut f64,
@@ -5081,7 +5081,7 @@ pub(crate) unsafe extern "C" fn gc_stats(
 /// `gc_flags &= GC_PROFILE`, which keeps profiling on and clears every OTHER
 /// flag — a missing `~` rather than a semantic, since upstream's own
 /// `Gc.flags.unset(Profile)` does what this does.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_profile(b: bool) {
     crate::rt::gc_profile(b);
 }
@@ -5120,7 +5120,7 @@ pub(crate) unsafe extern "C" fn gc_profile(b: bool) {
 /// returns: an unresolved native resolves to a call-time trap (the JIT's stub,
 /// the interpreter's failed lazy lookup), so a program that reaches this one
 /// dies at the call site instead of being told ash cannot enumerate its heap.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_get_live_objects(t: *mut hl_type, arr: *mut hl::varray) -> i32 {
     crate::rt::gc_get_live_objects(t, arr)
 }
@@ -5169,7 +5169,7 @@ unsafe fn c_utf8_path(p: *const hl::vbyte) -> Option<String> {
 /// — so the cost of dumping is at most one extra conservative cycle. Clearing
 /// them would be the unsafe direction: it would also drop the marks
 /// allocation-time marking had already set.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     crate::rt::gc_dump_memory(filename);
 }

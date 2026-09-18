@@ -109,7 +109,7 @@ unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
     let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlMutex>(), finalize_mutex)
         as *mut HlMutex;
@@ -130,14 +130,14 @@ unsafe extern "C" fn finalize_mutex(block: *mut c_void) {
     hlp_mutex_free(block);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_acquire(m: *mut c_void) {
     if !m.is_null() {
         mutex_acquire_inner(m as *mut HlMutex);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_try_acquire(m: *mut c_void) -> bool {
     if m.is_null() {
         return false;
@@ -145,14 +145,14 @@ pub unsafe extern "C" fn hlp_mutex_try_acquire(m: *mut c_void) -> bool {
     mutex_try_acquire_inner(m as *mut HlMutex)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_release(m: *mut c_void) {
     if !m.is_null() {
         mutex_release_inner(m as *mut HlMutex);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
     if m.is_null() {
         return;
@@ -170,27 +170,27 @@ pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
 // HDLLs call HashLink's public C API names directly, while Haxe bytecode
 // resolves the `hlp_` primitive names above. Export both spellings so native
 // extensions and bytecode share the same synchronization objects.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_alloc(gc_thread: bool) -> *mut c_void {
     hlp_mutex_alloc(gc_thread)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_acquire(m: *mut c_void) {
     hlp_mutex_acquire(m);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_try_acquire(m: *mut c_void) -> bool {
     hlp_mutex_try_acquire(m)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_release(m: *mut c_void) {
     hlp_mutex_release(m);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_mutex_free(m: *mut c_void) {
     hlp_mutex_free(m);
 }
@@ -242,7 +242,7 @@ unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant>
     (secs > 0.0).then(|| std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
     let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlSemaphore>(), finalize_semaphore)
         as *mut HlSemaphore;
@@ -287,7 +287,7 @@ unsafe fn semaphore_wait(s: *mut HlSemaphore, deadline: Option<Instant>) -> bool
     notified
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
     if sem.is_null() {
         return;
@@ -296,7 +296,7 @@ pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
     let _ = semaphore_wait(s, None);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     sem: *mut c_void,
     timeout: *mut vdynamic,
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     semaphore_wait(s, Some(deadline))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_release(sem: *mut c_void) {
     if sem.is_null() {
         return;
@@ -326,7 +326,7 @@ pub unsafe extern "C" fn hlp_semaphore_release(sem: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
     if sem.is_null() {
         return;
@@ -338,17 +338,17 @@ pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
     ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_alloc(value: i32) -> *mut c_void {
     hlp_semaphore_alloc(value)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_acquire(sem: *mut c_void) {
     hlp_semaphore_acquire(sem);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_try_acquire(
     sem: *mut c_void,
     timeout: *mut vdynamic,
@@ -356,12 +356,12 @@ pub unsafe extern "C" fn hl_semaphore_try_acquire(
     hlp_semaphore_try_acquire(sem, timeout)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_release(sem: *mut c_void) {
     hlp_semaphore_release(sem);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_semaphore_free(sem: *mut c_void) {
     hlp_semaphore_free(sem);
 }
@@ -444,7 +444,7 @@ unsafe fn condition_mutex_release(c: *mut HlCondition) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
     let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlCondition>(), finalize_condition)
         as *mut HlCondition;
@@ -464,14 +464,14 @@ unsafe extern "C" fn finalize_condition(block: *mut c_void) {
     hlp_condition_free(block);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_acquire(c: *mut c_void) {
     if !c.is_null() {
         condition_mutex_acquire(c as *mut HlCondition);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_try_acquire(c: *mut c_void) -> bool {
     if c.is_null() {
         return false;
@@ -479,7 +479,7 @@ pub unsafe extern "C" fn hlp_condition_try_acquire(c: *mut c_void) -> bool {
     condition_mutex_try_acquire(c as *mut HlCondition)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
     if !c.is_null() {
         condition_mutex_release(c as *mut HlCondition);
@@ -514,14 +514,14 @@ unsafe fn condition_wait_inner(c: *mut HlCondition, deadline: Option<Instant>) -
     notified
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_wait(c: *mut c_void) {
     if !c.is_null() {
         let _ = condition_wait_inner(c as *mut HlCondition, None);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
     if c.is_null() {
         return false;
@@ -530,14 +530,14 @@ pub unsafe extern "C" fn hlp_condition_timed_wait(c: *mut c_void, timeout: f64) 
     condition_wait_inner(c as *mut HlCondition, Some(deadline))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_signal(c: *mut c_void) {
     if !c.is_null() {
         wake_one(&mut (*(c as *mut HlCondition)).state.lock().unwrap().waiters);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
     if !c.is_null() {
         let mut state = (*(c as *mut HlCondition)).state.lock().unwrap();
@@ -545,7 +545,7 @@ pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
     if c.is_null() {
         return;
@@ -557,47 +557,47 @@ pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
     ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_alloc() -> *mut c_void {
     hlp_condition_alloc()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_acquire(c: *mut c_void) {
     hlp_condition_acquire(c);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_try_acquire(c: *mut c_void) -> bool {
     hlp_condition_try_acquire(c)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_release(c: *mut c_void) {
     hlp_condition_release(c);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_wait(c: *mut c_void) {
     hlp_condition_wait(c);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
     hlp_condition_timed_wait(c, timeout)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_signal(c: *mut c_void) {
     hlp_condition_signal(c);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_broadcast(c: *mut c_void) {
     hlp_condition_broadcast(c);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_condition_free(c: *mut c_void) {
     hlp_condition_free(c);
 }
@@ -606,17 +606,17 @@ pub unsafe extern "C" fn hl_condition_free(c: *mut c_void) {
 // Lock (semaphore-backed lock with release/wait semantics)
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_create() -> *mut c_void {
     hlp_semaphore_alloc(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_release(lock: *mut c_void) {
     hlp_semaphore_release(lock);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic) -> bool {
     if lock.is_null() {
         return false;
@@ -654,13 +654,13 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
 // Compatibility primitive retained for bytecode that references it. Event
 // ownership belongs to the loaded UI/SDL library, so this only provides frame
 // pacing and never consumes native events itself.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_pump_and_sleep() {
     // The frame's idle time is the runtime's to spend, as `Sys.sleep` is.
     crate::rt::sleep_for(std::time::Duration::from_millis(16));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lock_free(lock: *mut c_void) {
     hlp_semaphore_free(lock);
 }
@@ -683,7 +683,7 @@ struct HlDeque {
 }
 const _: () = assert!(std::mem::offset_of!(HlDeque, free) == 0);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
     let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlDeque>(), finalize_deque)
         as *mut HlDeque;
@@ -743,7 +743,7 @@ unsafe fn deque_root(msg: *mut vdynamic) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_add(d: *mut c_void, msg: *mut vdynamic) {
     if d.is_null() {
         return;
@@ -756,7 +756,7 @@ pub unsafe extern "C" fn hlp_deque_add(d: *mut c_void, msg: *mut vdynamic) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_push(d: *mut c_void, msg: *mut vdynamic) {
     if d.is_null() {
         return;
@@ -769,7 +769,7 @@ pub unsafe extern "C" fn hlp_deque_push(d: *mut c_void, msg: *mut vdynamic) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdynamic {
     if d.is_null() {
         return ptr::null_mut();
@@ -828,7 +828,7 @@ struct HlTls {
 }
 const _: () = assert!(std::mem::offset_of!(HlTls, free) == 0);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_alloc(gc_value: bool) -> *mut c_void {
     let p =
         crate::rt::alloc_with_finalizer(std::mem::size_of::<HlTls>(), finalize_tls) as *mut HlTls;
@@ -844,7 +844,7 @@ unsafe extern "C" fn finalize_tls(block: *mut c_void) {
     hlp_tls_free(block);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
     if tls.is_null() {
         return;
@@ -869,7 +869,7 @@ pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
     if tls.is_null() {
         return ptr::null_mut();
@@ -884,7 +884,7 @@ pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
         .unwrap_or(ptr::null_mut())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
     if tls.is_null() {
         return;
@@ -912,22 +912,22 @@ pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
     ptr::drop_in_place(ptr::addr_of_mut!((*p).values));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_alloc(gc_value: bool) -> *mut c_void {
     hlp_tls_alloc(gc_value)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_set(tls: *mut c_void, value: *mut c_void) {
     hlp_tls_set(tls, value);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_get(tls: *mut c_void) -> *mut c_void {
     hlp_tls_get(tls)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_tls_free(tls: *mut c_void) {
     hlp_tls_free(tls);
 }
@@ -936,7 +936,7 @@ pub unsafe extern "C" fn hl_tls_free(tls: *mut c_void) {
 // Thread
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
     let handle = crate::rt::current_handle();
     if !handle.is_null() {
@@ -976,7 +976,7 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_thread_create(callback: *mut c_void) -> *mut c_void {
     // Haxe threads run as cooperative stackful fibers (krio). AIR V2 bodies
     // that the host resolves to native code are distributed over worker OS
@@ -985,17 +985,17 @@ pub unsafe extern "C" fn hlp_thread_create(callback: *mut c_void) -> *mut c_void
     crate::fiber::thread_create(callback as *mut crate::hl::vclosure)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_thread_set_name(_thread: *mut c_void, _name: *const u8) {
     // No-op stub
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_thread_get_name(_thread: *mut c_void) -> *const u8 {
     ptr::null()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_thread_current() -> *mut c_void {
     hlp_thread_current()
 }
@@ -1016,7 +1016,7 @@ pub unsafe extern "C" fn hl_thread_current() -> *mut c_void {
 /// `ui_start_sentinel` only stores the result -- nothing dereferences it. A
 /// program that asks for a sentinel therefore runs without a watchdog, rather
 /// than not running at all.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_thread_start(
     _callback: *mut c_void,
     _param: *mut c_void,
@@ -1025,7 +1025,7 @@ pub unsafe extern "C" fn hl_thread_start(
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_thread_yield() {
     if crate::rt::fibers_active() {
         crate::rt::fiber_poll();
@@ -1038,32 +1038,32 @@ pub unsafe extern "C" fn hl_thread_yield() {
 // Atomics
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_add32(a: *mut i32, b: i32) -> i32 {
     (*(a as *const AtomicI32)).fetch_add(b, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_sub32(a: *mut i32, b: i32) -> i32 {
     (*(a as *const AtomicI32)).fetch_sub(b, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_and32(a: *mut i32, b: i32) -> i32 {
     (*(a as *const AtomicI32)).fetch_and(b, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_or32(a: *mut i32, b: i32) -> i32 {
     (*(a as *const AtomicI32)).fetch_or(b, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_xor32(a: *mut i32, b: i32) -> i32 {
     (*(a as *const AtomicI32)).fetch_xor(b, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_compare_exchange32(
     a: *mut i32,
     expected: i32,
@@ -1088,7 +1088,7 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange32(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_compare_exchange_ptr(
     a: *mut *mut c_void,
     expected: *mut c_void,
@@ -1111,12 +1111,12 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange_ptr(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_exchange32(a: *mut i32, replacement: i32) -> i32 {
     (*(a as *const AtomicI32)).swap(replacement, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_exchange_ptr(
     a: *mut *mut c_void,
     replacement: *mut c_void,
@@ -1125,24 +1125,24 @@ pub unsafe extern "C" fn hlp_atomic_exchange_ptr(
     (*(a as *const AtomicPtr<c_void>)).swap(replacement, Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_load32(a: *const i32) -> i32 {
     (*(a as *const AtomicI32)).load(Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_load_ptr(a: *const *mut c_void) -> *mut c_void {
     use std::sync::atomic::AtomicPtr;
     (*(a as *const AtomicPtr<c_void>)).load(Ordering::SeqCst)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_store32(a: *mut i32, value: i32) -> i32 {
     (*(a as *const AtomicI32)).store(value, Ordering::SeqCst);
     value
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_atomic_store_ptr(
     a: *mut *mut c_void,
     value: *mut c_void,
@@ -1233,7 +1233,7 @@ fn current_os_thread_id() -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_blocking(b: bool) {
     if crate::rt::update_gc_blocking_depth(b) {
         let _ = crate::rt::gc_set_blocking(b);
@@ -1242,7 +1242,7 @@ pub unsafe extern "C" fn hlp_blocking(b: bool) {
     (*thread_info()).gc_blocking = i32::from(crate::rt::is_gc_blocking());
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_is_blocking() -> bool {
     crate::rt::is_gc_blocking()
 }
@@ -1257,7 +1257,7 @@ pub unsafe extern "C" fn hl_is_blocking() -> bool {
 /// land, because the word is not private: an hdll reaching
 /// `hl_get_thread()->flags` reads this slot, and that crossing is the whole
 /// observable contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_thread_flags(flags: i32, mask: i32) {
     let t = thread_info();
     (*t).flags = ((*t).flags & !mask) | flags;
@@ -1267,17 +1267,17 @@ pub unsafe extern "C" fn hlp_set_thread_flags(flags: i32, mask: i32) {
 // Memory tracking stubs
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_init() {}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_track_call(_mode: i32, _data: *mut c_void) {}
 
 // ============================================================================
 // Process stubs
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_exit(code: i32) {
     // ASH_DEBUG_EXIT=1 prints the exit site backtrace (debugging aid).
     if env_flag!(os "ASH_DEBUG_EXIT") {

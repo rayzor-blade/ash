@@ -16,13 +16,13 @@ macro_rules! export_direct {
 
 macro_rules! export_one {
     ($body:ident, $export:ident, slot2) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(d: *mut u8, di: i32, a: *const u8, ai: i32) {
             $body(d, di, a, ai)
         }
     };
     ($body:ident, $export:ident, slot3) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(
             d: *mut u8,
             di: i32,
@@ -35,7 +35,7 @@ macro_rules! export_one {
         }
     };
     ($body:ident, $export:ident, slot4) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(
             d: *mut u8,
             di: i32,
@@ -50,55 +50,55 @@ macro_rules! export_one {
         }
     };
     ($body:ident, $export:ident, splat_f) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(d: *mut u8, di: i32, x: f32) {
             $body(d, di, x)
         }
     };
     ($body:ident, $export:ident, splat_d) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(d: *mut u8, di: i32, x: f64) {
             $body(d, di, x)
         }
     };
     ($body:ident, $export:ident, splat_i) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(d: *mut u8, di: i32, x: i32) {
             $body(d, di, x)
         }
     };
     ($body:ident, $export:ident, shift) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(d: *mut u8, di: i32, a: *const u8, ai: i32, n: i32) {
             $body(d, di, a, ai, n)
         }
     };
     ($body:ident, $export:ident, reduce_f) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(a: *const u8, ai: i32) -> f32 {
             $body(a, ai)
         }
     };
     ($body:ident, $export:ident, reduce_d) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(a: *const u8, ai: i32) -> f64 {
             $body(a, ai)
         }
     };
     ($body:ident, $export:ident, reduce_i) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(a: *const u8, ai: i32) -> i32 {
             $body(a, ai)
         }
     };
     ($body:ident, $export:ident, load_arr) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(d: *mut u8, di: i32, arr: *const u8, index: i32) {
             $body(d, di, arr, index)
         }
     };
     ($body:ident, $export:ident, store_arr) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $export(arr: *mut u8, index: i32, a: *const u8, ai: i32) {
             $body(arr, index, a, ai)
         }

@@ -217,13 +217,13 @@ fn install_process(linker: &mut Linker<Host>) -> Result<()> {
                 };
                 let name = String::from_utf8_lossy(&name).into_owned();
                 if value_len < 0 {
-                    std::env::remove_var(name);
+                    unsafe { std::env::remove_var(name) };
                     return;
                 }
                 let Some(value) = guest_slice(&mut caller, value, value_len) else {
                     return;
                 };
-                std::env::set_var(name, String::from_utf8_lossy(&value).as_ref());
+                unsafe { std::env::set_var(name, String::from_utf8_lossy(&value).as_ref()) };
             },
         )
         .map_err(|e| anyhow!("installing the environment import: {e}"))?;

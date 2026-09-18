@@ -84,7 +84,7 @@ static COMPILED_WORKERS_ENABLED: AtomicBool = AtomicBool::new(false);
 /// `hlp_fiber_poll_epoch_address` for the address and bakes it in, while an
 /// object file has to name it and let the linker place it. Both reach the
 /// same word.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_upper_case_globals)]
 pub static ash_fiber_poll_epoch: AtomicU64 = AtomicU64::new(1);
 static PREEMPTOR_STARTED: OnceLock<()> = OnceLock::new();
@@ -143,7 +143,7 @@ pub(crate) fn request_fiber_poll() {
 /// Cranelift reissues an aligned 64-bit machine load at each natural-loop
 /// header because its atomic-load instruction is sequentially consistent and
 /// made the safe point itself a hot-path bottleneck on Apple Silicon.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_poll_epoch_address() -> *const u64 {
     crate::rt::fiber_poll_epoch_address()
 }
@@ -210,14 +210,14 @@ fn worker_trace(label: &str, id: u64, detail: u64) {
 
 /// Registered by the host (interpreter) so native code can run a Haxe
 /// closure whose `fun` is an interpreter stub pointer (findex+1).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_closure_runner(f: ClosureRunner) {
     CLOSURE_RUNNER.store(f as usize, Ordering::Release);
 }
 
 /// Registered by the host so logical VM state follows krio's stack switch.
 /// Fiber id 0 denotes the scheduler/main context.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_fiber_switch_hook(hook: FiberSwitchHook) {
     FIBER_SWITCH_HOOK.store(hook as usize, Ordering::Release);
 }
@@ -231,7 +231,7 @@ pub(crate) unsafe fn switch_hook() -> Option<FiberSwitchHook> {
 /// The host enables worker dispatch whenever it can resolve a thread body to
 /// compiled AIR V2 without interpreter re-entry. Pure-interpreter closures
 /// still need their owning `HLInterpreter` and remain on its main scheduler.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_compiled_worker_mode(enabled: bool) {
     COMPILED_WORKERS_ENABLED.store(enabled, Ordering::Release);
 }
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn hlp_set_compiled_worker_mode(enabled: bool) {
 /// Runtime object slots such as `castFun` and `compareFun` are bare function
 /// pointers and therefore need the same lazy compilation boundary as AIR V2
 /// call sites.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_stub_resolver(resolver: StubResolver) {
     STUB_RESOLVER.store(resolver as usize, Ordering::Release);
 }
@@ -286,7 +286,7 @@ pub(crate) unsafe fn resolve_stub_sentinel(address: usize) -> *mut c_void {
 /// True only while an OS worker is executing a worker-affine VM fiber.
 /// The host uses this to prevent a cold JIT sentinel from re-entering the
 /// single main-thread interpreter through the legacy stub bridge.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_is_worker_lane() -> bool {
     crate::rt::is_worker_lane()
 }
@@ -1094,7 +1094,7 @@ fn update_blocking_depth(depth: &mut u32, blocking: bool) -> bool {
 /// methods. Those nested calls must propagate exceptions through their active
 /// native trap; only a real thread body's outermost call owns an uncaught
 /// exception and may terminate the fiber.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_is_root_closure(c: *mut vclosure) -> bool {
     let ctx = crate::rt::current_ctx();
     !ctx.is_null() && ctx == c as *mut c_void
@@ -1164,7 +1164,7 @@ unsafe extern "C-unwind" fn run_closure_body(ctx: *mut c_void) {
 /// by `hlp_call_method`. Native event-loop code supplies `vdynamic**` args to
 /// the registered closure runner, so standalone JIT fibers must register this
 /// bridge instead of relying on the interpreter's runner.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_jit_closure_runner(
     c: *mut vclosure,
     args: *mut *mut vdynamic,
@@ -1526,7 +1526,7 @@ pub(crate) unsafe fn schedule_step() -> bool {
 /// A safe point reached on the main stack advances each worker once. A safe
 /// point reached by a worker yields that worker back to the scheduler. The VM that owns the safe point
 /// is still runnable and remains responsible for its own frame pacing.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_poll() {
     crate::rt::fiber_poll();
 }

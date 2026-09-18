@@ -52,7 +52,7 @@ pub unsafe extern "C" fn empty_static_call(
 /// # Safety
 /// Mirrors the native signature; touches none of its arguments.
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_static_call(
     fun: *mut c_void,
     t: *mut hl_type,
@@ -125,7 +125,7 @@ static CALL_TRAMPOLINES: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex:
 ///
 /// Called once from `ash_module_init`. `keys` and `fns` are parallel arrays
 /// of `count` entries.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_register_call_trampolines(
     keys: *const u64,
     fns: *const *const c_void,
@@ -155,7 +155,7 @@ unsafe fn call_trampoline(key: u64) -> Option<CallTrampoline> {
 /// Dynamic function call for aarch64 — marshals args according to function type
 /// and calls the function pointer. Used by hlp_call_method for dynamic dispatch.
 #[cfg(target_arch = "aarch64")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_static_call(
     fun: *mut c_void,
     t: *mut hl_type,
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn ash_static_call(
 /// Windows has its own arm below: none of this applies there, starting with
 /// `rdi`/`rsi`, which are callee-saved rather than argument registers.
 #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_static_call(
     fun: *mut c_void,
     t: *mut hl_type,
@@ -385,7 +385,7 @@ pub unsafe extern "C" fn ash_static_call(
 /// the System V arm drops its seventh integer, rather than being silently
 /// mispassed.
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_static_call(
     fun: *mut c_void,
     t: *mut hl_type,
@@ -468,7 +468,7 @@ pub static mut hlc_get_wrapper: HlcFunWrapperType = empty_fun_wrapper;
 pub static mut hlc_static_call: HlcStaticCallType = empty_static_call;
 pub static mut hlc_call_flags: i32 = 0;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_setup_callbacks2(c: *mut c_void, w: *mut c_void, flags: i32) {
     // Ash supplies its static-call bridge but has no HashLink wrapper-code
     // generator. Keep the null-returning defaults for callbacks it omits;
@@ -488,7 +488,7 @@ pub unsafe extern "C" fn hl_setup_callbacks2(c: *mut c_void, w: *mut c_void, fla
     hlc_call_flags = flags;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _fun_var_args() {
     hlp_error(str_to_uchar_ptr(
         "Variable fun args was not cast to typed function",
@@ -540,7 +540,7 @@ const RECORD_INT_REGS: u32 = 0;
 /// the caller reads the one its signature names.
 #[cfg(target_arch = "aarch64")]
 #[unsafe(naked)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _fun_record() {
     core::arch::naked_asm!(
         "sub sp, sp, #160",
@@ -567,7 +567,7 @@ pub unsafe extern "C" fn _fun_record() {
 
 #[cfg(all(target_arch = "x86_64", not(windows)))]
 #[unsafe(naked)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _fun_record() {
     core::arch::naked_asm!(
         "push rbp",
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn _fun_record() {
 }
 
 #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", not(windows)))))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _fun_record() {
     hlp_error(str_to_uchar_ptr(
         "A record closure cannot be called on this target",
@@ -648,7 +648,7 @@ unsafe extern "C" fn record_call(
 /// # Safety
 /// `t` is a function type and `rc` describes it, `rc.full` being `t` with
 /// the bound value first.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_record_closure(
     t: *mut hl_type,
     rc: *mut RecordClosure,
@@ -716,7 +716,7 @@ static mut HLT_VAR_FUN: hl::hl_type_fun = hl::hl_type_fun {
     },
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type) -> *mut vclosure {
     let wrap = hlc_get_wrapper(to);
     if wrap.is_null() {
@@ -779,7 +779,7 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
     cl
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdynamic {
     let cl = resolve_closure_ptr(c);
     if cl.is_null() {
@@ -978,7 +978,7 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
     dret
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_closure_type(t: *mut hl_type) -> *mut hl_type {
     let ft = (*t)
         .__bindgen_anon_1
@@ -1016,7 +1016,7 @@ pub unsafe extern "C" fn hlp_get_closure_type(t: *mut hl_type) -> *mut hl_type {
     &mut ft.closure_type as *mut _ as *mut hl_type
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_closure_void(
     t: *mut hl_type,
     fvalue: *mut libc::c_void,
@@ -1035,7 +1035,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_void(
     c_ptr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_closure_ptr(
     t: *mut hl_type,
     fun: *mut std::ffi::c_void,
@@ -1072,7 +1072,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
     c_ptr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_no_closure(c: *mut vdynamic) -> *mut vdynamic {
     let cl = resolve_closure_ptr(c);
     if cl.is_null() {
@@ -1135,7 +1135,7 @@ pub unsafe extern "C" fn hlp_no_closure(c: *mut vdynamic) -> *mut vdynamic {
     out
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_make_closure(c: *mut vdynamic, v: *mut vdynamic) -> *mut vdynamic {
     let cl = resolve_closure_ptr(c);
     if cl.is_null() {
@@ -1162,7 +1162,7 @@ pub unsafe extern "C" fn hlp_make_closure(c: *mut vdynamic, v: *mut vdynamic) ->
     hlp_alloc_closure_ptr(t, (*cl).fun, v as *mut libc::c_void) as *mut vdynamic
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_closure_value(c: *mut vdynamic) -> *mut vdynamic {
     let cl = resolve_closure_ptr(c);
     if cl.is_null() {
@@ -1189,7 +1189,7 @@ pub unsafe extern "C" fn hlp_get_closure_value(c: *mut vdynamic) -> *mut vdynami
     )
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fun_compare(a: *mut vdynamic, b: *mut vdynamic) -> bool {
     if a == b {
         return true;
@@ -1211,7 +1211,7 @@ pub unsafe extern "C" fn hlp_fun_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_make_var_args(c: *mut vclosure) -> *mut vdynamic {
     HLT_VAR_FUN.ret = crate::types::hlt_void();
     HLT_VAR_FUN.closure.ret = crate::types::hlt_void();
@@ -1229,7 +1229,7 @@ pub unsafe extern "C" fn hlp_make_var_args(c: *mut vclosure) -> *mut vdynamic {
     closure as *mut vdynamic
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_call(
     c: *mut vclosure,
     args: *mut *mut vdynamic,
@@ -1293,14 +1293,14 @@ pub unsafe extern "C" fn hlp_dyn_call(
     hlp_call_method(c_ptr as *mut vdynamic, &mut tmp.a)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_prim_not_loaded() {
     unsafe {
         hlp_error(c"Primitive or library is missing".as_ptr() as *const u16);
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_is_prim_loaded(f: *mut hl::vdynamic) -> bool {
     if f.is_null() {
         return false;
@@ -1325,7 +1325,7 @@ pub extern "C" fn hlp_is_prim_loaded(f: *mut hl::vdynamic) -> bool {
 /// and the link fails with "does not have address". Calling a function works
 /// (the linker makes a stub); taking its address does not. So the address is
 /// taken HERE, inside the library that owns it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_install_static_call() {
     hl_setup_callbacks2(
         ash_static_call as *mut std::ffi::c_void,
@@ -1339,7 +1339,7 @@ pub unsafe extern "C" fn hlp_install_static_call() {
 /// Same reason as [`hlp_install_static_call`]: this is installed BY ADDRESS,
 /// and a shared-runtime AOT object cannot take the address of one of the
 /// library's functions. Taking it here keeps the object to calls only.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_install_closure_runner() {
     crate::fiber::hlp_set_closure_runner(crate::fiber::hlp_jit_closure_runner);
 }

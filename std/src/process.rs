@@ -231,7 +231,7 @@ fn status_code(s: ExitStatus) -> c_int {
 }
 
 // DEFINE_PRIM(_PROCESS, process_run, _BYTES _ARR _BOOL)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_run(
     cmd: *mut vbyte,
     vargs: *mut varray,
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn hlp_process_run(
 }
 
 // DEFINE_PRIM(_I32, process_stdout_read, _PROCESS _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdout_read(
     p: *mut c_void,
     str: *mut vbyte,
@@ -404,7 +404,7 @@ pub unsafe extern "C" fn hlp_process_stdout_read(
 }
 
 // DEFINE_PRIM(_I32, process_stderr_read, _PROCESS _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stderr_read(
     p: *mut c_void,
     str: *mut vbyte,
@@ -427,7 +427,7 @@ pub unsafe extern "C" fn hlp_process_stderr_read(
 }
 
 // DEFINE_PRIM(_I32, process_stdin_write, _PROCESS _BYTES _I32 _I32)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdin_write(
     p: *mut c_void,
     str: *mut vbyte,
@@ -460,7 +460,7 @@ pub unsafe extern "C" fn hlp_process_stdin_write(
 }
 
 // DEFINE_PRIM(_BOOL, process_stdin_close, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_stdin_close(p: *mut c_void) -> bool {
     let Some(st) = state_of(p) else {
         return false;
@@ -471,7 +471,7 @@ pub unsafe extern "C" fn hlp_process_stdin_close(p: *mut c_void) -> bool {
 }
 
 // DEFINE_PRIM(_I32, process_exit, _PROCESS _REF(_BOOL))
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_exit(p: *mut c_void, running: *mut bool) -> c_int {
     if !running.is_null() {
         *running = false;
@@ -504,7 +504,7 @@ pub unsafe extern "C" fn hlp_process_exit(p: *mut c_void, running: *mut bool) ->
 }
 
 // DEFINE_PRIM(_I32, process_pid, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_pid(p: *mut c_void) -> c_int {
     let Some(st) = state_of(p) else {
         return -1;
@@ -519,7 +519,7 @@ pub unsafe extern "C" fn hlp_process_pid(p: *mut c_void) -> c_int {
 }
 
 // DEFINE_PRIM(_VOID, process_close, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_close(p: *mut c_void) {
     let Some(st) = state_of(p) else {
         return;
@@ -554,7 +554,7 @@ unsafe extern "C" fn finalize_process(block: *mut c_void) {
 }
 
 // DEFINE_PRIM(_VOID, process_kill, _PROCESS)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_process_kill(p: *mut c_void) {
     let Some(st) = state_of(p) else {
         return;

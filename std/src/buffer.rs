@@ -12,7 +12,7 @@ use crate::obj::{hlp_field_name, hlp_get_obj_proto, hlp_hash_gen, hlp_lookup_fin
 use crate::strings::{hlp_utf16_length, str_to_uchar_ptr};
 use crate::types::{hl_aptr, hl_is_ptr, hlp_type_size, TSTR};
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     // Allocate memory for the hl_buffer struct
     let buffer_ptr = match crate::rt::alloc_locked(std::mem::size_of::<hl_buffer>()) {
@@ -38,7 +38,7 @@ pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     buffer_ptr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, len: i32) {
     // Adjust buffer length if necessary
     while (*b).totlen >= ((*b).blen << 2) {
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, l
     // and the `str` block each one owns.
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_buffer_str_sub(b: *mut hl_buffer, mut s: *const uchar, mut len: i32) {
     // Check for null pointer or non-positive length
     if s.is_null() || len <= 0 {
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, pa
 // DEFINE_PRIM(_BYTES, type_str, _TYPE) — bytecode asks for `std@type_str` by
 // name, so this needs an export as well as the internal callers in cast.rs
 // and obj.rs; without one the resolver fails the whole module load.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_str(t: *mut hl_type) -> *const uchar {
     // A kind outside the table is a corrupt or non-type pointer; naming it
     // "?" beats indexing out of bounds, which panics inside the very
@@ -842,7 +842,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_buffer_val(b: *mut hl_buffer, v: *mut vdynamic) {
     hlp_buffer_rec(b, v, std::ptr::null_mut())
 }

@@ -1,7 +1,7 @@
 [package]
 name = "ash_hdll_simd"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
 description = "simd.hdll: the ash-simd primitives for stock HashLink"

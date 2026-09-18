@@ -50,7 +50,7 @@ pub fn str_to_uchar_ptr(s: &str) -> *const u16 {
 /// # Returns
 ///
 /// The length of the string, not including the null terminator
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_utf16_length(s: *const hl::uchar) -> usize {
     if s.is_null() {
         return 0;
@@ -63,7 +63,7 @@ pub unsafe extern "C" fn hlp_utf16_length(s: *const hl::uchar) -> usize {
     len
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos: i32) -> usize {
     if s.is_null() {
         return 0;
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos: i32) -> usize 
     hlp_utf16_length(s.wrapping_add(pos as usize))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_itos(i: c_int, len: *mut c_int) -> *const hl::vbyte {
     let s = format!("{}", i);
     let utf16: Vec<u16> = s.encode_utf16().collect();
@@ -129,7 +129,7 @@ pub(crate) fn format_g(d: f64, p: i32) -> String {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vbyte {
     // hl_ftos special-cases NaN before the printf and lets everything else,
     // infinities included, fall through to %.15g.
@@ -153,7 +153,7 @@ pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vb
     result as *const hl::vbyte
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_utf8_to_utf16(
     str: *const hl::vbyte,
     pos: i32,
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn hlp_utf8_to_utf16(
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_utf16_to_utf8(
     str: *const vbyte,
     len: i32,
@@ -331,7 +331,7 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_ucs2_upper(str: *const vbyte, pos: i32, len: i32) -> *mut vbyte {
     let cstr = str.offset(pos as isize) as *const uchar;
     let out = crate::bytes::hlp_alloc_bytes((len + 1) * 2) as *mut uchar;
@@ -357,7 +357,7 @@ pub unsafe extern "C" fn hlp_ucs2_upper(str: *const vbyte, pos: i32, len: i32) -
     out as *mut vbyte
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_ucs2_lower(str: *const vbyte, pos: i32, len: i32) -> *mut vbyte {
     let cstr = str.offset(pos as isize) as *const uchar;
     // len is in u16 characters; allocate (len+1) * sizeof(u16) bytes
@@ -384,7 +384,7 @@ pub unsafe extern "C" fn hlp_ucs2_lower(str: *const vbyte, pos: i32, len: i32) -
     out as *mut vbyte
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_parse_int(bytes: *mut vbyte, pos: c_int, len: c_int) -> *mut vdynamic {
     if bytes.is_null() {
         return ptr::null_mut();
@@ -473,7 +473,7 @@ pub unsafe extern "C" fn hlp_parse_int(bytes: *mut vbyte, pos: c_int, len: c_int
     hlp_make_dyn(&h as *const i32 as *mut std::ffi::c_void, t)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_int) -> c_double {
     if bytes.is_null() {
         return f64::NAN;
@@ -544,7 +544,7 @@ pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) -> *const vbyte {
     // removed debug counter
     // A Dynamic slot can hold an UNBOXED small value (a bool's 0x1, a raw

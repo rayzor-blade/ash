@@ -92,7 +92,7 @@ static INITIAL_CACHE_CAPACITY: usize = 16;
 
 pub static cache_lock: Mutex<i32> = Mutex::new(0);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvirtual {
     // Ensure the virtual type is initialized (indexes, lookup, dataSize
     // populated). The interpreter doesn't call hlp_init_virtual during setup,
@@ -167,7 +167,7 @@ unsafe fn alloc_virtual(t: *mut hl::hl_type) -> Option<ptr::NonNull<hl::vvirtual
     Some(ptr::NonNull::new_unchecked(v))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic {
     let obj = (*t).__bindgen_anon_1.obj;
     if obj.is_null() {
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
 /// `size` must be the instance size `hl_runtime_obj` would have reported.
 /// `layout`'s tests pin it against the runtime, and the debug assertion below
 /// re-checks it wherever a resolved `rt` is available to compare with.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *mut vdynamic {
     debug_assert!(!t.is_null(), "hlp_alloc_obj_sized on a null type");
     #[cfg(debug_assertions)]
@@ -292,7 +292,7 @@ pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *m
     o as *mut vdynamic
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     // let flags = mem_kind | MEM_ZERO;
 
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn hlp_alloc_dynbool(b: bool) -> *mut vdynamic {
     v
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_write_dyn(
     data: *mut c_void,
     t: *mut hl_type,
@@ -365,7 +365,7 @@ pub unsafe extern "C" fn hlp_write_dyn(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_lookup(
     d: *mut vdynamic,
     hfield: i32,
@@ -480,7 +480,7 @@ unsafe fn grow_cache(cache: &mut Cache) -> bool {
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i32 {
     // println!(
     //     "Entering hl_hash_gen with name: {:?}, cache_name: {}",
@@ -558,7 +558,7 @@ pub unsafe extern "C" fn hlp_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lookup_insert(
     l: *mut hl_field_lookup,
     size: i32,
@@ -605,7 +605,7 @@ pub unsafe extern "C" fn hlp_lookup_insert(
     l.add(pos)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lookup_find(
     l: *mut hl_field_lookup,
     size: i32,
@@ -633,7 +633,7 @@ pub unsafe extern "C" fn hlp_lookup_find(
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_lookup_find_index(
     l: *mut hl_field_lookup,
     size: i32,
@@ -660,7 +660,7 @@ pub unsafe extern "C" fn hlp_lookup_find_index(
 
     low as i32
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_field_name(hash: c_int) -> *mut vbyte {
     if let Ok(cache) = (*(&raw const HL_CACHE)).read() {
         let l = hlp_lookup_find(cache.data, cache.size as i32, hash);
@@ -683,7 +683,7 @@ pub(crate) unsafe fn obj_resolve_field(o: *const hl_type_obj, hfield: i32) -> *m
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_obj {
     let o = (*ot).__bindgen_anon_1.obj;
     let m = (*o).m;
@@ -1017,7 +1017,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
     t
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut hl_obj_field {
     if (*t).kind != hl::hl_type_kind_HOBJ && (*t).kind != hl::hl_type_kind_HSTRUCT {
         return ptr::null_mut();
@@ -1043,7 +1043,7 @@ pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut 
         .offset((fid - offset) as isize)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj {
     let _kind = (*ot).kind;
 
@@ -1321,7 +1321,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
     t
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_lookup_set(
     d: *mut vdynamic,
     hfield: i32,
@@ -1561,7 +1561,7 @@ unsafe fn hl_vfields(v: *mut vvirtual) -> *mut *mut std::ffi::c_void {
     (v as *mut u8).add(mem::size_of::<vvirtual>()) as *mut *mut std::ffi::c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dynobj_add_field(
     o: *mut vdynobj,
     hfield: i32,
@@ -1743,7 +1743,7 @@ pub fn hlp_pad_size(size: i32, t: *mut hl::hl_type) -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
     // Allocate memory for the vdynobj structure
     let obj = crate::rt::gc_alloc(mem::size_of::<vdynobj>())
@@ -1783,7 +1783,7 @@ pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
     obj
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynamic {
     if !(*v).value.is_null() {
         return (*v).value;
@@ -1854,7 +1854,7 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
     (*v).value
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_getp(
     d: *mut vdynamic,
     hfield: i32,
@@ -1885,7 +1885,7 @@ pub unsafe extern "C" fn hlp_dyn_getp(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> *mut vvirtual {
     if obj.is_null() {
         return ptr::null_mut();
@@ -2170,7 +2170,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_virtual_value(v: *mut vdynamic) -> *mut vdynamic {
     // HashLink declares this native as `_DYN -> _DYN`, but the incoming word
     // is the `vvirtual*` itself. Treating it as a boxed `vdynamic` and reading
@@ -2224,7 +2224,7 @@ unsafe fn vcall_fn_or_stub(fun: *mut c_void, this: *mut vdynamic) -> *mut vdynam
 /// may be an interpreter stub sentinel (findex+1): the JIT calls the result
 /// through its stub-guarded indirect call, so sentinels re-enter the
 /// interpreter with full, correctly-typed arguments.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_vresolve_method_hashed(
     target: *mut vdynamic,
     hfield: i32,
@@ -2373,7 +2373,7 @@ pub(crate) unsafe fn cast_via_stub_castfun(
 
 /// A varray of HDYN elements, for callers (JIT-emitted code) that need to
 /// stage boxed arguments without holding a dyn type pointer of their own.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_dyn_array(n: i32) -> *mut varray {
     crate::array::hlp_alloc_array(crate::types::hlt_dyn(), n)
 }
@@ -2395,7 +2395,7 @@ pub unsafe extern "C" fn hlp_alloc_dyn_array(n: i32) -> *mut varray {
 ///
 /// Returns null when the method cannot be resolved or typed; the caller
 /// stores the declared kind's zero, same as before.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_vcall_dyn(
     target: *mut vdynamic,
     hfield: i32,
@@ -2548,7 +2548,7 @@ pub unsafe extern "C" fn hlp_vcall_dyn(
 /// instead of trusting the static type (trusting it was a deterministic
 /// SIGBUS on game.hl: hl_type_obj's nfields/nproto ints read as a "fields"
 /// pointer, fault_addr 0x2d00000058).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_vcall_virtual_hashed(
     target: *mut vdynamic,
     hfield: i32,
@@ -2613,7 +2613,7 @@ pub unsafe extern "C" fn hlp_vcall_virtual_hashed(
 /// Resolves the method from the underlying object's vtable, calls it (with only
 /// the `this` arg — nargs=0 methods like hasNext/next), and returns the result
 /// as a vdynamic* (boxed). The JIT unboxes as needed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_vcall_virtual_0(virt: *mut vvirtual, field: i32) -> *mut vdynamic {
     let obj = (*virt).value;
     let vt = (*virt).t;
@@ -2673,7 +2673,7 @@ unsafe fn should_recast(t: *mut hl_type, vt: *mut hl_type) -> bool {
     false
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_setp(
     d: *mut vdynamic,
     hfield: i32,
@@ -2698,7 +2698,7 @@ pub unsafe extern "C" fn hlp_dyn_setp(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64) {
     let mut t: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2716,7 +2716,7 @@ pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64)
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32) {
     let mut t: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2734,7 +2734,7 @@ pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32)
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64) {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2759,7 +2759,7 @@ pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i6
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_type, value: i32) {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2792,7 +2792,7 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2815,7 +2815,7 @@ pub unsafe extern "C" fn hlp_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2838,7 +2838,7 @@ pub unsafe extern "C" fn hlp_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_type) -> i32 {
     let dyn_type = crate::types::hlt_dyn();
 
@@ -2874,7 +2874,7 @@ pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
     let dyn_type = crate::types::hlt_dyn();
 
@@ -2901,7 +2901,7 @@ pub unsafe extern "C" fn hlp_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_dynset(t: *mut hl_type) -> *mut c_void {
     unsafe {
         match (*t).kind {
@@ -2916,7 +2916,7 @@ pub unsafe extern "C" fn hlp_get_dynset(t: *mut hl_type) -> *mut c_void {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_dynget(t: *mut hl_type) -> *mut c_void {
     unsafe {
         match (*t).kind {
@@ -2931,7 +2931,7 @@ pub unsafe extern "C" fn hlp_get_dynget(t: *mut hl_type) -> *mut c_void {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *mut vdynamic {
     if obj.is_null() {
         return ptr::null_mut();
@@ -2974,7 +2974,7 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
 static NULL_WRITE_RAISES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Set by the loader from what it knows about the program.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_set_null_write_raises(raises: bool) {
     NULL_WRITE_RAISES.store(raises, std::sync::atomic::Ordering::Release);
 }
@@ -2994,7 +2994,7 @@ fn null_write_raises() -> bool {
     over.unwrap_or_else(|| NULL_WRITE_RAISES.load(std::sync::atomic::Ordering::Acquire))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *mut vdynamic) {
     if obj.is_null() {
         if null_write_raises() {
@@ -3026,7 +3026,7 @@ pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *
     hlp_write_dyn(addr, ft, v, false);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_has_field(obj: *mut vdynamic, hfield: i32) -> bool {
     if obj.is_null() {
         return false;
@@ -3058,7 +3058,7 @@ pub unsafe extern "C" fn hlp_obj_has_field(obj: *mut vdynamic, hfield: i32) -> b
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_delete_field(obj: *mut vdynamic, hfield: i32) -> bool {
     if obj.is_null() {
         return false;
@@ -3094,12 +3094,12 @@ pub unsafe extern "C" fn hlp_obj_delete_field(obj: *mut vdynamic, hfield: i32) -
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_hash(name: *mut vbyte) -> i32 {
     hlp_hash_gen(name as *const uchar, true)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
     use crate::{
         array::hlp_alloc_array,
@@ -3174,7 +3174,7 @@ pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
 /// has no copy semantics to give -- upstream returns NULL for it, and
 /// `Reflect.copy` reads that as "not copyable".
 // DEFINE_PRIM(_DYN, obj_copy, _DYN)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_obj_copy(obj: *mut vdynamic) -> *mut vdynamic {
     if obj.is_null() || (*obj).t.is_null() {
         return ptr::null_mut();
@@ -3256,7 +3256,7 @@ pub unsafe extern "C" fn hlp_obj_copy(obj: *mut vdynamic) -> *mut vdynamic {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varray {
     use crate::{
         array::hlp_alloc_array,
@@ -3341,7 +3341,7 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
     a
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// Flush a type's cached vtable/proto so it gets re-populated from `functions_ptrs`
 /// on the next method dispatch. Used during hot-reload after function pointers are updated.
 pub unsafe extern "C" fn hlp_flush_proto(ot: *mut hl_type) {
@@ -3362,7 +3362,7 @@ pub unsafe extern "C" fn hlp_flush_proto(ot: *mut hl_type) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_context) {
     unsafe {
         let virt = (*vt).__bindgen_anon_1.virt.as_mut().unwrap();

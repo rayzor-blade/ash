@@ -1,7 +1,7 @@
 [package]
 name = "ash_wasm_runtime"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "The wasm side of the ash runtime, and the hosts that complete it"
 publish = false
 

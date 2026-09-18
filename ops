@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1789298292,"nonce":"djyx5LnwYQY0NfYeg3oiW4xOFV8=","added":["bug","area:interp","priority:low"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1789767661,"nonce":"bY+BXtpc+olWrpOTkxGCENKpIys=","message":"Already done by 11b3649 (2026-09-13): the line is behind ASH_TIER_LOG and printed once per findex; the fatal branch stays unconditional. Closing.","files":null}]}

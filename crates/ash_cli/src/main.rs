@@ -731,31 +731,18 @@ fn main() {
 /// `~GDBJITRegistrationListener` on the main thread. Waiting for that
 /// promotion also works, but it costs whatever the compile has left to run
 /// and buys nothing: the program has produced its answer and nothing can call
-/// the code being compiled. deltablue paid 22ms of a 45ms run that way.
+/// the code being compiled.
 ///
-/// Leaving without the handlers wins the same race for free. Nothing is being
-/// freed -- the interpreter is already leaked, for the raw handles the
-/// brokers hold -- so a compile still in flight is simply ended with the
-/// process. The buffers have to be flushed by hand, since that is one of the
-/// things `exit` would have done.
-#[cfg(unix)]
+/// `Sys.exit` takes the same path from inside the program, so the two exits
+/// share one implementation in the runtime crate.
+#[cfg(not(windows))]
 fn exit_without_atexit(code: i32) -> ! {
-    use std::io::Write;
-    // Anything the skipped handlers would have printed has to be printed
-    // here instead. `ASH_GC_STATS` registers one; it is gated internally, so
-    // this is a no-op when it was not asked for.
-    ash_std::gc::print_stats_if_enabled();
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    unsafe { libc::_exit(code) }
+    ash_std::sys::exit_process(code)
 }
 
-/// Windows counterpart to the Unix `_exit` path above.
-///
-/// `ExitProcess` terminates all threads and does not run the MSVC CRT's
-/// `atexit` table, which is the property this shutdown path needs.  The
-/// embedded ash_std DLL owns the GC state on Windows, so linking a second
-/// ash_std rlib here merely to print its (different) counters would be wrong.
+/// Windows counterpart. `ExitProcess` terminates all threads and does not
+/// run the MSVC CRT's `atexit` table. The embedded ash_std DLL owns the GC
+/// state on Windows, so the rlib's counters are not printed.
 #[cfg(windows)]
 fn exit_without_atexit(code: i32) -> ! {
     use std::io::Write;

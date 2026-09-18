@@ -130,10 +130,22 @@ pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
     }
 }
 
+/// ASH_NATIVE_RECOVERY=0 leaves native faults to the crash handler, so the
+/// banner names the real fault site instead of a recovered call. Safe to run
+/// with; the process dies where it would otherwise have carried on.
+#[cfg(unix)]
+fn recovery_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| !matches!(std::env::var("ASH_NATIVE_RECOVERY").as_deref(), Ok("0")))
+}
+
 #[inline(always)]
 #[cfg(unix)]
 unsafe fn arm_slot(index: usize) -> i32 {
     unsafe {
+        if !recovery_enabled() {
+            return 0;
+        }
         let slot = &SLOTS[index];
         // savemask 0, not 1. Arming happens on every native call the interpreter
         // makes, and on macOS saving the mask costs TWO syscalls per arm --

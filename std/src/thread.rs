@@ -1430,7 +1430,7 @@ pub unsafe extern "C" fn hlp_sys_exit(code: i32) {
         eprintln!("[ash] sys_exit({})", code);
         eprintln!("{}", std::backtrace::Backtrace::force_capture());
     }
-    std::process::exit(code);
+    crate::sys::exit_process(code)
 }
 
 #[cfg(test)]

@@ -466,6 +466,12 @@ def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
         panicked = next((l.strip() for l in lines[:i] if "panicked at" in l), None)
         if panicked:
             detail += "  <- " + panicked[:240]
+        # ash's handler re-raises, so a process that crashed died by signal.
+        # A banner with an ordinary exit code was printed by a child the
+        # program spawned (the sys suite runs `hl` on itself) and reached
+        # this output through an inherited stderr.
+        if os.name != "nt" and res.returncode >= 0:
+            return "FAIL", "a child process crashed: " + detail
         return "CRASH", detail
     if "panicked at" in out:
         line = next((l for l in out.splitlines() if "panicked at" in l), "")

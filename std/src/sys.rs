@@ -1161,6 +1161,33 @@ pub unsafe extern "C" fn hlp_sys_read_dir(path: *const vbyte) -> *mut varray {
 /// the Haxe side. The result packs the exit code in the low byte and the
 /// terminating signal in the next, as upstream's
 /// `WEXITSTATUS(status) | (WTERMSIG(status) << 8)` does. -1 means the shell
+/// Leave the process without running its `atexit` handlers.
+///
+/// LLVM registers handlers that tear down JIT state a promotion still running
+/// on a broker thread is using, so an ordinary `exit` races that thread and
+/// can die inside its own teardown. Nothing here needs the handlers: the GC
+/// report they would have printed is printed by hand, the buffers `exit`
+/// would have flushed are flushed here, and every thread ends with the
+/// process. `Sys.exit` and the CLI's own return both come through this.
+pub fn exit_process(code: i32) -> ! {
+    crate::gc::print_stats_if_enabled();
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    unsafe {
+        // C stdio, for anything an HDLL printed through it.
+        libc::fflush(std::ptr::null_mut());
+        libc::_exit(code)
+    }
+    #[cfg(windows)]
+    unsafe {
+        // Terminates every thread and skips the CRT's atexit table.
+        windows_sys::Win32::System::Threading::ExitProcess(code as u32)
+    }
+    #[cfg(not(any(unix, windows)))]
+    std::process::exit(code)
+}
+
 /// could not be started at all, where C's system() would have returned -1 and
 /// upstream would have decoded that -1 as a status word.
 #[unsafe(no_mangle)]

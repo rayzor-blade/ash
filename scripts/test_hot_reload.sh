@@ -110,10 +110,16 @@ cat "$OUTPUT"
 echo "--- End ---"
 echo ""
 
-# Verify
+# Verify. `hot` and `warm` are promoted after the reload; 90 and 74250000 are
+# V2's sums (V1's are 45 and 49500000), and a sum that is neither is a
+# promotion that landed V1's body part-way through the loop.
 if grep -q "reloaded v2" "$OUTPUT"; then
-    echo "PASS: Hot reload detected and code updated (v1 -> v2)"
-    exit 0
+    if grep -q "^after 90 74250000$" "$OUTPUT"; then
+        echo "PASS: Hot reload detected and code updated (v1 -> v2)"
+        exit 0
+    fi
+    echo "FAIL: reload applied but a body promoted afterwards computes V1's sum"
+    exit 1
 elif grep -q "reloaded v1" "$OUTPUT"; then
     echo "FAIL: Reload was detected but getMessage still returns v1 (body not swapped)"
     exit 1

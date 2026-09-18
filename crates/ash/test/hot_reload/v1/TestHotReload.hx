@@ -3,6 +3,22 @@ class TestHotReload {
         return "v1";
     }
 
+    // Hot enough to be promoted after the reload. A body the tier lowers
+    // from the program as it was at startup gives the old sum.
+    static function hot(n:Int):Int {
+        var s = 0;
+        for (i in 0...n) s += i * 1;
+        return s;
+    }
+
+    // Unchanged between versions and promoted only after the reload, so
+    // the tier has to lower it from the program it was pointed at then.
+    static function warm(n:Int):Int {
+        var s = 0;
+        for (i in 0...n) s += i;
+        return s;
+    }
+
     static function main() {
         Sys.println("start " + getMessage());
 
@@ -30,6 +46,13 @@ class TestHotReload {
         if (!reloaded) {
             Sys.println("no-reload " + getMessage());
         }
+
+        // Past any promotion threshold, so the ladder compiles `hot` from
+        // whatever program the tier holds now and the rest of the loop runs
+        // that code.
+        var t = 0;
+        for (k in 0...5000) t += hot(100) + warm(100);
+        Sys.println("after " + hot(10) + " " + t);
 
         Sys.println("done " + getMessage());
     }

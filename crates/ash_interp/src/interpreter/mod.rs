@@ -1329,14 +1329,9 @@ impl HLInterpreter {
         }
 
         let published_bytecode = Arc::clone(bytecode);
-        // Publishing the bytecode once went through a set_bytecode helper
-        // (since deleted — this is now its only caller and it was dead code),
-        // which also computed this. Setting the OnceLock directly skipped it, and a
-        // max_findex of 0 silently disables the functions_ptrs update in
-        // install_function_address — every virtual dispatch from compiled
-        // code then falls back to the interpreter bridge. deltablue went from
-        // 119ms to 700ms with the right answer, which is exactly how a
-        // "performance only" field hides.
+        // A max_findex of 0 silently disables the functions_ptrs update in
+        // install_function_address, and every virtual dispatch from compiled
+        // code then falls back to the interpreter bridge.
         let published_max_findex = published_bytecode
             .functions
             .iter()
@@ -1372,11 +1367,14 @@ impl HLInterpreter {
                     }
                 },
             },
-            bytecode: {
-                let c = OnceLock::new();
-                let _ = c.set(published_bytecode);
-                c
-            },
+            bytecode: Mutex::new(published_bytecode),
+            reload_generation: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "llvm")]
+            llvm_seed: hot_reload.then(|| crate::tiering::LlvmSeed {
+                path: hl_path.clone(),
+                shared: shared.clone(),
+                compiled_only: config.compiled_only,
+            }),
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
             llvm_done: Mutex::new(HashSet::new()),
             llvm_failed: Mutex::new(HashSet::new()),
@@ -4505,6 +4503,23 @@ impl HLInterpreter {
         {
             return Some(*entry);
         }
+        // Under hot reload the only tier is LLVM, and it publishes a body to
+        // `functions_ptrs` before beadie installs it in the bead. A body the
+        // bead offers that the table no longer holds was compiled from the
+        // program before a reload, and the reload's own recompile has since
+        // taken the slot: the bead is put back on the interpreter and the
+        // ladder promotes it again from the new program.
+        if tiered.config.hot_reload && tiered.shared_ctx.arrays.functions_ptrs != 0 {
+            let published = unsafe {
+                *(tiered.shared_ctx.arrays.functions_ptrs as *const usize).add(findex)
+            };
+            if published != addr {
+                if let Some(bound) = tiered.beads[findex].as_ref() {
+                    bound.reset_to_interpreter();
+                }
+                return None;
+            }
+        }
         // Freshly installed (or newly swapped-in) code.
         //
         // Attach any OSR entries the promote staged. The re-swap with the
@@ -5522,9 +5537,24 @@ impl HLInterpreter {
     /// new bytecode. Polled after a native call returns, on both walkers,
     /// since `hl.Api.checkReload()` is the native that flags it.
     fn apply_pending_reload(&mut self, native_resolver: &NativeFunctionResolver) {
-        if ash_core::reload::take_reload_pending()
-            && let Some(new_bc) = ash_core::reload::do_reload()
-        {
+        if !ash_core::reload::take_reload_pending() {
+            return;
+        }
+        // The top tier's lock is held from before the function table is
+        // patched until the brokers have been pointed at the new program. A
+        // compile in flight finishes first and installs a body the patch then
+        // overwrites; a compile that starts afterwards lowers the new one.
+        let ctx = self
+            .tiered_runtime
+            .as_ref()
+            .map(|t| Arc::clone(&t.shared_ctx));
+        let mut llvm = ctx
+            .as_ref()
+            .map(|c| c.llvm.lock().expect("tiered llvm mutex poisoned"));
+        if let Some(new_bc) = ash_core::reload::do_reload() {
+            if let (Some(ctx), Some(llvm)) = (ctx.as_ref(), llvm.as_mut()) {
+                ctx.reload(llvm, Arc::new(new_bc.clone()));
+            }
             // Leak the old utf16_strings cache — live NanBoxed registers
             // in the current (old) frame hold raw pointers into those
             // Vec<u16> buffers. Clearing would create dangling pointers.
@@ -5566,12 +5596,6 @@ impl HLInterpreter {
                         tiered.gate_checked[findex] = false;
                     }
                 }
-                tiered
-                    .shared_ctx
-                    .llvm_done
-                    .lock()
-                    .expect("llvm_done mutex poisoned")
-                    .clear();
             }
 
             // Re-initialize constants from the new bytecode so that

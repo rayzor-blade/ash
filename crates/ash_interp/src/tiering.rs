@@ -420,7 +420,16 @@ pub(crate) struct TieredSharedCtx {
     /// Holding an Arc makes the lifetime a fact rather than a request: every
     /// compile thread captures this context by Arc, so the bytecode cannot
     /// outlive its readers or be dropped beneath them.
-    pub(crate) bytecode: OnceLock<Arc<DecodedBytecode>>,
+    ///
+    /// Swapped by [`Self::reload`]; a compile in flight keeps the Arc it
+    /// started from.
+    pub(crate) bytecode: Mutex<Arc<DecodedBytecode>>,
+    /// Bumped by every reload. A compile that began under an older value
+    /// installs nothing: its body describes a program that no longer exists.
+    pub(crate) reload_generation: std::sync::atomic::AtomicU64,
+    /// What a reload rebuilds the top tier's module from.
+    #[cfg(feature = "llvm")]
+    pub(crate) llvm_seed: Option<LlvmSeed>,
     /// `max(findex) + 1`, matching the length of `functions_ptrs`.
     pub(crate) max_findex: std::sync::atomic::AtomicUsize,
     /// Findexes whose installed code already came from LLVM — a tier-1
@@ -538,12 +547,103 @@ pub(crate) enum WorkerClosureDepsState {
     Ready,
 }
 
+/// The inputs `enable_tiered` built the LLVM module from, kept so a reload
+/// can build another the same way.
+#[cfg(feature = "llvm")]
+pub(crate) struct LlvmSeed {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) shared: ash_core::runtime_handles::SharedRuntimeHandles,
+    pub(crate) compiled_only: bool,
+}
+
 impl TieredSharedCtx {
-    /// The bytecode, borrowed from this context's own Arc. No unsafe, and no
-    /// lifetime obligation on the caller: the borrow cannot outlive the
-    /// context, and every compile thread holds the context by Arc.
-    pub(crate) fn bytecode_ptr(&self) -> Option<&DecodedBytecode> {
-        self.bytecode.get().map(|b| &**b)
+    /// The program the brokers lower from, as of now. A caller that lowers
+    /// holds this Arc for the whole compile, so a reload in the middle swaps
+    /// the context's copy and not the one being read.
+    pub(crate) fn bytecode(&self) -> Arc<DecodedBytecode> {
+        Arc::clone(&self.bytecode.lock().expect("bytecode mutex poisoned"))
+    }
+
+    pub(crate) fn reload_generation(&self) -> u64 {
+        self.reload_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Point the tiers at a reloaded program.
+    ///
+    /// Called with the top tier's lock held by the caller, which is what
+    /// orders this against a compile in flight: that compile installed its
+    /// body before the reload patched the function table, and the next one
+    /// lowers from `new_bytecode`. The LLVM module is rebuilt from the new
+    /// program; the old one is leaked, since its code may still be on a
+    /// stack. Every memo keyed by findex is dropped, because a findex may
+    /// name a different function now.
+    #[cfg_attr(not(feature = "llvm"), allow(unused_variables))]
+    pub(crate) fn reload(
+        &self,
+        llvm: &mut LlvmState,
+        new_bytecode: Arc<DecodedBytecode>,
+    ) {
+        let old_bytecode = std::mem::replace(
+            &mut *self.bytecode.lock().expect("bytecode mutex poisoned"),
+            Arc::clone(&new_bytecode),
+        );
+        // The middle tier keeps a raw pointer into the program it was built
+        // from, so that program is kept alive with it; both are leaked.
+        std::mem::forget(old_bytecode);
+        if let Some(tier) = self
+            .cranelift
+            .lock()
+            .expect("cranelift mutex poisoned")
+            .take()
+            .flatten()
+        {
+            std::mem::forget(tier);
+        }
+        self.reload_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "llvm")]
+        if let Some(seed) = &self.llvm_seed {
+            // A raw module pointer is leaked by being dropped; a claimed
+            // module is `ManuallyDrop` already.
+            match std::mem::replace(llvm, LlvmState::Unavailable) {
+                LlvmState::Building(handle) => {
+                    let _ = handle.join();
+                }
+                LlvmState::Pending(_) | LlvmState::Ready(_) | LlvmState::Unavailable => {}
+            }
+            let context: &'static inkwell::context::Context =
+                Box::leak(Box::new(inkwell::context::Context::create()));
+            let mut jit = JITModule::new_with_shared_runtime(
+                context,
+                &seed.path,
+                &new_bytecode,
+                seed.shared.clone(),
+            );
+            jit.set_hot_reload(true);
+            jit.set_lazy_compilation(seed.compiled_only);
+            *llvm = LlvmState::Ready(LlvmModule(ManuallyDrop::new(jit)));
+        }
+        for set in [&self.llvm_done, &self.llvm_failed] {
+            set.lock().expect("tier memo poisoned").clear();
+        }
+        self.hot_loop_pcs.lock().expect("hot_loop_pcs mutex poisoned").clear();
+        self.live_frame.lock().expect("live_frame mutex poisoned").clear();
+        self.called_from_loop
+            .lock()
+            .expect("called_from_loop mutex poisoned")
+            .clear();
+        self.pending_osr.lock().expect("pending_osr mutex poisoned").clear();
+        self.osr_image_regs
+            .lock()
+            .expect("osr_image_regs mutex poisoned")
+            .clear();
+        self.uniform_entries
+            .lock()
+            .expect("uniform_entries mutex poisoned")
+            .clear();
+        self.worker_beads.lock().expect("worker_beads mutex poisoned").clear();
+        forget_refusals();
     }
 }
 
@@ -654,6 +754,17 @@ fn remember_tier0_refusal(findex: usize) {
         .lock()
         .expect("tier0 refusal set poisoned")
         .insert(findex);
+}
+
+/// Drop every remembered refusal: after a reload the same findex may be a
+/// different function, and the answer it got no longer applies.
+fn forget_refusals() {
+    if let Some(set) = TIER0_REFUSED.get() {
+        set.lock().expect("tier0 refusal set poisoned").clear();
+    }
+    if let Ok(mut g) = GATE_REJECTED.lock() {
+        *g = None;
+    }
 }
 
 fn gate_rejected(findex: usize) -> bool {
@@ -801,9 +912,19 @@ pub(crate) fn tiered_compile_tier(
     // SAFETY: the primitive only touches this thread's own mutator record.
     unsafe { ash_core::hl_bindings::hl_blocking(true) };
     let began = std::time::Instant::now();
-    let code = tiered_compile_tier_inner(ctx, tier, findex, bead, may_block);
+    let generation = ctx.reload_generation();
+    let mut code = tiered_compile_tier_inner(ctx, tier, findex, bead, may_block);
     let took = began.elapsed();
     unsafe { ash_core::hl_bindings::hl_blocking(false) };
+    // Lowered from a program that has since been reloaded: the reload has
+    // already patched the table over whatever this installed, and the bead
+    // must not learn an address for the old body.
+    if !code.is_null() && ctx.reload_generation() != generation {
+        if ctx.tier_log {
+            eprintln!("[tier] discard findex={findex} tier={tier} reason=reloaded");
+        }
+        code = std::ptr::null_mut();
+    }
     if took.as_millis() >= 20 && (ctx.tier_log || env_flag!("ASH_TIER_LOG")) {
         // Name as well as id: a bare pthread_self cannot be read as "this ran
         // on the frame loop" without guessing, and a tier-1 compile landing on
@@ -885,9 +1006,9 @@ fn tiered_compile_tier_inner(
         }
         #[cfg(feature = "llvm")]
         if ash_core::llvm::air::promotion_gate_enabled()
-            && let Some(bc) = ctx.bytecode_ptr()
+            && let bc = ctx.bytecode()
             && let Some(raw) = bc.functions.iter().find(|f| f.findex as usize == findex)
-            && ash_core::llvm::air::llvm_ceiling(bc, raw) == ash_core::llvm::air::LlvmCeiling::None
+            && ash_core::llvm::air::llvm_ceiling(&bc, raw) == ash_core::llvm::air::LlvmCeiling::None
         {
             remember_gate_rejection(findex);
             record_decline(findex, "no LLVM headroom (gate)");
@@ -1030,9 +1151,7 @@ pub(crate) fn compile_with_cranelift(
     bead: &Arc<Bead>,
 ) -> *mut () {
     use std::sync::atomic::Ordering;
-    let Some(bytecode) = ctx.bytecode_ptr() else {
-        return std::ptr::null_mut();
-    };
+    let bytecode = ctx.bytecode();
 
     // Cheap static pre-flight before paying for a lowering attempt.
     let Some(func) = bytecode
@@ -1050,7 +1169,7 @@ pub(crate) fn compile_with_cranelift(
     // `cranelift::air::lower_best`; a function both decline still reaches the
     // LLVM tier, because a declining Cranelift compile returns an error and
     // this returns null on it.
-    if let Some(reason) = ash_core::cranelift::signature_reject_reason(bytecode, func) {
+    if let Some(reason) = ash_core::cranelift::signature_reject_reason(&bytecode, func) {
         if ctx.tier_log {
             eprintln!("[tier] decline findex={findex} tier=cranelift reason={reason}");
         }
@@ -1069,7 +1188,7 @@ pub(crate) fn compile_with_cranelift(
                 let cl_ctx = unsafe {
                     ash_core::cranelift::CraneliftTierContext::new(
                         &backend,
-                        bytecode,
+                        &bytecode,
                         ctx.arrays.globals_data as *mut c_void as *mut *mut c_void,
                         ctx.arrays.nglobals,
                         ctx.arrays.functions_ptrs as *mut c_void as *mut *mut c_void,
@@ -1234,9 +1353,7 @@ pub(crate) fn resolve_worker_stub(
     if findex >= ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
         return std::ptr::null_mut();
     }
-    let Some(bytecode) = ctx.bytecode_ptr() else {
-        return std::ptr::null_mut();
-    };
+    let bytecode = ctx.bytecode();
     if !bytecode
         .functions
         .iter()
@@ -1388,12 +1505,12 @@ pub(crate) fn prepare_worker_closure_dependencies(
     }
 
     let prepared = (|| {
-        let bytecode = ctx.bytecode_ptr()?;
+        let bytecode = ctx.bytecode();
         let raw = bytecode
             .functions
             .iter()
             .find(|function| function.findex as usize == findex)?;
-        let module = ash_core::air_pipeline::AshModule::new(bytecode);
+        let module = ash_core::air_pipeline::AshModule::new(&bytecode);
         let mut targets = Vec::new();
         // Every body that can MATERIALIZE a closure for this findex, not just
         // the one the tiers compile. The interpreter walks its own
@@ -1475,9 +1592,7 @@ pub(crate) fn prepare_worker_closure_dependencies(
 pub(crate) fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mut c_void) {
     let map = ctx.vtable_slots.get_or_init(|| {
         let mut m: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
-        let Some(bytecode) = ctx.bytecode_ptr() else {
-            return m;
-        };
+        let bytecode = ctx.bytecode();
         for (tidx, t) in bytecode.types.iter().enumerate() {
             if t.kind != hl::hl_type_kind_HOBJ && t.kind != hl::hl_type_kind_HSTRUCT {
                 continue;
@@ -1563,9 +1678,7 @@ pub(crate) fn produce_cranelift_osr_entries(
         Some(v) if !v.is_empty() => v.clone(),
         _ => return 0,
     };
-    let Some(bytecode) = ctx.bytecode_ptr() else {
-        return 0;
-    };
+    let bytecode = ctx.bytecode();
     let Some(raw) = bytecode
         .functions
         .iter()
@@ -1706,7 +1819,7 @@ pub(crate) fn osr_plan_for(
         Some(v) if !v.is_empty() => v.clone(),
         _ => return None,
     };
-    let bytecode = ctx.bytecode_ptr()?;
+    let bytecode = ctx.bytecode();
     let raw = bytecode
         .functions
         .iter()
@@ -1720,9 +1833,9 @@ pub(crate) fn osr_plan_for(
         return None;
     }
     let m = if cfg.callees_visible {
-        ash_core::air_pipeline::AshModule::new(bytecode)
+        ash_core::air_pipeline::AshModule::new(&bytecode)
     } else {
-        ash_core::air_pipeline::AshModule::new(bytecode).without_callees()
+        ash_core::air_pipeline::AshModule::new(&bytecode).without_callees()
     };
     let optimized = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg).ok()?;
     let plan = ash_core::osr::analyze(&optimized.ir);
@@ -1740,10 +1853,8 @@ pub(crate) fn osr_plan_for(
 
 #[cfg(feature = "llvm")]
 fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, findex: usize) {
-    let Some(program) = ctx.bytecode_ptr() else {
-        return;
-    };
-    for site in ash_core::cranelift::retier_targets(findex, program as *const _ as usize) {
+    let program = ctx.bytecode();
+    for site in ash_core::cranelift::retier_targets(findex, &*program as *const _ as usize) {
         if site.target() != 0 {
             continue;
         }

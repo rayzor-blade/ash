@@ -343,12 +343,11 @@ fn main() {
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let text = bindings
         .to_string()
-        .lines()
-        .map(|l| match l.strip_prefix("extern \"C\" {") {
-            Some(rest) => format!("unsafe extern \"C\" {{{rest}\n"),
-            None => format!("{l}\n"),
-        })
-        .collect::<String>()
+        // Token-wise, not line-wise: without rustfmt on the machine bindgen
+        // emits the whole file on one line.
+        .replace("unsafe extern \"C\" {", "\u{1}")
+        .replace("extern \"C\" {", "unsafe extern \"C\" {")
+        .replace("\u{1}", "unsafe extern \"C\" {")
         .replace(
             "::std::slice::from_raw_parts(self.as_ptr(), len)",
             "unsafe { ::std::slice::from_raw_parts(self.as_ptr(), len) }",

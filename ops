@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1789755775,"nonce":"YJ+HY6zfGfYFtxJ9PcquxEsJPP4=","message":"Verified through CI: the published results.json of the 2026-09-18 sweep carries base_commit and a base block per row, so every leg timed HEAD against the previous sweep's commit on the same runner. Closing.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1789755776,"nonce":"hMZHYC7Jc610KUjwOVcr14hpcNU=","status":2}]}

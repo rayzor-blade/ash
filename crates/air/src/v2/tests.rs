@@ -3216,6 +3216,92 @@ fn redundant_guard_elim_keeps_a_guard_on_a_different_value() {
     );
 }
 
+/// The shape from the Haxe unit suite that broke the pass the day it joined
+/// the pipeline: two tests on the same pair, the second decided by the
+/// first, with the block the decided edge abandons being a `Throw` that
+/// nothing else reaches. At O2 GVN has unified the constants first.
+#[test]
+fn redundant_guard_elim_survives_the_pipeline_on_a_decided_throw_arm() {
+    // r0 enum, r1 int, r2 int, r3 pointer
+    let regs = vec![t(30), t(3), t(3), t(5)];
+    let ops = vec![
+        Opcode::NullCheck { reg: Reg(0) },
+        Opcode::EnumIndex {
+            dst: Reg(1),
+            value: Reg(0),
+        },
+        Opcode::Switch {
+            reg: Reg(1),
+            offsets: vec![1, 12],
+            end: 0,
+        },
+        Opcode::JAlways { offset: 13 },
+        Opcode::EnumField {
+            dst: Reg(1),
+            value: Reg(0),
+            construct: RefEnumConstruct(0),
+            field: RefField(0),
+        },
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(0),
+        },
+        Opcode::JSGte {
+            a: Reg(2),
+            b: Reg(1),
+            offset: 2,
+        },
+        Opcode::GetGlobal {
+            dst: Reg(3),
+            global: RefGlobal(1),
+        },
+        Opcode::Ret { ret: Reg(3) },
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(0),
+        },
+        Opcode::JSLt {
+            a: Reg(2),
+            b: Reg(1),
+            offset: 2,
+        },
+        Opcode::GetGlobal {
+            dst: Reg(3),
+            global: RefGlobal(2),
+        },
+        Opcode::Ret { ret: Reg(3) },
+        Opcode::GetGlobal {
+            dst: Reg(3),
+            global: RefGlobal(3),
+        },
+        Opcode::Throw { exc: Reg(3) },
+        Opcode::GetGlobal {
+            dst: Reg(3),
+            global: RefGlobal(4),
+        },
+        Opcode::Ret { ret: Reg(3) },
+        Opcode::Null { dst: Reg(3) },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let ints = Ints(&[0]);
+    let mut f = lower_with(&ops, &regs, &ints).expect("lower");
+    let pm = PassManager::with_module(OptLevel::O2, &ints).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    pm.run(&mut f).unwrap_or_else(|e| panic!("{e}"));
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+    assert_eq!(
+        f.blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Throw { .. }))
+            .count(),
+        0,
+        "the decided throw arm survived:\n{}",
+        f.dump()
+    );
+}
+
 /// An int pool for the range-fact tests: index `i` holds `ints[i]`.
 struct Ints(&'static [i32]);
 impl ModuleInfo for Ints {

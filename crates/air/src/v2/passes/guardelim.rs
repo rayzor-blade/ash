@@ -345,15 +345,19 @@ impl Pass for RedundantGuardElim<'_> {
         // The block the guard used to reach -- a throw, in the shape this
         // exists for -- is usually left with no predecessors, and `verify`
         // rejects an unreachable block. Nothing later prunes them: dce removes
-        // dead VALUES. So the pass cleans up after itself.
-        prune_unreachable(f);
+        // dead VALUES. So the pass cleans up after itself, and the values the
+        // pruned blocks defined go with them: a value with no definition is
+        // not a function either.
+        if prune_unreachable(f) {
+            super::compact_values(f)?;
+        }
         Ok(stats)
     }
 }
 
 /// Drop blocks no longer reachable from the entry, renumbering what remains
-/// and dropping the phi arms that named them.
-fn prune_unreachable(f: &mut Function) {
+/// and dropping the phi arms that named them. Whether anything was dropped.
+fn prune_unreachable(f: &mut Function) -> bool {
     let n = f.blocks.len();
     let mut seen = vec![false; n];
     let mut stack = vec![0usize];
@@ -371,7 +375,7 @@ fn prune_unreachable(f: &mut Function) {
         }
     }
     if seen.iter().all(|reached| *reached) {
-        return;
+        return false;
     }
 
     let mut new_id = vec![None; n];
@@ -407,4 +411,5 @@ fn prune_unreachable(f: &mut Function) {
         .filter(|b| seen[b.idx()])
         .map(|b| remap(*b))
         .collect();
+    true
 }

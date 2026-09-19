@@ -447,6 +447,26 @@ impl LateEntryWorker {
     }
 }
 
+/// Threads draining the tier-0 compile queue. A hot program asks for
+/// dozens of Cranelift compiles in its first tens of milliseconds, and
+/// with one thread the function the mutator is waiting for queues behind
+/// every function that turned hot before it. Half the cores, leaving room
+/// for the mutator and the promoter, and never more than four.
+/// `ASH_TIER0_WORKERS=<n>` sets it directly.
+pub(crate) fn tier0_workers() -> usize {
+    static CELL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        if let Some(n) = std::env::var("ASH_TIER0_WORKERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            return n.max(1);
+        }
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        (cores / 2).clamp(1, 4)
+    })
+}
+
 /// `ASH_STUB_COMPILE=1` makes compiled code that reaches an uncompiled
 /// callee compile it on the spot, on the mutator, instead of running it in
 /// the interpreter until the ladder promotes it; safe, for measuring.

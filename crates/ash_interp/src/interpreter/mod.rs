@@ -1314,8 +1314,11 @@ impl HLInterpreter {
             ],
             _ => vec![tier0],
         };
-        let adapter = TieredAdapter::new(policies);
+        let workers = tier0_workers();
+        let adapter =
+            TieredAdapter::with_workers(policies, beadie::TieredDeoptPolicy::default(), workers);
         if config.log_promotions {
+            eprintln!("[tiered] tier0 workers={workers}");
             eprintln!(
                 "[tiered] ladder: mode={} tier0={} {}",
                 config.tier_mode.name(),

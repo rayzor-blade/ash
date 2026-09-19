@@ -43,6 +43,7 @@ being taken:
 | Variable | Effect |
 |----------|--------|
 | `ASH_TIER` | same values as `--jit-tier`; used when the flag is absent |
+| `ASH_TIER0_WORKERS` | threads draining the tier-0 compile queue; default half the cores, at most four |
 | `ASH_TIER_LOG` | log promotions, declines and tier crossings |
 | `ASH_TIERED_TIMING` | break down JIT startup cost by phase |
 | `ASH_OSR` | `0` disables mid-loop transfers into compiled code |

@@ -1392,6 +1392,20 @@ fn release_tlab_region(gc: &mut ImmixAllocator) {
     });
 }
 
+/// Bump-region refills so far, the index `ASH_GC_COLLECT_AT_REFILLS` and the
+/// `ASH_GC_STATS` lines count by.
+static REFILLS: AtomicU64 = AtomicU64::new(0);
+
+fn forced_refills() -> &'static [u64] {
+    static V: OnceLock<Vec<u64>> = OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("ASH_GC_COLLECT_AT_REFILLS")
+            .ok()
+            .map(|s| s.split(',').filter_map(|w| w.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    })
+}
+
 #[cold]
 fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
     mark_site(SITE_TLAB_REFILL);
@@ -1408,7 +1422,14 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
     // the registered interpreter ranges are complete as of their last
     // sync (a superset is over-retention, never under-rooting).
     set_collect_origin(2);
-    gc.maybe_collect_at_safepoint();
+    // `ASH_GC_COLLECT_AT_REFILLS=a,b,c` collects at exactly those refills
+    // (counted from 1), so a timing-dependent collection can be replayed.
+    let refill = REFILLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if forced_refills().contains(&refill) {
+        gc.collect_garbage();
+    } else {
+        gc.maybe_collect_at_safepoint();
+    }
     // Recycled lines first: a span in a block the sweep kept costs nothing to
     // acquire and leaves the free list for allocations that need a whole
     // block. Spans too small for the pending object are dropped rather than
@@ -2089,17 +2110,17 @@ fn protect_enabled() -> bool {
     })
 }
 
-/// Most collections are minor. Marks stick: a block kept by the last
-/// collection keeps its line and object marks, so tracing stops at an old
-/// object, and only the old blocks the mutator wrote since (the dirty ones)
-/// are scanned as roots. Old garbage waits for the next major, every
-/// `ASH_GC_MAJOR_EVERY` collections (default 8), on exhaustion, or on
-/// `Gc.major`. Needs the write-fault tracking above, so unix only;
-/// `ASH_GC_GEN=0` makes every collection a major, which is the setting for
-/// hunting a rooting bug in a long-lived object.
+/// `ASH_GC_GEN=1`: most collections are minor. Marks stick: a block kept
+/// by the last collection keeps its line and object marks, so tracing stops
+/// at an old object, and only the old blocks the mutator wrote since (the
+/// dirty ones) are scanned as roots. Old garbage waits for the next major,
+/// every `ASH_GC_MAJOR_EVERY` collections (default 8), on exhaustion, or on
+/// `Gc.major`. Needs the write-fault tracking above, so unix only. Off by
+/// default: the interpreter's unit-suite run crashes intermittently under
+/// it, see git-bug.
 fn generational() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(unix) && !std::env::var("ASH_GC_GEN").is_ok_and(|v| v == "0"))
+    *ON.get_or_init(|| cfg!(unix) && std::env::var("ASH_GC_GEN").is_ok_and(|v| v == "1"))
 }
 
 fn major_every() -> u32 {
@@ -3973,7 +3994,10 @@ impl ImmixAllocator {
         self.take_dead_finalizers();
         let t_mark = t_mark0.elapsed();
         let t_sweep0 = Instant::now();
-        let freed_blocks = self.sweep(&stopped_world.snapshots, minor);
+        // The collector's own frame, so the audit can leave the sweep's
+        // locals out of the roots it reports.
+        let sp_floor = Self::current_stack_addr();
+        let freed_blocks = self.sweep(&stopped_world.snapshots, minor, sp_floor);
         let t_sweep = t_sweep0.elapsed();
         let pause = t0.elapsed();
 
@@ -4086,10 +4110,11 @@ impl ImmixAllocator {
         // report that could drift from this one.
         if gc_stats_enabled() || gc_flag(GC_FLAG_PROFILE) {
             eprintln!(
-                "[gc] #{}{} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
+                "[gc] #{}{} refill={} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
                  next-trigger={} (x{:.1}) free={} blocks",
                 n,
                 if minor { " minor" } else { "" },
+                REFILLS.load(Ordering::Relaxed),
                 ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize],
                 pause_ns as f64 / 1e6,
                 freed_blocks,
@@ -4685,7 +4710,111 @@ impl ImmixAllocator {
     /// Freed blocks' pages are returned to the OS via madvise (batched per
     /// contiguous run) so RSS actually falls after a collection instead of
     /// plateauing at high-water. Returns the number of blocks reclaimed.
-    fn sweep(&mut self, mutators: &[MutatorSnapshot], minor: bool) -> usize {
+    /// Every range the marker read as roots, for `ASH_GC_SWEEP_AUDIT`.
+    /// `sp_floor` is the collector's own stack pointer at the sweep's entry,
+    /// so the auditor's own locals are not reported as roots.
+    fn audit_root_ranges(
+        &self,
+        mutators: &[MutatorSnapshot],
+        sp_floor: usize,
+    ) -> Vec<(&'static str, usize, usize)> {
+        let mut out = Vec::new();
+        if let Some((gp, count)) = self.globals_range {
+            out.push((
+                "globals",
+                gp as usize,
+                gp as usize + count * std::mem::size_of::<usize>(),
+            ));
+        }
+        for mutator in mutators {
+            for &(rs, sz) in &mutator.scan_ranges {
+                out.push(("range", rs, rs + sz));
+            }
+        }
+        let collector = thread_self_fast();
+        for mutator in mutators {
+            let raw_sp = if mutator.thread == collector {
+                sp_floor
+            } else {
+                mutator.stack_sp
+            };
+            if raw_sp == 0 {
+                continue;
+            }
+            let sp = word_align_up(raw_sp);
+            let running = self.fiber_stacks.iter().find(|f| {
+                f.thread == mutator.thread && f.size > 0 && sp >= f.base && sp < f.base + f.size
+            });
+            let top = running
+                .map(|f| f.base + f.size)
+                .unwrap_or(mutator.stack_top);
+            if sp < top {
+                out.push(("stack", sp, top));
+            }
+            for fiber in self
+                .fiber_stacks
+                .iter()
+                .filter(|f| f.thread == mutator.thread && f.saved_sp != 0)
+            {
+                if running.is_some_and(|active| active.id == fiber.id) {
+                    continue;
+                }
+                let saved_sp = word_align_up(fiber.saved_sp);
+                let saved_top = if fiber.size > 0 {
+                    fiber.base + fiber.size
+                } else {
+                    mutator.stack_top
+                };
+                if saved_sp < saved_top {
+                    out.push(("suspended-stack", saved_sp, saved_top));
+                }
+            }
+        }
+        out
+    }
+
+    /// Report every root word, raw or NaN-boxed, that points into
+    /// `lo..hi`, which the sweep is about to hand back.
+    fn audit_pointers_into(
+        ranges: &[(&'static str, usize, usize)],
+        lo: usize,
+        hi: usize,
+        what: &str,
+    ) {
+        // The collector's own frames hold `lo` and friends; they sit just
+        // above this frame, so a window over them is left out.
+        let here = Self::current_stack_addr();
+        for &(src, start, end) in ranges {
+            let mut p = start & !(WORD - 1);
+            while p + WORD <= end {
+                if src == "stack" && p >= here && p < here + 16384 {
+                    p += WORD;
+                    continue;
+                }
+                let w = unsafe { *(p as *const usize) };
+                if (lo..hi).contains(&w) {
+                    eprintln!("[gc-audit] {what} {lo:#x}..{hi:#x} but {src} @{p:#x} holds {w:#x}");
+                }
+                #[cfg(target_pointer_width = "64")]
+                {
+                    const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
+                    const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
+                    const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
+                    if w & NAN_MASK == NAN_TAG {
+                        let d = w & PAYLOAD_MASK;
+                        if (lo..hi).contains(&d) {
+                            eprintln!(
+                                "[gc-audit] {what} {lo:#x}..{hi:#x} but {src} @{p:#x} holds boxed {d:#x}"
+                            );
+                        }
+                    }
+                }
+                p += WORD;
+            }
+        }
+    }
+
+    fn sweep(&mut self, mutators: &[MutatorSnapshot], minor: bool, sp_floor: usize) -> usize {
         // Sticky marks: a kept block's marks survive into the next minor,
         // where they say which objects are old. A major cleared them first.
         let keep_marks = generational();
@@ -4694,7 +4823,10 @@ impl ImmixAllocator {
         // they are rebuilt below anyway.
         self.heap.recycle_spans.clear();
         self.heap.noptr_recycle_spans.clear();
-        let used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
+        let mut used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
+        // Address order, so the spans the sweep hands out are in address
+        // order too and a run is the same run every time.
+        used_block_addrs.sort_unstable();
         let mut freed: Vec<usize> = Vec::new();
         let (mut occ_blocks, mut occ_marked) = (0usize, 0usize);
         let mut occ_hist = [0usize; 6];
@@ -4731,6 +4863,7 @@ impl ImmixAllocator {
         // pairs inside the stop-the-world. Reusing one buffer keeps the
         // capacity across blocks and changes nothing else.
         let mut spans: Vec<(usize, usize)> = Vec::new();
+        let audit_ranges = sweep_audit().then(|| self.audit_root_ranges(mutators, sp_floor));
         for block_addr in used_block_addrs {
             let block_index = block_addr / BLOCK_SIZE;
             // A clean old block was neither traced nor written: nothing in
@@ -4824,6 +4957,13 @@ impl ImmixAllocator {
                 }] += 1;
             }
             if !is_empty && !is_tlab && recycle_lines() {
+                if let Some(ranges) = &audit_ranges {
+                    let base = self.heap.memory.as_ptr() as usize;
+                    for &(start, len) in &spans {
+                        let lo = base + block_addr + start * LINE_SIZE;
+                        Self::audit_pointers_into(ranges, lo, lo + len * LINE_SIZE, "RECYCLED");
+                    }
+                }
                 let spans_of_kind = if self.blocks[block_index].noptr {
                     &mut self.heap.noptr_recycle_spans
                 } else {
@@ -6174,7 +6314,7 @@ mod tests {
         gc.mark_allocation(start + 36, &mut work);
         assert_eq!(work, vec![(start + 32, 16)]);
         assert!(!gc.blocks[start / BLOCK_SIZE].is_marked(1));
-        gc.sweep(&[], false);
+        gc.sweep(&[], false, 0);
         if generational() {
             // The claim is sticky across a sweep; a major forgets it first.
             assert!(object_marked(&gc, start + 32));

@@ -1382,7 +1382,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hl_abi"
 version = "0.1.0"
-source = "git+https://github.com/rayzor-blade/hl_abi#5482332e64fbdb8ae65e559c62eb320a95bd3d16"
+source = "git+https://github.com/rayzor-blade/hl_abi?rev=5482332e64fbdb8ae65e559c62eb320a95bd3d16#5482332e64fbdb8ae65e559c62eb320a95bd3d16"
 
 [[package]]
 name = "iana-time-zone"

@@ -16,7 +16,8 @@ num_enum = {version = "0.7.3"}
 ash_simd = { path = "crates/ash_simd" }
 # Its own repository: the HashLink C ABI is not specific to this VM, and the
 # libraries that use it are not all here. https://github.com/rayzor-blade/hl_abi
-hl_abi = { git = "https://github.com/rayzor-blade/hl_abi" }
+# Held at one rev, as every shared dependency is.
+hl_abi = { git = "https://github.com/rayzor-blade/hl_abi", rev = "5482332e64fbdb8ae65e559c62eb320a95bd3d16" }
 ash_native_call = { path = "crates/ash_native_call" }
 ash_macro ={ path = "crates/ash_macro" }
 once_cell = "1.20.2"

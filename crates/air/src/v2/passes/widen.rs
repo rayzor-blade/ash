@@ -57,6 +57,10 @@ pub enum Decline {
     FloatReduction(ValueId),
     /// A combining operation with no identity to seed the lanes from.
     UnreducibleOp(BinOp),
+    /// An operation on the lanes that not every consumer executes on a
+    /// vector: the walker runs a fixed set lane by lane, and Cranelift has
+    /// no vector integer division and takes a scalar shift amount only.
+    NoLaneForm(BinOp),
     /// A guard whose condition this cannot prove for the whole vector range.
     /// Hoisting needs the test to be the induction variable against something
     /// loop-invariant; anything else would be assumed rather than proven.
@@ -538,6 +542,19 @@ fn identity_of(op: BinOp) -> Option<i32> {
 /// binds the IR is the tier that must lower everything.
 const MACHINE_VECTOR_BYTES: u32 = 16;
 
+/// Whether every consumer executes `op` on a vector of `float` or integer
+/// lanes. The set is the SSA walker's `scalar_binop` and what Cranelift
+/// lowers as one instruction; LLVM takes anything, and the serializer runs
+/// the scalar opcode per lane.
+fn has_lane_form(op: BinOp, float: bool) -> bool {
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul => true,
+        BinOp::SDiv | BinOp::UDiv => float,
+        BinOp::And | BinOp::Or | BinOp::Xor => !float,
+        BinOp::SMod | BinOp::UMod | BinOp::Shl | BinOp::SShr | BinOp::UShr => false,
+    }
+}
+
 /// The one lane count a loop's widened values agree on.
 ///
 /// Exactly one machine vector per value, not merely no more than one. A
@@ -660,14 +677,18 @@ fn widen_loop(
         let mut grew = false;
         for b in &body {
             for ins in f.blocks[b.idx()].instrs.clone() {
-                let Instr::BinOp { dst, a, b: rb, .. } = ins else {
+                let Instr::BinOp { op, dst, a, b: rb } = ins else {
                     continue;
                 };
                 if widened.contains_key(&dst) {
                     continue;
                 }
                 if widened.contains_key(&a) || widened.contains_key(&rb) {
-                    let (ty, reg) = (f.value_ty(dst), f.value_reg(dst));
+                    let ty = f.value_ty(dst);
+                    if !has_lane_form(op, info.is_float(ty)) {
+                        return Err(Decline::NoLaneForm(op));
+                    }
+                    let reg = f.value_reg(dst);
                     let w = f.new_vector_value(ty, reg, vf);
                     widened.insert(dst, w);
                     grew = true;

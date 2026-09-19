@@ -7244,6 +7244,85 @@ fn widen_reduction_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     (ops, regs)
 }
 
+/// `a[i] = a[i] >> shift` with `shift` invariant: a lane operation the SSA
+/// walker does not execute and Cranelift takes only with a scalar amount. Widened, it did not run slower, it stopped the
+/// program with "unsupported vector op". The same loop with an `Add` widens.
+#[test]
+fn a_lane_operation_without_a_form_in_every_consumer_is_refused() {
+    use super::passes::widen::{Decline, Widen, take_outcomes};
+    // r0 a(array) r1 i r2 limit r3 step r4 shift r5 elem
+    let regs = vec![t(13), t(3), t(3), t(3), t(3), t(3)];
+    let body = |op: fn(Reg, Reg, Reg) -> Opcode| {
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(1),
+            },
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(2),
+            },
+            Opcode::Int {
+                dst: Reg(4),
+                ptr: RefInt(4),
+            },
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(1),
+                b: Reg(2),
+                offset: 5,
+            },
+            Opcode::GetArray {
+                dst: Reg(5),
+                array: Reg(0),
+                index: Reg(1),
+            },
+            op(Reg(5), Reg(5), Reg(4)),
+            Opcode::SetArray {
+                array: Reg(0),
+                index: Reg(1),
+                src: Reg(5),
+            },
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(3),
+            },
+            Opcode::JAlways { offset: -6 },
+            Opcode::Ret { ret: Reg(1) },
+        ]
+    };
+    let shifted = body(|dst, a, b| Opcode::SShr { dst, a, b });
+    let mut f = lowered_and_cleaned(&shifted, &regs);
+    let stats = Widen { info: &WidenInfo }
+        .run(&mut f, &PassOptions::default())
+        .expect("widen");
+    assert_eq!(stats.replaced, 0, "widened a shift:\n{}", f.dump());
+    let why = take_outcomes();
+    assert!(
+        why.iter()
+            .any(|(_, r)| matches!(r, Err(Decline::NoLaneForm(BinOp::SShr)))),
+        "declined, but not for the operation: {why:?}"
+    );
+
+    let added = body(|dst, a, b| Opcode::Add { dst, a, b });
+    let mut f = lowered_and_cleaned(&added, &regs);
+    let stats = Widen { info: &WidenInfo }
+        .run(&mut f, &PassOptions::default())
+        .expect("widen");
+    assert_eq!(
+        stats.replaced,
+        1,
+        "the add form did not widen; declines: {:?}\n{}",
+        super::passes::widen::explain(&f, &WidenInfo),
+        f.dump()
+    );
+}
+
 #[test]
 fn a_sum_over_an_array_widens_into_lane_partials() {
     let (ops, regs) = widen_reduction_fixture();

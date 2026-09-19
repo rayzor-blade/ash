@@ -45,6 +45,16 @@ jobs:
           # current Intel image.
           - os: macos-15-intel
             target: macos-x86_64
+          # The -dev tarballs register every LLVM backend, for `--target`
+          # triples outside the supported set (MIPS, LoongArch, SPARC, ...).
+          # Objects only, like the rest of the cross-target set: nothing
+          # links or runs them here.
+          - os: ubuntu-24.04
+            target: linux-x86_64-dev
+            features: all-targets
+          - os: macos-14
+            target: macos-aarch64-dev
+            features: all-targets
     steps:
       - uses: actions/checkout@v4
 
@@ -93,7 +103,7 @@ jobs:
       - name: Build ash (release)
         run: |
           cargo build --release -p ash_std
-          cargo build --release -p ash
+          cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
       - name: Smoke test
         run: |
@@ -107,6 +117,16 @@ jobs:
         run: |
           tar xzf "dist/ash-${{ matrix.target }}.tar.gz" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/ash" --mode interp crates/ash/test/tests/test_basic.hl
+          "$RUNNER_TEMP/ash" --version
+
+      # What the -dev tarball exists for: an object for a triple the default
+      # build refuses.
+      - name: Emit an object for an unsupported target
+        if: matrix.features == 'all-targets'
+        run: |
+          "$RUNNER_TEMP/ash" --emit-aot "$RUNNER_TEMP/basic-mips.o" --target mips64el-unknown-linux-gnuabi64 \
+            crates/ash/test/tests/test_basic.hl
+          test -s "$RUNNER_TEMP/basic-mips.o"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

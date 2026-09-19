@@ -57,6 +57,11 @@ and the wasm linker are inside the binary; nothing else is installed.
 ASH requires a 64-bit target. Other platforms build from source — see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+`ASH_DEV=1 ... | sh` installs the `-dev` build instead (Linux x86_64 and
+macOS arm64): the same ash with every LLVM backend registered, so
+`--target` can emit objects for architectures outside the supported set.
+See [docs/aot.md](docs/aot.md#cross-compiling).
+
 ## Run
 
 ```bash

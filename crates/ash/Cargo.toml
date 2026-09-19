@@ -12,6 +12,10 @@ keywords = ["Virtual Machine", "VM", "JIT", "Compiler", "Haxe", "HashLink"]
 [features]
 default = ["llvm"]
 llvm = ["dep:inkwell", "dep:ash_wasm_link", "dep:gimli"]
+# Register every backend LLVM was built with, not only the targets ash
+# supports, so `--target` can emit objects for the rest. The binary grows by
+# what those backends weigh; the `-dev` release tarballs are built this way.
+all-targets = ["llvm"]
 
 [dependencies]
 inkwell = { workspace = true, optional = true }

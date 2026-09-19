@@ -84,7 +84,8 @@ Flags:
 
 - `--target <triple>` cross-compiles. A non-host target is built for a
   generic CPU and always with one shard, because shards are joined by the
-  host's `ld`, which reads one object format.
+  host's `ld`, which reads one object format. See
+  [Cross-compiling](#cross-compiling) for which triples a build accepts.
 - `--allow-refused` emits even when some functions could not be lowered; each
   becomes a throw at the point it is reached. Without it a refusal stops the
   build.
@@ -144,6 +145,31 @@ into it.
 
 `cargo test -p ash --test aot_smoke` compiles a corpus with `--build` and
 compares each binary's output with the JIT's, byte for byte.
+
+### Cross-compiling
+
+`--emit-aot out.o --target <triple>` writes an object for another
+architecture; linking it needs that architecture's toolchain and a runtime
+built for it, which is why the platform table calls these "objects only".
+
+The release binary registers the LLVM backends for the targets ash claims:
+x86 (64- and 32-bit), AArch64, ARM, RISC-V 32 and 64, PowerPC64LE, s390x,
+and wasm32. `cargo test -p ash --test cross_targets` emits an object for
+each and checks its ELF header, so those triples are gated. A triple
+outside the set is refused with `no target for <triple>`.
+
+The `-dev` tarballs (`ash-linux-x86_64-dev`, `ash-macos-aarch64-dev`;
+`ASH_DEV=1` on the install line) are the same ash built with
+`--features all-targets`, which registers every backend the LLVM it links
+was built with — MIPS, LoongArch, SPARC, Hexagon and the rest. Nothing
+checks those objects beyond emitting them; `ash --version` says
+`(all LLVM targets)` when a binary is that build. The default build leaves
+them out because their instruction tables are a third of the binary.
+
+```
+ASH_DEV=1 curl -fsSL https://ash.rayzor.tech/install.sh | sh
+ash --emit-aot game.o --target mips64el-unknown-linux-gnuabi64 game.hl
+```
 
 ## WebAssembly
 

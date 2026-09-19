@@ -20,6 +20,15 @@ case "$os/$arch" in
   *) echo "error: unsupported platform $os/$arch (ash requires a 64-bit target)" >&2; exit 1 ;;
 esac
 
+# ASH_DEV=1 takes the -dev build: every LLVM backend, for `--target` triples
+# outside the supported set. Built for Linux x86_64 and macOS arm64.
+if [ -n "${ASH_DEV:-}" ]; then
+  case "$target" in
+    linux-x86_64|macos-aarch64) target="${target}-dev" ;;
+    *) echo "error: no -dev build for ${target}; it exists for linux-x86_64 and macos-aarch64" >&2; exit 1 ;;
+  esac
+fi
+
 asset="ash-${target}.tar.gz"
 url="https://github.com/${REPO}/releases/latest/download/${asset}"
 fallback="https://github.com/${REPO}/releases/download/nightly/${asset}"

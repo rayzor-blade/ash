@@ -365,19 +365,32 @@ fn default_features(triple: &str) -> String {
 /// references every backend LLVM was built with, so the tables and code of
 /// targets ash never names -- Hexagon, AMDGPU, NVPTX, MIPS, Sparc and the
 /// rest -- were a third of the release binary. A triple outside this set
-/// fails in `Target::from_triple` with "no target for", which is the honest
-/// answer; `table_agrees_with_llvm` pins that every triple ash claims is
-/// inside it.
+/// fails in `Target::from_triple`, and the error names the build that has
+/// it: the `all-targets` feature registers everything, which is what the
+/// `-dev` release tarballs are built with. `table_agrees_with_llvm` pins
+/// that every triple ash claims is inside the default set.
 #[cfg(feature = "llvm")]
 pub(crate) fn initialize_targets() {
     let config = InitializationConfig::default();
-    Target::initialize_x86(&config);
-    Target::initialize_aarch64(&config);
-    Target::initialize_arm(&config);
-    Target::initialize_riscv(&config);
-    Target::initialize_power_pc(&config);
-    Target::initialize_system_z(&config);
-    Target::initialize_webassembly(&config);
+    #[cfg(feature = "all-targets")]
+    Target::initialize_all(&config);
+    #[cfg(not(feature = "all-targets"))]
+    {
+        Target::initialize_x86(&config);
+        Target::initialize_aarch64(&config);
+        Target::initialize_arm(&config);
+        Target::initialize_riscv(&config);
+        Target::initialize_power_pc(&config);
+        Target::initialize_system_z(&config);
+        Target::initialize_webassembly(&config);
+    }
+}
+
+/// Whether this build registers every LLVM backend (the `-dev` tarballs) or
+/// the supported set alone.
+#[cfg(feature = "llvm")]
+pub fn all_targets_build() -> bool {
+    cfg!(feature = "all-targets")
 }
 
 #[cfg(feature = "llvm")]
@@ -387,7 +400,17 @@ pub(crate) fn target_machine(
 ) -> Result<(TargetTriple, TargetMachine)> {
     initialize_targets();
     let tt = TargetTriple::create(triple);
-    let target = Target::from_triple(&tt).map_err(|e| anyhow!("no target for {triple}: {e}"))?;
+    let target = Target::from_triple(&tt).map_err(|e| {
+        if all_targets_build() {
+            anyhow!("no target for {triple}: {e}")
+        } else {
+            anyhow!(
+                "no target for {triple}: {e}. This build registers x86, AArch64, ARM, RISC-V, \
+                 PowerPC, SystemZ and WebAssembly; the -dev release (built with \
+                 --features all-targets) registers every backend LLVM has"
+            )
+        }
+    })?;
     let host = TargetMachine::get_default_triple();
     let native = tt == host;
     let cpu = if native {

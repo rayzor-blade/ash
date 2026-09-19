@@ -29,9 +29,17 @@ enum Command {
     },
 }
 
+/// The version, and which LLVM backends the build registers: the supported
+/// set, or every one for a `-dev` build.
+#[cfg(feature = "all-targets")]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (all LLVM targets)");
+#[cfg(not(feature = "all-targets"))]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser)]
 #[command(
     name = "ash",
+    version = VERSION,
     about = "ASH - HashLink bytecode runtime (interp | hybrid | jit)"
 )]
 #[command(group(

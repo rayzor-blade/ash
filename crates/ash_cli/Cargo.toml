@@ -12,6 +12,8 @@ description = "ASH HashLink VM CLI - hybrid interpreter/JIT runner"
 [features]
 default = ["llvm"]
 llvm = ["dep:inkwell", "ash_core/llvm", "ash_interp/llvm"]
+# See ash_core's feature of the same name.
+all-targets = ["llvm", "ash_core/all-targets"]
 
 [dependencies]
 # Reading a wasm module for `ash wasm`: the parser only, no engine.

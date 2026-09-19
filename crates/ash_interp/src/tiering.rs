@@ -447,6 +447,19 @@ impl LateEntryWorker {
     }
 }
 
+/// `ASH_STUB_COMPILE=1` makes compiled code that reaches an uncompiled
+/// callee compile it on the spot, on the mutator, instead of running it in
+/// the interpreter until the ladder promotes it; safe, for measuring.
+pub(crate) fn stub_compile_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        matches!(
+            std::env::var("ASH_STUB_COMPILE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 /// `ASH_OSR_ENTRY_SYNC=1` builds late Cranelift entries on the interpreter
 /// thread, as before the worker; safe, for measuring the stall.
 pub(crate) fn late_entry_sync() -> bool {

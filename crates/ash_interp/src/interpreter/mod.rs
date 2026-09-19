@@ -3074,14 +3074,21 @@ impl HLInterpreter {
                 };
                 // The mutator must not park behind a broker's compile. A worker
                 // lane has no interpreter to fall back to, so it still waits.
-                let may_block = if ctx.fiber_is_worker_lane.is_null() {
+                let is_worker = if ctx.fiber_is_worker_lane.is_null() {
                     false
                 } else {
                     let is_worker: unsafe extern "C" fn() -> bool =
                         std::mem::transmute(ctx.fiber_is_worker_lane);
                     is_worker()
                 };
-                resolve_worker_stub(shared, findex as usize, may_block)
+                // With an interpreter to fall back to, a callee that is not
+                // compiled yet is run there and promoted by the ladder like
+                // any other; compiling it here would put a tier-0 compile on
+                // the mutator for every cold callee compiled code reaches.
+                if !is_worker && !shared.compiled_only && !stub_compile_enabled() {
+                    return std::ptr::null_mut();
+                }
+                resolve_worker_stub(shared, findex as usize, is_worker)
             }
         }
 

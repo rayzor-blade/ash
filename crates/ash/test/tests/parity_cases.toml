@@ -718,6 +718,20 @@ normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
 
+# Loop-carried values that trade places: a swap, a rotation, a fib pair and
+# a `prev = cur; cur = next` chain, each a set of phis that read one
+# another's destinations after copy propagation. A de-SSA consumer that
+# assigns them one at a time turns a swap into a duplication. Each loop is
+# long enough to be compiled and entered mid-way.
+[[case]]
+name = "TestPhiCopies"
+main = "TestPhiCopies"
+hl = "test_phi_copies.hl"
+slow = false
+timeout_secs = 120
+expectation = "exact"
+normalize = "default"
+
 # The ash-simd primitives (haxelib/ash-simd) against a scalar reference:
 # NaN, signed zero, saturation, wrapping, unaligned slots, aliasing. The
 # oracle is stock hl with simd.hdll on its path, so HashLink and ash are

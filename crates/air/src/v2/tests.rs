@@ -1718,6 +1718,299 @@ fn dessa_swap_cycle_temp() {
     }
 }
 
+/// `a, b = b, a` over a counted loop; `t` is the register the temporary
+/// goes through. Copy propagation makes the header phis read each other.
+fn fix_swap_loop() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            }, // a = 1
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(2),
+            }, // b = 2
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(4),
+                ptr: RefInt(1),
+            }, // one
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(3),
+                b: Reg(0),
+                offset: 5,
+            },
+            Opcode::Mov {
+                dst: Reg(5),
+                src: Reg(1),
+            }, // t = a
+            Opcode::Mov {
+                dst: Reg(1),
+                src: Reg(2),
+            }, // a = b
+            Opcode::Mov {
+                dst: Reg(2),
+                src: Reg(5),
+            }, // b = t
+            Opcode::Add {
+                dst: Reg(3),
+                a: Reg(3),
+                b: Reg(4),
+            },
+            Opcode::JAlways { offset: -7 },
+            Opcode::Int {
+                dst: Reg(6),
+                ptr: RefInt(4),
+            }, // ten
+            Opcode::Mul {
+                dst: Reg(7),
+                a: Reg(1),
+                b: Reg(6),
+            },
+            Opcode::Add {
+                dst: Reg(7),
+                a: Reg(7),
+                b: Reg(2),
+            }, // a * 10 + b
+            Opcode::Ret { ret: Reg(7) },
+        ],
+        vec![t(0); 8],
+    )
+}
+
+/// `a, b, c = b, c, a`: a copy cycle longer than a swap.
+fn fix_rotate_loop() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            }, // a = 1
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(2),
+            }, // b = 2
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(3),
+            }, // c = 3
+            Opcode::Int {
+                dst: Reg(4),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(5),
+                ptr: RefInt(1),
+            }, // one
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(4),
+                b: Reg(0),
+                offset: 6,
+            },
+            Opcode::Mov {
+                dst: Reg(6),
+                src: Reg(1),
+            }, // t = a
+            Opcode::Mov {
+                dst: Reg(1),
+                src: Reg(2),
+            }, // a = b
+            Opcode::Mov {
+                dst: Reg(2),
+                src: Reg(3),
+            }, // b = c
+            Opcode::Mov {
+                dst: Reg(3),
+                src: Reg(6),
+            }, // c = t
+            Opcode::Add {
+                dst: Reg(4),
+                a: Reg(4),
+                b: Reg(5),
+            },
+            Opcode::JAlways { offset: -8 },
+            Opcode::Int {
+                dst: Reg(7),
+                ptr: RefInt(5),
+            }, // hundred
+            Opcode::Mul {
+                dst: Reg(9),
+                a: Reg(1),
+                b: Reg(7),
+            },
+            Opcode::Int {
+                dst: Reg(8),
+                ptr: RefInt(4),
+            }, // ten
+            Opcode::Mul {
+                dst: Reg(7),
+                a: Reg(2),
+                b: Reg(8),
+            },
+            Opcode::Add {
+                dst: Reg(9),
+                a: Reg(9),
+                b: Reg(7),
+            },
+            Opcode::Add {
+                dst: Reg(9),
+                a: Reg(9),
+                b: Reg(3),
+            }, // a * 100 + b * 10 + c
+            Opcode::Ret { ret: Reg(9) },
+        ],
+        vec![t(0); 10],
+    )
+}
+
+/// `prev = cur; cur = next; next = prev + cur`: a phi whose source is the
+/// next phi's destination, without a cycle.
+fn fix_chain_loop() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            }, // prev = 0
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(1),
+            }, // cur = 1
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(2),
+            }, // next = 2
+            Opcode::Int {
+                dst: Reg(4),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(5),
+                ptr: RefInt(1),
+            }, // one
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(4),
+                b: Reg(0),
+                offset: 5,
+            },
+            Opcode::Mov {
+                dst: Reg(1),
+                src: Reg(2),
+            }, // prev = cur
+            Opcode::Mov {
+                dst: Reg(2),
+                src: Reg(3),
+            }, // cur = next
+            Opcode::Add {
+                dst: Reg(3),
+                a: Reg(1),
+                b: Reg(2),
+            }, // next = prev + cur
+            Opcode::Add {
+                dst: Reg(4),
+                a: Reg(4),
+                b: Reg(5),
+            },
+            Opcode::JAlways { offset: -7 },
+            Opcode::Int {
+                dst: Reg(6),
+                ptr: RefInt(5),
+            }, // hundred
+            Opcode::Mul {
+                dst: Reg(7),
+                a: Reg(1),
+                b: Reg(6),
+            },
+            Opcode::Add {
+                dst: Reg(7),
+                a: Reg(7),
+                b: Reg(2),
+            }, // prev * 100 + cur
+            Opcode::Ret { ret: Reg(7) },
+        ],
+        vec![t(0); 8],
+    )
+}
+
+/// The header phis of `f` that read another phi of the same block: `(phi,
+/// the phi it reads)`, one pair per such edge.
+fn phi_reads_phi(f: &Function) -> Vec<(ValueId, ValueId)> {
+    let mut pairs = Vec::new();
+    for blk in &f.blocks {
+        for p in &blk.phis {
+            for (_, src) in &p.incoming {
+                if *src != p.dst && blk.phis.iter().any(|q| q.dst == *src) {
+                    pairs.push((p.dst, *src));
+                }
+            }
+        }
+    }
+    pairs
+}
+
+#[test]
+fn dessa_swap_rotate_and_chain_phis_at_every_level() {
+    // The consumers that turn phis back into copies -- the serializer here,
+    // and the walker and the native emitters through the parity case that
+    // runs the same loops -- must implement a block's phis as one parallel
+    // copy. Serialized code at every level runs the mini interpreter to the
+    // answer the unoptimized opcodes give.
+    let ints = [0, 1, 2, 3, 10, 100];
+    for (name, (ops, tys)) in [
+        ("swap", fix_swap_loop()),
+        ("rotate", fix_rotate_loop()),
+        ("chain", fix_chain_loop()),
+    ] {
+        for level in [OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
+            let out = optimized_round_trip_at(level, &NoModuleInfo, None, &ops, &tys);
+            for n in 0..=7i64 {
+                assert_eq!(
+                    mini_eval(&out.ops, &ints, &[n], out.num_regs),
+                    mini_eval(&ops, &ints, &[n], tys.len()),
+                    "{name} at {level:?}, n={n}: {}",
+                    ops_text(&out.ops)
+                );
+            }
+        }
+        // Copy propagation leaves the copies as phis reading one another, so
+        // the loop above ran the parallel-copy path and not a chain of Movs.
+        let mut f = lower(&ops, &tys).expect("lower");
+        PassManager::new(OptLevel::O2).run(&mut f).expect("passes");
+        let pairs = phi_reads_phi(&f);
+        // A swap is a 2-cycle, a rotation a 3-cycle, and the chain is two
+        // edges that never close.
+        let (edges, cycle) = match name {
+            "swap" => (2, Some(2)),
+            "rotate" => (3, Some(3)),
+            _ => (2, None),
+        };
+        assert_eq!(
+            pairs.len(),
+            edges,
+            "{name}: phis reading a phi of the same block: {pairs:?}\n{}",
+            f.dump()
+        );
+        let (start, mut at) = pairs[0];
+        let mut steps = 1;
+        while at != start && steps <= edges {
+            match pairs.iter().find(|(p, _)| *p == at) {
+                Some((_, next)) => at = *next,
+                None => break,
+            }
+            steps += 1;
+        }
+        let found = (at == start).then_some(steps);
+        assert_eq!(found, cycle, "{name}: {pairs:?}\n{}", f.dump());
+    }
+}
+
 #[test]
 fn dessa_critical_edge_split() {
     // b0 has two successors and b1 (the phi block) has two predecessors:

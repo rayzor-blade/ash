@@ -484,6 +484,45 @@ impl<'ctx> JITModule<'ctx> {
             let body = blocks[bi][0];
 
             self.builder.position_at_end(poll_entry);
+            // A loop with an induction variable polls once per strip: the
+            // low bits of the variable are tested first, and every other
+            // iteration skips straight to the join. On the back edge the
+            // stepped value is what is defined; in front of the header, the
+            // phi, whose slot the edge has already written.
+            if let Some(test) = air.strip_tests.iter().find(|t| t.header.0 == bi as u32) {
+                let value = if polls_on_back_edges {
+                    test.stepped
+                } else {
+                    test.phi
+                };
+                let slot = registers[value.idx()];
+                let ty = reg_types[value.idx()];
+                if let BasicTypeEnum::IntType(int_ty) = ty {
+                    let current = self
+                        .builder
+                        .build_load(int_ty, slot, "air_strip_iv")?
+                        .into_int_value();
+                    let low = self.builder.build_and(
+                        current,
+                        int_ty.const_int(
+                            (air::v2::passes::stripmine::STRIP - 1) as u64,
+                            false,
+                        ),
+                        "air_strip_low",
+                    )?;
+                    let mid = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        low,
+                        int_ty.const_zero(),
+                        "air_strip_due",
+                    )?;
+                    let check = self
+                        .context
+                        .append_basic_block(function, &format!("air_b{bi}_fiber_poll_check"));
+                    self.builder.build_conditional_branch(mid, check, join)?;
+                    self.builder.position_at_end(check);
+                }
+            }
             // On the back-edge form the handled epoch stays in its stack
             // slot: read once per iteration, written only when a poll
             // fires. Promoted to a register it would cost a callee-saved

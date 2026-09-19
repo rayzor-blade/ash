@@ -1561,6 +1561,21 @@ pub struct Function {
     /// values: what `serialize` needs to give those values scratch slots
     /// again in the flat form.
     pub simd_scratch: Option<SimdScratch>,
+    /// Loops whose safepoint a backend may skip on every iteration but one
+    /// in [`STRIP`](super::passes::stripmine::STRIP): the induction
+    /// variable to test is named here by [`stripmine`](super::passes::stripmine).
+    pub strip_tests: Vec<StripTest>,
+}
+
+/// One loop with an induction variable: its header, the header phi the
+/// loop steps by a constant, and the stepped value the latch hands back.
+/// A backend tests the low bits of whichever of the two is defined where
+/// its poll sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StripTest {
+    pub header: BlockId,
+    pub phi: ValueId,
+    pub stepped: ValueId,
 }
 
 /// How the flat form gets a 16-byte scratch slot back for a vector value:
@@ -1602,6 +1617,7 @@ impl Function {
             scalar_remainders: Vec::new(),
             inline_sites: Vec::new(),
             simd_scratch: None,
+            strip_tests: Vec::new(),
         }
     }
 

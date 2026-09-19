@@ -49,6 +49,7 @@ pub mod inline;
 pub mod licm;
 pub mod nullcheck;
 pub mod sroa;
+pub mod stripmine;
 pub mod tre;
 pub mod widen;
 
@@ -390,12 +391,16 @@ impl<'m> PassManager<'m> {
             ],
         };
         // Allocation hoisting runs after the fixed point, never inside it —
-        // see `PassManager::final_passes`.
-        let final_passes: Vec<Box<dyn Pass + 'm>> = if matches!(level, OptLevel::O3) {
+        // see `PassManager::final_passes`. Strip-mining is last of all: it
+        // reads the loops the passes above have finished shaping.
+        let mut final_passes: Vec<Box<dyn Pass + 'm>> = if matches!(level, OptLevel::O3) {
             vec![Box::new(LoopAllocHoisting)]
         } else {
             Vec::new()
         };
+        if level != OptLevel::O0 && stripmine::enabled() {
+            final_passes.push(Box::new(stripmine::StripMine));
+        }
         PassManager {
             passes,
             final_passes,

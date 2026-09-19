@@ -56,6 +56,8 @@ being taken:
 | `ASH_SROA_WHY` | `1` reports why each allocation the optimiser looked at was kept in memory, including ash-simd slots |
 | `ASH_AIR_LEVEL` | `0..3`: how hard the AIR optimiser works |
 | `ASH_AIR_NO_WIDEN` | `1` disables loop widening |
+| `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |
+| `ASH_STRIP_MINE` | `0` makes compiled loops poll on every iteration instead of once per strip of 256 |
 | `ASH_AIR` | `v2` runs the interpreter over AIR instead of opcodes |
 | `ASH_GC_STATS` | print collections, reclaimed blocks, live bytes, pause times at exit |
 | `ASH_GC_HEAP_MB` | heap reservation; committed on demand, so a ceiling |

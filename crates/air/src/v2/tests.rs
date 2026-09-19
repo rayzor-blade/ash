@@ -6975,3 +6975,71 @@ fn a_lane_wider_than_the_machine_vector_is_refused() {
         "declined, but not for the width: {why:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// strip-mining
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stripmine_names_the_induction_variable_and_changes_nothing() {
+    use super::passes::stripmine::StripMine;
+    let (ops, tys) = fix_loop();
+    let mut f = lower(&ops, &tys).expect("lower");
+    let before = f.dump();
+    let pm = PassManager::with_passes(vec![Box::new(StripMine)]).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    let report = pm.run(&mut f).expect("stripmine");
+    assert_eq!(report.stats_for("stripmine").added, 1);
+    let [test] = f.strip_tests.as_slice() else {
+        panic!("one loop, got {:?}", f.strip_tests);
+    };
+    let header = &f.blocks[test.header.idx()];
+    let phi = header
+        .phis
+        .iter()
+        .find(|p| p.dst == test.phi)
+        .expect("the phi is the header\'s");
+    assert!(phi.incoming.iter().any(|(_, v)| *v == test.stepped));
+    assert_eq!(f.dump(), before, "the IR is only read");
+}
+
+#[test]
+fn stripmine_skips_a_loop_with_a_variable_step() {
+    use super::passes::stripmine::StripMine;
+    // x = n; s = 0; while (x > 0) { s = s + x; x = x - d }  with d a parameter
+    let ops = vec![
+        Opcode::Mov {
+            dst: Reg(2),
+            src: Reg(0),
+        },
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(0),
+        },
+        Opcode::Label,
+        Opcode::JSLte {
+            a: Reg(2),
+            b: Reg(3),
+            offset: 3,
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(3),
+            b: Reg(2),
+        },
+        Opcode::Sub {
+            dst: Reg(2),
+            a: Reg(2),
+            b: Reg(1),
+        },
+        Opcode::JAlways { offset: -4 },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let tys = vec![t(0); 4];
+    let mut f = lower(&ops, &tys).expect("lower");
+    let pm = PassManager::with_passes(vec![Box::new(StripMine)]);
+    pm.run(&mut f).expect("stripmine");
+    assert!(f.strip_tests.is_empty(), "no constant step, no test");
+}

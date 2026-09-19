@@ -22,10 +22,12 @@ A Rust workspace. In the order a program meets them:
 an effect classification per instruction (pure / reads memory / writes memory
 / may throw / clobbers all) and an alias model over fields, array data,
 globals, raw bytes and cells. GVN, LICM, SROA, inlining, the FMA peephole and
-the loop widener run over it. Both backends lower it directly; the
-interpreter can walk it (`ASH_AIR=v2`); `serialize` turns it back into HL
-opcodes, which is what `--emit-optimized` writes and what the opcode
-interpreter executes.
+the loop widener run over it, and last `stripmine`, which names the
+induction variable of each innermost loop so a backend can test its low
+bits and poll once per strip of iterations instead of on every one. Both
+backends lower it directly; the interpreter can walk it (`ASH_AIR=v2`);
+`serialize` turns it back into HL opcodes, which is what `--emit-optimized`
+writes and what the opcode interpreter executes.
 
 **Tiers.** The interpreter runs everything and counts calls. `beadie` brokers
 promotion: it compiles a hot function with Cranelift on a background thread

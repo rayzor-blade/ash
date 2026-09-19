@@ -166,6 +166,17 @@ impl AshCraneliftBackend {
         if code.is_null() {
             bail!("cranelift returned a null entry pointer");
         }
+        // ASH_CL_CODE_DUMP=<dir>: the machine code of every body this
+        // compiles, one file per address, for a disassembler. Safe to run
+        // with.
+        if let Ok(dir) = std::env::var("ASH_CL_CODE_DUMP")
+            && !dir.is_empty()
+            && let Some(end) = spans.iter().map(|s| s.end).max()
+        {
+            // SAFETY: the spans cover the code just emitted at `code`.
+            let bytes = unsafe { std::slice::from_raw_parts(code as *const u8, end as usize) };
+            let _ = std::fs::write(format!("{dir}/cl_{:x}.bin", code as usize), bytes);
+        }
         Ok((
             code,
             source_runs(spans.into_iter().map(|s| (s.start, s.end, s.loc)), chains),

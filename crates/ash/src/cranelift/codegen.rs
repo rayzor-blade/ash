@@ -734,7 +734,37 @@ impl AirCodegen<'_, '_> {
             self.emit_retier_poll(site)?;
         }
         if fiber_poll {
-            self.emit_fiber_poll(folded.as_ref())?;
+            // A loop with an induction variable polls once per strip: the
+            // low bits of the header phi are tested first, and every other
+            // iteration skips the poll. The phi is a block parameter here,
+            // so the test costs the iteration an `and` and a branch.
+            let strip = self
+                .f
+                .strip_tests
+                .iter()
+                .find(|t| t.header == bid)
+                .map(|t| t.phi)
+                .filter(|_| self.retier_test_count.is_none());
+            match strip {
+                Some(phi) => {
+                    let iv = self.get(phi)?;
+                    let low = self
+                        .b
+                        .ins()
+                        .band_imm(iv, i64::from(air::v2::passes::stripmine::STRIP - 1));
+                    let poll = self.b.create_block();
+                    let body = self.b.create_block();
+                    // Cold, so the common iteration falls through to the
+                    // body rather than jumping over the poll.
+                    self.b.set_cold_block(poll);
+                    self.b.ins().brif(low, body, &[], poll, &[]);
+                    self.b.switch_to_block(poll);
+                    self.emit_fiber_poll(folded.as_ref())?;
+                    self.b.ins().jump(body, &[]);
+                    self.b.switch_to_block(body);
+                }
+                None => self.emit_fiber_poll(folded.as_ref())?,
+            }
         }
         Ok(())
     }

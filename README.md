@@ -52,7 +52,7 @@ irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex
 ```
 
 Installs `ash` into `~/.ash/bin` and adds it to `PATH`. Prebuilt binaries:
-macOS arm64 and x86_64, Linux x86_64, Windows x86_64. The standard library
+macOS arm64 and x86_64, Linux x86_64 and aarch64, Windows x86_64. The standard library
 and the wasm linker are inside the binary; nothing else is installed.
 ASH requires a 64-bit target. Other platforms build from source — see
 [CONTRIBUTING.md](CONTRIBUTING.md).

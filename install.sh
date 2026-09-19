@@ -16,7 +16,7 @@ case "$os/$arch" in
   Darwin/arm64)  target="macos-aarch64" ;;
   Darwin/x86_64) target="macos-x86_64" ;;
   Linux/x86_64)  target="linux-x86_64" ;;
-  Linux/aarch64) echo "error: no prebuilt Linux aarch64 binary yet — build from source (see README)" >&2; exit 1 ;;
+  Linux/aarch64) target="linux-aarch64" ;;
   *) echo "error: unsupported platform $os/$arch (ash requires a 64-bit target)" >&2; exit 1 ;;
 esac
 

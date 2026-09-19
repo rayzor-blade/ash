@@ -34,6 +34,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: linux-x86_64
+          # The native aarch64 Linux runner; the same apt.llvm.org script
+          # serves arm64.
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
           - os: macos-14
             target: macos-aarch64
           # macos-13 is retired: its jobs queue forever rather than failing,

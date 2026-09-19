@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Obs {
     /// One shape ever seen. For closures: the callee findex and whether the
     /// closure carried a bound value. For methods: the receiver's runtime
@@ -47,12 +47,47 @@ fn method_sites() -> &'static Mutex<HashMap<u64, Obs>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The last shape this thread recorded per site, direct-mapped. A site the
+/// interpreter dispatches thousands of times before its caller promotes
+/// records the same shape every time, and once a shape is in the map a
+/// repeat changes nothing: `Mono` stays, `Poly` stays. So the repeat is
+/// answered here without the lock, and so is anything at a site already
+/// poisoned. A new shape at a monomorphic site misses and reaches the map,
+/// which is what poisons it.
+const SEEN_SLOTS: usize = 256;
+
+/// A slot's shape once its site is `Poly`: every record for the site hits.
+const POISONED: (u64, u32) = (u64::MAX, u32::MAX);
+
+thread_local! {
+    static SEEN: std::cell::RefCell<[(u64, u64, u32); SEEN_SLOTS]> =
+        const { std::cell::RefCell::new([(u64::MAX, 0, 0); SEEN_SLOTS]) };
+}
+
 fn record(map: &Mutex<HashMap<u64, Obs>>, caller: u32, pc: u32, a: u64, b: u32) {
-    let mut m = map.lock().expect("callsite profile mutex poisoned");
-    let e = m.entry(key(caller, pc)).or_insert(Obs::Mono(a, b));
-    if *e != Obs::Mono(a, b) {
-        *e = Obs::Poly;
+    // The two maps share the cache; the map's address tells their keys apart.
+    let k = key(caller, pc) ^ (map as *const _ as u64).rotate_left(17);
+    let slot = (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize;
+    let seen = SEEN.with(|c| {
+        let c = c.borrow();
+        let (sk, sa, sb) = c[slot];
+        sk == k && ((sa, sb) == (a, b) || (sa, sb) == POISONED)
+    });
+    if seen {
+        return;
     }
+    let shape = {
+        let mut m = map.lock().expect("callsite profile mutex poisoned");
+        let e = m.entry(key(caller, pc)).or_insert(Obs::Mono(a, b));
+        if *e != Obs::Mono(a, b) {
+            *e = Obs::Poly;
+        }
+        match *e {
+            Obs::Mono(..) => (a, b),
+            Obs::Poly => POISONED,
+        }
+    };
+    SEEN.with(|c| c.borrow_mut()[slot] = (k, shape.0, shape.1));
 }
 
 fn lookup(map: &Mutex<HashMap<u64, Obs>>, caller: u32, pc: u32) -> Option<(u64, u32)> {
@@ -279,5 +314,34 @@ mod tests {
         let polymorphic = Mutex::new(HashMap::from([(key(43, 0), Obs::Poly)]));
         assert_eq!(lookup_uniform_caller(&polymorphic, 43), None);
         assert_eq!(lookup_uniform_caller(&polymorphic, 44), None);
+    }
+
+    /// The per-thread cache in front of the map answers repeats and
+    /// poisoned sites without changing what the map says: a repeat leaves a
+    /// monomorphic site monomorphic, a second shape still poisons it, and a
+    /// poisoned site stays poisoned whatever comes next.
+    #[test]
+    fn the_seen_cache_never_changes_the_map_answer() {
+        let map = Mutex::new(HashMap::new());
+        record(&map, 5, 1, 100, 1);
+        record(&map, 5, 1, 100, 1);
+        record(&map, 5, 1, 100, 1);
+        assert_eq!(lookup(&map, 5, 1), Some((100, 1)));
+        record(&map, 5, 1, 200, 1);
+        assert_eq!(lookup(&map, 5, 1), None);
+        record(&map, 5, 1, 100, 1);
+        record(&map, 5, 1, 300, 2);
+        assert_eq!(lookup(&map, 5, 1), None);
+        assert_eq!(
+            map.lock().expect("test profile mutex poisoned")[&key(5, 1)],
+            Obs::Poly
+        );
+        // Another site, and another map with the same key, are their own
+        // observations.
+        record(&map, 5, 2, 100, 1);
+        assert_eq!(lookup(&map, 5, 2), Some((100, 1)));
+        let other = Mutex::new(HashMap::new());
+        record(&other, 5, 1, 100, 1);
+        assert_eq!(lookup(&other, 5, 1), Some((100, 1)));
     }
 }

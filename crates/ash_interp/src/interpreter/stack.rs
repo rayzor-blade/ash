@@ -47,6 +47,18 @@ pub(super) struct TraceSite {
     pub position: Option<(i32, i32)>,
 }
 
+/// A compiled frame the native walk found.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CompiledSite {
+    pub function_index: usize,
+    /// The `(file, line)` the tier recorded for the frame's address, when it
+    /// kept a source map.
+    pub position: Option<(i32, i32)>,
+    /// An address inside the frame, for ordering against interpreter frames
+    /// on the same stack; zero when the walk had only return addresses.
+    pub addr: usize,
+}
+
 impl std::fmt::Display for TraceFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.file {
@@ -162,8 +174,67 @@ impl HLInterpreter {
             });
         }
         let mut sites: Vec<TraceSite> = Vec::new();
-        for (function_index, position) in self.compiled_stack_functions(frame_hint) {
-            push(&mut sites, function_index, 0, false, position);
+        let compiled = self.compiled_stack_functions(frame_hint);
+        // An interpreter frame, expanded: a walker frame stopped inside
+        // inlined code is the callee's frame at its own line, then the call
+        // that reached it, out to the function the body belongs to -- the
+        // frames the stack would hold had nothing been inlined.
+        let interp_frame = |sites: &mut Vec<TraceSite>, frame: &crate::frame::InterpreterFrame| {
+            let mut visit = |findex: u32, file: i32, line: i32| {
+                if let Some(function_index) = func_of(&self.targets, findex as usize) {
+                    push(sites, function_index, frame.pc, true, Some((file, line)));
+                }
+            };
+            let named = match self.ssa.body(frame.function_index) {
+                Some(prep) => prep.frames_at(frame.pc, &mut visit),
+                None => self
+                    .air
+                    .frames_at(frame.function_index, frame.pc, &mut visit),
+            };
+            if !named {
+                push(sites, frame.function_index, frame.pc, true, None);
+            }
+        };
+
+        // Compiled and interpreted activations interleave -- the interpreter
+        // calls compiled code, compiled code reaches an interpreted callee
+        // through the stub bridge -- and the stack grows down, so when every
+        // frame knows where it sits the two sources merge by address, inner
+        // first. Without addresses the compiled frames come first, then the
+        // bridge callers, then the interpreter's, which is right only while
+        // nothing interleaves.
+        let addressed = !compiled.is_empty()
+            && compiled.iter().all(|c| c.addr != 0)
+            && self.stack.iter().all(|f| f.native_sp != 0);
+        if addressed {
+            let mut ci = compiled.iter().peekable();
+            let mut fi = self.stack.iter().rev().peekable();
+            while sites.len() < Self::MAX_TRACE_FRAMES {
+                match (ci.peek(), fi.peek()) {
+                    (Some(c), Some(f)) if c.addr < f.native_sp => {
+                        push(&mut sites, c.function_index, 0, false, c.position);
+                        ci.next();
+                    }
+                    (Some(_), Some(f)) => {
+                        interp_frame(&mut sites, f);
+                        fi.next();
+                    }
+                    (Some(c), None) => {
+                        push(&mut sites, c.function_index, 0, false, c.position);
+                        ci.next();
+                    }
+                    (None, Some(f)) => {
+                        interp_frame(&mut sites, f);
+                        fi.next();
+                    }
+                    (None, None) => break,
+                }
+            }
+            return sites;
+        }
+
+        for c in &compiled {
+            push(&mut sites, c.function_index, 0, false, c.position);
         }
         for i in (0..self.jit_bridge_callers.len()).rev() {
             if sites.len() >= Self::MAX_TRACE_FRAMES {
@@ -175,30 +246,7 @@ impl HLInterpreter {
             if sites.len() >= Self::MAX_TRACE_FRAMES {
                 return sites;
             }
-            // A walker frame stopped inside inlined code is the callee's
-            // frame at its own line, then the call that reached it, out to
-            // the function the body belongs to -- the frames the stack
-            // would hold had nothing been inlined.
-            let mut visit = |findex: u32, file: i32, line: i32| {
-                if let Some(function_index) = func_of(&self.targets, findex as usize) {
-                    push(
-                        &mut sites,
-                        function_index,
-                        frame.pc,
-                        true,
-                        Some((file, line)),
-                    );
-                }
-            };
-            let named = match self.ssa.body(frame.function_index) {
-                Some(prep) => prep.frames_at(frame.pc, &mut visit),
-                None => self
-                    .air
-                    .frames_at(frame.function_index, frame.pc, &mut visit),
-            };
-            if !named {
-                push(&mut sites, frame.function_index, frame.pc, true, None);
-            }
+            interp_frame(&mut sites, frame);
         }
         sites
     }
@@ -297,15 +345,18 @@ impl HLInterpreter {
         })
     }
 
-    /// The native stack by unwind table: `(pc, rbp)` per frame, innermost
-    /// first, as many as `out` holds.
+    /// The native stack by unwind table: `(pc, cfa)` per frame, innermost
+    /// first, as many as `out` holds. The canonical frame address is the
+    /// stack pointer in the caller at the call, an address inside the caller
+    /// just above the frame, which orders the frame against anything else on
+    /// the same stack.
     ///
-    /// libgcc reports the frame it has no table for -- the first compiled
-    /// one -- before it stops, with the registers restored through every
-    /// runtime frame above it. Frames are collected first and classified by
-    /// the caller, because classification asks the loader and the unwinder
-    /// is already holding its lock.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    /// The unwinder passes through the runtime's frames by their tables and
+    /// through compiled frames whose tier registered one; it reports the
+    /// first frame it has no table for and stops there. Frames are collected
+    /// first and classified by the caller, because classification asks the
+    /// loader and the unwinder is already holding its lock.
+    #[cfg(unix)]
     fn unwind_frames(out: &mut [(usize, usize)]) -> usize {
         unsafe extern "C" {
             fn _Unwind_Backtrace(
@@ -313,12 +364,10 @@ impl HLInterpreter {
                 argument: *mut c_void,
             ) -> i32;
             fn _Unwind_GetIP(context: *mut c_void) -> usize;
-            fn _Unwind_GetGR(context: *mut c_void, index: i32) -> usize;
+            fn _Unwind_GetCFA(context: *mut c_void) -> usize;
         }
         const URC_NO_REASON: i32 = 0;
         const URC_END_OF_STACK: i32 = 5;
-        /// DWARF register number of rbp on x86-64.
-        const RBP: i32 = 6;
         struct Walk<'a> {
             out: &'a mut [(usize, usize)],
             len: usize,
@@ -330,7 +379,7 @@ impl HLInterpreter {
                 if pc == 0 || walk.len == walk.out.len() {
                     return URC_END_OF_STACK;
                 }
-                walk.out[walk.len] = (pc, _Unwind_GetGR(context, RBP));
+                walk.out[walk.len] = (pc, _Unwind_GetCFA(context));
                 walk.len += 1;
                 URC_NO_REASON
             }
@@ -393,76 +442,95 @@ impl HLInterpreter {
     /// Capture return addresses from the native stack. Generated code ranges
     /// are registered by both AIR V2 backends, so this works for Cranelift,
     /// LLVM promotion, and a stack containing frames from both tiers.
-    pub(super) fn compiled_stack_functions(
-        &self,
-        _frame_hint: *const usize,
-    ) -> Vec<(usize, Option<(i32, i32)>)> {
+    ///
+    /// Each frame comes with an address inside it when the walk knows one,
+    /// so [`trace_sites`](Self::trace_sites) can place it among the
+    /// interpreter's frames; a walk that only has return addresses reports
+    /// zero and the trace falls back to listing the sources in turn.
+    pub(super) fn compiled_stack_functions(&self, _frame_hint: *const usize) -> Vec<CompiledSite> {
         const MAX_FRAMES: usize = 256;
-        let mut functions: Vec<(usize, Option<(i32, i32)>)> = Vec::new();
+        let mut functions: Vec<CompiledSite> = Vec::new();
+        let debug = std::env::var_os("ASH_TRACE_WALK").is_some();
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if !_frame_hint.is_null() {
-            // The frame the walk below starts from was reached through
-            // runtime frames that keep no frame pointer, so its saved rbp is
-            // the innermost compiled frame's and the chain names that
-            // frame's CALLERS. The unwinder can still name the innermost
-            // frame itself: it steps through the runtime's own frames by
-            // their unwind tables and stops at the first compiled one,
-            // reporting the return address into it.
-            //
-            // The unwinder also restores the callee-saved registers frame by
-            // frame, so at the compiled frame it holds that frame's own rbp,
-            // whatever the runtime frames in between did with the register.
-            // The chain starts there; the boundary's frame pointer is only
-            // a fallback for a throw the unwinder could not follow.
-            let mut inner = [(0usize, 0usize); 64];
+        #[cfg(unix)]
+        {
+            let mut inner = [(0usize, 0usize); MAX_FRAMES];
             let count = Self::unwind_frames(&mut inner);
-            let mut innermost_pc = 0usize;
-            let mut chain_start = _frame_hint as usize;
-            for &(pc, rbp) in inner.iter().take(count) {
+            // The last compiled frame the unwinder reached: where a frame
+            // chain continues if the unwinder stopped at one without a table.
+            let mut last_compiled: Option<(usize, usize)> = None;
+            for &(pc, cfa) in inner.iter().take(count) {
                 if Self::native_image_owns_pc(pc) {
+                    if debug {
+                        eprintln!("[trace-walk] runtime pc={pc:#x} cfa={cfa:#x}");
+                    }
                     continue;
                 }
                 // Waiting on the map, not trying it: an install on a broker
                 // thread holds the lock briefly, and losing to it here would
                 // drop the throwing frame from the trace.
                 if ash_core::jit_map::lookup_wait(pc).is_some() {
-                    self.push_jit_frames(&mut functions, pc);
-                    innermost_pc = pc;
-                    if rbp != 0 {
-                        chain_start = rbp;
+                    if debug {
+                        eprintln!("[trace-walk] compiled pc={pc:#x} cfa={cfa:#x}");
                     }
-                    break;
+                    self.push_jit_frames(&mut functions, pc, cfa);
+                    last_compiled = Some((pc, cfa));
+                } else if debug {
+                    eprintln!("[trace-walk] unknown pc={pc:#x} cfa={cfa:#x}");
                 }
             }
-            unsafe {
-                if let Some((stack_low, stack_high)) = Self::thread_stack_bounds() {
-                    let stack_size = stack_high - stack_low;
-                    let mut frame = chain_start;
-                    for _ in 0..MAX_FRAMES {
-                        if frame < stack_low
-                            || frame > stack_high.saturating_sub(2 * std::mem::size_of::<usize>())
-                            || !frame.is_multiple_of(std::mem::align_of::<usize>())
-                        {
-                            break;
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let _ = last_compiled;
+            // A frame the unwinder had no table for ends its walk; on x86-64
+            // Linux the compiled frames keep frame pointers, so the chain
+            // continues from that frame's saved-rbp slot, two words under
+            // its CFA, or from the trap boundary's frame pointer for a throw
+            // the unwinder could not follow at all.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                let innermost_pc = last_compiled.map_or(0, |(pc, _)| pc);
+                let chain_start = match last_compiled {
+                    Some((_, cfa)) => cfa.wrapping_sub(2 * std::mem::size_of::<usize>()),
+                    None => _frame_hint as usize,
+                };
+                if chain_start != 0 {
+                    unsafe {
+                        if let Some((stack_low, stack_high)) = Self::thread_stack_bounds() {
+                            let stack_size = stack_high - stack_low;
+                            let mut frame = chain_start;
+                            for _ in 0..MAX_FRAMES {
+                                if frame < stack_low
+                                    || frame
+                                        > stack_high
+                                            .saturating_sub(2 * std::mem::size_of::<usize>())
+                                    || !frame.is_multiple_of(std::mem::align_of::<usize>())
+                                {
+                                    break;
+                                }
+                                let words = frame as *const usize;
+                                let caller = *words;
+                                let return_pc = *words.add(1);
+                                if return_pc != innermost_pc
+                                    && !Self::native_image_owns_pc(return_pc)
+                                    && functions.last().is_none_or(|c| c.addr < frame)
+                                {
+                                    if debug {
+                                        eprintln!(
+                                            "[trace-walk] chain pc={return_pc:#x} frame={frame:#x}"
+                                        );
+                                    }
+                                    self.push_jit_frames(&mut functions, return_pc, frame);
+                                }
+                                if caller <= frame
+                                    || caller >= stack_high
+                                    || caller - frame > stack_size
+                                    || !caller.is_multiple_of(std::mem::align_of::<usize>())
+                                {
+                                    break;
+                                }
+                                frame = caller;
+                            }
                         }
-                        let words = frame as *const usize;
-                        let caller = *words;
-                        let return_pc = *words.add(1);
-                        // The runtime's own frames keep frame pointers only
-                        // on some builds; when they do, the chain passes
-                        // the throw again, and the unwinder already named it.
-                        if return_pc != innermost_pc && !Self::native_image_owns_pc(return_pc) {
-                            self.push_jit_frames(&mut functions, return_pc);
-                        }
-                        if caller <= frame
-                            || caller >= stack_high
-                            || caller - frame > stack_size
-                            || !caller.is_multiple_of(std::mem::align_of::<usize>())
-                        {
-                            break;
-                        }
-                        frame = caller;
                     }
                 }
             }
@@ -494,7 +562,7 @@ impl HLInterpreter {
             if Self::native_image_owns_pc(*pc as usize) {
                 continue;
             }
-            self.push_jit_frames(&mut functions, *pc as usize);
+            self.push_jit_frames(&mut functions, *pc as usize, 0);
         }
         functions
     }
@@ -507,12 +575,16 @@ impl HLInterpreter {
     /// Cranelift records a map, and only when positions were asked for;
     /// without one the frame is its function at the entry position, which
     /// names the right function and the line it opens on.
-    fn push_jit_frames(&self, functions: &mut Vec<(usize, Option<(i32, i32)>)>, pc: usize) {
+    fn push_jit_frames(&self, functions: &mut Vec<CompiledSite>, pc: usize, addr: usize) {
         let mut push = |findex: u32, position: Option<(i32, i32)>| {
             if let Some(function_index) = func_of(&self.targets, findex as usize)
-                && functions.last().map(|(f, _)| *f) != Some(function_index)
+                && functions.last().map(|c| c.function_index) != Some(function_index)
             {
-                functions.push((function_index, position));
+                functions.push(CompiledSite {
+                    function_index,
+                    position,
+                    addr,
+                });
             }
         };
         if let Some(frames) = ash_core::jit_map::position_of(pc) {

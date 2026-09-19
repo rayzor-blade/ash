@@ -171,6 +171,11 @@ pub struct InterpreterFrame {
     /// Callee returns into this frame from a SELF-recursive call. A recursive
     /// frame has no back-edge, so this is its only recurring transfer point.
     pub self_returns: u32,
+    /// An address inside the native activation that runs this frame, so a
+    /// trace can place it among compiled frames: the native stack grows
+    /// down, so the frame with the smaller address is the inner one. Zero
+    /// when unknown.
+    pub native_sp: usize,
 }
 
 impl InterpreterFrame {
@@ -188,6 +193,7 @@ impl InterpreterFrame {
             trap_stack: Vec::new(),
             backedges: 0,
             self_returns: 0,
+            native_sp: 0,
         }
     }
 
@@ -210,6 +216,7 @@ impl InterpreterFrame {
             trap_stack: Vec::new(),
             backedges: 0,
             self_returns: 0,
+            native_sp: 0,
         }
     }
 

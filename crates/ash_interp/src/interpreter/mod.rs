@@ -5398,6 +5398,11 @@ impl HLInterpreter {
             }
         }
 
+        // A local of this activation, which outlives the frame: where the
+        // frame sits on the native stack, for the trace to order it against
+        // compiled frames.
+        let native_mark = 0u8;
+        frame.native_sp = std::ptr::addr_of!(native_mark) as usize;
         self.stack.push(frame);
         let published = self
             .stack
@@ -7110,6 +7115,11 @@ impl HLInterpreter {
             }
         }
 
+        // A local of this activation, which outlives the frame: where the
+        // frame sits on the native stack, for the trace to order it against
+        // compiled frames.
+        let native_mark = 0u8;
+        frame.native_sp = std::ptr::addr_of!(native_mark) as usize;
         self.stack.push(frame);
         let published = self
             .stack

@@ -732,6 +732,20 @@ normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
 
+# A stack captured in an interpreted function that compiled code reached
+# through the stub bridge: the trace has to interleave the two kinds of frame
+# in stack order, or the capturing line is not at the top.
+[[case]]
+name = "TestTraceBridge"
+main = "TestTraceBridge"
+hl = "test_trace_bridge.hl"
+slow = false
+timeout_secs = 120
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true
+
 # Loop-carried values that trade places: a swap, a rotation, a fib pair and
 # a `prev = cur; cur = next` chain, each a set of phis that read one
 # another's destinations after copy propagation. A de-SSA consumer that

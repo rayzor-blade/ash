@@ -21,15 +21,15 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
         let esize = hlp_type_size(at);
         let total_size = std::mem::size_of::<varray>() + (esize as usize) * (size as usize);
 
-        // let flag = if hl_is_ptr(at) {
-        //     MEM_KIND_DYNAMIC
-        // } else {
-        //     MEM_KIND_NOPTR
-        // } | MEM_ZERO;
-
-        let a = crate::rt::gc_alloc(total_size)
-            .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
-            .as_ptr() as *mut varray;
+        // A value array holds no heap pointer: its header names types, which
+        // live outside the heap. Same split as upstream's MEM_KIND_NOPTR.
+        let a = if crate::types::hl_is_ptr(at) {
+            crate::rt::gc_alloc(total_size)
+        } else {
+            crate::rt::gc_alloc_noptr(total_size)
+        }
+        .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
+        .as_ptr() as *mut varray;
 
         (*a).t = crate::types::hlt_array();
         (*a).at = at;

@@ -309,6 +309,9 @@ thread_local! {
             cur: Cell::new(0),
             limit: Cell::new(0),
             block: Cell::new(usize::MAX),
+            noptr_cur: Cell::new(0),
+            noptr_limit: Cell::new(0),
+            noptr_block: Cell::new(usize::MAX),
             objects: Cell::new(std::ptr::null()),
             heap_base: Cell::new(0),
             registered: Cell::new(false),
@@ -330,6 +333,12 @@ struct Tlab {
     /// Heap offset of the block this thread is bumping through, so a refill
     /// can hand the previous one back to the sweep.
     block: Cell<usize>,
+    /// The same three for pointer-free allocations, which bump through their
+    /// own blocks. After `cur`/`limit`/`block` so compiled code's offsets to
+    /// those hold.
+    noptr_cur: Cell<usize>,
+    noptr_limit: Cell<usize>,
+    noptr_block: Cell<usize>,
     /// Stable side table, shared atomically with the stopped-world marker.
     /// A bump publishes its boundary before returning the new allocation.
     objects: Cell<*const std::sync::atomic::AtomicU8>,
@@ -1282,6 +1291,17 @@ fn tlab_enabled() -> bool {
 /// `gc_locked().allocate(..)` relied on), taking the mutator's bump region
 /// when it can and the locked path when it cannot.
 pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
+    gc_alloc_kind(size, false)
+}
+
+/// Zeroed memory that will never hold a pointer into the heap. Lives in its
+/// own blocks, which the marker keeps but never scans.
+pub fn gc_alloc_noptr(size: usize) -> Option<NonNull<u8>> {
+    gc_alloc_kind(size, true)
+}
+
+#[inline(always)]
+fn gc_alloc_kind(size: usize, noptr: bool) -> Option<NonNull<u8>> {
     let aligned = (size.max(8) + 15) & !15;
     if aligned <= TLAB_MAX_OBJ && tlab_enabled() {
         // One TLS lookup for the whole sequence -- see `TLAB`.
@@ -1294,19 +1314,24 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
             if !t.registered.get() {
                 return Step::Unregistered;
             }
-            let cur = t.cur.get();
+            let (cur_cell, limit_cell) = if noptr {
+                (&t.noptr_cur, &t.noptr_limit)
+            } else {
+                (&t.cur, &t.limit)
+            };
+            let cur = cur_cell.get();
             if cur != 0 {
                 let mut p = cur;
                 if (p & (LINE_SIZE - 1)) + aligned > LINE_SIZE {
                     p = (p + LINE_SIZE - 1) & !(LINE_SIZE - 1);
                 }
                 let np = p + aligned;
-                if np <= t.limit.get() {
+                if np <= limit_cell.get() {
                     unsafe {
                         (*t.objects.get().add((p - t.heap_base.get()) / ALLOC_QUANTUM))
                             .store((aligned / ALLOC_QUANTUM) as u8, Ordering::Relaxed);
                     }
-                    t.cur.set(np);
+                    cur_cell.set(np);
                     return Step::Bumped(p);
                 }
             }
@@ -1315,11 +1340,11 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
         match step {
             // Pre-zeroed at refill.
             Step::Bumped(p) => return Some(unsafe { NonNull::new_unchecked(p as *mut u8) }),
-            Step::Refill => return tlab_refill_then_alloc(aligned),
+            Step::Refill => return tlab_refill_then_alloc(aligned, noptr),
             Step::Unregistered => {}
         }
     }
-    gc_locked_init().allocate(size)
+    gc_locked_init().allocate_kind(size, noptr)
 }
 
 /// Region exhausted (or never opened): take the lock, run the ordinary
@@ -1332,29 +1357,43 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
 /// Releasing the old block simply makes it ordinary again — its live objects
 /// are marked conservatively like any others; it just stops being exempt
 /// from reclamation.
-fn adopt_tlab_region(gc: &mut ImmixAllocator, block: usize, cur: usize, limit: usize) {
-    gc.heap.tlab_blocks.insert(thread_self_fast(), block);
+fn adopt_tlab_region(gc: &mut ImmixAllocator, block: usize, cur: usize, limit: usize, noptr: bool) {
+    if noptr {
+        gc.heap.noptr_tlab_blocks.insert(thread_self_fast(), block);
+    } else {
+        gc.heap.tlab_blocks.insert(thread_self_fast(), block);
+    }
     TLAB.with(|t| {
         t.objects.set(gc.heap.objects.as_ptr());
         t.heap_base.set(gc.heap.memory.as_ptr() as usize);
-        t.block.set(block);
-        t.cur.set(cur);
-        t.limit.set(limit);
+        if noptr {
+            t.noptr_block.set(block);
+            t.noptr_cur.set(cur);
+            t.noptr_limit.set(limit);
+        } else {
+            t.block.set(block);
+            t.cur.set(cur);
+            t.limit.set(limit);
+        }
     });
 }
 
-/// Give up this thread's bump region entirely (thread exit).
+/// Give up this thread's bump regions entirely (thread exit).
 fn release_tlab_region(gc: &mut ImmixAllocator) {
     gc.heap.tlab_blocks.remove(&thread_self_fast());
+    gc.heap.noptr_tlab_blocks.remove(&thread_self_fast());
     TLAB.with(|t| {
         t.block.set(usize::MAX);
         t.cur.set(0);
         t.limit.set(0);
+        t.noptr_block.set(usize::MAX);
+        t.noptr_cur.set(0);
+        t.noptr_limit.set(0);
     });
 }
 
 #[cold]
-fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
+fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
     mark_site(SITE_TLAB_REFILL);
     let mut gc = gc_locked();
     // A refill is a true safepoint, so a due trigger COLLECTS here instead
@@ -1377,7 +1416,11 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     // sweep.
     let want_lines = aligned.div_ceil(LINE_SIZE).max(1);
     if recycle_lines() {
-        while let Some((rblock, start, len)) = gc.heap.recycle_spans.pop() {
+        while let Some((rblock, start, len)) = if noptr {
+            gc.heap.noptr_recycle_spans.pop()
+        } else {
+            gc.heap.recycle_spans.pop()
+        } {
             if len < want_lines {
                 continue;
             }
@@ -1401,18 +1444,19 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
                 rblock,
                 base as usize + aligned,
                 base as usize + span_bytes,
+                noptr,
             );
             gc.record_allocation(lo, aligned);
             return Some(unsafe { NonNull::new_unchecked(base) });
         }
     }
 
-    let block = match gc.acquire_free_block() {
+    let block = match gc.acquire_free_block(noptr) {
         Some(b) => b,
         None => {
             set_collect_origin(4);
             gc.collect_garbage();
-            gc.acquire_free_block()?
+            gc.acquire_free_block(noptr)?
         }
     };
     let base = unsafe { gc.heap.memory.as_mut_ptr().add(block) };
@@ -1429,6 +1473,7 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
         block,
         base as usize + aligned,
         base as usize + BLOCK_SIZE,
+        noptr,
     );
     gc.record_allocation(block, aligned);
     Some(unsafe { NonNull::new_unchecked(base) })
@@ -2567,8 +2612,13 @@ struct ImmixHeap {
     /// block with one live line out of 256 hands the other 255 back instead
     /// of being retained whole. Filled only when `ASH_GC_RECYCLE=1`.
     recycle_spans: Vec<(usize, usize, usize)>,
+    /// The same, for blocks of pointer-free allocations.
+    noptr_recycle_spans: Vec<(usize, usize, usize)>,
     allocation_point: usize,
     current_block_end: usize,
+    /// The locked path's bump region for pointer-free allocations.
+    noptr_point: usize,
+    noptr_block_end: usize,
     alloc_count: usize,
     /// For each line in the heap, stores the number of lines this allocation
     /// occupies if this is an allocation start, or 0 for continuation lines.
@@ -2611,6 +2661,8 @@ struct ImmixHeap {
     /// block. With a plain set, whichever refilled first would remove the
     /// block from it and expose the other thread's live region to the sweep.
     tlab_blocks: HashMap<u64, usize>,
+    /// The block each thread bumps pointer-free allocations through.
+    noptr_tlab_blocks: HashMap<u64, usize>,
     /// True once the interpreter has registered scan ranges. The interpreter
     /// roots its bytecode registers via a SNAPSHOT (sync_gc_scan_roots) that
     /// is complete only at the moment it is published — values written to
@@ -2653,6 +2705,11 @@ struct Block {
     /// 16228 of 27000 in one measured collection -- and each cost 256 byte reads
     /// to discover that.
     any_marked: AtomicBool,
+    /// The block holds only pointer-free allocations (byte buffers, strings,
+    /// value arrays): the marker keeps its objects alive but never scans
+    /// their bytes, and dirty tracking never protects it. Fixed while the
+    /// block is in use; a freed block takes the kind of its next user.
+    noptr: bool,
 }
 
 /// Claim a line for the marker. Returns true for the thread that set it, so a
@@ -2841,6 +2898,10 @@ fn scan_allocation_shared(
     size: usize,
     out: &mut Vec<(usize, usize)>,
 ) {
+    // A pointer-free block's objects are reachable, never sources.
+    if blocks[start / BLOCK_SIZE].noptr {
+        return;
+    }
     for off in (0..size).step_by(WORD) {
         let val = unsafe { *((heap_start + start + off) as *const usize) };
         if val >= heap_start && val < heap_end {
@@ -3086,8 +3147,11 @@ impl ImmixAllocator {
             free_blocks: Vec::new(),
             used_blocks: HashSet::new(),
             recycle_spans: Vec::new(),
+            noptr_recycle_spans: Vec::new(),
             allocation_point: 0,
             current_block_end: 0,
+            noptr_point: 0,
+            noptr_block_end: 0,
             alloc_count: 0,
             alloc_sizes: vec![0u32; heap_size / LINE_SIZE],
             objects: allocation_table(heap_size / ALLOC_QUANTUM),
@@ -3099,6 +3163,7 @@ impl ImmixAllocator {
             last_pressure_relief: Instant::now(),
             reusable_blocks: HashSet::new(),
             tlab_blocks: HashMap::new(),
+            noptr_tlab_blocks: HashMap::new(),
             safepoint_mode: false,
             collect_pending: false,
         };
@@ -3238,10 +3303,11 @@ impl ImmixAllocator {
     /// Take a block off the free list, un-madvising it first if its pages
     /// were marked reusable, and clearing any stale mark bits left by
     /// conservative scans of stale pointers into freed blocks.
-    fn acquire_free_block(&mut self) -> Option<usize> {
+    fn acquire_free_block(&mut self, noptr: bool) -> Option<usize> {
         let addr = self.heap.free_blocks.pop()?;
         self.clear_allocation_metadata(addr, BLOCK_SIZE);
         self.blocks[addr / BLOCK_SIZE].has_span = false;
+        self.blocks[addr / BLOCK_SIZE].noptr = noptr;
         self.heap.used_blocks.insert(addr);
         self.reclaim_block_pages(addr);
         clear_marks(&self.blocks[addr / BLOCK_SIZE]);
@@ -3316,6 +3382,11 @@ impl ImmixAllocator {
     }
 
     pub fn allocate(&mut self, size: usize) -> Option<NonNull<u8>> {
+        self.allocate_kind(size, false)
+    }
+
+    /// [`allocate`](Self::allocate) into the pointer-free blocks when `noptr`.
+    pub fn allocate_kind(&mut self, size: usize, noptr: bool) -> Option<NonNull<u8>> {
         let size = size.max(8);
         // 16-byte bump allocation. This used to round EVERY object up to a
         // full 128-byte line ("each object gets its own line"), which
@@ -3336,11 +3407,17 @@ impl ImmixAllocator {
         self.maybe_collect();
 
         if aligned_size > BLOCK_SIZE {
-            return self.allocate_large(size);
+            return self.allocate_large(size, noptr);
         }
 
-        let multi_line = aligned_size > LINE_SIZE - (self.heap.allocation_point & (LINE_SIZE - 1));
-        let mut point = self.heap.allocation_point;
+        let (region_point, region_end) = if noptr {
+            (self.heap.noptr_point, self.heap.noptr_block_end)
+        } else {
+            (self.heap.allocation_point, self.heap.current_block_end)
+        };
+        let multi_line = aligned_size > LINE_SIZE - (region_point & (LINE_SIZE - 1));
+        let mut point = region_point;
+        let mut block_end = region_end;
         if aligned_size >= LINE_SIZE {
             // Line-aligned start; span recorded below.
             point = (point + LINE_SIZE - 1) & !(LINE_SIZE - 1);
@@ -3349,20 +3426,21 @@ impl ImmixAllocator {
             point = (point + LINE_SIZE - 1) & !(LINE_SIZE - 1);
         }
 
-        if point + aligned_size > self.heap.current_block_end {
-            let new_block = match self.acquire_free_block() {
+        if point + aligned_size > block_end {
+            let new_block = match self.acquire_free_block(noptr) {
                 Some(b) => b,
                 None => {
                     // Exhaustion backstop trigger.
                     set_collect_origin(4);
                     self.collect_garbage();
-                    self.acquire_free_block()? // None = out of memory
+                    self.acquire_free_block(noptr)? // None = out of memory
                 }
             };
             point = new_block;
-            self.heap.current_block_end = new_block + BLOCK_SIZE;
+            block_end = new_block + BLOCK_SIZE;
         }
 
+        let start = point;
         let result = unsafe {
             let ptr = self.heap.memory.as_mut_ptr().add(point);
             // Zero the allocation — HashLink semantics require zeroed memory.
@@ -3396,11 +3474,18 @@ impl ImmixAllocator {
             for i in 1..num_lines {
                 self.heap.alloc_sizes[start_line + i] = 0;
             }
-            self.heap.allocation_point = point + num_lines * LINE_SIZE;
+            point += num_lines * LINE_SIZE;
         } else {
-            self.heap.allocation_point = point + aligned_size;
+            point += aligned_size;
         }
-        self.record_allocation(point, aligned_size);
+        if noptr {
+            self.heap.noptr_point = point;
+            self.heap.noptr_block_end = block_end;
+        } else {
+            self.heap.allocation_point = point;
+            self.heap.current_block_end = block_end;
+        }
+        self.record_allocation(start, aligned_size);
         self.heap.alloc_count += 1;
         self.heap.bytes_since_gc += aligned_size;
         GC_STATS
@@ -3410,7 +3495,7 @@ impl ImmixAllocator {
         Some(result)
     }
 
-    pub fn allocate_large(&mut self, size: usize) -> Option<NonNull<u8>> {
+    pub fn allocate_large(&mut self, size: usize, noptr: bool) -> Option<NonNull<u8>> {
         let blocks_needed = size.div_ceil(BLOCK_SIZE);
         // Find contiguous free blocks by sorting the free list and scanning for a run.
         self.heap.free_blocks.sort_unstable();
@@ -3443,6 +3528,7 @@ impl ImmixAllocator {
                 for block in removed {
                     self.clear_allocation_metadata(block, BLOCK_SIZE);
                     self.blocks[block / BLOCK_SIZE].has_span = false;
+                    self.blocks[block / BLOCK_SIZE].noptr = noptr;
                     self.heap.used_blocks.insert(block);
                     self.reclaim_block_pages(block);
                     clear_marks(&self.blocks[block / BLOCK_SIZE]);
@@ -3478,7 +3564,7 @@ impl ImmixAllocator {
         set_collect_origin(5);
         self.collect_garbage();
         if self.heap.free_blocks.len() >= blocks_needed {
-            return self.allocate_large(size);
+            return self.allocate_large(size, noptr);
         }
         None // Out of memory
     }
@@ -3857,6 +3943,8 @@ impl ImmixAllocator {
         // Reset so next allocation picks a fresh free block
         self.heap.allocation_point = 0;
         self.heap.current_block_end = 0;
+        self.heap.noptr_point = 0;
+        self.heap.noptr_block_end = 0;
         self.heap.last_collect = Instant::now();
 
         // Everything above mutates heap state a resumed mutator would read:
@@ -3945,10 +4033,13 @@ impl ImmixAllocator {
             .heap
             .tlab_blocks
             .values()
+            .chain(self.heap.noptr_tlab_blocks.values())
             .chain(self.heap.recycle_spans.iter().map(|(b, _, _)| b))
+            .chain(self.heap.noptr_recycle_spans.iter().map(|(b, _, _)| b))
             .map(|&off| off / BLOCK_SIZE)
             .collect();
-        blocks.retain(|b| !writable.contains(b));
+        // A pointer-free block can hold no reference to remember.
+        blocks.retain(|b| !writable.contains(b) && !self.blocks[*b].noptr);
         blocks.sort_unstable();
         let mut protected = 0;
         let mut i = 0;
@@ -4421,6 +4512,7 @@ impl ImmixAllocator {
         // would hand out lines in a block this sweep is about to free, and
         // they are rebuilt below anyway.
         self.heap.recycle_spans.clear();
+        self.heap.noptr_recycle_spans.clear();
         let used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
         let mut freed: Vec<usize> = Vec::new();
         let (mut occ_blocks, mut occ_marked) = (0usize, 0usize);
@@ -4446,8 +4538,13 @@ impl ImmixAllocator {
             live
         });
         // Hoisted: this was a linear scan of every TLAB for every swept block.
-        let tlab_set: std::collections::HashSet<usize> =
-            self.heap.tlab_blocks.values().copied().collect();
+        let tlab_set: std::collections::HashSet<usize> = self
+            .heap
+            .tlab_blocks
+            .values()
+            .chain(self.heap.noptr_tlab_blocks.values())
+            .copied()
+            .collect();
         // Hoisted for the same reason: this was a fresh Vec per swept block,
         // so a sweep over ~18,000 retained blocks did ~18,000 malloc/free
         // pairs inside the stop-the-world. Reusing one buffer keeps the
@@ -4531,8 +4628,13 @@ impl ImmixAllocator {
                 }] += 1;
             }
             if !is_empty && !is_tlab && recycle_lines() {
+                let spans_of_kind = if self.blocks[block_index].noptr {
+                    &mut self.heap.noptr_recycle_spans
+                } else {
+                    &mut self.heap.recycle_spans
+                };
                 for (start, len) in spans.drain(..) {
-                    self.heap.recycle_spans.push((block_addr, start, len));
+                    spans_of_kind.push((block_addr, start, len));
                 }
             }
             if is_empty && !is_tlab && !no_reclaim() {
@@ -4664,6 +4766,7 @@ impl ImmixAllocator {
                     *slot.get_mut() = 0;
                 }
                 self.blocks[block_index].has_span = false;
+                self.blocks[block_index].noptr = false;
                 freed.push(block_addr);
             }
         }
@@ -5514,10 +5617,16 @@ pub(crate) unsafe extern "C" fn gc_dump_memory(filename: *mut hl::vbyte) {
         w(format!("blocks-used {}", gc.heap.used_blocks.len()));
         w(format!("blocks-free {}", gc.heap.free_blocks.len()));
         w(format!("blocks-reusable {}", gc.heap.reusable_blocks.len()));
-        if gc.heap.tlab_blocks.is_empty() {
+        if gc.heap.tlab_blocks.is_empty() && gc.heap.noptr_tlab_blocks.is_empty() {
             w("tlab-blocks none".into());
         } else {
-            let mut blocks: Vec<usize> = gc.heap.tlab_blocks.values().copied().collect();
+            let mut blocks: Vec<usize> = gc
+                .heap
+                .tlab_blocks
+                .values()
+                .chain(gc.heap.noptr_tlab_blocks.values())
+                .copied()
+                .collect();
             blocks.sort_unstable();
             let rendered: Vec<String> = blocks
                 .iter()
@@ -5755,9 +5864,15 @@ mod tests {
         // heap survives into another test or the process-wide allocator.
         std::thread::spawn(|| {
             let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
-            let block = gc.acquire_free_block().unwrap();
+            let block = gc.acquire_free_block(false).unwrap();
             let base = gc.heap.memory.as_ptr() as usize;
-            adopt_tlab_region(&mut gc, block, base + block, base + block + BLOCK_SIZE);
+            adopt_tlab_region(
+                &mut gc,
+                block,
+                base + block,
+                base + block + BLOCK_SIZE,
+                false,
+            );
             TLAB.with(|t| t.registered.set(true));
             let a = gc_alloc(80).unwrap();
             let b = gc_alloc(64).unwrap();
@@ -6462,6 +6577,38 @@ mod tests {
             "a block the trace reached through a field is not garbage"
         );
         assert!(gc.finalizables.contains(&offset(&gc, held)));
+    }
+
+    #[test]
+    fn pointer_free_allocations_take_their_own_blocks() {
+        const MEM_KIND_NOPTR: i32 = 2;
+        let mut ty: hl_type = unsafe { mem::zeroed() };
+        let _lock = gc_guard();
+        let bytes = unsafe { crate::bytes::hlp_alloc_bytes(64) } as usize;
+        let hdll =
+            unsafe { crate::hl_compat::hl_gc_alloc_gen(&mut ty, 64, MEM_KIND_NOPTR) } as usize;
+        let obj = crate::rt::gc_alloc(64).unwrap().as_ptr() as usize;
+
+        let gc = gc_locked_init();
+        let heap_start = gc.heap.memory.as_ptr() as usize;
+        let block_of = |p: usize| (p - heap_start) / BLOCK_SIZE;
+        assert!(
+            gc.blocks[block_of(bytes)].noptr,
+            "a byte buffer is pointer-free"
+        );
+        assert!(
+            gc.blocks[block_of(hdll)].noptr,
+            "an HDLL's MEM_KIND_NOPTR is honoured"
+        );
+        assert!(
+            !gc.blocks[block_of(obj)].noptr,
+            "an object may hold pointers"
+        );
+        assert_ne!(
+            block_of(bytes),
+            block_of(obj),
+            "the two kinds never share a block"
+        );
     }
 
     #[test]

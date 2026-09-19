@@ -271,6 +271,7 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
         // "GC not initialized".
         const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
         const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
+        const MEM_KIND_NOPTR: i32 = 2; // hl.h:747
         const MEM_KIND_FINALIZER: i32 = 3; // hl.h:748
         let p = match flags & PAGE_KIND_MASK {
             // The kind bits reach no further than this function, so a block that
@@ -278,6 +279,9 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
             // never know it from any other block. The caller writes its callback
             // into word zero on return.
             MEM_KIND_FINALIZER => crate::rt::alloc_finalizable(size as usize) as *mut u8,
+            MEM_KIND_NOPTR => {
+                crate::rt::alloc_locked_noptr(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr())
+            }
             _ => crate::rt::alloc_locked(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr()),
         };
         if p.is_null() {

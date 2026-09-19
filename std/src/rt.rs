@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bumped whenever a slot is added, removed or changes signature.
-pub const RT_VERSION: u32 = 1;
+pub const RT_VERSION: u32 = 2;
 
 /// `timeout_ns` value meaning "no deadline" for [`RuntimeVTable::park`].
 pub const RT_NO_TIMEOUT: u64 = u64::MAX;
@@ -118,7 +118,9 @@ macro_rules! runtime_table {
 runtime_table! {
     // ── Heap ────────────────────────────────────────────────────────────
     gc_alloc(size: usize) -> *mut u8 = ash::gc_alloc;
+    gc_alloc_noptr(size: usize) -> *mut u8 = ash::gc_alloc_noptr;
     alloc_locked(size: usize) -> *mut u8 = ash::alloc_locked;
+    alloc_locked_noptr(size: usize) -> *mut u8 = ash::alloc_locked_noptr;
     alloc_immortal(size: usize) -> *mut u8 = ash::alloc_immortal;
     alloc_with_finalizer(size: usize, finalize: Option<Finalizer>) -> *mut c_void = ash::alloc_with_finalizer;
     allocation_size(ptr: *const c_void) -> usize = ash::allocation_size;
@@ -255,10 +257,23 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
     NonNull::new(unsafe { call::gc_alloc(size) })
 }
 
+/// Zeroed memory that never holds a heap pointer: byte buffers, strings,
+/// value arrays. The collector keeps it reachable but never scans it.
+#[inline(always)]
+pub fn gc_alloc_noptr(size: usize) -> Option<NonNull<u8>> {
+    NonNull::new(unsafe { call::gc_alloc_noptr(size) })
+}
+
 /// Zeroed memory from the locked path.
 #[inline(always)]
 pub fn alloc_locked(size: usize) -> Option<NonNull<u8>> {
     NonNull::new(unsafe { call::alloc_locked(size) })
+}
+
+/// [`alloc_locked`] for pointer-free memory; see [`gc_alloc_noptr`].
+#[inline(always)]
+pub fn alloc_locked_noptr(size: usize) -> Option<NonNull<u8>> {
+    NonNull::new(unsafe { call::alloc_locked_noptr(size) })
 }
 
 /// Zeroed, pinned for the life of the process.
@@ -398,9 +413,19 @@ mod ash {
         crate::gc::gc_alloc(size).map_or(std::ptr::null_mut(), NonNull::as_ptr)
     }
 
+    pub unsafe extern "C" fn gc_alloc_noptr(size: usize) -> *mut u8 {
+        crate::gc::gc_alloc_noptr(size).map_or(std::ptr::null_mut(), NonNull::as_ptr)
+    }
+
     pub unsafe extern "C" fn alloc_locked(size: usize) -> *mut u8 {
         crate::gc::gc_locked_init()
             .allocate(size)
+            .map_or(std::ptr::null_mut(), NonNull::as_ptr)
+    }
+
+    pub unsafe extern "C" fn alloc_locked_noptr(size: usize) -> *mut u8 {
+        crate::gc::gc_locked_init()
+            .allocate_kind(size, true)
             .map_or(std::ptr::null_mut(), NonNull::as_ptr)
     }
 

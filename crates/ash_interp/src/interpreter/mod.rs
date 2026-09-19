@@ -1405,6 +1405,7 @@ impl HLInterpreter {
             calls: Vec::new(),
             shared_ctx,
             stats: TieredStats::default(),
+            late_entries: None,
         });
         Ok(())
     }
@@ -3708,6 +3709,7 @@ impl HLInterpreter {
     /// up afterwards -- one error with four symptoms.
     fn note_hot_loop(&mut self, bytecode: &DecodedBytecode, func_idx: usize, header_pc: usize) {
         let findex = self.bytecode_findex_of(bytecode, func_idx);
+        self.attach_late_entries();
 
         // Publish the header before ticking: a tick can be the one that
         // submits the LLVM compile, and the broker reads this map when that
@@ -3772,15 +3774,15 @@ impl HLInterpreter {
         let ctx = Arc::clone(&tiered.shared_ctx);
         // Some tier must have installed code for this findex — an entry is a
         // door into code that already exists.
-        let Some(addr) = self
+        if self
             .tiered_runtime
             .as_ref()
             .and_then(|t| t.entries.get(findex))
             .and_then(|e| e.as_ref())
-            .map(|e| e.fn_addr)
-        else {
+            .is_none()
+        {
             return;
-        };
+        }
         let llvm_installed = ctx
             .llvm_done
             .lock()
@@ -3830,6 +3832,27 @@ impl HLInterpreter {
             else {
                 return;
             };
+            // Off the mutator: the worker builds it and the probe that finds
+            // it finished attaches it. The loop keeps interpreting meanwhile,
+            // which is what it did during the compile before, without the
+            // compile.
+            if !late_entry_sync() {
+                let job = LateEntryJob {
+                    findex,
+                    header_pc,
+                    tier,
+                    bead: Arc::clone(bound.bead()),
+                    opt,
+                };
+                let tiered = self.tiered_runtime.as_mut().expect("tiered runtime");
+                let worker = tiered
+                    .late_entries
+                    .get_or_insert_with(LateEntryWorker::spawn);
+                if worker.jobs.send(job).is_err() && osr_logging() {
+                    eprintln!("[osr] late entry worker is gone; findex={findex} pc={header_pc}");
+                }
+                return;
+            }
             match ash_core::cranelift::codegen::compile_osr_entry(
                 &tier.backend,
                 &tier.ctx,
@@ -3900,8 +3923,58 @@ impl HLInterpreter {
             }
         };
 
-        // Incremental attach: the swap replaces the whole table, so resend
-        // what is already installed plus the new entry.
+        self.attach_late_entry(findex, header_pc, entry_addr as usize);
+    }
+
+    /// Attach an entry the worker finished, if the bead still runs the
+    /// Cranelift body it was built for. Called at every hot-loop probe, so
+    /// the transfer that follows the probe can take it.
+    fn attach_late_entries(&mut self) {
+        loop {
+            let done = match self
+                .tiered_runtime
+                .as_ref()
+                .and_then(|t| t.late_entries.as_ref())
+                .map(|w| w.done.try_recv())
+            {
+                Some(Ok(done)) => done,
+                _ => return,
+            };
+            let llvm_installed = self.tiered_runtime.as_ref().is_some_and(|t| {
+                t.shared_ctx
+                    .llvm_done
+                    .lock()
+                    .expect("llvm_done mutex poisoned")
+                    .contains(&done.findex)
+            });
+            if llvm_installed {
+                // The function moved to LLVM while the entry was being built;
+                // a door into the Cranelift body would take the frame backwards.
+                if osr_logging() {
+                    eprintln!(
+                        "[osr] late entry dropped, LLVM installed meanwhile findex={} pc={}",
+                        done.findex, done.header_pc
+                    );
+                }
+                continue;
+            }
+            self.attach_late_entry(done.findex, done.header_pc, done.addr);
+        }
+    }
+
+    /// Put `entry_addr` on the bead as the door for `header_pc`. The swap
+    /// replaces the whole table, so what is already installed is resent
+    /// with the new entry.
+    fn attach_late_entry(&mut self, findex: usize, header_pc: usize, entry_addr: usize) {
+        let Some(addr) = self
+            .tiered_runtime
+            .as_ref()
+            .and_then(|t| t.entries.get(findex))
+            .and_then(|e| e.as_ref())
+            .map(|e| e.fn_addr)
+        else {
+            return;
+        };
         let mut entries = self.osr_attached.get(&findex).cloned().unwrap_or_default();
         entries.push(OsrEntry {
             site: header_pc as u64,

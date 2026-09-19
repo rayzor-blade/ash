@@ -372,6 +372,93 @@ pub(crate) struct CraneliftTier {
     pub(crate) ctx: ash_core::cranelift::CraneliftTierContext,
 }
 
+/// A Cranelift OSR entry to build for a header that turned hot after its
+/// function was compiled. Built on [`LateEntryWorker`]'s thread rather than
+/// the interpreter's: one costs little, but a program with many short hot
+/// loops asks for many, and each stalled the loop it was for.
+pub(crate) struct LateEntryJob {
+    pub(crate) findex: usize,
+    pub(crate) header_pc: usize,
+    pub(crate) tier: Arc<CraneliftTier>,
+    pub(crate) bead: Arc<Bead>,
+    pub(crate) opt: Arc<ash_core::air_pipeline::Optimized>,
+}
+
+/// An entry the worker built. The interpreter attaches it to the bead at
+/// its next probe of that header, so the attach and the transfer stay on
+/// the thread that owns the frame.
+pub(crate) struct LateEntryDone {
+    pub(crate) findex: usize,
+    pub(crate) header_pc: usize,
+    pub(crate) addr: usize,
+}
+
+/// The thread that builds late Cranelift entries, started on first use.
+pub(crate) struct LateEntryWorker {
+    pub(crate) jobs: std::sync::mpsc::Sender<LateEntryJob>,
+    pub(crate) done: std::sync::mpsc::Receiver<LateEntryDone>,
+}
+
+impl LateEntryWorker {
+    pub(crate) fn spawn() -> Self {
+        let (jobs, rx) = std::sync::mpsc::channel::<LateEntryJob>();
+        let (tx, done) = std::sync::mpsc::channel::<LateEntryDone>();
+        std::thread::Builder::new()
+            .name("ash-osr-entry".into())
+            .spawn(move || {
+                for job in rx {
+                    match ash_core::cranelift::codegen::compile_osr_entry(
+                        &job.tier.backend,
+                        &job.tier.ctx,
+                        &job.bead,
+                        job.findex,
+                        &job.opt,
+                        job.header_pc,
+                    ) {
+                        Ok((addr, positions)) => {
+                            ash_core::profile::register_jit_code(
+                                job.findex as u32,
+                                ash_core::profile::Tier::Cranelift,
+                                addr,
+                            );
+                            ash_core::jit_map::set_positions(addr, positions);
+                            let sent = tx.send(LateEntryDone {
+                                findex: job.findex,
+                                header_pc: job.header_pc,
+                                addr,
+                            });
+                            if sent.is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            if osr_logging() {
+                                eprintln!(
+                                    "[osr] late cranelift entry declined findex={} pc={}: {e:#}",
+                                    job.findex, job.header_pc
+                                );
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("spawn ash-osr-entry");
+        Self { jobs, done }
+    }
+}
+
+/// `ASH_OSR_ENTRY_SYNC=1` builds late Cranelift entries on the interpreter
+/// thread, as before the worker; safe, for measuring the stall.
+pub(crate) fn late_entry_sync() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        matches!(
+            std::env::var("ASH_OSR_ENTRY_SYNC").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 /// Raw handles the Cranelift lowering needs; all process-lifetime shared
 /// arrays, captured once in `enable_tiered`.
 #[derive(Clone)]
@@ -689,6 +776,9 @@ pub(crate) struct TieredRuntime {
     pub(crate) shared_ctx: Arc<TieredSharedCtx>,
     /// Interp-side counters; broker-side counters live in `shared_ctx`.
     pub(crate) stats: TieredStats,
+    /// Builds late Cranelift OSR entries off the interpreter thread; started
+    /// by the first header that needs one.
+    pub(crate) late_entries: Option<LateEntryWorker>,
 }
 
 /// Whether anything is waiting for LLVM code for `findex`.

@@ -56,19 +56,11 @@ impl AshCraneliftBackend {
     /// could not be linked at all.
     pub fn new() -> Result<Self> {
         // Knobs for re-running the tier-configuration measurement, not for
-        // production use. What they showed on deltablue/closure_call/
-        // binary_trees, best of three, warm binary:
-        //
-        //   enable_verifier=false      no change -- already off in release
-        //   regalloc_algorithm         28.1ms -> 26.3ms of compile (6%),
-        //     =single_pass             and slightly worse code
-        //   opt_level=none             28.1ms -> 28.1ms of compile (0%),
-        //                              and deltablue 0.07s -> 0.45s
-        //
-        // The last one is the informative one: this tier's compile time is
-        // spent in lowering, regalloc and emission rather than in the
-        // optimizer, so trading the optimizer away buys nothing and costs 6x
-        // execution. A faster first rung has to come from somewhere else.
+        // production use. `opt_level=none` does not shorten the compile --
+        // this tier's time is lowering, regalloc and emission, not the
+        // optimizer -- and runs several times slower; `single_pass` regalloc
+        // shortens it a little for slightly worse code. A faster first rung
+        // has to come from somewhere else.
         let opt = std::env::var("ASH_CL_OPT").unwrap_or_else(|_| "speed".into());
         let mut cfg = CraneliftConfig::new()
             .opt_level(&opt)
@@ -79,7 +71,16 @@ impl AshCraneliftBackend {
         if std::env::var("ASH_CL_REGALLOC").as_deref() == Ok("single_pass") {
             cfg = cfg.set("regalloc_algorithm", "single_pass");
         }
-        if std::env::var("ASH_CL_VERIFIER").as_deref() == Ok("0") {
+        // Cranelift's IR verifier is on by default and is a fifth of this
+        // tier's compile. A debug build keeps it, so the test suites still
+        // catch invalid IR; a release build runs without it, as wasmtime
+        // does. `ASH_CL_VERIFIER=1|0` overrides either way.
+        let verifier = match std::env::var("ASH_CL_VERIFIER").as_deref() {
+            Ok("0") => false,
+            Ok("1") => true,
+            _ => cfg!(debug_assertions),
+        };
+        if !verifier {
             cfg = cfg.set("enable_verifier", "false");
         }
 

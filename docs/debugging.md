@@ -48,6 +48,7 @@ being taken:
 | `ASH_OSR` | `0` disables mid-loop transfers into compiled code |
 | `ASH_CL_RETIER` | `0` refuses the Cranelift → LLVM hand-off of a running loop |
 | `ASH_OSR_LOG` | log published and taken transfers |
+| `ASH_CL_VERIFIER` | `1` runs Cranelift's IR verifier on every tier-0 compile (a debug build's default), `0` skips it (a release build's default) |
 | `ASH_STUB_COMPILE` | `1` makes compiled code that reaches an uncompiled callee compile it on the mutator instead of running it in the interpreter until the ladder promotes it; safe, for measuring |
 | `ASH_OSR_ENTRY_SYNC` | `1` builds a late Cranelift OSR entry on the interpreter thread instead of the `ash-osr-entry` worker; safe, for measuring the stall |
 | `ASH_TRACE_LINES` | `0` drops the source-position markers compiled code carries; a compiled frame then reports its function's entry line and inlined code is not named. On by default |

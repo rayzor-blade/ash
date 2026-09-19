@@ -68,7 +68,9 @@ being taken:
 | `ASH_GC_TRIGGER_MB` | floor for the adaptive collection threshold |
 | `ASH_GC_SHARE_PCT` | target share of run time spent collecting (default 5); the trigger adapts toward it |
 | `ASH_GC_STRESS` | collect every N allocations |
-| `ASH_GC_PROTECT` | `1` write-protects the blocks a collection kept and counts which ones the mutator writes before the next (unix; the collector does not use the count yet). A syscall writing straight into a protected buffer fails with EFAULT |
+| `ASH_GC_GEN` | `0` makes every collection a major. By default (unix) most are minor: the blocks a collection kept are write-protected, the first store into one faults and marks it dirty, and the next collection traces only young blocks and dirty old ones. A rooting bug in a long-lived object only shows under a major, so hunt those with `ASH_GC_GEN=0` |
+| `ASH_GC_MAJOR_EVERY` | collections between majors (default 8); exhaustion and `Gc.major` force one |
+| `ASH_GC_PROTECT` | `1` keeps the write-protection and its counts (`ASH_GC_STATS`) with `ASH_GC_GEN=0` |
 | `ASH_NATIVE_RECOVERY` | `0` stops the interpreter turning a SIGSEGV inside a native call into a recoverable error, so the crash banner names the real fault site |
 | `ASH_CRASH_BACKTRACE` | capture a backtrace in the crash handler (best effort; allocates in a signal handler) |
 | `ASH_JIT_NATIVE_TRAPS` | compile unresolved natives to call-time traps instead of declining the function |

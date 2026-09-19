@@ -1749,6 +1749,8 @@ struct GcStatCounters {
     blocks_protected: AtomicU64,
     /// Of those, blocks a mutator wrote before the next collection.
     blocks_dirtied: AtomicU64,
+    /// Collections that traced only the young blocks and the dirty old ones.
+    minors: AtomicU64,
 }
 
 static GC_STATS: GcStatCounters = GcStatCounters {
@@ -1763,6 +1765,7 @@ static GC_STATS: GcStatCounters = GcStatCounters {
     stops_abandoned: AtomicU64::new(0),
     blocks_protected: AtomicU64::new(0),
     blocks_dirtied: AtomicU64::new(0),
+    minors: AtomicU64::new(0),
 };
 
 // ── Collection switch (`Gc.enable`) ─────────────────────────────────────────
@@ -2011,6 +2014,10 @@ fn print_gc_stats_report() {
             GC_STATS.blocks_dirtied.load(Ordering::Relaxed)
         );
     }
+    let minors = GC_STATS.minors.load(Ordering::Relaxed);
+    if minors > 0 {
+        eprintln!("[gc] minor collections: {minors} of {n}");
+    }
 }
 
 extern "C" fn gc_stats_atexit() {
@@ -2077,7 +2084,33 @@ const PROTECT_DIRTY: u8 = 2;
 
 fn protect_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(unix) && std::env::var("ASH_GC_PROTECT").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        cfg!(unix) && (std::env::var("ASH_GC_PROTECT").is_ok_and(|v| v == "1") || generational())
+    })
+}
+
+/// Most collections are minor. Marks stick: a block kept by the last
+/// collection keeps its line and object marks, so tracing stops at an old
+/// object, and only the old blocks the mutator wrote since (the dirty ones)
+/// are scanned as roots. Old garbage waits for the next major, every
+/// `ASH_GC_MAJOR_EVERY` collections (default 8), on exhaustion, or on
+/// `Gc.major`. Needs the write-fault tracking above, so unix only;
+/// `ASH_GC_GEN=0` makes every collection a major, which is the setting for
+/// hunting a rooting bug in a long-lived object.
+fn generational() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| cfg!(unix) && !std::env::var("ASH_GC_GEN").is_ok_and(|v| v == "0"))
+}
+
+fn major_every() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("ASH_GC_MAJOR_EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(8)
+    })
 }
 
 #[cfg(unix)]
@@ -2619,6 +2652,12 @@ struct ImmixHeap {
     /// The locked path's bump region for pointer-free allocations.
     noptr_point: usize,
     noptr_block_end: usize,
+    /// Minor collections since the last major; see `generational`.
+    since_major: u32,
+    /// Blocks kept by the last major. A minor cannot free an old object, so
+    /// the kept set grows between majors; once it passes twice this the
+    /// next collection is a major, which bounds that growth.
+    live_after_major: usize,
     alloc_count: usize,
     /// For each line in the heap, stores the number of lines this allocation
     /// occupies if this is an allocation start, or 0 for continuation lines.
@@ -3152,6 +3191,8 @@ impl ImmixAllocator {
             current_block_end: 0,
             noptr_point: 0,
             noptr_block_end: 0,
+            since_major: 0,
+            live_after_major: 0,
             alloc_count: 0,
             alloc_sizes: vec![0u32; heap_size / LINE_SIZE],
             objects: allocation_table(heap_size / ALLOC_QUANTUM),
@@ -3311,6 +3352,9 @@ impl ImmixAllocator {
         self.heap.used_blocks.insert(addr);
         self.reclaim_block_pages(addr);
         clear_marks(&self.blocks[addr / BLOCK_SIZE]);
+        self.blocks[addr / BLOCK_SIZE]
+            .any_marked
+            .store(false, Ordering::Relaxed);
         if trace_freed() {
             let base = self.heap.memory.as_ptr() as usize;
             eprintln!(
@@ -3863,7 +3907,23 @@ impl ImmixAllocator {
         if !stopped_world.stopped {
             return;
         }
-        self.unprotect_blocks();
+        // A minor needs an old generation to stop at: at least one earlier
+        // collection has protected blocks. Exhaustion and an explicit
+        // `Gc.major` want old garbage back, so they are majors.
+        let origin = COLLECT_ORIGIN.load(Ordering::Relaxed);
+        let minor = generational()
+            && PROTECT.get().is_some()
+            && self.heap.since_major < major_every()
+            && !matches!(origin, 4..=6);
+        if minor {
+            self.heap.since_major += 1;
+        } else {
+            self.heap.since_major = 0;
+            self.unprotect_blocks();
+            if generational() {
+                self.clear_all_marks();
+            }
+        }
         if trace_freed() || debug_roots() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
             let origin = ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];
@@ -3886,6 +3946,26 @@ impl ImmixAllocator {
         // half buys nothing.
         let t_stop = t0.elapsed();
         let t_mark0 = Instant::now();
+        if minor {
+            let old = self.old_roots();
+            if gc_stats_enabled() {
+                let clean = PROTECT.get().map_or(0, |t| {
+                    t.state
+                        .iter()
+                        .filter(|s| s.load(Ordering::Relaxed) == PROTECT_CLEAN)
+                        .count()
+                });
+                eprintln!(
+                    "[gc-minor] old roots={} ({}) clean blocks={clean} used={}",
+                    old.len(),
+                    fmt_mb(old.iter().map(|(_, s)| *s as u64).sum()),
+                    self.heap.used_blocks.len()
+                );
+            }
+            if !old.is_empty() {
+                self.conservative_trace(old);
+            }
+        }
         self.mark_roots(&stopped_world.snapshots);
         // Between the two phases on purpose: this reads the mark bits, and
         // sweep clears them. Counted in the mark half rather than left out of
@@ -3893,12 +3973,19 @@ impl ImmixAllocator {
         self.take_dead_finalizers();
         let t_mark = t_mark0.elapsed();
         let t_sweep0 = Instant::now();
-        let freed_blocks = self.sweep(&stopped_world.snapshots);
+        let freed_blocks = self.sweep(&stopped_world.snapshots, minor);
         let t_sweep = t_sweep0.elapsed();
         let pause = t0.elapsed();
 
         let live_blocks = self.heap.used_blocks.len();
         let live_bytes = live_blocks * BLOCK_SIZE;
+        if minor {
+            if live_blocks > 2 * self.heap.live_after_major + 64 {
+                self.heap.since_major = major_every();
+            }
+        } else {
+            self.heap.live_after_major = live_blocks;
+        }
 
         // Adaptive threshold: next collection after ~live*2 bytes of new
         // allocation (wren_lift gc_marksweep.rs:464-466), bounded so tiny
@@ -3979,6 +4066,9 @@ impl ImmixAllocator {
 
         // Stats (atomics — readable without the GC lock).
         let n = GC_STATS.collections.fetch_add(1, Ordering::Relaxed) + 1;
+        if minor {
+            GC_STATS.minors.fetch_add(1, Ordering::Relaxed);
+        }
         GC_STATS
             .blocks_reclaimed
             .fetch_add(freed_blocks as u64, Ordering::Relaxed);
@@ -3996,9 +4086,10 @@ impl ImmixAllocator {
         // report that could drift from this one.
         if gc_stats_enabled() || gc_flag(GC_FLAG_PROFILE) {
             eprintln!(
-                "[gc] #{} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
+                "[gc] #{}{} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
                  next-trigger={} (x{:.1}) free={} blocks",
                 n,
+                if minor { " minor" } else { "" },
                 ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize],
                 pause_ns as f64 / 1e6,
                 freed_blocks,
@@ -4014,10 +4105,86 @@ impl ImmixAllocator {
         }
     }
 
-    /// Makes every block this collection kept whole read-only; see the
-    /// dirty-tracking section. Blocks a thread is still bumping through and
-    /// blocks with free lines to recycle stay writable, since allocation
-    /// writes into them. Runs inside the stop, before mutators resume.
+    /// The old generation's contribution to a minor collection's roots:
+    /// every marked object in a used block that is not protected-and-clean,
+    /// since a clean block has not been written since it was traced and a
+    /// marked object in any other block may now point at a young one. An
+    /// object spanning into a block from an earlier one counts for it too.
+    fn old_roots(&self) -> Vec<(usize, usize)> {
+        let Some(t) = PROTECT.get() else {
+            return Vec::new();
+        };
+        let mut roots = Vec::new();
+        // An object spanning several dirty blocks is pushed once.
+        let mut spanning: HashSet<usize> = HashSet::new();
+        for &block_addr in &self.heap.used_blocks {
+            let idx = block_addr / BLOCK_SIZE;
+            let block = &self.blocks[idx];
+            // A block nothing has marked holds no old object; that is every
+            // block allocated since the last collection.
+            if t.state[idx].load(Ordering::Acquire) == PROTECT_CLEAN
+                || block.noptr
+                || !block.any_marked.load(Ordering::Relaxed)
+            {
+                continue;
+            }
+            if let Some((begin, size)) = containing_allocation(
+                &self.blocks,
+                &self.heap.alloc_sizes,
+                &self.heap.objects,
+                block_addr,
+            ) && begin < block_addr
+                && self.heap.objects[begin / ALLOC_QUANTUM].load(Ordering::Relaxed) & OBJECT_MARK
+                    != 0
+                && spanning.insert(begin)
+            {
+                roots.push((begin, size));
+            }
+            for q in block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM {
+                let slot = self.heap.objects[q].load(Ordering::Relaxed);
+                if slot & OBJECT_MARK == 0 {
+                    continue;
+                }
+                let begin = q * ALLOC_QUANTUM;
+                let size = match slot & !OBJECT_MARK {
+                    0 => continue,
+                    SPAN_OBJECT => self.heap.alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE,
+                    code => code as usize * ALLOC_QUANTUM,
+                };
+                roots.push((begin, size));
+            }
+        }
+        roots
+    }
+
+    /// Before a major: forget every sticky mark, which the generational
+    /// sweep leaves in place on the blocks it keeps.
+    fn clear_all_marks(&mut self) {
+        for &block_addr in &self.heap.used_blocks {
+            let block = &mut self.blocks[block_addr / BLOCK_SIZE];
+            if !*block.any_marked.get_mut() {
+                continue;
+            }
+            for slot in &mut self.heap.objects
+                [block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
+            {
+                *slot.get_mut() &= !OBJECT_MARK;
+            }
+            for word in block.mark_bits.iter_mut() {
+                *word.get_mut() = 0;
+            }
+            *block.any_marked.get_mut() = false;
+        }
+    }
+
+    /// Makes every block this collection kept read-only; see the
+    /// dirty-tracking section. Only the blocks threads are bumping through
+    /// stay writable. A block with free lines to recycle is protected too:
+    /// the refill that takes a span faults once, which is what marks the
+    /// block for scanning, where leaving it writable would mean rescanning
+    /// every sparse block's old objects at every minor. Runs inside the
+    /// stop, before mutators resume. A block still clean from an earlier
+    /// collection is left as it is.
     fn protect_kept_blocks(&mut self) -> usize {
         if !protect_enabled() {
             return 0;
@@ -4034,14 +4201,17 @@ impl ImmixAllocator {
             .tlab_blocks
             .values()
             .chain(self.heap.noptr_tlab_blocks.values())
-            .chain(self.heap.recycle_spans.iter().map(|(b, _, _)| b))
-            .chain(self.heap.noptr_recycle_spans.iter().map(|(b, _, _)| b))
             .map(|&off| off / BLOCK_SIZE)
             .collect();
         // A pointer-free block can hold no reference to remember.
-        blocks.retain(|b| !writable.contains(b) && !self.blocks[*b].noptr);
+        blocks.retain(|b| {
+            !writable.contains(b)
+                && !self.blocks[*b].noptr
+                && t.state[*b].load(Ordering::Acquire) != PROTECT_CLEAN
+        });
         blocks.sort_unstable();
         let mut protected = 0;
+        let mut dirtied = 0u64;
         let mut i = 0;
         while i < blocks.len() {
             let first = blocks[i];
@@ -4050,7 +4220,9 @@ impl ImmixAllocator {
                 count += 1;
             }
             for b in first..first + count {
-                t.state[b].store(PROTECT_CLEAN, Ordering::Release);
+                if t.state[b].swap(PROTECT_CLEAN, Ordering::AcqRel) == PROTECT_DIRTY {
+                    dirtied += 1;
+                }
             }
             protect_range(t, first, count, false);
             protected += count;
@@ -4059,6 +4231,12 @@ impl ImmixAllocator {
         GC_STATS
             .blocks_protected
             .fetch_add(protected as u64, Ordering::Relaxed);
+        GC_STATS
+            .blocks_dirtied
+            .fetch_add(dirtied, Ordering::Relaxed);
+        if gc_stats_enabled() && dirtied > 0 {
+            eprintln!("[gc-protect] dirtied={dirtied} blocks since the last collection");
+        }
         protected
     }
 
@@ -4507,7 +4685,10 @@ impl ImmixAllocator {
     /// Freed blocks' pages are returned to the OS via madvise (batched per
     /// contiguous run) so RSS actually falls after a collection instead of
     /// plateauing at high-water. Returns the number of blocks reclaimed.
-    fn sweep(&mut self, mutators: &[MutatorSnapshot]) -> usize {
+    fn sweep(&mut self, mutators: &[MutatorSnapshot], minor: bool) -> usize {
+        // Sticky marks: a kept block's marks survive into the next minor,
+        // where they say which objects are old. A major cleared them first.
+        let keep_marks = generational();
         // Last cycle's spans die with last cycle's marks. Carrying them over
         // would hand out lines in a block this sweep is about to free, and
         // they are rebuilt below anyway.
@@ -4551,23 +4732,34 @@ impl ImmixAllocator {
         // capacity across blocks and changes nothing else.
         let mut spans: Vec<(usize, usize)> = Vec::new();
         for block_addr in used_block_addrs {
+            let block_index = block_addr / BLOCK_SIZE;
+            // A clean old block was neither traced nor written: nothing in
+            // it changed, so a minor leaves it exactly as it is.
+            if minor
+                && PROTECT
+                    .get()
+                    .is_some_and(|t| t.state[block_index].load(Ordering::Acquire) == PROTECT_CLEAN)
+            {
+                continue;
+            }
             // The mutator's live bump region: marks still reset below for
             // the next cycle, but the block is never reclaimed under the
             // cursor.
             let is_tlab = tlab_set.contains(&block_addr);
-            let block_index = block_addr / BLOCK_SIZE;
             let block = &mut self.blocks[block_index];
             // Nothing reached this block, so every bit is already clear and
             // the scan below could only confirm it.
             let touched = *block.any_marked.get_mut();
-            if touched {
+            if touched && !keep_marks {
                 for slot in &mut self.heap.objects
                     [block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
                 {
                     *slot.get_mut() &= !OBJECT_MARK;
                 }
             }
-            *block.any_marked.get_mut() = false;
+            if !keep_marks {
+                *block.any_marked.get_mut() = false;
+            }
             let mut is_empty = true;
             let mut marked_lines = 0usize;
             // Runs of unmarked lines, harvested in the pass that resets the
@@ -4582,7 +4774,11 @@ impl ImmixAllocator {
             // observes.
             if touched {
                 for (word_index, slot) in block.mark_bits.iter_mut().enumerate() {
-                    let word = std::mem::replace(slot.get_mut(), 0);
+                    let word = if keep_marks {
+                        *slot.get_mut()
+                    } else {
+                        std::mem::replace(slot.get_mut(), 0)
+                    };
                     // A word of 64 unmarked lines is the common case on a
                     // sparsely reached block; skipping it keeps the run that
                     // `run_start` is tracking open across the whole word.
@@ -5978,7 +6174,12 @@ mod tests {
         gc.mark_allocation(start + 36, &mut work);
         assert_eq!(work, vec![(start + 32, 16)]);
         assert!(!gc.blocks[start / BLOCK_SIZE].is_marked(1));
-        gc.sweep(&[]);
+        gc.sweep(&[], false);
+        if generational() {
+            // The claim is sticky across a sweep; a major forgets it first.
+            assert!(object_marked(&gc, start + 32));
+            gc.clear_all_marks();
+        }
         assert!(!object_marked(&gc, start + 32));
         let mut again = Vec::new();
         gc.mark_allocation(start + 36, &mut again);

@@ -563,7 +563,7 @@ impl<'ctx> JITModule<'ctx> {
         let bitcode: Vec<u8> = self.module.write_bitcode_to_memory().as_slice().to_vec();
         // Registering targets is not something two threads should race on;
         // once here, every worker's own call finds them registered.
-        Target::initialize_all(&InitializationConfig::default());
+        crate::target_abi::initialize_targets();
         if !quiet {
             crate::progress::detail(&format!(
                 "[aot] sharding: {} bodies, {} shards, shielded {shielded}, stream {} MB, prepared in {}ms",

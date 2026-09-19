@@ -561,7 +561,9 @@ fn function_names(bc: &DecodedBytecode) -> HashMap<usize, String> {
 /// vtables built from the old table would call the wrong bodies.
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
     if diff.type_layout_changed {
-        return Some("a type's field layout changed; live objects are laid out by the old one".into());
+        return Some(
+            "a type's field layout changed; live objects are laid out by the old one".into(),
+        );
     }
     if diff.globals_count_changed {
         return Some(format!(
@@ -653,7 +655,9 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
     match ctx.staged.take() {
         Some(bc) => Ok(bc),
-        None => Ok(crate::bytecode::BytecodeDecoder::decode(&ctx.bytecode_path)?),
+        None => Ok(crate::bytecode::BytecodeDecoder::decode(
+            &ctx.bytecode_path,
+        )?),
     }
 }
 

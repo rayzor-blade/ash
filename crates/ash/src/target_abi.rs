@@ -356,12 +356,36 @@ fn default_features(triple: &str) -> String {
     String::new()
 }
 
+/// Register the backends ash emits for: the hosts it runs on (x86-64,
+/// AArch64), wasm32, and the objects-only targets `cross_targets` gates --
+/// 32-bit x86 and ARM, RISC-V 32 and 64, PowerPC64LE, s390x.
+///
+/// Only these, not `Target::initialize_all`: a static archive member is
+/// linked only when something references it, and `initialize_all`
+/// references every backend LLVM was built with, so the tables and code of
+/// targets ash never names -- Hexagon, AMDGPU, NVPTX, MIPS, Sparc and the
+/// rest -- were a third of the release binary. A triple outside this set
+/// fails in `Target::from_triple` with "no target for", which is the honest
+/// answer; `table_agrees_with_llvm` pins that every triple ash claims is
+/// inside it.
+#[cfg(feature = "llvm")]
+pub(crate) fn initialize_targets() {
+    let config = InitializationConfig::default();
+    Target::initialize_x86(&config);
+    Target::initialize_aarch64(&config);
+    Target::initialize_arm(&config);
+    Target::initialize_riscv(&config);
+    Target::initialize_power_pc(&config);
+    Target::initialize_system_z(&config);
+    Target::initialize_webassembly(&config);
+}
+
 #[cfg(feature = "llvm")]
 pub(crate) fn target_machine(
     triple: &str,
     opt: OptimizationLevel,
 ) -> Result<(TargetTriple, TargetMachine)> {
-    Target::initialize_all(&InitializationConfig::default());
+    initialize_targets();
     let tt = TargetTriple::create(triple);
     let target = Target::from_triple(&tt).map_err(|e| anyhow!("no target for {triple}: {e}"))?;
     let host = TargetMachine::get_default_triple();

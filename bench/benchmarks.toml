@@ -266,23 +266,21 @@ parity_case = "TestTieredHotLoop"
 group = "jit"
 description = "Hot integer loop; the case the promotion counters are read on."
 
-# Floating-point kernel. `expectation = "checksum"` with an explicit accepted
-# set, because the answer legitimately differs by FMA policy — see
-# the cross-tier FMA policy issue. Recording *which* checksum came back
-# tells you whether the hot function ran compiled and under what fusion.
+# Floating-point kernels. `expectation = "checksum"` with an accepted set of
+# two, because the answer depends on one switch: every engine fuses
+# multiply-add pairs by default (the AIR peephole decides which, and the
+# interpreter, both JIT tiers and AOT round those once), and `--no-fma`
+# rounds every operation, which is HashLink's number. Recording *which*
+# checksum came back says which of the two a run was; a value outside the
+# pair is a wrong answer, from any tier.
 [[bench]]
 name = "mandelbrot_small"
 parity_case = "MandelbrotSmall"
 group = "fp"
 description = "Mandelbrot 298x298, 1000 iterations."
 checksums = [
-  { value = "22816350", label = "unfused" },
   { value = "22825041", label = "fused" },
-  # The same AIR-era divergence already recorded on the full-size row below:
-  # the `Fma` peephole forms fused ops on scalars and the LLVM tier then
-  # contracts the mul/add pairs it left behind. Measured on the whole-module
-  # LLVM tier; the accepted set here was never updated when mandelbrot's was.
-  { value = "22825063", label = "fused-air-llvm" },
+  { value = "22816350", label = "unfused" },
 ]
 
 [[bench]]
@@ -296,46 +294,10 @@ parity_case = "Mandelbrot"
 group = "fp"
 description = "Mandelbrot 875x500, 1000 iterations. Minutes in interp mode."
 checksums = [
+  { value = "112798587", label = "fused" },
   { value = "112790102", label = "unfused" },
-  { value = "112798515", label = "fused" },
-  # ash's own LLVM tier at 875x500. Same fusion *presence* as hxcpp, different
-  # fusion *pattern*.
-  { value = "112798587", label = "fused-llvm" },
-  # With LLVM's middle-end running, mem2reg puts more multiply/add pairs in one
-  # block, so ash's `contract` flag fuses more of them. A third fusion pattern,
-  # not a wrong answer.
-  { value = "112798288", label = "fused-llvm-opt" },
-  # Hybrid with OSR: an unfused interpreted prefix, then a Cranelift OSR
-  # entry whose AIR `Fma` lowers to a hardware fma, then LLVM after tier-up.
-  # Stable across runs (the transfer point is tick-deterministic). The
-  # cross-tier FMA policy issue covers why these coexist.
-  { value = "112798265", label = "fused-osr-mixed" },
-  # SROA scalarized the Complex loop, so the AIR-level `Fma` peephole now
-  # forms the fused ops on scalars and every engine executing that AIR agrees
-  # with itself. Cranelift executes exactly the AIR Fmas:
-  { value = "112798500", label = "fused-air-cranelift" },
-  # ...while the LLVM tier additionally contracts the mul/add pairs the AIR
-  # peephole left behind. A fifth pattern, not a wrong answer; unifying the
-  # policy so both compiled tiers agree by construction is tracked in git-bug.
-  { value = "112798779", label = "fused-air-llvm" },
-  # A sixth pattern, from the AOT lane. It optimizes the whole module ONCE at
-  # the end rather than per promotion, so the contraction pass sees every body
-  # and every call at once and fuses a different set of the mul/add pairs the
-  # AIR peephole left behind. Fusion presence is the same; only the grouping
-  # differs, which is what every value in this list has in common.
-  #
-  # Read against the band rather than in isolation: the fused values run
-  # 112798265..112798779 while the UNFUSED one is 112790102, eight thousand
-  # away. A wrong answer would not land inside that band -- and this lane
-  # matches the JIT bit for bit on fib, deltablue, stdlib and binary_trees.
-  { value = "112798637", label = "fused-aot" },
 ]
 
-# Object field access with no allocation in the hot loop, which makes it the
-# cleanest read on what field access itself costs: the profiler charges ~46% of
-# this benchmark to hlp_get_obj_rt, one runtime call per field read. Whatever
-# replaces that call with a constant-offset load should move this row and leave
-# mandelbrot's allocation-bound row roughly alone.
 [[bench]]
 name = "nbody"
 main = "NBody"

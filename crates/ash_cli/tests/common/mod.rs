@@ -57,16 +57,16 @@ pub struct ParityCase {
     pub expected_exit: Option<i32>,
     /// Pin the JIT tier for hybrid runs of this case.
     ///
-    /// The oracle is interpreter semantics, and the promoted tiers are
-    /// allowed to differ from it exactly one way: FP contraction. The AIR
-    /// `fma` peephole fuses mul+add in the LLVM tier's body, so a case whose
-    /// checksum accumulates contractible arithmetic (the Mandelbrots) takes a
-    /// different, promotion-timing-dependent value the moment the top tier
-    /// executes its kernel. `"cranelift"` keeps the case on the tiers that
-    /// round every op the way the oracle does -- still promoting, still
-    /// exercising tier-0 codegen -- rather than pinning promotion off
-    /// entirely.
+    /// Pin hybrid runs to one JIT tier (`"auto" | "cranelift" | "llvm" |
+    /// "off"`), for a case that exercises one tier's codegen in particular.
     pub jit_tier: Option<String>,
+    /// Run ash with `--no-fma`. Every engine fuses multiply-add pairs by
+    /// default and agrees on the result, but HashLink's JIT rounds every
+    /// operation, so a case whose checksum accumulates contractible
+    /// arithmetic (the Mandelbrots) can only match an external oracle bit
+    /// for bit unfused. The fused answer is checked by a sibling case with
+    /// `oracle_is_interp = true`.
+    pub no_fma: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -261,9 +261,13 @@ pub fn run_ash(
     program_args: &[String],
     mode: AshMode,
     jit_tier: Option<&str>,
+    no_fma: bool,
     timeout: Option<Duration>,
 ) -> RunResult {
     let mut cmd = Command::new(ash_cli);
+    if no_fma {
+        cmd.arg("--no-fma");
+    }
     match mode {
         AshMode::Interp => {
             cmd.arg("--mode").arg("interp");
@@ -361,6 +365,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 oracle_is_interp: false,
                 expected_exit: None,
                 jit_tier: None,
+                no_fma: false,
             });
             continue;
         }
@@ -414,6 +419,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
             "compile" => c.compile = parse_bool(value),
             "sanity_interp" => c.sanity_interp = parse_bool(value),
             "oracle_is_interp" => c.oracle_is_interp = parse_bool(value),
+            "no_fma" => c.no_fma = parse_bool(value),
             "jit_tier" => {
                 let t = parse_string(value);
                 match t.as_str() {

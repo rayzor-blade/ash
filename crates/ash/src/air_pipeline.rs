@@ -494,6 +494,24 @@ pub fn default_level() -> OptLevel {
     })
 }
 
+/// Whether the FMA peephole runs; `--no-fma` clears it. Fusion is decided
+/// here, once, and every backend executes an `Fma` as one rounding -- the
+/// interpreter with `mul_add`, Cranelift and LLVM with the hardware
+/// instruction -- so which pairs fuse never depends on which tier a function
+/// happened to reach. Off, no `Fma` exists and every engine rounds each
+/// operation, which is what HashLink's JIT computes.
+static FMA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set by the CLI before anything is lowered; a change after the cache has
+/// entries would leave them keyed on the old answer.
+pub fn set_fma(on: bool) {
+    FMA.store(on, std::sync::atomic::Ordering::Release);
+}
+
+pub fn fma() -> bool {
+    FMA.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// One function's AIR, lowered and optimized exactly once.
 ///
 /// Bytecode lowers to AIR once and every consumer reads that. Before this,
@@ -521,7 +539,7 @@ pub struct Optimized {
 /// * a hot-reload build runs at O2 with callee bodies hidden, deliberately --
 ///   inlining across a reload boundary means an edit to a callee stops taking
 ///   effect between iterations (`jit::air::run_v2`);
-/// * `ASH_AIR_FMA=0` turns off the FMA peephole, which is the one pass whose
+/// * `--no-fma` turns off the FMA peephole, which is the one pass whose
 ///   output is observable as a different *number* rather than different code.
 ///
 /// Keying on findex alone would have let whichever consumer asked first decide
@@ -539,7 +557,7 @@ impl AirConfigKey {
     pub fn standard() -> Self {
         Self {
             level: default_level(),
-            fma: PassOptions::default().fma,
+            fma: fma(),
             callees_visible: true,
         }
     }

@@ -84,17 +84,6 @@ check_one() {
   for m in hybrid jit; do
     o=$(run "$ASH" --mode "$m" "$f")
     if [ "$TIMED_OUT" = 1 ]; then echo "TIMEOUT $b/$m"; TIMED_OUT=0; continue; fi
-    # FP kernels legitimately differ from the interpreter under a compiled
-    # tier: the interpreter rounds every opcode while Cranelift and LLVM
-    # contract multiply-add into FMA. Measured ground truth for
-    # test_mandelbrot: interp 112790102 is bit-identical to the C reference at
-    # -ffp-contract=off, and the compiled tiers land in the fused family
-    # alongside clang -ffp-contract=on (112798515) and hxcpp. Fusion is the
-    # norm -- the unfused value appears nowhere but a strict interpreter -- so
-    # these are expected, not regressions.
-    case "$b/$m" in
-      test_mandelbrot.hl/hybrid|test_mandelbrot.hl/jit|test_mandelbrot_small.hl/jit) continue ;;
-    esac
     if [ "$o" != "$normal" ]; then
       echo "DIFF-$m $b"
     fi

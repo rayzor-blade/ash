@@ -127,15 +127,17 @@ cargo run -p ash -- --mode interp crates/ash/test/tests/test_basic.hl
 cargo run -p ash -- --mode hybrid --jit-threshold 1 crates/ash/test/tests/test_basic.hl
 ```
 
-The Mandelbrot checksums are engine fingerprints: the interpreter rounds
-multiply and add separately, compiled code fuses them.
+The Mandelbrot checksums say which float policy a run used. Every engine
+fuses multiply-add pairs by default and prints the same number; `--no-fma`
+rounds every operation, which is HashLink's number.
 
 | | 298² | 875×500 |
 |---|---|---|
-| unfused | 22816350 | 112790102 |
-| fused | 22825041 | 112798515 |
+| fused (default) | 22825041 | 112798587 |
+| unfused (`--no-fma`, HashLink) | 22816350 | 112790102 |
 
-Source: `crates/ash/test/tests/Mandelbrot_reference.c`.
+Any other value is a wrong answer from some tier. Source for the C
+reference: `crates/ash/test/tests/Mandelbrot_reference.c`.
 
 ## CI
 

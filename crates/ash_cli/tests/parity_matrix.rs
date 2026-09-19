@@ -251,6 +251,7 @@ fn run_parity_matrix(mode: AshMode) {
             &case.program_args,
             mode,
             case.jit_tier.as_deref(),
+            case.no_fma,
             timeout,
         );
         if ash_run.timed_out {
@@ -279,6 +280,7 @@ fn run_parity_matrix(mode: AshMode) {
                 &case.program_args,
                 AshMode::Interp,
                 None,
+                case.no_fma,
                 timeout,
             );
             if r.timed_out {

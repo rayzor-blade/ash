@@ -110,6 +110,16 @@ struct Cli {
     #[arg(long, value_name = "TRIPLE")]
     target: Option<String>,
 
+    /// Round every float operation on its own instead of fusing multiply-add
+    /// pairs.
+    ///
+    /// By default the AIR optimiser fuses `a * b + c` into one rounding, and
+    /// every engine -- interpreter, both JIT tiers, AOT -- computes that same
+    /// number. HashLink's JIT rounds twice; a program whose floats must match
+    /// it bit for bit runs with this flag.
+    #[arg(long)]
+    no_fma: bool,
+
     /// Emit even when some functions could not be lowered (--build/--emit-aot).
     ///
     /// A refused function becomes a throw. Without this, emitting stops rather
@@ -1307,6 +1317,8 @@ fn run() -> Result<()> {
     // Startup diagnostics go to stderr, which the parity harness compares
     // against an oracle's. --quiet has to reach them.
     ash_core::native_lib::set_quiet(cli.quiet);
+    // Before any lowering: the shared AIR cache keys on this answer.
+    ash_core::air_pipeline::set_fma(!cli.no_fma);
 
     let hl_path = cli.file.unwrap_or_else(|| {
         let mut cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

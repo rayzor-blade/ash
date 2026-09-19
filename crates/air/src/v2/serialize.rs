@@ -963,6 +963,10 @@ fn emit_instr(
                 BinOp::Xor => Opcode::Xor { dst, a, b },
             });
         }
+        // HL has no fused opcode, so a serialized body rounds twice where the
+        // SSA walker and the compiled tiers round once. The consumers of this
+        // form (`ASH_AIR=v2-serialize`, the hl2 encoder) accept that; a run
+        // that must agree with them bit for bit takes `--no-fma`.
         Instr::Fma { dst, a, b, c } => {
             let ty = f.value_ty(*dst);
             let tmp = *fma_temps.entry(ty).or_insert_with(|| {

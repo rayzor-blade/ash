@@ -67,18 +67,13 @@ fn level() -> AirOptLevel {
     *LEVEL.get_or_init(air_pipeline::default_level)
 }
 
-/// v2 pass options. Only the FMA peephole is exposed, via `ASH_AIR_FMA=0`,
+/// v2 pass options. Only the FMA peephole is exposed, via `--no-fma`,
 /// because it is the one pass whose output is observable as a *different
 /// number* rather than as different code — see the module docs on fusion.
 fn pass_options() -> AirPassOptions {
-    static OPTS: OnceLock<AirPassOptions> = OnceLock::new();
-    *OPTS.get_or_init(|| {
-        let mut o = AirPassOptions::default();
-        if matches!(std::env::var("ASH_AIR_FMA").as_deref(), Ok("0") | Ok("off")) {
-            o.fma = false;
-        }
-        o
-    })
+    let mut o = AirPassOptions::default();
+    o.fma = air_pipeline::fma();
+    o
 }
 
 /// Whether promoting this function needs the inliner to see bodies other than

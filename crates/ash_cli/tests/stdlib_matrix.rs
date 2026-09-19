@@ -104,7 +104,7 @@ fn run_matrix(mode: AshMode) {
             Some(Duration::from_secs(case.timeout_secs))
         };
 
-        let ash_run = run_ash(&ash_cli, &hl_path, &[], mode, None, timeout);
+        let ash_run = run_ash(&ash_cli, &hl_path, &[], mode, None, false, timeout);
         if ash_run.timed_out {
             unexpected.push(format!(
                 "[ASH TIMEOUT][{}] {} ({}) exceeded {}s",
@@ -207,6 +207,7 @@ fn hybrid_promotions_observable() {
                 jit_log: true,
             },
             None,
+            false,
             Some(Duration::from_secs(120)),
         );
         assert!(!run.timed_out, "hybrid observability run timed out");

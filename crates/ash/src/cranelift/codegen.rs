@@ -1528,30 +1528,17 @@ impl AirCodegen<'_, '_> {
 
             Instr::BinOp { op, dst, a, b } => self.emit_binop(*op, *dst, *a, *b)?,
 
-            // Multiply then add, ROUNDING TWICE, which is the one thing this
-            // tier could emit as a single instruction and must not.
-            //
-            // A fused multiply-add rounds once, so it answers a different
-            // number from the interpreter's op-by-op arithmetic. This tier's
-            // contract is that promoting a function does not change what the
-            // program computes -- the parity matrix compares a hybrid run
-            // against the interpreter's own output -- and the FMA peephole
-            // runs before every consumer, so honouring `Fma` here would make
-            // the answer depend on whether a function happened to get hot.
-            // Mandelbrot is the case that showed it: 112790102 interpreted,
-            // 112798500 once the kernel was promoted and fused.
-            //
-            // The serializer already lowers `Fma` this way for the same
-            // reason (`crates/air/src/v2/serialize.rs`), and the LLVM tier is
-            // where fusion is taken deliberately, under `ASH_AIR_FMA`.
+            // One rounding, like the interpreter's `mul_add` and the LLVM
+            // tier's `llvm.fma`: the AIR peephole decides which pairs fuse and
+            // every backend computes the same number for them, so a promoted
+            // function answers what the interpreted one did.
             Instr::Fma { dst, a, b, c } => {
                 let (va, vb, vc) = (self.get(*a)?, self.get(*b)?, self.get(*c)?);
                 let t = self.b.func.dfg.value_type(va);
                 if !t.is_float() {
                     bail!("Fma on non-float operands");
                 }
-                let product = self.b.ins().fmul(va, vb);
-                let r = self.b.ins().fadd(product, vc);
+                let r = self.b.ins().fma(va, vb, vc);
                 self.def(*dst, r)?;
             }
 

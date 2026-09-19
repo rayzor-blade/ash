@@ -699,12 +699,9 @@ impl<'ctx> JITModule<'ctx> {
                                     }
                                     _ => return Err(anyhow!("AIR BinOp {op:?} on floats")),
                                 };
-                                // `contract`, so the FMA peephole's pairs can
-                                // still fuse -- the same flag the opcode path
-                                // sets on these three.
-                                if let Some(inst) = fv.as_instruction() {
-                                    inst.set_fast_math_flags(1 << 5);
-                                }
+                                // No `contract` flag: the AIR peephole decides
+                                // which pairs fuse, for every backend alike,
+                                // and LLVM must not fuse more of them.
                                 fv.into()
                             }
                             _ => {

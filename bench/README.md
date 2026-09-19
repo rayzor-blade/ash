@@ -99,17 +99,16 @@ Apple Silicon, so locally the oracle is a CI artifact or nothing.
 
 ### Mandelbrot's checksums
 
-Both Mandelbrot benchmarks accept more than one answer and the runner records
-which one came back, because it says whether the hot function ran compiled
-and under what fusion policy:
+Both Mandelbrot benchmarks accept two answers and the runner records which
+one came back. Every engine fuses multiply-add pairs by default and agrees
+on the result; `--no-fma` rounds every operation and matches HashLink:
 
 | Benchmark | Checksum | Label | |
 |---|---|---|---|
-| `mandelbrot_small` (298²) | `22816350` | `unfused` | no FMA contraction; matches `clang -ffp-contract=off` and the interpreter bit for bit |
-| `mandelbrot_small` | `22825041` | `fused` | matches `clang -ffp-contract=on` |
-| `mandelbrot` (875×500) | `112790102` | `unfused` | |
-| `mandelbrot` | `112798515` | `fused` | also the hxcpp / hxjava value |
-| `mandelbrot` | `112798587` | `fused-llvm` | ash's LLVM tier: same fusion presence, different pattern |
+| `mandelbrot_small` (298²) | `22825041` | `fused` | the default, every engine; also `clang -ffp-contract=on` |
+| `mandelbrot_small` | `22816350` | `unfused` | `--no-fma`; HashLink's JIT and the C reference at `-ffp-contract=off` |
+| `mandelbrot` (875×500) | `112798587` | `fused` | the default, every engine |
+| `mandelbrot` | `112790102` | `unfused` | `--no-fma`; HashLink's JIT |
 
 A checksum outside the set is `INVALID`, and a label change against a
 baseline is reported even when the time is flat.

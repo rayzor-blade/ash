@@ -432,7 +432,7 @@ const RUNTIME_OBJECT: &str = "ash_runtime.o";
 /// Whether to instrument the module for fibers.
 ///
 /// An env var rather than a flag, matching how every other experimental
-/// codegen switch here is reached (`ASH_AIR_FMA` and the rest), and because
+/// codegen switch here is reached, and because
 /// the transform is unproven in a real build: `docs/wasm/fibers.md` has it
 /// working and measured on linked modules, and nothing has yet run a Haxe
 /// program that actually suspends.

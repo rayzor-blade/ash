@@ -25,6 +25,7 @@ ash --build mygame.wasm --target wasm32-wasip1 main.hl
 | `--jit-tier` | `auto`, `cranelift`, `llvm`, `off` | `auto` | restrict the ladder to one compiler, or disable promotion |
 | `--jit-log` | flag | | log every promotion, decline and tier transfer to stderr |
 | `--quiet` | flag | | suppress everything ash prints that the program did not |
+| `--no-fma` | flag | | round every float operation on its own; see below |
 
 **`interp`** executes bytecode and compiles nothing. It is the reference
 semantics: every compiled mode is checked against it, and a difference is a
@@ -45,6 +46,16 @@ isolating the interpreter from a problem, not for ordinary use.
 `--jit-tier cranelift` and `--jit-tier llvm` pin one compiler; `off` keeps
 the tiering machinery and disables promotion. Explicit thresholds override
 the preset. `ASH_TIER` supplies `--jit-tier` when the flag is absent.
+
+**Floating point.** The optimiser fuses `a * b + c` into one rounding, and
+every engine — interpreter, both JIT tiers, AOT — computes the same number
+for it, so promoting a function never changes a result. HashLink's JIT
+rounds the multiply and the add separately; a program whose floats must
+match it bit for bit (lockstep simulation against HashLink clients, a
+checksum recorded from `hl`) runs with `--no-fma`, in every mode and in
+`--build`. Which pairs fuse is decided per expression from the bytecode, so
+the fused value is stable across ash versions but is not the one `hxcpp` or
+HL/C produce; those fuse different pairs.
 
 ## Compiling
 

@@ -56,6 +56,10 @@ const PROGRAMS: &[&str] = &[
     "test_ref_offset.hl",
     "test_gettype_null.hl",
     "test_std_reflect_type.hl",
+    // Fused multiply-add: the AIR peephole decides which pairs fuse and
+    // both engines must round them once, or the checksum differs. LLVM's
+    // own contraction on top of that once made this lane a seventh number.
+    "test_mandelbrot_small.hl",
 ];
 
 fn repo_root() -> PathBuf {

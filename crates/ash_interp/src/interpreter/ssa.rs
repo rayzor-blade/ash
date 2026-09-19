@@ -574,12 +574,11 @@ impl HLInterpreter {
                 set!(dst, narrow!(dst, r));
             }
             I::Fma { dst, a, b, c } => {
-                // Deliberately two roundings, not `mul_add`. The FMA peephole
-                // exists for backends that emit a hardware fused multiply-add;
-                // this interpreter is the bit-exact reference the others are
-                // measured against, and it rounds every operation — fusing here
-                // would move the measuring stick.
-                let r = get!(a).as_f64() * get!(b).as_f64() + get!(c).as_f64();
+                // One rounding, the same number the compiled tiers' fused
+                // multiply-add produces; the peephole decided this pair
+                // fuses for every engine. `--no-fma` leaves no `Fma` to
+                // execute and every operation rounds on its own.
+                let r = get!(a).as_f64().mul_add(get!(b).as_f64(), get!(c).as_f64());
                 set!(dst, NanBoxedValue::from_f64(r));
             }
             I::UnOp { op, dst, src } => {

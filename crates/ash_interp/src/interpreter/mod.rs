@@ -1076,6 +1076,73 @@ impl HLInterpreter {
         }
     }
 
+    /// Let the program at `hl_path` reload in place: the walker lowers
+    /// without inlining, so a frame it keeps across a reload calls the new
+    /// bodies; the reload context holds the program as loaded and the
+    /// function table as it is now; the standard library gets the path
+    /// for `hl.Api.checkReload` and the callback that flags a reload. A
+    /// host flags one with `ash_core::reload::stage_reload`, and the
+    /// interpreter applies it when it next returns from a native call.
+    /// `enable_tiered` calls this under `TieredConfig::hot_reload`; a
+    /// program without tiers calls it itself.
+    pub fn enable_reload(
+        &mut self,
+        hl_path: &Path,
+        native_resolver: &NativeFunctionResolver,
+    ) -> Result<()> {
+        ash_core::air_pipeline::set_hot_reload(true);
+        // Register the bytecode path for hot-reload mtime detection
+        match native_resolver.resolve_function("std", "hlp_setup_reload_check") {
+            Ok(setup_fn) => {
+                let path_str = hl_path.to_string_lossy();
+                let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
+                utf16.push(0);
+                type FnSetup = unsafe extern "C" fn(*const u16);
+                let setup: FnSetup = unsafe { std::mem::transmute(setup_fn) };
+                unsafe { setup(utf16.as_ptr()) };
+            }
+            Err(e) => {
+                eprintln!(
+                    "[hot-reload] warning: could not register reload check: {}",
+                    e
+                );
+            }
+        }
+        let module_ctx = self.c_type_factory.module_ctx();
+        let shared = SharedRuntimeHandles {
+            globals_data_ptr: self.c_type_factory.globals_data().0,
+            nglobals: self.c_type_factory.globals_data().1,
+            c_types: self.c_type_factory.as_slice().to_vec(),
+            module_ctx,
+        };
+        // The function table as it is now, sized by the program's highest
+        // findex, function or native.
+        let old_bc = ash_core::bytecode::BytecodeDecoder::decode(hl_path)?;
+        let max_findex = old_bc
+            .functions
+            .iter()
+            .map(|f| f.findex as usize)
+            .chain(old_bc.natives.iter().map(|n| n.findex as usize))
+            .max()
+            .map_or(0, |m| m + 1);
+        let fptrs: Vec<*mut std::ffi::c_void> = (0..max_findex)
+            .map(|i| unsafe {
+                if !module_ctx.is_null() && !(*module_ctx).functions_ptrs.is_null() {
+                    *(*module_ctx).functions_ptrs.add(i)
+                } else {
+                    std::ptr::null_mut()
+                }
+            })
+            .collect();
+        ash_core::reload::init_reload_context(hl_path.to_path_buf(), old_bc, fptrs, shared);
+        if let Ok(set_cb_fn) = native_resolver.resolve_function("std", "hlp_set_reload_callback") {
+            type FnSetCb = unsafe extern "C" fn(unsafe extern "C" fn(*const u16) -> bool);
+            let set_cb: FnSetCb = unsafe { std::mem::transmute(set_cb_fn) };
+            unsafe { set_cb(ash_core::reload::reload_callback) };
+        }
+        Ok(())
+    }
+
     pub fn enable_tiered(
         &mut self,
         hl_path: &Path,
@@ -1099,37 +1166,15 @@ impl HLInterpreter {
             config.tier_mode = TierMode::Llvm;
         }
         if config.hot_reload {
-            ash_core::air_pipeline::set_hot_reload(true);
+            self.enable_reload(hl_path, _native_resolver)?;
         }
         config.enabled = true;
 
         let log_promotions = config.log_promotions;
+        #[cfg(feature = "llvm")]
         let hot_reload = config.hot_reload;
         let hl_path = hl_path.to_path_buf();
 
-        // Register the bytecode path for hot-reload mtime detection
-        if hot_reload {
-            match _native_resolver.resolve_function("std", "hlp_setup_reload_check") {
-                Ok(setup_fn) => {
-                    let path_str = hl_path.to_string_lossy();
-                    let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
-                    utf16.push(0);
-                    type FnSetup = unsafe extern "C" fn(*const u16);
-                    let setup: FnSetup = unsafe { std::mem::transmute(setup_fn) };
-                    unsafe { setup(utf16.as_ptr()) };
-                    eprintln!(
-                        "[hot-reload] registered bytecode path: {}",
-                        hl_path.display()
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[hot-reload] warning: could not register reload check: {}",
-                        e
-                    );
-                }
-            }
-        }
         let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
         let shared = SharedRuntimeHandles {
             globals_data_ptr,
@@ -1137,58 +1182,6 @@ impl HLInterpreter {
             c_types: self.c_type_factory.as_slice().to_vec(),
             module_ctx: self.c_type_factory.module_ctx(),
         };
-
-        // Initialize the global reload context and register the callback
-        if hot_reload {
-            // Build the functions_ptrs snapshot from the module context.
-            // Use bytecode function/native count to size the table.
-            let old_bc = ash_core::bytecode::BytecodeDecoder::decode(&hl_path);
-            let max_findex = old_bc.as_ref().map_or(0, |bc| {
-                let max_fn = bc
-                    .functions
-                    .iter()
-                    .map(|f| f.findex as usize)
-                    .max()
-                    .unwrap_or(0);
-                let max_nat = bc
-                    .natives
-                    .iter()
-                    .map(|n| n.findex as usize)
-                    .max()
-                    .unwrap_or(0);
-                max_fn.max(max_nat) + 1
-            });
-            let fptrs: Vec<*mut std::ffi::c_void> = (0..max_findex)
-                .map(|i| unsafe {
-                    if !shared.module_ctx.is_null()
-                        && !(*shared.module_ctx).functions_ptrs.is_null()
-                    {
-                        *(*shared.module_ctx).functions_ptrs.add(i)
-                    } else {
-                        std::ptr::null_mut()
-                    }
-                })
-                .collect();
-
-            if let Ok(old_bc) = old_bc {
-                ash_core::reload::init_reload_context(
-                    hl_path.to_path_buf(),
-                    old_bc,
-                    fptrs,
-                    shared.clone(),
-                );
-
-                // Register the actual reload callback
-                if let Ok(set_cb_fn) =
-                    _native_resolver.resolve_function("std", "hlp_set_reload_callback")
-                {
-                    type FnSetCb = unsafe extern "C" fn(unsafe extern "C" fn(*const u16) -> bool);
-                    let set_cb: FnSetCb = unsafe { std::mem::transmute(set_cb_fn) };
-                    unsafe { set_cb(ash_core::reload::reload_callback) };
-                    eprintln!("[hot-reload] reload callback registered");
-                }
-            }
-        }
         // Pre-warm the tiered JIT module ON THE MAIN THREAD, before any
         // bytecode runs. Module init GC-allocates (constants via
         // hlp_alloc_obj + hlp_gc_register_root, obj runtimes via
@@ -5652,6 +5645,14 @@ impl HLInterpreter {
             return;
         }
         self.apply_reload(native_resolver);
+    }
+
+    /// Apply a reload flagged since a call last returned, if one is: for
+    /// a host that enters the program from outside, between runs, where no
+    /// call of the interpreter's own returns first. Not from inside a
+    /// native the program is in.
+    pub fn poll_reload(&mut self, native_resolver: &NativeFunctionResolver) {
+        self.apply_pending_reload(native_resolver);
     }
 
     #[cold]

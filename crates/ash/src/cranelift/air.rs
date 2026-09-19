@@ -167,6 +167,11 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
         Ok(o) => o,
         Err(e) => return decline(format!("{} failed: {}", e.stage, e.brief())),
     };
+    // What this body copied in, for a reload of one of those callees.
+    crate::reload::note_inlined(
+        func.findex as usize,
+        opt.ir.inline_sites.iter().map(|site| site.callee as usize),
+    );
     let s = &opt.ser;
 
     // Re-gate. The passes only ever remove opcodes, but the serializer
@@ -437,6 +442,10 @@ fn lower_air_codegen(
 
     let opt = air_pipeline::optimized(ctx.air_module(), func)
         .map_err(|e| anyhow::anyhow!("{} failed: {}", e.stage, e.brief()))?;
+    crate::reload::note_inlined(
+        func.findex as usize,
+        opt.ir.inline_sites.iter().map(|site| site.callee as usize),
+    );
 
     let osr_exits = retier_state_for(
         findex,

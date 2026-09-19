@@ -749,10 +749,11 @@ impl HLInterpreter {
             return Err(anyhow!("ToVirtual destination type is unavailable"));
         }
 
-        // The helper allocates. Publish the backing object before entering it;
-        // on return there is no allocation point before the view is installed
-        // in the destination register and becomes part of the live root set.
-        self.sync_gc_scan_roots();
+        // The helper allocates. The backing object is in a published register
+        // before entering it; on return there is no allocation point before
+        // the view is installed in the destination register and becomes part
+        // of the live root set.
+        self.ensure_scan_roots_published();
         type FnToVirtual =
             unsafe extern "C" fn(*mut hl_type, *mut hl::vdynamic) -> *mut hl::vvirtual;
         let to_virtual: FnToVirtual = unsafe { std::mem::transmute(self.fn_to_virtual) };

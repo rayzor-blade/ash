@@ -1611,6 +1611,18 @@ impl HLInterpreter {
         unsafe { set(self.scan_range_buf.as_ptr(), self.scan_range_buf.len()) };
     }
 
+    /// The root table the collector reads, published if it is not already
+    /// live. Frame pushes and pops keep the live table current, so a call
+    /// into code that can collect needs no rebuild unless the table was
+    /// never published or the wide-argument buffer moved. The rebuild
+    /// re-registers the table under the GC lock and the mutator lock, which
+    /// on a call-heavy program is most of what the runtime did per call.
+    fn ensure_scan_roots_published(&mut self) {
+        if !self.scan_live_published || self.wide_call_args.capacity() != self.scan_wide_cap {
+            self.sync_gc_scan_roots();
+        }
+    }
+
     /// Drop the range for a frame about to be popped, if it published one.
     fn scan_roots_pop_frame(&mut self, published: bool) {
         if !published {
@@ -4939,7 +4951,7 @@ impl HLInterpreter {
             ))));
         }
 
-        self.sync_gc_scan_roots();
+        self.ensure_scan_roots_published();
 
         let func_ptr = entry.fn_addr as *mut c_void;
         // `args()`, not the raw array: the array is fixed at eight slots and
@@ -4960,7 +4972,7 @@ impl HLInterpreter {
             // boxing loop fills is already inside a registered scan range.
             self.wide_call_args.clear();
             self.wide_call_args.resize(nargs, NanBoxedValue::null());
-            self.sync_gc_scan_roots();
+            self.ensure_scan_roots_published();
         }
         for index in 0..nargs {
             let arg = args[index];
@@ -4990,9 +5002,9 @@ impl HLInterpreter {
         } else {
             &marshaled_args[..nargs]
         };
-        // Boxing may allocate. Republish the complete interpreted root set
-        // before entering code that can itself trigger a collection.
-        self.sync_gc_scan_roots();
+        // Boxing may allocate, and so may the callee: the interpreted root
+        // set has to be live before either.
+        self.ensure_scan_roots_published();
 
         // One 8-byte word per argument, in the encoding the emitted entry
         // decodes: `value_to_i64` already writes floats as their f64 bits.

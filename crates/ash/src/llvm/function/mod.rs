@@ -1770,7 +1770,9 @@ impl<'ctx> JITModule<'ctx> {
             let bodies: Vec<FunctionValue<'ctx>> = self
                 .module
                 .get_functions()
-                .filter(|f| f.count_basic_blocks() > 0 && f.get_name().to_bytes() != name.as_bytes())
+                .filter(|f| {
+                    f.count_basic_blocks() > 0 && f.get_name().to_bytes() != name.as_bytes()
+                })
                 .collect();
             for f in &bodies {
                 f.set_linkage(inkwell::module::Linkage::Internal);

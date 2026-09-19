@@ -4519,9 +4519,8 @@ impl HLInterpreter {
         // taken the slot: the bead is put back on the interpreter and the
         // ladder promotes it again from the new program.
         if tiered.config.hot_reload && tiered.shared_ctx.arrays.functions_ptrs != 0 {
-            let published = unsafe {
-                *(tiered.shared_ctx.arrays.functions_ptrs as *const usize).add(findex)
-            };
+            let published =
+                unsafe { *(tiered.shared_ctx.arrays.functions_ptrs as *const usize).add(findex) };
             if published != addr {
                 if let Some(bound) = tiered.beads[findex].as_ref() {
                     bound.reset_to_interpreter();

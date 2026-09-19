@@ -199,7 +199,9 @@ pub fn attach_runs(runs: &[(usize, usize, u32)]) {
     for &(start, end, id) in runs {
         let Some(frames) = chain(id) else { continue };
         let at = m.partition_point(|r| r.start <= start);
-        let Some(index) = at.checked_sub(1) else { continue };
+        let Some(index) = at.checked_sub(1) else {
+            continue;
+        };
         let r = m[index];
         if r.size > 0 && start - r.start >= r.size {
             continue;

@@ -69,9 +69,10 @@ impl<'ctx> JITModule<'ctx> {
             self.module.add_basic_value_flag(
                 "Debug Info Version",
                 FlagBehavior::Warning,
-                self.context
-                    .i32_type()
-                    .const_int(u64::from(inkwell::debug_info::debug_metadata_version()), false),
+                self.context.i32_type().const_int(
+                    u64::from(inkwell::debug_info::debug_metadata_version()),
+                    false,
+                ),
             );
             let file = unit.get_file();
             self.lines = Some(ModuleLines {
@@ -105,17 +106,26 @@ impl<'ctx> JITModule<'ctx> {
         );
         function.set_subprogram(scope);
         lines.scope = Some(scope);
-        let location =
-            lines
-                .builder
-                .create_debug_location(self.context, entry, 0, scope.as_debug_info_scope(), None);
+        let location = lines.builder.create_debug_location(
+            self.context,
+            entry,
+            0,
+            scope.as_debug_info_scope(),
+            None,
+        );
         self.builder.set_current_debug_location(location);
     }
 
     /// An AIR position marker: everything emitted from here to the next one
     /// is at this position, in the function it was written in, reached
     /// through the inline sites the marker names.
-    pub(crate) fn lines_mark(&mut self, air: &AirFunction, file: u32, line: u32, site: Option<u32>) {
+    pub(crate) fn lines_mark(
+        &mut self,
+        air: &AirFunction,
+        file: u32,
+        line: u32,
+        site: Option<u32>,
+    ) {
         let Some(lines) = self.lines.as_ref() else {
             return;
         };
@@ -150,10 +160,13 @@ impl<'ctx> JITModule<'ctx> {
             cur = st.parent;
         }
         let id = crate::jit_map::intern_chain(frames);
-        let location =
-            lines
-                .builder
-                .create_debug_location(self.context, id, 0, scope.as_debug_info_scope(), None);
+        let location = lines.builder.create_debug_location(
+            self.context,
+            id,
+            0,
+            scope.as_debug_info_scope(),
+            None,
+        );
         self.builder.set_current_debug_location(location);
     }
 
@@ -208,7 +221,11 @@ unsafe extern "C" {
     );
 }
 
-unsafe extern "C" fn on_object_loaded(_: *mut c_void, sections: *const AshLoadedSection, count: usize) {
+unsafe extern "C" fn on_object_loaded(
+    _: *mut c_void,
+    sections: *const AshLoadedSection,
+    count: usize,
+) {
     let mut loaded = Vec::with_capacity(count);
     for i in 0..count {
         // SAFETY: the listener hands `count` entries whose names live for

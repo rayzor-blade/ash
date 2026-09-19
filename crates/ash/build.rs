@@ -282,8 +282,8 @@ fn llvm_config(args: &[&str]) -> Option<String> {
 /// is refused rather than emitted wrong and a compiled frame reports its
 /// function's entry line, which is what the cfg carries.
 fn build_wasm_exception_shim() {
-    let cpp = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
-        .join("cpp");
+    let cpp =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join("cpp");
     let src = cpp.join("wasm_exception_model.cpp");
     let sections = cpp.join("jit_sections.cpp");
     println!("cargo:rerun-if-changed={}", src.display());

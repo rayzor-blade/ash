@@ -579,11 +579,7 @@ impl TieredSharedCtx {
     /// stack. Every memo keyed by findex is dropped, because a findex may
     /// name a different function now.
     #[cfg_attr(not(feature = "llvm"), allow(unused_variables))]
-    pub(crate) fn reload(
-        &self,
-        llvm: &mut LlvmState,
-        new_bytecode: Arc<DecodedBytecode>,
-    ) {
+    pub(crate) fn reload(&self, llvm: &mut LlvmState, new_bytecode: Arc<DecodedBytecode>) {
         let old_bytecode = std::mem::replace(
             &mut *self.bytecode.lock().expect("bytecode mutex poisoned"),
             Arc::clone(&new_bytecode),
@@ -627,13 +623,22 @@ impl TieredSharedCtx {
         for set in [&self.llvm_done, &self.llvm_failed] {
             set.lock().expect("tier memo poisoned").clear();
         }
-        self.hot_loop_pcs.lock().expect("hot_loop_pcs mutex poisoned").clear();
-        self.live_frame.lock().expect("live_frame mutex poisoned").clear();
+        self.hot_loop_pcs
+            .lock()
+            .expect("hot_loop_pcs mutex poisoned")
+            .clear();
+        self.live_frame
+            .lock()
+            .expect("live_frame mutex poisoned")
+            .clear();
         self.called_from_loop
             .lock()
             .expect("called_from_loop mutex poisoned")
             .clear();
-        self.pending_osr.lock().expect("pending_osr mutex poisoned").clear();
+        self.pending_osr
+            .lock()
+            .expect("pending_osr mutex poisoned")
+            .clear();
         self.osr_image_regs
             .lock()
             .expect("osr_image_regs mutex poisoned")
@@ -642,7 +647,10 @@ impl TieredSharedCtx {
             .lock()
             .expect("uniform_entries mutex poisoned")
             .clear();
-        self.worker_beads.lock().expect("worker_beads mutex poisoned").clear();
+        self.worker_beads
+            .lock()
+            .expect("worker_beads mutex poisoned")
+            .clear();
         forget_refusals();
     }
 }
@@ -1859,7 +1867,11 @@ pub(crate) fn osr_plan_for(
 
 #[cfg(feature = "llvm")]
 /// Returns how many exits were published by this call.
-fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, findex: usize) -> usize {
+fn publish_retier_entries(
+    ctx: &TieredSharedCtx,
+    module: &mut JITModule<'_>,
+    findex: usize,
+) -> usize {
     let program = ctx.bytecode();
     let mut published = 0;
     for site in ash_core::cranelift::retier_targets(findex, &*program as *const _ as usize) {

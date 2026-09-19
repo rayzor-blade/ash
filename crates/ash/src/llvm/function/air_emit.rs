@@ -504,10 +504,7 @@ impl<'ctx> JITModule<'ctx> {
                         .into_int_value();
                     let low = self.builder.build_and(
                         current,
-                        int_ty.const_int(
-                            (air::v2::passes::stripmine::STRIP - 1) as u64,
-                            false,
-                        ),
+                        int_ty.const_int((air::v2::passes::stripmine::STRIP - 1) as u64, false),
                         "air_strip_low",
                     )?;
                     let mid = self.builder.build_int_compare(

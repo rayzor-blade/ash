@@ -932,7 +932,7 @@ impl HLInterpreter {
                 );
             }
             let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-            self.dyn_set_field_checked(                bytecode,                obj_ptr,                hfield,                src_val,                src_kind,                src_type_ptr,            )?;
+            self.dyn_set_field_checked(bytecode, obj_ptr, hfield, src_val, src_kind, src_type_ptr)?;
         }
 
         Ok(StepResult::Continue)
@@ -1101,7 +1101,14 @@ impl HLInterpreter {
                     {
                         let obj_ptr = obj_val.as_ptr() as *mut c_void;
                         let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                        self.dyn_set_field_checked(                            bytecode,                            obj_ptr,                            hfield,                            src_val,                            src_kind,                            src_type_ptr,                        )?;
+                        self.dyn_set_field_checked(
+                            bytecode,
+                            obj_ptr,
+                            hfield,
+                            src_val,
+                            src_kind,
+                            src_type_ptr,
+                        )?;
                     }
                     if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
@@ -1115,7 +1122,14 @@ impl HLInterpreter {
             {
                 let obj_ptr = obj_val.as_ptr() as *mut c_void;
                 let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                self.dyn_set_field_checked(                    bytecode,                    obj_ptr,                    hfield,                    src_val,                    src_kind,                    src_type_ptr,                )?;
+                self.dyn_set_field_checked(
+                    bytecode,
+                    obj_ptr,
+                    hfield,
+                    src_val,
+                    src_kind,
+                    src_type_ptr,
+                )?;
             }
         }
 

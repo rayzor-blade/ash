@@ -526,9 +526,12 @@ pub unsafe extern "C" fn reload_callback(_path_utf16: *const u16) -> bool {
 }
 
 /// Check and clear the pending reload flag. Called by the interpreter after
-/// returning from native calls.
+/// every call returns, so the common answer is a plain load; the swap runs
+/// only once a reload is pending.
+#[inline]
 pub fn take_reload_pending() -> bool {
-    RELOAD_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel)
+    RELOAD_PENDING.load(std::sync::atomic::Ordering::Acquire)
+        && RELOAD_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
 /// Execute the deferred reload and return the new bytecode (for interpreter update).

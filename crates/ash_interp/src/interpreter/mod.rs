@@ -5556,10 +5556,19 @@ impl HLInterpreter {
     /// then point every body the interpreter resolves from now on at the
     /// new bytecode. Polled after a native call returns, on both walkers,
     /// since `hl.Api.checkReload()` is the native that flags it.
+    /// Apply a reload the watcher flagged, if there is one. Polled after
+    /// every call returns, so the no-reload answer is one load.
+    #[inline]
     fn apply_pending_reload(&mut self, native_resolver: &NativeFunctionResolver) {
         if !ash_core::reload::take_reload_pending() {
             return;
         }
+        self.apply_reload(native_resolver);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn apply_reload(&mut self, native_resolver: &NativeFunctionResolver) {
         // The top tier's lock is held from before the function table is
         // patched until the brokers have been pointed at the new program. A
         // compile in flight finishes first and installs a body the patch then

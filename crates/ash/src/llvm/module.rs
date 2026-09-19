@@ -1712,8 +1712,6 @@ impl<'ctx> JITModule<'ctx> {
         &mut self,
         ty: &HLType,
     ) -> Result<AnyTypeEnum<'ctx>> {
-        let types = self.bytecode.types.clone();
-        let strings = self.bytecode.strings.clone();
         match ty.kind {
             hl_type_kind_HVOID => Ok(self.context.void_type().into()),
             hl_type_kind_HUI8 => Ok(self.context.i8_type().into()),

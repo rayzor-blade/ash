@@ -36,7 +36,12 @@ pub const STRIP: i32 = 256;
 /// measuring what the test is worth; safe to run with.
 pub fn enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CELL.get_or_init(|| !matches!(std::env::var("ASH_STRIP_MINE").as_deref(), Ok("0") | Ok("off")))
+    *CELL.get_or_init(|| {
+        !matches!(
+            std::env::var("ASH_STRIP_MINE").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
 }
 
 pub struct StripMine;

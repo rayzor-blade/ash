@@ -1,7 +1,7 @@
 # AIR loop vectorization
 
-`air::v2::passes::widen` widens loops by four with a scalar epilogue. O3
-only. All tiers and the SSA walker execute the vector instructions;
+`air::v2::passes::widen` widens loops to one machine vector per trip, with
+a scalar epilogue. O3 only. All tiers and the SSA walker execute the vector instructions;
 `serialize` scalarizes them back, so the opcode interpreter never sees a
 vector.
 
@@ -22,25 +22,33 @@ addressing (`i << 2`, `i + k`, `i * c`), contiguity from the element's byte
 width, and integer reductions closed by a `VecReduce` on a block spliced
 onto the exit edge.
 
-The width gate is `lanes_fit`: `element_bytes * 4 <= 16`. An `i64` at four
-lanes is 256 bits, which no 128-bit register holds.
+The lane count is one per loop, from the element width: as many lanes as
+fill 128 bits, so bytes widen by 16, shorts by 8, ints by 4 and 64-bit
+elements by 2. `Lanes` in `widen.rs` fixes it from the first element and
+refuses a loop whose elements differ in width (`MixedLaneWidth`) or whose
+width does not divide the vector (`LaneTooWide`). A byte or short access
+into a wider register is refused too (`AccessNarrowerThanValue`): the lane
+is the register, and the load that extends as it goes is not an instruction
+the IR has.
 
 ## Soundness rules
 
 Each of these produced IR that verified and a wrong answer at run time.
 
 1. **Only a loop-invariant scalar may be broadcast.** Splatting a term that
-   varies per lane duplicates lane zero four times.
+   varies per lane duplicates lane zero across the vector.
 2. **Every use of a widened value must be one the emit stage rewrites.** A
    widened value reaching a phi, a field store, or anything past the loop
    still names a definition that was just replaced.
 3. **What follows the loop is the remainder's value, not the vector loop's.**
-   The vector loop stops at `start + (n & ~3)`; `return i` after it is up to
-   three short unless it reads the epilogue's counter.
-4. **The IR must not hold a vector the machine cannot.** A widened `i64x4`
-   made both backends refuse the function, and because a tier-0 refusal was
-   not remembered the function was re-lowered on every call. Totality of
-   lowering covers types, not only instructions.
+   The vector loop stops at `start + (n & ~(lanes - 1))`; `return i` after
+   it is up to `lanes - 1` short unless it reads the epilogue's counter.
+4. **The IR must not hold a vector the machine cannot.** A widened `i64x4`,
+   from the days of a fixed four lanes, made both backends refuse the
+   function, and because a tier-0 refusal was not remembered the function
+   was re-lowered on every call. Totality of lowering covers types, not only
+   instructions; the per-width lane count is what keeps every vector at 128
+   bits.
 
 Two more that outlive this pass: a pass that deletes a definition calls
 `compact_values`, and a pass that mints a constant is only safe for
@@ -88,20 +96,20 @@ CLIF holds no vector type.
 
 1. If-conversion under a lane mask — retires the bounds-check diamond and
    lets reductions over array reads widen.
-2. Per-width vector factor (`f64x2`, `i64x2`) so 64-bit elements widen by two
-   instead of being refused.
-3. Hoist grow-on-demand out of an array write's slow path, which needs
+2. Hoist grow-on-demand out of an array write's slow path, which needs
    something to vouch that the callee is "ensure capacity".
-4. Alias disambiguation strong enough to separate a store from an access
+3. Alias disambiguation strong enough to separate a store from an access
    through an unrelated base, or a runtime overlap guard.
-5. Masked, divergent loops last.
+4. Masked, divergent loops last.
 
 ## Testing
 
 `o3_preserves_semantics` executes a widened loop with an epilogue against the
 unoptimized version; `TestVectorize` in the parity matrix covers lengths zero
-through twelve at width four. Float reduction reassociation changes results
-and needs the same explicit policy decision FMA contraction has. Test the
-wide element types: a widened stdlib loop is instantiated per element type,
-so `Array<Int>` and `Array<haxe.Int64>` are different code, and rule 4 was
+through twelve at four lanes, and `TestVecLanes` runs fills, in-place
+arithmetic and a reduction over bytes, shorts, 64-bit ints and doubles on
+every engine. Float reduction reassociation changes results and needs the
+same explicit policy decision FMA contraction has. Test the wide element
+types: a widened stdlib loop is instantiated per element type, so
+`Array<Int>` and `Array<haxe.Int64>` are different code, and rule 4 was
 found in the second.

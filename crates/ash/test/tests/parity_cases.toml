@@ -662,6 +662,20 @@ normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
 
+# The same loops over bytes, shorts, 64-bit ints and doubles: 16, 8, 2 and 2
+# lanes to the vector. The lane count comes from the element width, and
+# every width has to address, splat, add and reduce on every engine.
+[[case]]
+name = "TestVecLanes"
+main = "TestVecLanes"
+hl = "test_vec_lanes.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true
+
 # hl.Ref.offset over NativeArray data: the offset counts elements of the
 # ref's parameter type, so every element width gets its own array. Reads
 # and writes through the ref go into raw array memory, not a register slot.

@@ -35,9 +35,14 @@ use crate::v2::vectorize::{self, LoopPlan, Reduction, VecOptions};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
-/// Lanes per vector. Four 32-bit lanes is 128 bits, which every target ash
-/// runs on has.
-pub const VF: u32 = 4;
+/// Lanes per vector for an element `bytes` wide: as many as fill one
+/// machine vector. One count per loop, because lane `i` of every vector in
+/// it has to be the same iteration.
+pub fn lanes_for(bytes: u32) -> Option<u32> {
+    (bytes != 0 && MACHINE_VECTOR_BYTES.is_multiple_of(bytes))
+        .then(|| MACHINE_VECTOR_BYTES / bytes)
+        .filter(|n| *n >= 2)
+}
 
 /// Why a *widenable* loop was still not widened. Distinct from
 /// [`vectorize::Refusal`], which says why a loop was not widenable.
@@ -72,26 +77,30 @@ pub enum Decline {
     /// A scalar operand that changes every iteration and would have to be
     /// broadcast across the lanes, which computes a different thing.
     VaryingBroadcast(ValueId),
-    /// An element so narrow that VF of them do not fill a machine vector. A
-    /// backend lowers the vector widths its ISA names; a 32- or 64-bit vector
-    /// is not one of them on aarch64, and reaches the backend as an ISLE
-    /// "no rule matched" or a splat whose destination is not a vector.
-    LanesBelowMachineVector(TypeRef),
+    /// A byte or short access into a register wider than the memory it
+    /// reads or writes. A vector of the register's width would cover more
+    /// memory than the lanes it holds; the load that extends each lane as
+    /// it goes is an instruction the IR does not have.
+    AccessNarrowerThanValue(ValueId),
+    /// Two widened values of different widths. The lane count is one per
+    /// loop, and a count that fills a machine vector with the wider element
+    /// underfills it with the narrower; a backend lowers only the widths its
+    /// ISA names.
+    MixedLaneWidth(TypeRef, TypeRef),
     /// The induction closes its cycle with a form `retime_induction` cannot
     /// rescale. The analysis accepts `Incr`/`Decr` as a stride of one, but the
     /// transform only rewrites the constant of a `BinOp::Add`, so anything
-    /// else leaves the step at one and the widened loop runs VF times too
+    /// else leaves the step at one and the widened loop runs lanes times too
     /// many -- silently, and for a reduction that is a wrong answer rather
     /// than a wrong address.
     UnscalableInductionStep(ValueId),
-    /// An element so wide that VF of them exceed the widest vector the
-    /// weakest tier lowers. A 64-bit lane by four is 256 bits; Cranelift's
-    /// backends -- every ISA, not just aarch64 -- accept a vector only when
-    /// `ty.bits() <= 128` (`isa/*/inst/mod.rs`, the Wasm-SIMD set), and one
-    /// asked for more does not degrade, it refuses the whole function, which
-    /// the ladder then re-proposed without end. The game froze on exactly
-    /// this. LLVM would have split it; the rule is what every tier can take,
-    /// and on Apple silicon (NEON, no SVE) it is the hardware ceiling too.
+    /// An element that does not divide the widest vector the weakest tier
+    /// lowers. Cranelift's backends -- every ISA, not just aarch64 -- accept
+    /// a vector only when `ty.bits() <= 128` (`isa/*/inst/mod.rs`, the
+    /// Wasm-SIMD set), and one asked for more does not degrade, it refuses
+    /// the whole function, which the ladder then re-proposed without end.
+    /// LLVM would have split it; the rule is what every tier can take, and
+    /// on Apple silicon (NEON, no SVE) it is the hardware ceiling too.
     LaneTooWide(TypeRef),
     NonUnitStride(i64),
     TooSmall(usize),
@@ -207,8 +216,16 @@ pub fn explain(
     vectorize::analyze_with(f, &opts, &|i| info.int_value(i))
         .into_iter()
         .filter(|p| p.vectorizable())
-        .map(|p| (p.header, check(f, &p, &opts, info)))
+        .map(|p| (p.header, check(f, &p, &opts, info).map(|c| c.trips)))
         .collect()
+}
+
+/// What `check` establishes for a loop it accepts.
+struct Checked {
+    /// The trip count when every term is a compile-time constant.
+    trips: Option<i64>,
+    /// The lane count the loop's elements fixed.
+    lanes: Lanes,
 }
 
 /// The constant an `Int` defines, resolved through the pool.
@@ -270,7 +287,7 @@ fn check(
     plan: &LoopPlan,
     opts: &VecOptions,
     info: &dyn crate::v2::module::ModuleInfo,
-) -> Result<Option<i64>, Decline> {
+) -> Result<Checked, Decline> {
     for r in &plan.reductions {
         // A float accumulation vectorizes only by reassociating it, which
         // changes the answer. The analysis already refuses those unless the
@@ -295,9 +312,20 @@ fn check(
     // a step of 1 is back-to-back; every other kind indexes in BYTES, where
     // back-to-back is the element's own width -- HL scales those itself, so
     // `a[i]` on an Int array arrives here as `i << 2` and steps by 4.
+    let mut lanes = Lanes::default();
     for a in &plan.accesses {
         let size = info.type_size(a.elem);
-        lanes_fit(a.elem, size)?;
+        lanes.fit(a.elem, size)?;
+        // The lane is the register: a byte access has to hold its byte in a
+        // byte-wide register for the vector load to be the same bytes.
+        let memory = match a.kind {
+            MemAccess::I8 => Some(1),
+            MemAccess::I16 => Some(2),
+            MemAccess::Mem | MemAccess::Array => size,
+        };
+        if memory != size {
+            return Err(Decline::AccessNarrowerThanValue(a.at));
+        }
         match a.contiguous_stride(size) {
             Some(want) if want == a.stride => {}
             Some(_) => return Err(Decline::NonUnitStride(a.stride)),
@@ -306,15 +334,16 @@ fn check(
     }
     for r in &plan.reductions {
         let ty = f.value_ty(r.phi);
-        lanes_fit(ty, info.type_size(ty))?;
+        lanes.fit(ty, info.type_size(ty))?;
     }
+    let vf = lanes.count().ok_or(Decline::TooSmall(plan.body_size))?;
     // A constant trip count that divides the width needs no remainder
     // handling at all. Anything else gets a scalar epilogue, which is where
     // the leftover iterations run -- so a runtime length is no longer a
     // refusal, but it does require the step to be 1: the epilogue's entry
-    // index is `start + (n & ~(VF-1))`, and that arithmetic is only this
+    // index is `start + (n & ~(vf-1))`, and that arithmetic is only this
     // simple for a unit step.
-    // `retime_induction` multiplies the step by VF by giving the `BinOp::Add`
+    // `retime_induction` multiplies the step by the lane count by giving the `BinOp::Add`
     // that closes the induction cycle a fresh constant operand. It has no
     // case for `UnOp::Incr`/`Decr`, which the analysis does accept, so refuse
     // here rather than widen a loop whose step will not move.
@@ -323,12 +352,12 @@ fn check(
     {
         return Err(Decline::UnscalableInductionStep(iv));
     }
-    match const_trip_count(f, plan, info) {
+    let trips = match const_trip_count(f, plan, info) {
         Some(t) => {
-            if t % VF as i64 != 0 {
+            if t % vf as i64 != 0 {
                 plan.bound.ok_or(Decline::TripCountNotConstant)?;
             }
-            Ok(Some(t))
+            Some(t)
         }
         None => {
             let (_, step) = plan.induction.ok_or(Decline::TripCountNotConstant)?;
@@ -336,9 +365,10 @@ fn check(
                 return Err(Decline::EpilogueNeedsUnitStep(step));
             }
             plan.bound.ok_or(Decline::TripCountNotConstant)?;
-            Ok(None)
+            None
         }
-    }
+    };
+    Ok(Checked { trips, lanes })
 }
 
 /// A guard this transform can prove for a whole vector range.
@@ -508,30 +538,36 @@ fn identity_of(op: BinOp) -> Option<i32> {
 /// binds the IR is the tier that must lower everything.
 const MACHINE_VECTOR_BYTES: u32 = 16;
 
-/// Refuse an element that VF lanes of would overflow a machine vector, or
-/// whose width nobody can state.
-/// `lanes_fit` under a name the tests can reach.
-#[cfg(test)]
-pub fn lanes_fit_for_test(ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
-    lanes_fit(ty, size)
+/// The one lane count a loop's widened values agree on.
+///
+/// Exactly one machine vector per value, not merely no more than one. A
+/// backend lowers the widths its ISA names and nothing else: on aarch64 that
+/// is the 128-bit set, so `i8x4` (4 bytes) and `i16x4` (8) are as
+/// unlowerable as `i64x4` (32) is oversized. Cranelift answers a 32-bit
+/// vector with "no rule matched for term vector_size" from inside ISLE, and
+/// the LLVM own-module path reports the splat's destination as not a vector.
+#[derive(Default)]
+pub struct Lanes {
+    /// The element that fixed the count, and the count.
+    fixed: Option<(TypeRef, u32)>,
 }
 
-fn lanes_fit(ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
-    match size {
-        // Exactly one machine vector, not merely no more than one. A backend
-        // lowers the widths its ISA names and nothing else: on aarch64 that is
-        // the 128-bit set, so `i8x4` (4 bytes) and `i16x4` (8) are as
-        // unlowerable as `i64x4` (32) is oversized. Cranelift answers a
-        // 32-bit vector with "no rule matched for term vector_size" from
-        // inside ISLE, and the LLVM own-module path reports the splat's
-        // destination as not a vector. At VF 4 this admits 4-byte elements
-        // alone; a per-width VF would admit the rest and is its own change.
-        Some(bytes) if u64::from(bytes) * (VF as u64) == u64::from(MACHINE_VECTOR_BYTES) => Ok(()),
-        Some(bytes) if u64::from(bytes) * (VF as u64) > u64::from(MACHINE_VECTOR_BYTES) => {
-            Err(Decline::LaneTooWide(ty))
+impl Lanes {
+    /// Take `ty`, `size` bytes wide, as one more element the loop widens.
+    pub fn fit(&mut self, ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
+        let bytes = size.ok_or(Decline::UnknownElementSize(ty))?;
+        let n = lanes_for(bytes).ok_or(Decline::LaneTooWide(ty))?;
+        match self.fixed {
+            None => self.fixed = Some((ty, n)),
+            Some((first, m)) if m != n => return Err(Decline::MixedLaneWidth(first, ty)),
+            Some(_) => {}
         }
-        Some(_) => Err(Decline::LanesBelowMachineVector(ty)),
-        None => Err(Decline::UnknownElementSize(ty)),
+        Ok(())
+    }
+
+    /// The count, once an element has fixed it.
+    pub fn count(&self) -> Option<u32> {
+        self.fixed.map(|(_, n)| n)
     }
 }
 
@@ -553,15 +589,16 @@ fn widen_loop(
     opts: &VecOptions,
     info: &dyn crate::v2::module::ModuleInfo,
 ) -> Result<(), Decline> {
-    let trips = check(f, plan, opts, info)?;
+    let Checked { trips, mut lanes } = check(f, plan, opts, info)?;
+    let vf = lanes.count().ok_or(Decline::TooSmall(plan.body_size))? as u16;
     let (iv, step) = plan.induction.ok_or(Decline::TripCountNotConstant)?;
 
     // A trip count that is not a known multiple of the width leaves a
     // remainder, and the remainder runs scalar. The copy has to be taken
     // BEFORE anything below touches the body -- it is a copy of the scalar
     // loop, guards and all.
-    let epilogue = if !trips.is_some_and(|t| t % VF as i64 == 0) {
-        Some(prepare_epilogue(f, plan, iv)?)
+    let epilogue = if !trips.is_some_and(|t| t % vf as i64 == 0) {
+        Some(prepare_epilogue(f, plan, iv, vf)?)
     } else {
         None
     };
@@ -608,15 +645,15 @@ fn widen_loop(
     let mut widened: HashMap<ValueId, ValueId> = HashMap::new();
     for a in plan.accesses.iter().filter(|a| !a.is_store) {
         let (ty, reg) = (f.value_ty(a.at), f.value_reg(a.at));
-        let w = f.new_vector_value(ty, reg, VF as u16);
+        let w = f.new_vector_value(ty, reg, vf);
         widened.insert(a.at, w);
     }
-    // An accumulator is a vector too: VF partial sums that collapse into one
-    // after the loop. Seeding the phi is enough -- the growth below carries
-    // it through the `acc op x` that closes the cycle.
+    // An accumulator is a vector too: one partial sum per lane that collapse
+    // into one after the loop. Seeding the phi is enough -- the growth below
+    // carries it through the `acc op x` that closes the cycle.
     for r in &plan.reductions {
         let (ty, reg) = (f.value_ty(r.phi), f.value_reg(r.phi));
-        let w = f.new_vector_value(ty, reg, VF as u16);
+        let w = f.new_vector_value(ty, reg, vf);
         widened.insert(r.phi, w);
     }
     loop {
@@ -631,7 +668,7 @@ fn widen_loop(
                 }
                 if widened.contains_key(&a) || widened.contains_key(&rb) {
                     let (ty, reg) = (f.value_ty(dst), f.value_reg(dst));
-                    let w = f.new_vector_value(ty, reg, VF as u16);
+                    let w = f.new_vector_value(ty, reg, vf);
                     widened.insert(dst, w);
                     grew = true;
                 }
@@ -642,13 +679,14 @@ fn widen_loop(
         }
     }
 
-    // Every value about to become a vector has to fit one, and this is the
-    // first point at which that set is complete -- the growth above can pull
-    // in a value no access or accumulator named. `check` screened what it
-    // could see; this screens what widening actually produces.
+    // Every value about to become a vector has to be the loop's lane width,
+    // and this is the first point at which that set is complete -- the
+    // growth above can pull in a value no access or accumulator named.
+    // `check` screened what it could see; this screens what widening
+    // actually produces.
     for &v in widened.keys() {
         let ty = f.value_ty(v);
-        lanes_fit(ty, info.type_size(ty))?;
+        lanes.fit(ty, info.type_size(ty))?;
     }
 
     // The induction variable must stay scalar: it addresses the vector.
@@ -759,7 +797,7 @@ fn widen_loop(
                     // A stored value that is not itself widened is loop
                     // invariant -- the analysis classified it, or the access
                     // would not be here -- so every lane gets the same one.
-                    let ws = vector_operand(f, &mut out, &mut widened, *src);
+                    let ws = vector_operand(f, &mut out, &mut widened, *src, vf);
                     out.push(Instr::VecStore {
                         kind: *kind,
                         base: *base,
@@ -769,8 +807,8 @@ fn widen_loop(
                     });
                 }
                 Instr::BinOp { op, dst, a, b: rb } if widened.contains_key(dst) => {
-                    let wa = vector_operand(f, &mut out, &mut widened, *a);
-                    let wb = vector_operand(f, &mut out, &mut widened, *rb);
+                    let wa = vector_operand(f, &mut out, &mut widened, *a, vf);
+                    let wb = vector_operand(f, &mut out, &mut widened, *rb, vf);
                     out.push(Instr::VecBinOp {
                         op: *op,
                         dst: widened[dst],
@@ -784,7 +822,7 @@ fn widen_loop(
         f.blocks[b.idx()].instrs = out;
     }
 
-    retime_induction(f, plan, iv, step, info);
+    retime_induction(f, plan, iv, step, vf, info);
 
     // Each accumulator's header phi becomes the vector one, seeded from a
     // splat of the identity, and the scalar total is rebuilt on the way out.
@@ -843,7 +881,7 @@ fn splice_exit_block(f: &mut Function, plan: &LoopPlan) -> Result<BlockId, Decli
     Ok(mid)
 }
 
-/// Turn one scalar accumulator into VF partial ones and put them back
+/// Turn one scalar accumulator into one partial per lane and put them back
 /// together after the loop.
 ///
 /// The lanes start at the operation's identity rather than at the loop's own
@@ -860,6 +898,7 @@ fn collapse_reduction(
     info: &dyn crate::v2::module::ModuleInfo,
 ) -> Result<ValueId, Decline> {
     let vacc = *widened.get(&r.phi).ok_or(Decline::HasReduction)?;
+    let vf = f.value_lanes(vacc);
     let vnext = *widened.get(&r.next).ok_or(Decline::HasReduction)?;
     let (ty, reg) = (f.value_ty(r.phi), f.value_reg(r.phi));
     let body = loop_blocks(f, plan.header);
@@ -886,7 +925,7 @@ fn collapse_reduction(
         let reg = f.new_reg(ty);
         f.new_value(ty, reg)
     };
-    let vinit = f.new_vector_value(ty, reg, VF as u16);
+    let vinit = f.new_vector_value(ty, reg, vf);
     f.blocks[entry_block.idx()].instrs.extend([
         Instr::Int {
             dst: ident_v,
@@ -985,9 +1024,16 @@ struct Epilogue {
     pre: BlockId,
     /// The induction's value on that edge, i.e. where counting starts.
     entry_iv: ValueId,
+    /// Lanes per vector, which is the stride the vector loop leaves off at.
+    lanes: u16,
 }
 
-fn prepare_epilogue(f: &Function, plan: &LoopPlan, iv: ValueId) -> Result<Epilogue, Decline> {
+fn prepare_epilogue(
+    f: &Function,
+    plan: &LoopPlan,
+    iv: ValueId,
+    lanes: u16,
+) -> Result<Epilogue, Decline> {
     let bound = plan.bound.ok_or(Decline::TripCountNotConstant)?;
     let mut body: Vec<BlockId> = loop_blocks(f, plan.header).into_iter().collect();
     if body.is_empty() {
@@ -1038,10 +1084,11 @@ fn prepare_epilogue(f: &Function, plan: &LoopPlan, iv: ValueId) -> Result<Epilog
         body,
         pre,
         entry_iv,
+        lanes,
     })
 }
 
-/// Bound the widened loop at `start + (n & ~(VF-1))` and run the leftover
+/// Bound the widened loop at `start + (n & ~(vf-1))` and run the leftover
 /// iterations in a scalar copy of the body.
 ///
 /// Without this a vectorizer only ever handles loops whose length divides the
@@ -1065,12 +1112,13 @@ fn wire_epilogue(
         body,
         pre,
         entry_iv,
+        lanes: vf,
     } = epi;
 
     let ity = f.value_ty(iv);
-    let mask = f.intern_int(!(VF as i32 - 1), |i| info.int_value(i));
+    let mask = f.intern_int(!(vf as i32 - 1), |i| info.int_value(i));
 
-    // n = limit - start ; vn = n & ~(VF-1) ; vend = start + vn
+    // n = limit - start ; vn = n & ~(vf-1) ; vend = start + vn
     let mut fresh = || {
         let reg = f.new_reg(ity);
         f.new_value(ity, reg)
@@ -1224,12 +1272,13 @@ fn vector_operand(
     out: &mut Vec<Instr>,
     widened: &mut HashMap<ValueId, ValueId>,
     v: ValueId,
+    vf: u16,
 ) -> ValueId {
     if let Some(w) = widened.get(&v) {
         return *w;
     }
     let (ty, reg) = (f.value_ty(v), f.value_reg(v));
-    let w = f.new_vector_value(ty, reg, VF as u16);
+    let w = f.new_vector_value(ty, reg, vf);
     out.push(Instr::VecSplat { dst: w, src: v });
     widened.insert(v, w);
     w
@@ -1363,12 +1412,13 @@ fn retime_induction(
     plan: &LoopPlan,
     iv: ValueId,
     step: i64,
+    vf: u16,
     info: &dyn crate::v2::module::ModuleInfo,
 ) {
     let Some((blk, at, old)) = induction_step_site(f, plan, iv, step, info) else {
         return;
     };
-    let want = (step * VF as i64) as i32;
+    let want = (step * vf as i64) as i32;
     let idx = f.intern_int(want, |i| info.int_value(i));
     let fresh = {
         let ty = f.value_ty(old);

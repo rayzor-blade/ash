@@ -6600,30 +6600,194 @@ fn widening_emits_vector_instructions_that_verify() {
     );
 }
 
-/// A byte element must not be widened at VF 4: `i8x4` is 32 bits, and a
-/// backend names the widths its ISA has -- on aarch64 the 128-bit set. The
-/// lane count has to come from the element width (rayzor's Cranelift backend
-/// maps I8 to 16 lanes, I16 to 8, I32 to 4, I64 to 2, every one 128 bits),
-/// which ash does not do yet, so the only sound answer for now is to refuse.
+/// The lane count comes from the element width: as many lanes as fill one
+/// machine vector, so every width lowers to a type the backends name --
+/// I8 to 16 lanes, I16 to 8, I32 to 4, I64 to 2, every one 128 bits. A
+/// width that does not divide the vector, or fills it alone, has no count.
 #[test]
-fn an_element_that_does_not_fill_a_machine_vector_is_refused() {
-    use super::passes::widen::{Decline, lanes_fit_for_test};
-    // 4-byte element, VF 4: exactly 128 bits.
-    assert!(lanes_fit_for_test(TypeRef(3), Some(4)).is_ok());
-    // 1- and 2-byte elements underfill it.
+fn the_lane_count_comes_from_the_element_width() {
+    use super::passes::widen::{Decline, Lanes, lanes_for};
+    assert_eq!(lanes_for(1), Some(16));
+    assert_eq!(lanes_for(2), Some(8));
+    assert_eq!(lanes_for(4), Some(4));
+    assert_eq!(lanes_for(8), Some(2));
+    assert_eq!(lanes_for(16), None);
+    assert_eq!(lanes_for(3), None);
+    assert_eq!(lanes_for(32), None);
+    assert_eq!(lanes_for(0), None);
+
+    // One count per loop: the first element fixes it and a second of another
+    // width is refused, whichever order they come in.
+    let mut lanes = Lanes::default();
+    assert_eq!(lanes.count(), None);
+    lanes.fit(TypeRef(1), Some(1)).unwrap();
+    lanes.fit(TypeRef(2), Some(1)).unwrap();
+    assert_eq!(lanes.count(), Some(16));
     assert!(matches!(
-        lanes_fit_for_test(TypeRef(3), Some(1)),
-        Err(Decline::LanesBelowMachineVector(_))
+        lanes.fit(TypeRef(3), Some(4)),
+        Err(Decline::MixedLaneWidth(TypeRef(1), TypeRef(3)))
+    ));
+    let mut lanes = Lanes::default();
+    assert!(matches!(
+        lanes.fit(TypeRef(9), None),
+        Err(Decline::UnknownElementSize(TypeRef(9)))
     ));
     assert!(matches!(
-        lanes_fit_for_test(TypeRef(3), Some(2)),
-        Err(Decline::LanesBelowMachineVector(_))
+        lanes.fit(TypeRef(9), Some(32)),
+        Err(Decline::LaneTooWide(TypeRef(9)))
     ));
-    // 8 bytes overflows it, as before.
-    assert!(matches!(
-        lanes_fit_for_test(TypeRef(3), Some(8)),
-        Err(Decline::LaneTooWide(_))
-    ));
+}
+
+/// The fill loop over elements `bytes` wide, widened: the vector values
+/// carry `lanes` lanes and the induction steps by that many per trip.
+fn widen_fill_by_width(bytes: u32, lanes: u16) {
+    struct Info(u32);
+    impl ModuleInfo for Info {
+        fn int_value(&self, idx: usize) -> Option<i32> {
+            WidenInfo.int_value(idx)
+        }
+        fn int_pool_len(&self) -> usize {
+            WidenInfo.int_pool_len()
+        }
+        fn type_size(&self, _ty: TypeRef) -> Option<u32> {
+            Some(self.0)
+        }
+    }
+    let info = Info(bytes);
+    let (ops, regs) = widen_fixture();
+    let mut f = lower_with(&ops, &regs, &info).expect("lower");
+    let pass = super::passes::widen::Widen { info: &info };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(
+        stats.replaced,
+        1,
+        "{bytes}-byte fill not widened:\n{}",
+        f.dump()
+    );
+    verify(&f).unwrap_or_else(|e| panic!("verify after widen: {e}\n{}", f.dump()));
+    let vectors: Vec<u16> = f
+        .values
+        .iter()
+        .map(|v| v.lanes)
+        .filter(|l| *l > 1)
+        .collect();
+    assert!(!vectors.is_empty(), "no vector value:\n{}", f.dump());
+    assert!(
+        vectors.iter().all(|l| *l == lanes),
+        "{bytes}-byte lanes by {vectors:?}, want {lanes}:\n{}",
+        f.dump()
+    );
+    // The step: every `Int` the pass minted for the induction is `lanes`.
+    let minted: Vec<i32> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::Int { idx, .. } => f.int_at(*idx, |i| info.int_value(i)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        minted.contains(&(lanes as i32)),
+        "no step of {lanes} among {minted:?}:\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn a_byte_element_widens_by_sixteen_lanes() {
+    widen_fill_by_width(1, 16);
+}
+
+/// The fill loop as a byte store: `bytes[i] = k` through `SetI8`.
+fn widen_byte_store_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    let (ops, regs) = widen_fixture();
+    let ops = ops
+        .into_iter()
+        .map(|op| match op {
+            Opcode::SetArray { array, index, src } => Opcode::SetI8 {
+                bytes: array,
+                index,
+                src,
+            },
+            other => other,
+        })
+        .collect();
+    (ops, regs)
+}
+
+/// A byte store from a 4-byte register is declined: the lanes are the
+/// register's width, and 16 bytes of them cover four times the memory the
+/// loop wrote. Held in a byte-wide register, the same loop widens by 16.
+#[test]
+fn a_byte_access_widens_only_from_a_byte_register() {
+    use super::passes::widen::{Decline, Widen, take_outcomes};
+    struct Info(u32);
+    impl ModuleInfo for Info {
+        fn int_value(&self, idx: usize) -> Option<i32> {
+            WidenInfo.int_value(idx)
+        }
+        fn int_pool_len(&self) -> usize {
+            WidenInfo.int_pool_len()
+        }
+        /// Every register is `t(3)`; its width is the fixture's parameter.
+        fn type_size(&self, _ty: TypeRef) -> Option<u32> {
+            Some(self.0)
+        }
+    }
+    let (ops, regs) = widen_byte_store_fixture();
+
+    let wide = Info(4);
+    let mut f = lower_with(&ops, &regs, &wide).expect("lower");
+    let stats = Widen { info: &wide }
+        .run(&mut f, &PassOptions::default())
+        .expect("widen");
+    assert_eq!(
+        stats.replaced,
+        0,
+        "widened a byte store of Int lanes:\n{}",
+        f.dump()
+    );
+    let why = take_outcomes();
+    assert!(
+        why.iter()
+            .any(|(_, r)| matches!(r, Err(Decline::AccessNarrowerThanValue(_)))),
+        "declined, but not for the access width: {why:?}"
+    );
+
+    let byte = Info(1);
+    let mut f = lower_with(&ops, &regs, &byte).expect("lower");
+    let stats = Widen { info: &byte }
+        .run(&mut f, &PassOptions::default())
+        .expect("widen");
+    assert_eq!(stats.replaced, 1, "byte store not widened:\n{}", f.dump());
+    verify(&f).unwrap_or_else(|e| panic!("verify after widen: {e}\n{}", f.dump()));
+    let store = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::VecStore { src, stride, .. } => Some((*src, *stride)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no VecStore:\n{}", f.dump()));
+    assert_eq!(f.value_lanes(store.0), 16);
+    assert_eq!(store.1, 1, "a byte walk steps one byte");
+}
+
+#[test]
+fn a_short_element_widens_by_eight_lanes() {
+    widen_fill_by_width(2, 8);
+}
+
+#[test]
+fn an_int_element_widens_by_four_lanes() {
+    widen_fill_by_width(4, 4);
+}
+
+#[test]
+fn an_eight_byte_element_widens_by_two_lanes() {
+    widen_fill_by_width(8, 2);
 }
 
 /// An induction closed by `Incr` must be refused, not widened.
@@ -7226,10 +7390,10 @@ fn a_reduction_over_a_varying_term_is_refused() {
     );
 }
 
-/// An element two machine-vectors wide, by four lanes, is not a vector any
-/// backend can name -- and a backend handed one refuses the whole function,
-/// which the ladder re-proposes forever. The game froze on `i64x4`. The
-/// widener must decline it, whatever else about the loop is fine.
+/// An element wider than a machine vector has no lane count -- and a
+/// backend handed a vector it cannot name refuses the whole function, which
+/// the ladder re-proposes forever. The game froze on `i64x4`. The widener
+/// must decline it, whatever else about the loop is fine.
 struct WideInfo;
 impl ModuleInfo for WideInfo {
     fn int_value(&self, idx: usize) -> Option<i32> {
@@ -7239,7 +7403,7 @@ impl ModuleInfo for WideInfo {
         WidenInfo.int_pool_len()
     }
     fn type_size(&self, _ty: TypeRef) -> Option<u32> {
-        Some(8)
+        Some(32)
     }
 }
 
@@ -7253,7 +7417,7 @@ fn a_lane_wider_than_the_machine_vector_is_refused() {
     assert_eq!(
         stats.replaced,
         0,
-        "widened an 8-byte element by 4:\n{}",
+        "widened a 32-byte element:\n{}",
         f.dump()
     );
     assert_eq!(

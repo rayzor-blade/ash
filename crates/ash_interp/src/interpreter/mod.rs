@@ -4769,6 +4769,10 @@ impl HLInterpreter {
                     .tiered_runtime
                     .as_ref()
                     .ok_or_else(|| anyhow!("compiled-only runtime disappeared"))?;
+                // The Cranelift tier's module when the ladder has one; with
+                // `--jit-tier llvm` there is no tier 0 and the interpreter's
+                // own cached module serves. Both are the callees-visible
+                // view, so the optimized cache answers for either.
                 let tier = tiered
                     .shared_ctx
                     .cranelift
@@ -4777,11 +4781,12 @@ impl HLInterpreter {
                     .as_ref()
                     .and_then(|tier| tier.as_ref())
                     .cloned();
-                let Some(tier) = tier else {
-                    return Err(anyhow!("JIT lost its Cranelift baseline"));
+                let module: &ash_core::air_pipeline::AshModule<'static> = match &tier {
+                    Some(tier) => tier.ctx.air_module(),
+                    None => self.air.shared_module(bytecode),
                 };
                 let raw = &bytecode.functions[func_idx];
-                let optimized = ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw)
+                let optimized = ash_core::air_pipeline::optimized(module, raw)
                     .map_err(|e| anyhow!("AIR V2 closure scan failed: {}", e.brief()))?;
                 let mut targets = Vec::new();
                 for block in &optimized.ir.blocks {

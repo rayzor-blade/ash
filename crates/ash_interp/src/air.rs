@@ -337,6 +337,40 @@ impl Cache {
     /// the function it is optimizing.
     /// Whether [`Self::prepare`] would do more than look up a cached body.
     /// See the note on `crate::ssa::Cache::needs_prepare`.
+    /// The module view with callee bodies, for a consumer that needs one
+    /// outside the interpreter's own lowering (the compiled-only mode's
+    /// closure scan, which has no Cranelift tier to borrow one from when
+    /// the ladder is pinned to LLVM).
+    pub fn shared_module(&mut self, bc: &DecodedBytecode) -> &'static AshModule<'static> {
+        self.ensure_module(bc);
+        self.module.expect("module was just built").1
+    }
+
+    fn ensure_module(&mut self, bc: &DecodedBytecode) {
+        let key = bc as *const DecodedBytecode;
+        if self.module.map(|(p, _, _)| p) == Some(key) {
+            return;
+        }
+        // `AshModule::new` builds a findex map over every function and
+        // every native, so building one per function would make first
+        // execution quadratic in module size. It is built once and cached
+        // — and leaked with its bytecode borrow widened to 'static,
+        // because `HLInterpreter` has no lifetime parameter to hang that
+        // borrow on.
+        //
+        // The pointer key is what keeps the widened borrow honest: a hot
+        // reload installs a *different* `DecodedBytecode`, and the stale
+        // module — along with every body lowered from it — leaves the
+        // cache here, before anything can read through it.
+        let built = AshModule::new(bc);
+        let without: &AshModule<'_> = Box::leak(Box::new(built.without_callees_view()));
+        let with: &AshModule<'_> = Box::leak(Box::new(built));
+        let with: &'static AshModule<'static> = unsafe { std::mem::transmute(with) };
+        let without: &'static AshModule<'static> = unsafe { std::mem::transmute(without) };
+        self.bodies.clear();
+        self.module = Some((key, with, without));
+    }
+
     pub fn needs_prepare(&self, func_idx: usize) -> bool {
         enabled() && matches!(self.bodies.get(func_idx), None | Some(Body::Untried))
     }
@@ -346,27 +380,7 @@ impl Cache {
             return;
         }
 
-        let key = bc as *const DecodedBytecode;
-        if self.module.map(|(p, _, _)| p) != Some(key) {
-            // `AshModule::new` builds a findex map over every function and
-            // every native, so building one per function would make first
-            // execution quadratic in module size. It is built once and cached
-            // — and leaked with its bytecode borrow widened to 'static,
-            // because `HLInterpreter` has no lifetime parameter to hang that
-            // borrow on.
-            //
-            // The pointer key is what keeps the widened borrow honest: a hot
-            // reload installs a *different* `DecodedBytecode`, and the stale
-            // module — along with every body lowered from it — leaves the
-            // cache here, before anything can read through it.
-            let built = AshModule::new(bc);
-            let without: &AshModule<'_> = Box::leak(Box::new(built.without_callees_view()));
-            let with: &AshModule<'_> = Box::leak(Box::new(built));
-            let with: &'static AshModule<'static> = unsafe { std::mem::transmute(with) };
-            let without: &'static AshModule<'static> = unsafe { std::mem::transmute(without) };
-            self.bodies.clear();
-            self.module = Some((key, with, without));
-        }
+        self.ensure_module(bc);
 
         if self.bodies.len() < bc.functions.len() {
             self.bodies.resize(bc.functions.len(), Body::Untried);

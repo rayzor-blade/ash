@@ -9,7 +9,11 @@ use std::fmt;
 pub struct TypeRef(pub u32);
 
 /// Dense index into [`Function::values`].
+///
+/// `repr(transparent)`: a consumer that addresses a frame by value index
+/// reads a `&[ValueId]` as the `&[Reg]` its register-indexed paths take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
 pub struct ValueId(pub u32);
 
 impl ValueId {

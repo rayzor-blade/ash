@@ -11,7 +11,11 @@ pub type InlineBool = bool;
 /// A register argument
 ///
 /// Registers are a function local variables.
+///
+/// `repr(transparent)`, so a `&[ValueId]` can be read as a `&[Reg]` by a
+/// consumer whose frame is indexed by value.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Hash)]
+#[repr(transparent)]
 pub struct Reg(pub u32);
 
 /// A reference to the i32 constant pool

@@ -1720,25 +1720,26 @@ impl HLInterpreter {
     ) -> Result<StepResult> {
         // CallMethod: args[0] is 'this'. CallThis: the receiver is
         // IMPLICITLY register 0 (HashLink OCallThis semantics) and
-        // args hold only the real arguments — prepend Reg(0), else
-        // method resolution runs against the first argument's type.
-        let args_with_this: Vec<Reg> = if op_is_this {
-            let mut v = Vec::with_capacity(args.len() + 1);
-            v.push(Reg(0));
-            v.extend(args.iter().copied());
-            v
+        // args hold only the real arguments, else method resolution runs
+        // against the first argument's type. The receiver and the rest are
+        // kept apart rather than joined: joining was a Vec per call.
+        let (this_reg, rest): (Reg, &[Reg]) = if op_is_this {
+            (Reg(0), args)
         } else {
-            args.to_vec()
+            (args[0], &args[1..])
         };
-        let args = &args_with_this;
-        let (arg_vals, call_pc) = {
+        // The values, receiver first, in a buffer from the pool `ssa_call`
+        // returns them to.
+        let mut arg_vals = self.arg_pool.pop().unwrap_or_default();
+        arg_vals.clear();
+        arg_vals.reserve(rest.len() + 1);
+        let call_pc = {
             let frame = self.stack.last().unwrap();
-            (
-                args.iter()
-                    .map(|r| frame.registers.get(r.0))
-                    .collect::<Vec<_>>(),
-                frame.pc,
-            )
+            arg_vals.push(frame.registers.get(this_reg.0));
+            for r in rest {
+                arg_vals.push(frame.registers.get(r.0));
+            }
+            frame.pc
         };
         let this_val = arg_vals[0];
 
@@ -1754,7 +1755,7 @@ impl HLInterpreter {
         // raw HOBJ as well for values arriving from older/external producers.
         // Resolve the findex by matching the virtual field's hashed_name
         // against the runtime object's proto chain.
-        let this_reg_type_idx = func.regs[args[0].0 as usize].0;
+        let this_reg_type_idx = func.regs[this_reg.0 as usize].0;
         if this_reg_type_idx < bytecode.types.len()
             && bytecode.types[this_reg_type_idx].kind == hl::hl_type_kind_HVIRTUAL
         {
@@ -2048,7 +2049,7 @@ impl HLInterpreter {
                     if self.fn_vcall_dyn.is_null() {
                         return Err(anyhow!("hlp_vcall_dyn is unavailable"));
                     }
-                    let packed = self.pack_varargs_array(func, &args[1..], &arg_vals[1..])?;
+                    let packed = self.pack_varargs_array(func, rest, &arg_vals[1..])?;
                     type FnVCallDyn = unsafe extern "C" fn(
                         *mut hl::vdynamic,
                         i32,
@@ -2120,7 +2121,7 @@ impl HLInterpreter {
                 if self.fn_vcall_dyn.is_null() {
                     return Err(anyhow!("hlp_vcall_dyn is unavailable"));
                 }
-                let packed = self.pack_varargs_array(func, &args[1..], &arg_vals[1..])?;
+                let packed = self.pack_varargs_array(func, rest, &arg_vals[1..])?;
                 type FnVCallDyn = unsafe extern "C" fn(
                     *mut hl::vdynamic,
                     i32,
@@ -2193,7 +2194,7 @@ impl HLInterpreter {
                         Self::find_runtime_proto_findex(type_ptr, field)
                             .or_else(|| {
                                 self.resolve_method_findex_from_bytecode(
-                                    bytecode, func, &args[0], field,
+                                    bytecode, func, &this_reg, field,
                                 )
                             })
                             .ok_or_else(|| {
@@ -2206,13 +2207,13 @@ impl HLInterpreter {
                     Self::find_runtime_proto_findex(type_ptr, field)
                         .or_else(|| {
                             self.resolve_method_findex_from_bytecode(
-                                bytecode, func, &args[0], field,
+                                bytecode, func, &this_reg, field,
                             )
                         })
                         .ok_or_else(|| anyhow!("Cannot resolve method field={} on type", field))?
                 }
             } else {
-                self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
+                self.resolve_method_findex_from_bytecode(bytecode, func, &this_reg, field)
                     .ok_or_else(|| {
                         anyhow!("Cannot resolve method field={} (null type header)", field)
                     })?

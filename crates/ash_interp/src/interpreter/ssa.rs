@@ -28,6 +28,14 @@ use super::{
     ref_elem_size, ref_target_kind, write_raw_kind,
 };
 
+/// SSA operands as HL registers. A value's index is its slot in the frame,
+/// which is what the shared `op_*` methods take; the newtypes share a layout,
+/// so the slice is reinterpreted rather than copied per call.
+fn regs_of(values: &[air::v2::ValueId]) -> &[Reg] {
+    // SAFETY: `ValueId` and `Reg` are both `#[repr(transparent)]` over `u32`.
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<Reg>(), values.len()) }
+}
+
 impl HLInterpreter {
     /// Block-at-a-time dispatch over the SSA CFG.
     pub(super) fn ssa_loop(
@@ -777,14 +785,12 @@ impl HLInterpreter {
                 field,
                 args: a,
             } => {
-                let regs: Vec<Reg> = a.iter().map(|v| Reg(v.0)).collect();
                 let staged =
-                    self.op_call_method(bc, func, func_idx, false, dst.0, *field, &regs)?;
+                    self.op_call_method(bc, func, func_idx, false, dst.0, *field, regs_of(a))?;
                 return self.ssa_staged_call(bc, native_resolver, func, staged);
             }
             I::CallClosure { dst, fun, args: a } => {
-                let regs: Vec<Reg> = a.iter().map(|v| Reg(v.0)).collect();
-                let staged = self.op_call_closure(bc, func, func_idx, dst.0, fun.0, &regs)?;
+                let staged = self.op_call_closure(bc, func, func_idx, dst.0, fun.0, regs_of(a))?;
                 return self.ssa_staged_call(bc, native_resolver, func, staged);
             }
             I::StaticClosure { dst, fun } => {

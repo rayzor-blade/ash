@@ -876,6 +876,9 @@ impl<'ctx> JITModule<'ctx> {
             .map_err(|_| anyhow!("promote module {modname}: invalid symbol name"))?
             .to_string();
 
+        // Before the middle end, which may strip a declaration the values
+        // in `promo_funcs` still point at.
+        let promo_symbols = self.bytecode_symbols(&promo_funcs);
         {
             let _phase = crate::profile::scope("llvm middle-end (promote)");
             // The module holds this promotion and nothing else, so there is
@@ -919,7 +922,7 @@ impl<'ctx> JITModule<'ctx> {
 
         self.bind_module_declarations(
             &promo_module,
-            &promo_funcs,
+            &promo_symbols,
             &format!("promote module {modname}"),
         )?;
 
@@ -939,17 +942,21 @@ impl<'ctx> JITModule<'ctx> {
         // each inlined callee body with the promoted function's findex, which
         // is the small version of the hole the shared path had: a crash in a
         // copied callee was reported as the function that inlined it.
+        //
+        // Walked through the module, not `promo_funcs`: the middle end has
+        // run, and a value in that map for a declaration it stripped is
+        // freed memory.
         let mut found: Vec<(usize, usize)> = Vec::new();
-        for (&fi, f) in &promo_funcs {
+        for f in promo_module.get_functions() {
             if f.count_basic_blocks() == 0 {
                 continue;
             }
-            if let Ok(sym) = f.get_name().to_str() {
-                if let Ok(a) = self.execution_engine.get_function_address(sym) {
-                    if a != 0 {
-                        found.push((fi, a as usize));
-                    }
-                }
+            if let Ok(sym) = f.get_name().to_str()
+                && let Some(&fi) = promo_symbols.get(sym)
+                && let Ok(a) = self.execution_engine.get_function_address(sym)
+                && a != 0
+            {
+                found.push((fi, a as usize));
             }
         }
         register_batch(found, "own");
@@ -1479,7 +1486,8 @@ impl<'ctx> JITModule<'ctx> {
         // a bytecode function that was never compiled has no definition, and
         // the call lands on a null pointer. Resolving them explicitly is the
         // only way a fresh module reaches the runtime symbols.
-        self.bind_module_declarations(&osr_module, &osr_funcs, &format!("osr module {name}"))?;
+        let osr_symbols = self.bytecode_symbols(&osr_funcs);
+        self.bind_module_declarations(&osr_module, &osr_symbols, &format!("osr module {name}"))?;
 
         self.execution_engine
             .add_module(&osr_module)
@@ -3486,27 +3494,35 @@ impl<'ctx> JITModule<'ctx> {
     /// name is not, so bytecode declarations bind through it and never fall
     /// back to a name. Only runtime symbols -- natives, `hlp_*` helpers --
     /// still resolve by symbol, which for them is a unique C name.
-    fn bind_module_declarations(
+    /// Symbol -> findex for the bytecode functions a module declares, read
+    /// while every value in `module_funcs` is still in the module: the
+    /// middle end strips declarations nothing references any more, and a
+    /// value it stripped is freed memory. Names are unique within a module,
+    /// so this is injective; LLVM's own uniquifying suffix rides along
+    /// because the key is taken from the value that is actually in the
+    /// module.
+    fn bytecode_symbols(
         &self,
-        module: &inkwell::module::Module<'ctx>,
         module_funcs: &std::collections::HashMap<usize, FunctionValue<'ctx>>,
-        label: &str,
-    ) -> Result<()> {
-        // Symbol -> findex for the bytecode functions this module declares.
-        // Names are unique within a module, so this is injective; LLVM's own
-        // uniquifying suffix rides along because the key is taken from the
-        // value that is actually in the module.
-        let mut bytecode_findex: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
+    ) -> std::collections::HashMap<String, usize> {
+        let mut bytecode_findex = std::collections::HashMap::new();
         for (&findex, value) in module_funcs {
             if !matches!(self.findexes.get(&findex), Some(FuncPtr::Fun(_))) {
                 continue;
             }
             if let Ok(symbol) = value.get_name().to_str() {
-                bytecode_findex.insert(symbol, findex);
+                bytecode_findex.insert(symbol.to_string(), findex);
             }
         }
+        bytecode_findex
+    }
 
+    fn bind_module_declarations(
+        &self,
+        module: &inkwell::module::Module<'ctx>,
+        bytecode_findex: &std::collections::HashMap<String, usize>,
+        label: &str,
+    ) -> Result<()> {
         let mut unresolved = Vec::new();
         for declaration in module.get_functions() {
             if declaration.count_basic_blocks() != 0 {

@@ -1700,6 +1700,10 @@ struct GcStatCounters {
     pause_ns_max: AtomicU64,
     /// Collections given up because a mutator never reached a safepoint.
     stops_abandoned: AtomicU64,
+    /// Blocks write-protected after a collection (`ASH_GC_PROTECT=1`).
+    blocks_protected: AtomicU64,
+    /// Of those, blocks a mutator wrote before the next collection.
+    blocks_dirtied: AtomicU64,
 }
 
 static GC_STATS: GcStatCounters = GcStatCounters {
@@ -1712,6 +1716,8 @@ static GC_STATS: GcStatCounters = GcStatCounters {
     pause_ns_total: AtomicU64::new(0),
     pause_ns_max: AtomicU64::new(0),
     stops_abandoned: AtomicU64::new(0),
+    blocks_protected: AtomicU64::new(0),
+    blocks_dirtied: AtomicU64::new(0),
 };
 
 // ── Collection switch (`Gc.enable`) ─────────────────────────────────────────
@@ -1952,6 +1958,14 @@ fn print_gc_stats_report() {
         pm as f64 / 1e6,
         pt
     );
+    let protected = GC_STATS.blocks_protected.load(Ordering::Relaxed);
+    if protected > 0 {
+        eprintln!(
+            "[gc] blocks protected: {} , written before the next collection: {}",
+            protected,
+            GC_STATS.blocks_dirtied.load(Ordering::Relaxed)
+        );
+    }
 }
 
 extern "C" fn gc_stats_atexit() {
@@ -1985,6 +1999,151 @@ unsafe extern "C" {
     /// (forces MADV_FREE_REUSABLE internally — wren_lift gc.rs:1493-1515).
     fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
 }
+
+// ── Write-fault dirty tracking (`ASH_GC_PROTECT=1`) ─────────────────────────
+//
+// The remembered-set half of a generational collector, measured on its own:
+// after a collection every block the sweep kept whole is made read-only, the
+// first store into it faults, and the handler records the block as dirty and
+// makes it writable again. The collector does not read the dirty bits yet;
+// what this measures is the barrier's cost to the mutator -- one fault per
+// written old block per cycle plus the protection calls -- with no store
+// instrumented in any backend and no runtime helper missed.
+//
+// Unix only: Windows would need a vectored handler, wasm has no protection.
+//
+// Known hazard: a syscall that writes into a protected block (`read(2)` into
+// a GC-allocated buffer) fails with EFAULT instead of faulting. Segregating
+// pointer-free allocations into their own, never-protected blocks removes it.
+
+/// Per-block state read by the fault handler: 0 writable, 1 protected,
+/// 2 protected and then written this cycle.
+#[cfg_attr(not(unix), allow(dead_code))] // only the unix handler reads the range
+struct ProtectTable {
+    base: usize,
+    len: usize,
+    state: Box<[std::sync::atomic::AtomicU8]>,
+}
+
+static PROTECT: OnceLock<ProtectTable> = OnceLock::new();
+
+const PROTECT_CLEAN: u8 = 1;
+const PROTECT_DIRTY: u8 = 2;
+
+fn protect_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| cfg!(unix) && std::env::var("ASH_GC_PROTECT").is_ok_and(|v| v == "1"))
+}
+
+#[cfg(unix)]
+static PREV_SIGSEGV: OnceLock<libc::sigaction> = OnceLock::new();
+#[cfg(unix)]
+static PREV_SIGBUS: OnceLock<libc::sigaction> = OnceLock::new();
+
+/// A store into a protected block lands here. Anything else goes to whoever
+/// was handling the signal before the table was installed.
+#[cfg(unix)]
+unsafe extern "C" fn protect_fault_handler(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    ctx: *mut c_void,
+) {
+    unsafe {
+        let addr = (*info).si_addr() as usize;
+        if let Some(t) = PROTECT.get()
+            && addr >= t.base
+            && addr < t.base + t.len
+        {
+            let idx = (addr - t.base) / BLOCK_SIZE;
+            // A second thread faulting on the same block sees DIRTY and just
+            // retries: the first has already unprotected it.
+            if t.state[idx].swap(PROTECT_DIRTY, Ordering::AcqRel) == PROTECT_CLEAN {
+                libc::mprotect(
+                    (t.base + idx * BLOCK_SIZE) as *mut c_void,
+                    BLOCK_SIZE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                );
+            }
+            return;
+        }
+        let prev = if sig == libc::SIGBUS {
+            PREV_SIGBUS.get()
+        } else {
+            PREV_SIGSEGV.get()
+        };
+        match prev {
+            Some(sa) if sa.sa_sigaction != libc::SIG_DFL && sa.sa_sigaction != libc::SIG_IGN => {
+                if sa.sa_flags & libc::SA_SIGINFO != 0 {
+                    let f: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut c_void) =
+                        std::mem::transmute(sa.sa_sigaction);
+                    f(sig, info, ctx);
+                } else {
+                    let f: extern "C" fn(libc::c_int) = std::mem::transmute(sa.sa_sigaction);
+                    f(sig);
+                }
+            }
+            _ => {
+                // Default disposition: put it back and let the retry kill us.
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = libc::SIG_DFL;
+                libc::sigaction(sig, &sa, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
+/// Installs the table and the handler once, after every other handler in
+/// the process has had its chance to install, so this one runs first.
+#[cfg(unix)]
+fn protect_install(base: usize, len: usize) -> &'static ProtectTable {
+    PROTECT.get_or_init(|| {
+        let state = (0..len / BLOCK_SIZE)
+            .map(|_| std::sync::atomic::AtomicU8::new(0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        unsafe {
+            for (sig, prev) in [(libc::SIGSEGV, &PREV_SIGSEGV), (libc::SIGBUS, &PREV_SIGBUS)] {
+                let mut old: libc::sigaction = std::mem::zeroed();
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = protect_fault_handler as *const () as usize;
+                sa.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+                libc::sigemptyset(&mut sa.sa_mask);
+                libc::sigaction(sig, &sa, &mut old);
+                let _ = prev.set(old);
+            }
+        }
+        ProtectTable { base, len, state }
+    })
+}
+
+#[cfg(not(unix))]
+fn protect_install(base: usize, len: usize) -> &'static ProtectTable {
+    PROTECT.get_or_init(|| ProtectTable {
+        base,
+        len,
+        state: Box::new([]),
+    })
+}
+
+/// Sets the protection of a run of whole blocks.
+#[cfg(unix)]
+fn protect_range(t: &ProtectTable, first: usize, count: usize, writable: bool) {
+    let prot = if writable {
+        libc::PROT_READ | libc::PROT_WRITE
+    } else {
+        libc::PROT_READ
+    };
+    unsafe {
+        libc::mprotect(
+            (t.base + first * BLOCK_SIZE) as *mut c_void,
+            count * BLOCK_SIZE,
+            prot,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn protect_range(_t: &ProtectTable, _first: usize, _count: usize, _writable: bool) {}
 
 /// Demand-committed heap reservation: anonymous private mmap (Windows: one
 /// VirtualAlloc reservation, which is demand-zeroed the same way). Pages
@@ -3618,6 +3777,7 @@ impl ImmixAllocator {
         if !stopped_world.stopped {
             return;
         }
+        self.unprotect_blocks();
         if trace_freed() || debug_roots() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
             let origin = ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];
@@ -3705,6 +3865,7 @@ impl ImmixAllocator {
         // here on nothing touches the heap, so the world can restart -- the
         // zone walk below and the stderr writes are not reasons to keep ten
         // threads stopped, and `pause` above has already been measured.
+        let protected = self.protect_kept_blocks();
         drop(stopped_world);
         if gc_stats_enabled() {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
@@ -3759,6 +3920,84 @@ impl ImmixAllocator {
                 self.heap.growth,
                 self.heap.free_blocks.len(),
             );
+            if protect_enabled() {
+                eprintln!("[gc-protect] protected={protected} blocks");
+            }
+        }
+    }
+
+    /// Makes every block this collection kept whole read-only; see the
+    /// dirty-tracking section. Blocks a thread is still bumping through and
+    /// blocks with free lines to recycle stay writable, since allocation
+    /// writes into them. Runs inside the stop, before mutators resume.
+    fn protect_kept_blocks(&mut self) -> usize {
+        if !protect_enabled() {
+            return 0;
+        }
+        let t = protect_install(self.heap.memory.as_ptr() as usize, self.heap.memory.len);
+        let mut blocks: Vec<usize> = self
+            .heap
+            .used_blocks
+            .iter()
+            .map(|&off| off / BLOCK_SIZE)
+            .collect();
+        let writable: HashSet<usize> = self
+            .heap
+            .tlab_blocks
+            .values()
+            .chain(self.heap.recycle_spans.iter().map(|(b, _, _)| b))
+            .map(|&off| off / BLOCK_SIZE)
+            .collect();
+        blocks.retain(|b| !writable.contains(b));
+        blocks.sort_unstable();
+        let mut protected = 0;
+        let mut i = 0;
+        while i < blocks.len() {
+            let first = blocks[i];
+            let mut count = 1;
+            while i + count < blocks.len() && blocks[i + count] == first + count {
+                count += 1;
+            }
+            for b in first..first + count {
+                t.state[b].store(PROTECT_CLEAN, Ordering::Release);
+            }
+            protect_range(t, first, count, false);
+            protected += count;
+            i += count;
+        }
+        GC_STATS
+            .blocks_protected
+            .fetch_add(protected as u64, Ordering::Relaxed);
+        protected
+    }
+
+    /// Makes the whole heap writable again at the start of a collection and
+    /// counts how many protected blocks were written since the last one.
+    fn unprotect_blocks(&mut self) {
+        let Some(t) = PROTECT.get() else {
+            return;
+        };
+        let mut dirtied = 0u64;
+        let mut i = 0;
+        while i < t.state.len() {
+            if t.state[i].load(Ordering::Acquire) == 0 {
+                i += 1;
+                continue;
+            }
+            let first = i;
+            while i < t.state.len() && t.state[i].load(Ordering::Acquire) != 0 {
+                if t.state[i].swap(0, Ordering::AcqRel) == PROTECT_DIRTY {
+                    dirtied += 1;
+                }
+                i += 1;
+            }
+            protect_range(t, first, i - first, true);
+        }
+        GC_STATS
+            .blocks_dirtied
+            .fetch_add(dirtied, Ordering::Relaxed);
+        if gc_stats_enabled() {
+            eprintln!("[gc-protect] dirtied={dirtied} blocks since the last collection");
         }
     }
 

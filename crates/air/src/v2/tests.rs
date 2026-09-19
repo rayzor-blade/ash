@@ -3148,7 +3148,13 @@ fn redundant_guard_elim_drops_a_bounds_check_the_loop_guard_proved() {
     ];
     let mut f = lower(&ops, &regs).unwrap();
     let before = f.dump();
-    let stats = run_pass(&mut f, &RedundantGuardElim, PassOptions::default());
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim {
+            info: &NoModuleInfo,
+        },
+        PassOptions::default(),
+    );
     assert_eq!(stats.eliminated, 1, "guard not removed:\n{before}");
     verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
 }
@@ -3195,11 +3201,265 @@ fn redundant_guard_elim_keeps_a_guard_on_a_different_value() {
         Opcode::Ret { ret: Reg(0) },
     ];
     let mut f = lower(&ops, &regs).unwrap();
-    let stats = run_pass(&mut f, &RedundantGuardElim, PassOptions::default());
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim {
+            info: &NoModuleInfo,
+        },
+        PassOptions::default(),
+    );
     assert_eq!(
         stats.eliminated,
         0,
         "removed an unproven guard:\n{}",
+        f.dump()
+    );
+}
+
+/// An int pool for the range-fact tests: index `i` holds `ints[i]`.
+struct Ints(&'static [i32]);
+impl ModuleInfo for Ints {
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        self.0.get(idx).copied()
+    }
+    fn int_pool_len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// HL's own bounds check is UNSIGNED and the loop's exit test is signed,
+/// so removing it takes the range fact `i >= 0`.
+///
+/// `for (i in start...n) { a[i] }`: `r0 = start; loop: if i >=s n exit;
+/// if i <u n ok else throw; i = i + 1`. With `start` at pool index 0.
+fn counted_loop_with_unsigned_guard(start_idx: usize) -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 i, r1 n, r2 step, r3 exc
+    let regs = vec![t(3), t(3), t(3), t(5)];
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(start_idx),
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        }, // n
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Label,
+        Opcode::JSGte {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 4,
+        },
+        Opcode::JULt {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 1,
+        },
+        Opcode::Throw { exc: Reg(3) },
+        Opcode::Add {
+            dst: Reg(0),
+            a: Reg(0),
+            b: Reg(2),
+        },
+        Opcode::JAlways { offset: -6 },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    (ops, regs)
+}
+
+#[test]
+fn redundant_guard_elim_proves_an_unsigned_bounds_check_from_the_counter_range() {
+    // Pool: [0, n, 1, -1].
+    let ints = Ints(&[0, 100, 1, -1]);
+    let (ops, regs) = counted_loop_with_unsigned_guard(0);
+    let mut f = lower_with(&ops, &regs, &ints).unwrap();
+    let before = f.dump();
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim { info: &ints },
+        PassOptions::default(),
+    );
+    assert_eq!(stats.eliminated, 1, "guard not removed:\n{before}");
+    assert_eq!(
+        f.blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Throw { .. }))
+            .count(),
+        0,
+        "the throw arm survived:\n{}",
+        f.dump()
+    );
+
+    // Started at -1 the counter is negative on its first trip, and the
+    // unsigned test is the one thing standing between it and the array.
+    let (ops, regs) = counted_loop_with_unsigned_guard(3);
+    let mut f = lower_with(&ops, &regs, &ints).unwrap();
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim { info: &ints },
+        PassOptions::default(),
+    );
+    assert_eq!(
+        stats.eliminated,
+        0,
+        "removed the guard of a counter that starts negative:\n{}",
+        f.dump()
+    );
+
+    // A pool the pass cannot read leaves the start unknown, and so the guard.
+    let (ops, regs) = counted_loop_with_unsigned_guard(0);
+    let mut f = lower_with(&ops, &regs, &NoModuleInfo).unwrap();
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim {
+            info: &NoModuleInfo,
+        },
+        PassOptions::default(),
+    );
+    assert_eq!(stats.eliminated, 0, "guessed a constant:\n{}", f.dump());
+}
+
+/// A counter that steps before it is tested is not bounded when it steps,
+/// so nothing says it does not wrap.
+#[test]
+fn redundant_guard_elim_keeps_the_guard_of_a_counter_that_steps_before_its_test() {
+    let ints = Ints(&[0, 100, 1]);
+    // r0 i, r1 n, r2 step, r3 exc
+    let regs = vec![t(3), t(3), t(3), t(5)];
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        },
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(2),
+        },
+        Opcode::Label,
+        Opcode::Add {
+            dst: Reg(0),
+            a: Reg(0),
+            b: Reg(2),
+        }, // i = i + 1, unguarded
+        Opcode::JSGte {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 3,
+        },
+        Opcode::JULt {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 1,
+        },
+        Opcode::Throw { exc: Reg(3) },
+        Opcode::JAlways { offset: -6 },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower_with(&ops, &regs, &ints).unwrap();
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim { info: &ints },
+        PassOptions::default(),
+    );
+    assert_eq!(
+        stats.eliminated,
+        0,
+        "removed the guard of a counter that may wrap:\n{}",
+        f.dump()
+    );
+}
+
+/// nbody's shape: the inner counter starts at `i + 1`, one past the outer
+/// one, so its range comes from the outer counter's and from the outer test
+/// that bounds the add. Both guards go.
+#[test]
+fn redundant_guard_elim_reaches_an_inner_counter_started_from_the_outer_one() {
+    let ints = Ints(&[0, 100, 1]);
+    // r0 i, r1 n, r2 one, r3 j, r4 exc
+    let regs = vec![t(3), t(3), t(3), t(3), t(5)];
+    // Layout, offsets from indices:
+    //  0 Int i  1 Int n  2 Int one  3 Label(outer)  4 JSGte i,n -> 15
+    //  5 JULt i,n -> 7  6 Throw  7 Add j=i+1  8 Label(inner)  9 JSGte j,n -> 13
+    // 10 JULt j,n -> 12  11 Throw  12 Incr j  13 JAlways -> 8  (13+1+k=8, k=-6)
+    // 14 Incr i  15 JAlways -> 3 (15+1+k=3, k=-13)  16 Ret
+    // The inner exit lands on 14 (outer incr): 9+1+k=14, k=4.
+    // The outer exit lands on 16: 4+1+k=16, k=11.
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        },
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(2),
+        },
+        Opcode::Label,
+        Opcode::JSGte {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 11,
+        },
+        Opcode::JULt {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 1,
+        },
+        Opcode::Throw { exc: Reg(4) },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(2),
+        },
+        Opcode::Label,
+        Opcode::JSGte {
+            a: Reg(3),
+            b: Reg(1),
+            offset: 4,
+        },
+        Opcode::JULt {
+            a: Reg(3),
+            b: Reg(1),
+            offset: 1,
+        },
+        Opcode::Throw { exc: Reg(4) },
+        Opcode::Incr { dst: Reg(3) },
+        Opcode::JAlways { offset: -6 },
+        Opcode::Incr { dst: Reg(0) },
+        Opcode::JAlways { offset: -13 },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower_with(&ops, &regs, &ints).unwrap();
+    let before = f.dump();
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim { info: &ints },
+        PassOptions::default(),
+    );
+    assert_eq!(
+        stats.eliminated,
+        2,
+        "guards not removed:\n{before}\n{}",
+        f.dump()
+    );
+    assert_eq!(
+        f.blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Throw { .. }))
+            .count(),
+        0,
+        "a throw arm survived:\n{}",
         f.dump()
     );
 }
@@ -4087,6 +4347,7 @@ fn pass_manager_reports_per_pass_statistics() {
             "null-check-elim",
             "gvn",
             "licm",
+            "redundant-guard-elim",
             "fma",
             "dce"
         ]

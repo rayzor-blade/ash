@@ -21,8 +21,11 @@ A Rust workspace. In the order a program meets them:
 **AIR** is a typed phi-SSA IR built from HL bytecode. It carries trap regions,
 an effect classification per instruction (pure / reads memory / writes memory
 / may throw / clobbers all) and an alias model over fields, array data,
-globals, raw bytes and cells. GVN, LICM, SROA, inlining, the FMA peephole and
-the loop widener run over it, and last `stripmine`, which names the
+globals, raw bytes and cells. GVN, LICM, SROA, inlining, the FMA peephole,
+bounds-check elimination (`redundant-guard-elim`: a loop counter proven
+non-negative makes the unsigned array guard the loop's own exit test, which
+GVN has already unified) and the loop widener run over it, and last
+`stripmine`, which names the
 induction variable of each innermost loop so a backend can test its low
 bits and poll once per strip of iterations instead of on every one. Both
 backends lower it directly; the interpreter can walk it (`ASH_AIR=v2`);

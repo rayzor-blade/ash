@@ -2368,17 +2368,17 @@ fn protect_enabled() -> bool {
     })
 }
 
-/// `ASH_GC_GEN=1`: most collections are minor. Marks stick: a block kept
-/// by the last collection keeps its line and object marks, so tracing stops
-/// at an old object, and only the old blocks the mutator wrote since (the
-/// dirty ones) are scanned as roots. Old garbage waits for the next major,
-/// every `ASH_GC_MAJOR_EVERY` collections (default 8), on exhaustion, or on
-/// `Gc.major`. Needs the write-fault tracking above, so unix only. Off by
-/// default: the interpreter's unit-suite run crashes intermittently under
-/// it, see git-bug.
+/// Most collections are minor. Marks stick: a block kept by the last
+/// collection keeps its line and object marks, so tracing stops at an old
+/// object, and only the old blocks the mutator wrote since (the dirty
+/// ones) are scanned as roots. Old garbage waits for the next major, every
+/// `ASH_GC_MAJOR_EVERY` collections (default 8), on exhaustion, or on
+/// `Gc.major`. Needs the write-fault tracking above, so unix only;
+/// `ASH_GC_GEN=0` makes every collection a major, which is the setting for
+/// hunting a rooting bug in a long-lived object.
 fn generational() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(unix) && std::env::var("ASH_GC_GEN").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| cfg!(unix) && !std::env::var("ASH_GC_GEN").is_ok_and(|v| v == "0"))
 }
 
 fn major_every() -> u32 {

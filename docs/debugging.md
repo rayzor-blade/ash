@@ -68,9 +68,9 @@ being taken:
 | `ASH_GC_TRIGGER_MB` | floor for the adaptive collection threshold |
 | `ASH_GC_SHARE_PCT` | target share of run time spent collecting (default 5); the trigger adapts toward it |
 | `ASH_GC_STRESS` | collect every N allocations |
-| `ASH_GC_GEN` | `1` makes most collections minor (unix): the blocks a collection kept are write-protected, the first store into one faults and marks it dirty, and the next collection traces only young blocks and dirty old ones. Off by default while an intermittent interpreter crash under it is open |
-| `ASH_GC_MAJOR_EVERY` | collections between majors under `ASH_GC_GEN=1` (default 8); exhaustion and `Gc.major` force one |
-| `ASH_GC_PROTECT` | `1` write-protects kept blocks and counts the ones written (`ASH_GC_STATS`) without minors |
+| `ASH_GC_GEN` | `0` makes every collection a major. By default (unix) most are minor: the blocks a collection kept are write-protected, the first store into one faults and marks it dirty, and the next collection traces only young blocks and dirty old ones. A rooting bug in a long-lived object only shows under a major, so hunt those with `ASH_GC_GEN=0` |
+| `ASH_GC_MAJOR_EVERY` | collections between majors (default 8); exhaustion and `Gc.major` force one |
+| `ASH_GC_PROTECT` | `1` keeps the write-protection and its counts (`ASH_GC_STATS`) with `ASH_GC_GEN=0` |
 | `ASH_GC_COLLECT_AT_REFILLS` | `a,b,c`, `a-b` or `every:N`: collect at exactly those bump-region refills, numbered from 1 as `ASH_GC_STATS` reports them, to replay a timing-dependent collection |
 | `ASH_GC_SWEEP_AUDIT` | report roots that still point into a block being freed or a line run being recycled |
 | `ASH_GC_POISON` | `1` fills freed blocks and recycled line runs with `0xA5`, so a stale reference faults at its first use |

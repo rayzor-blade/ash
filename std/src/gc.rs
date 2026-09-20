@@ -5074,6 +5074,8 @@ impl ImmixAllocator {
             while p + WORD <= end {
                 let raw = unsafe { *(p as *const usize) };
                 consider(raw, work, reached);
+                // NaN-boxed words only exist where a machine word is 64 bits.
+                #[cfg(target_pointer_width = "64")]
                 if raw & 0xFFF8_0000_0000_0000 == 0x7FF8_0000_0000_0000 {
                     consider(raw & 0x0000_FFFF_FFFF_FFFF, work, reached);
                 }
@@ -5248,29 +5250,27 @@ impl ImmixAllocator {
                         p - base,
                     );
                     let target_t = unsafe { *(p as *const *mut hl_type) };
-                    let target_kind = if known.contains(&(target_t as usize)) {
-                        unsafe { (*target_t).kind }
-                    } else {
-                        u32::MAX
-                    };
+                    // None: a type word the runtime never allocated an
+                    // object with, which is not evidence either way (class
+                    // objects and closures come from other allocators).
+                    let target_kind = known
+                        .contains(&(target_t as usize))
+                        .then(|| unsafe { (*target_t).kind });
                     let target_marked = self.heap.objects[(p - base) / ALLOC_QUANTUM]
                         .load(Ordering::Relaxed)
                         & OBJECT_MARK
                         != 0;
-                    // A type word the runtime never allocated an object with
-                    // is not evidence either way: class objects and closures
-                    // come from other allocators.
                     let ok = matches!(found, Some((b, _)) if b == p - base)
                         && target_marked
-                        && (target_kind == u32::MAX
-                            || target_kind == hl::hl_type_kind_HOBJ
-                            || target_kind == hl::hl_type_kind_HSTRUCT);
+                        && target_kind.is_none_or(|k| {
+                            k == hl::hl_type_kind_HOBJ || k == hl::hl_type_kind_HSTRUCT
+                        });
                     if !ok && reported < 20 {
                         reported += 1;
                         let name = unsafe { crate::strings::uchar_to_string((*obj).name) };
                         eprintln!(
                             "[gc-verify] {name} @{begin:#x} field {fid} (offset {off}) -> {p:#x}: \
-                             start={:?} marked={target_marked} target kind={target_kind}",
+                             start={:?} marked={target_marked} target kind={target_kind:?}",
                             found.map(|(b, sz)| (base + b, sz))
                         );
                     }

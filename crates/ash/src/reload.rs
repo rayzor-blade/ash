@@ -618,12 +618,14 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     Ok(diff)
 }
 
-/// The callees each compiled body copied in, by findex: what a reload of
-/// a callee leaves stale besides the callee itself.
+/// The callees each compiled body bound to, by findex: copied in, or
+/// called by address rather than through the callee's slot. What a reload
+/// of a callee leaves stale besides the callee itself.
 static INLINED: LazyLock<Mutex<HashMap<usize, Vec<usize>>>> = LazyLock::new(Default::default);
 
-/// Record that the body compiled for `findex` inlined `callees`. A tier
-/// calls this with the inline sites of the AIR it compiled from.
+/// Record that the body compiled for `findex` bound `callees` into itself.
+/// A tier calls this with the inline sites of the AIR it compiled from,
+/// and with the calls it emits by address.
 pub fn note_inlined(findex: usize, callees: impl Iterator<Item = usize>) {
     let mut callees: Vec<usize> = callees.collect();
     callees.sort_unstable();
@@ -636,7 +638,7 @@ pub fn note_inlined(findex: usize, callees: impl Iterator<Item = usize>) {
     }
 }
 
-/// The compiled bodies that inlined one of `changed`.
+/// The compiled bodies that bound one of `changed`.
 fn inline_dependents(changed: &[usize]) -> Vec<usize> {
     let table = INLINED.lock().unwrap_or_else(|e| e.into_inner());
     let mut out: Vec<usize> = table
@@ -713,6 +715,30 @@ pub fn do_reload() -> Option<DecodedBytecode> {
     ) {
         Ok(diff) => {
             if diff.has_changes() {
+                // A body that bound a changed callee, compiled by a tier
+                // that saw the callee, goes back to the interpreter: its
+                // slot holds the stub sentinel, and the tiers promote it
+                // again from the new program.
+                let stale = inline_dependents(&diff.changed);
+                let live_ptrs = unsafe {
+                    if ctx.shared_runtime.module_ctx.is_null() {
+                        std::ptr::null_mut()
+                    } else {
+                        (*ctx.shared_runtime.module_ctx).functions_ptrs
+                    }
+                };
+                for &findex in &stale {
+                    let sentinel = (findex + 1) as *mut std::ffi::c_void;
+                    if findex < ctx.functions_ptrs.len() {
+                        ctx.functions_ptrs[findex] = sentinel;
+                        if !live_ptrs.is_null() {
+                            unsafe { *live_ptrs.add(findex) = sentinel };
+                        }
+                    }
+                }
+                if !stale.is_empty() {
+                    flush_affected_protos(&ctx.shared_runtime, &stale);
+                }
                 eprintln!(
                     "[hot-reload] reloaded {} changed function(s)",
                     diff.changed.len()

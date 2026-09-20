@@ -46,7 +46,19 @@ pub(crate) fn prepare_llvm(
         fma: opts.fma,
         callees_visible,
     };
-    air_pipeline::optimized_with_config(&module, f, cfg).map(|o| o.ir.clone())
+    let opt = air_pipeline::optimized_with_config(&module, f, cfg)?;
+    // What this body bound: the callees it copied in, and, with the callees
+    // visible, the ones it calls by address rather than through a slot. A
+    // reload of any of them sends this body back to the interpreter.
+    let inlined = opt.ir.inline_sites.iter().map(|site| site.callee as usize);
+    let called = opt.ir.blocks.iter().flat_map(|b| {
+        b.instrs.iter().filter_map(|i| match i {
+            air::v2::ir::Instr::Call { fun, .. } if callees_visible => Some(*fun),
+            _ => None,
+        })
+    });
+    crate::reload::note_inlined(f.findex as usize, inlined.chain(called));
+    Ok(opt.ir.clone())
 }
 
 /// The v2 opt level, from `ASH_AIR_LEVEL` — the same variable, and now the

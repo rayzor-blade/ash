@@ -28,6 +28,93 @@ use super::{
 };
 
 impl HLInterpreter {
+    /// `ASH_GC_STALE`: the containing allocation's start when `v` is a heap
+    /// pointer that no longer starts an allocation, or whose line was
+    /// recycled after the register was written at collection `written`.
+    fn stale_pointer(v: NanBoxedValue, written: u32) -> Option<usize> {
+        if !v.is_ptr() || v.as_ptr() <= 4096 {
+            return None;
+        }
+        let start = crate::frame::allocation_start(v.as_ptr());
+        if start == usize::MAX {
+            return None;
+        }
+        (start != v.as_ptr() || crate::frame::line_recycled_at(v.as_ptr()) > written)
+            .then_some(start)
+    }
+
+    /// `ASH_GC_STALE`: a field read yielded `val`; report it if it is stale.
+    fn check_loaded_pointer(
+        &self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        obj: NanBoxedValue,
+        field: usize,
+        val: NanBoxedValue,
+    ) {
+        if let Some(start) = Self::stale_pointer(val, u32::MAX) {
+            let class = crate::frame::object_type_name(unsafe { *(obj.as_ptr() as *const usize) });
+            self.stale_pointer_panic(
+                bytecode,
+                &format!(
+                    "field {field} of {class} at {:#x} (line recycled at {}) in {}",
+                    obj.as_ptr(),
+                    crate::frame::line_recycled_at(obj.as_ptr()),
+                    func.name()
+                ),
+                val.as_ptr(),
+                start,
+                u32::MAX,
+            );
+        }
+    }
+
+    /// Abort on a stale pointer with the memory it points at and the
+    /// innermost frames' registers, each with the collection it was written
+    /// at.
+    #[cold]
+    fn stale_pointer_panic(
+        &self,
+        bytecode: &DecodedBytecode,
+        what: &str,
+        ptr: usize,
+        start: usize,
+        written: u32,
+    ) -> ! {
+        let frames: Vec<String> = self
+            .stack
+            .iter()
+            .rev()
+            .take(3)
+            .map(|f| {
+                let regs = f.registers.as_slice();
+                format!(
+                    "{} [{}]",
+                    bytecode.functions[f.function_index].name(),
+                    regs.iter()
+                        .enumerate()
+                        .filter(|(_, v)| !v.is_void())
+                        .map(|(i, v)| format!("r{i}={v:?}@{}", f.registers.epoch(i as u32)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect();
+        let words: Vec<String> = (0..4)
+            .map(|i| format!("{:#x}", unsafe { *(ptr as *const usize).add(i) }))
+            .collect();
+        panic!(
+            "STALE: {what}: {ptr:#x} (containing allocation start {start:#x}, side-table code \
+             {:#x}, written at collection {written}, line recycled at {}, now {}); words {}; \
+             frames:\n  {}",
+            crate::frame::allocation_code(ptr),
+            crate::frame::line_recycled_at(ptr),
+            crate::frame::collections_now(),
+            words.join(" "),
+            frames.join("\n  ")
+        );
+    }
+
     /// Helper: perform integer binary op on two registers.
     /// Write an array element.
     ///
@@ -1039,6 +1126,23 @@ impl HLInterpreter {
         let src_kind = bytecode.types[src_type_idx].kind;
         let get_rt = self.fn_get_obj_rt;
         let obj_val = frame.registers.get(obj);
+        if crate::frame::stale_check() {
+            let v = frame.registers.get(src);
+            let written = frame.registers.epoch(src);
+            if let Some(start) = Self::stale_pointer(v, written) {
+                self.stale_pointer_panic(
+                    bytecode,
+                    &format!(
+                        "r{src} stored into field {field} of r{obj} in {}",
+                        func.name()
+                    ),
+                    v.as_ptr(),
+                    start,
+                    written,
+                );
+            }
+        }
+        let frame = self.stack.last_mut().unwrap();
         if env_flag!("ASH_DBG_FIELD") {
             eprintln!(
                 "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
@@ -1078,25 +1182,17 @@ impl HLInterpreter {
                     );
                 }
             } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                if let Some(offset) = unsafe {
-                    Self::resolve_virtual_field_offset(
-                        obj_val.as_ptr() as *mut u8,
-                        obj_c_type,
-                        field,
-                    )
-                } {
-                    let obj_ptr = obj_val.as_ptr() as *mut u8;
-                    let addr = unsafe { obj_ptr.add(offset) };
+                if let Some(addr) =
+                    unsafe { Self::virtual_field_address(obj_val.as_ptr() as *mut u8, field) }
+                {
                     if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
-                            "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
-                            func_idx, frame_pc, obj_type_idx, field, offset, src_kind, src_val
+                            "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} addr={:p} src_kind={} src={:?}",
+                            func_idx, frame_pc, obj_type_idx, field, addr, src_kind, src_val
                         );
                     }
                     unsafe { Self::write_value_at(addr, src_kind, src_val) };
                 } else {
-                    self.virtual_fields
-                        .insert((obj_val.as_ptr(), field), src_val);
                     if let Some(hfield) =
                         Self::resolve_typed_field_hash(bytecode, obj_type_idx, field)
                     {
@@ -1167,6 +1263,18 @@ impl HLInterpreter {
                 func_idx, frame.pc, obj_type_idx, obj_kind, field, dst_kind, obj_val
             );
         }
+        if crate::frame::stale_check() {
+            let written = frame.registers.epoch(obj);
+            if let Some(start) = Self::stale_pointer(obj_val, written) {
+                self.stale_pointer_panic(
+                    bytecode,
+                    &format!("r{obj} read for field {field} in {}", func.name()),
+                    obj_val.as_ptr(),
+                    start,
+                    written,
+                );
+            }
+        }
         if obj_val.is_null() || obj_val.is_void() {
             frame.registers.set(dst, NanBoxedValue::null());
         } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
@@ -1181,25 +1289,26 @@ impl HLInterpreter {
                 );
             }
             frame.registers.set(dst, val);
+            if crate::frame::stale_check() && dst_kind != hl::hl_type_kind_HREF {
+                self.check_loaded_pointer(bytecode, func, obj_val, field, val);
+            }
         } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-            if let Some(offset) = unsafe {
-                Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field)
-            } {
-                let obj_ptr = obj_val.as_ptr() as *mut u8;
-                let addr = unsafe { obj_ptr.add(offset) };
+            if let Some(addr) =
+                unsafe { Self::virtual_field_address(obj_val.as_ptr() as *mut u8, field) }
+            {
                 let val = unsafe { Self::read_value_at(addr, dst_kind) };
                 if env_flag!("ASH_DBG_FIELD") {
                     eprintln!(
-                        "[GETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
-                        func_idx, frame.pc, obj_type_idx, field, offset, dst_kind, val
+                        "[GETFIELD-VIRT] f{} pc={} obj_ty={} field={} addr={:p} dst_kind={} -> {:?}",
+                        func_idx, frame.pc, obj_type_idx, field, addr, dst_kind, val
                     );
                 }
                 frame.registers.set(dst, val);
+                if crate::frame::stale_check() && dst_kind != hl::hl_type_kind_HREF {
+                    self.check_loaded_pointer(bytecode, func, obj_val, field, val);
+                }
             } else {
-                let key = (obj_val.as_ptr(), field);
-                let val = if let Some(v) = self.virtual_fields.get(&key).copied() {
-                    v
-                } else if let Some(hfield) =
+                let val = if let Some(hfield) =
                     Self::resolve_typed_field_hash(bytecode, obj_type_idx, field)
                 {
                     let dst_type_idx = func.regs[dst as usize].0;

@@ -4,6 +4,9 @@
 // through the HashLink FFI contract, not a Rust API: per-function `# Safety`
 // sections would restate the single contract (pointers come from the VM and
 // follow HashLink's layout rules), and the FFI signatures are what they are.
+// A `--cfg ash_asan` build turns the sanitizer off inside the conservative
+// scanner, which reads stack words by design.
+#![cfg_attr(ash_asan, feature(sanitize))]
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]

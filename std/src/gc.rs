@@ -1328,8 +1328,11 @@ fn gc_alloc_kind(size: usize, noptr: bool) -> Option<NonNull<u8>> {
                 let np = p + aligned;
                 if np <= limit_cell.get() {
                     unsafe {
-                        (*t.objects.get().add((p - t.heap_base.get()) / ALLOC_QUANTUM))
-                            .store((aligned / ALLOC_QUANTUM) as u8, Ordering::Relaxed);
+                        let slot = &*t.objects.get().add((p - t.heap_base.get()) / ALLOC_QUANTUM);
+                        if check_fresh() {
+                            shadow_claim(p - t.heap_base.get(), aligned, "bump");
+                        }
+                        slot.store((aligned / ALLOC_QUANTUM) as u8, Ordering::Relaxed);
                     }
                     cur_cell.set(np);
                     return Step::Bumped(p);
@@ -1396,13 +1399,248 @@ fn release_tlab_region(gc: &mut ImmixAllocator) {
 /// `ASH_GC_STATS` lines count by.
 static REFILLS: AtomicU64 = AtomicU64::new(0);
 
-fn forced_refills() -> &'static [u64] {
-    static V: OnceLock<Vec<u64>> = OnceLock::new();
+/// `ASH_GC_CHECK_FRESH=1`: per-quantum owner sequence, cleared only by the
+/// sweep for objects it found dead, never by span adoption. A claim over a
+/// nonzero owner is memory handed out twice while its first object lives.
+static OWNER: LazyLock<std::sync::Mutex<Vec<u32>>> =
+    LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+static ALLOC_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cold]
+fn shadow_claim(offset: usize, size: usize, path: &str) {
+    let mut owner = OWNER.lock().expect("owner table poisoned");
+    if owner.is_empty() {
+        owner.resize(HEAP_LEN_HOOK.load(Ordering::Relaxed) / ALLOC_QUANTUM, 0);
+    }
+    let seq = ALLOC_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let base = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+    let mut reported = false;
+    for q in offset / ALLOC_QUANTUM..(offset + size).div_ceil(ALLOC_QUANTUM) {
+        if owner[q] != 0 && !reported {
+            reported = true;
+            eprintln!(
+                "[gc-fresh] {path} allocation #{seq} {:#x}+{size} overlaps live allocation #{} (quantum +{}) at collection {}",
+                base + offset,
+                owner[q],
+                q - offset / ALLOC_QUANTUM,
+                GC_STATS.collections.load(Ordering::Relaxed)
+            );
+        }
+        owner[q] = seq;
+    }
+}
+
+/// Sweep-side half of `shadow_claim`: forget the owners of the objects this
+/// block's marks say are dead.
+fn shadow_release_dead(
+    objects: &[std::sync::atomic::AtomicU8],
+    alloc_sizes: &[u32],
+    block_addr: usize,
+) {
+    let mut owner = OWNER.lock().expect("owner table poisoned");
+    if owner.is_empty() {
+        return;
+    }
+    let mut q = block_addr / ALLOC_QUANTUM;
+    let end = (block_addr + BLOCK_SIZE) / ALLOC_QUANTUM;
+    while q < end {
+        let code = objects[q].load(Ordering::Relaxed);
+        let size_q = match code & !OBJECT_MARK {
+            0 => {
+                // No allocation starts here: nothing may own it.
+                owner[q] = 0;
+                q += 1;
+                continue;
+            }
+            SPAN_OBJECT => {
+                alloc_sizes[q * ALLOC_QUANTUM / LINE_SIZE] as usize * (LINE_SIZE / ALLOC_QUANTUM)
+            }
+            c => c as usize,
+        }
+        .max(1);
+        if code & OBJECT_MARK == 0 {
+            for qq in q..(q + size_q).min(end) {
+                owner[qq] = 0;
+            }
+        }
+        q += size_q;
+    }
+}
+
+/// `ASH_GC_STALE=1`: the collection that last recycled each line, by line
+/// number, so the interpreter's stale-pointer reports can date the memory
+/// a register points at.
+static LINE_EPOCH: LazyLock<std::sync::Mutex<HashMap<u32, u32>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn stale_check() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_GC_STALE").is_ok_and(|v| v == "1"))
+}
+
+/// Whether `t` is a type some object has been allocated with (see
+/// `note_object_type`); `ASH_GC_VERIFY_HEAP` must be set for the set to fill.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_gc_known_object_type(t: usize) -> bool {
+    OBJECT_TYPES
+        .lock()
+        .expect("object types poisoned")
+        .contains(&t)
+}
+
+/// The class name of an object whose type word is `t`, written into `out`
+/// as UTF-8 up to `cap` bytes; 0 when `t` is not an object type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_gc_object_type_name(t: usize, out: *mut u8, cap: usize) -> usize {
+    if !hlp_gc_known_object_type(t) {
+        return 0;
+    }
+    let ty = t as *mut hl_type;
+    let obj = unsafe { (*ty).__bindgen_anon_1.obj };
+    if obj.is_null() {
+        return 0;
+    }
+    let name = unsafe { crate::strings::uchar_to_string((*obj).name) };
+    let bytes = name.as_bytes();
+    let n = bytes.len().min(cap);
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, n) };
+    n
+}
+
+/// The number of collections so far, for the stale-register check.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_gc_collections() -> u32 {
+    GC_STATS.collections.load(Ordering::Relaxed) as u32
+}
+
+/// The collection that last recycled the line holding `addr`, or 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_gc_line_recycled_at(addr: usize) -> u32 {
+    let base = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+    let len = HEAP_LEN_HOOK.load(Ordering::Relaxed);
+    if base == 0 || addr < base || addr >= base + len {
+        return 0;
+    }
+    let line = ((addr - base) / LINE_SIZE) as u32;
+    LINE_EPOCH
+        .lock()
+        .expect("line epochs poisoned")
+        .get(&line)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Start of the allocation holding `addr`: `usize::MAX` outside the heap,
+/// 0 when no allocation covers it.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_gc_allocation_start(addr: usize) -> usize {
+    let base = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+    let len = HEAP_LEN_HOOK.load(Ordering::Relaxed);
+    if base == 0 || addr < base || addr >= base + len {
+        return usize::MAX;
+    }
+    let gc = gc_locked();
+    match containing_allocation(
+        &gc.blocks,
+        &gc.heap.alloc_sizes,
+        &gc.heap.objects,
+        addr - base,
+    ) {
+        Some((begin, _)) => base + begin,
+        None => 0,
+    }
+}
+
+/// The side-table code at `addr`'s quantum (mark bit included), or
+/// `u32::MAX` outside the heap.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_gc_allocation_code(addr: usize) -> u32 {
+    let base = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+    let len = HEAP_LEN_HOOK.load(Ordering::Relaxed);
+    if base == 0 || addr < base || addr >= base + len {
+        return u32::MAX;
+    }
+    let gc = gc_locked();
+    let q = (addr - base) / ALLOC_QUANTUM;
+    let code = gc.heap.objects[q].load(Ordering::Relaxed) as u32;
+    let line = (addr - base) / LINE_SIZE;
+    let marked = marked_line(line / LINES_PER_BLOCK, line % LINES_PER_BLOCK);
+    let tlab = gc
+        .heap
+        .tlab_blocks
+        .values()
+        .chain(gc.heap.noptr_tlab_blocks.values())
+        .any(|&b| b == (addr - base) / BLOCK_SIZE * BLOCK_SIZE);
+    code | ((marked as u32) << 8)
+        | ((tlab as u32) << 9)
+        | ((gc.blocks[line / LINES_PER_BLOCK].noptr as u32) << 10)
+}
+
+static HEAP_BASE_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HEAP_LEN_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `ASH_GC_CHECK_FRESH=1`: report memory handed out twice. Every allocation
+/// claims its quanta in a shadow owner table that only the sweep clears,
+/// for the objects it found dead, so a claim over a live owner is a block
+/// or run adopted under an object that still lives. The sweep also checks
+/// the block lists against each other. Safe to run with, slow.
+fn check_fresh() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_GC_CHECK_FRESH").is_ok_and(|v| v == "1"))
+}
+
+/// The block table's address and length, so `marked_line` can read a line's
+/// mark from a probe.
+static LINE_MARKED_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static BLOCK_COUNT_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn marked_line(block: usize, line: usize) -> bool {
+    let blocks = LINE_MARKED_HOOK.load(Ordering::Relaxed) as *const Block;
+    if blocks.is_null() || block >= BLOCK_COUNT_HOOK.load(Ordering::Relaxed) {
+        return false;
+    }
+    unsafe { (*blocks.add(block)).is_marked(line) }
+}
+
+/// The refills `ASH_GC_COLLECT_AT_REFILLS` names: `7`, `20-30`, or `every:N`.
+struct ForcedRefills {
+    points: Vec<u64>,
+    ranges: Vec<(u64, u64)>,
+    every: u64,
+}
+
+impl ForcedRefills {
+    fn contains(&self, refill: u64) -> bool {
+        (self.every != 0 && refill.is_multiple_of(self.every))
+            || self.points.contains(&refill)
+            || self.ranges.iter().any(|&(a, b)| (a..=b).contains(&refill))
+    }
+}
+
+fn forced_refills() -> &'static ForcedRefills {
+    static V: OnceLock<ForcedRefills> = OnceLock::new();
     V.get_or_init(|| {
-        std::env::var("ASH_GC_COLLECT_AT_REFILLS")
-            .ok()
-            .map(|s| s.split(',').filter_map(|w| w.trim().parse().ok()).collect())
+        let mut f = ForcedRefills {
+            points: Vec::new(),
+            ranges: Vec::new(),
+            every: 0,
+        };
+        for w in std::env::var("ASH_GC_COLLECT_AT_REFILLS")
             .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+        {
+            if let Some(n) = w.strip_prefix("every:") {
+                f.every = n.parse().unwrap_or(0);
+            } else if let Some((a, b)) = w.split_once('-') {
+                if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                    f.ranges.push((a, b));
+                }
+            } else if let Ok(n) = w.parse() {
+                f.points.push(n);
+            }
+        }
+        f
     })
 }
 
@@ -1425,7 +1663,7 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
     // `ASH_GC_COLLECT_AT_REFILLS=a,b,c` collects at exactly those refills
     // (counted from 1), so a timing-dependent collection can be replayed.
     let refill = REFILLS.fetch_add(1, Ordering::Relaxed) + 1;
-    if forced_refills().contains(&refill) {
+    if forced_refills().contains(refill) {
         gc.collect_garbage();
     } else {
         gc.maybe_collect_at_safepoint();
@@ -1468,6 +1706,9 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
                 noptr,
             );
             gc.record_allocation(lo, aligned);
+            if check_fresh() {
+                shadow_claim(lo, aligned, "refill");
+            }
             return Some(unsafe { NonNull::new_unchecked(base) });
         }
     }
@@ -1497,6 +1738,9 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
         noptr,
     );
     gc.record_allocation(block, aligned);
+    if check_fresh() {
+        shadow_claim(block, aligned, "fresh-block");
+    }
     Some(unsafe { NonNull::new_unchecked(base) })
 }
 
@@ -2099,6 +2343,20 @@ struct ProtectTable {
 }
 
 static PROTECT: OnceLock<ProtectTable> = OnceLock::new();
+
+/// Every `hl_type` an object has been allocated with, for the heap verifier.
+static OBJECT_TYPES: LazyLock<std::sync::Mutex<HashSet<usize>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+pub(crate) fn note_object_type(t: *mut hl_type) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("ASH_GC_VERIFY_HEAP").is_some()) {
+        OBJECT_TYPES
+            .lock()
+            .expect("object types poisoned")
+            .insert(t as usize);
+    }
+}
 
 const PROTECT_CLEAN: u8 = 1;
 const PROTECT_DIRTY: u8 = 2;
@@ -3255,6 +3513,8 @@ impl ImmixAllocator {
         // valid Block: `mark_bits` is [AtomicU64; N], whose "no line claimed"
         // is 0, and `has_span` likewise.
         let block_count = heap_size / BLOCK_SIZE;
+        // Published for `check_fresh`, which runs on the allocation fast path
+        // without the lock.
         let blocks: Vec<Block> = unsafe {
             let layout =
                 std::alloc::Layout::array::<Block>(block_count).expect("block table layout");
@@ -3264,6 +3524,10 @@ impl ImmixAllocator {
             }
             Vec::from_raw_parts(ptr, block_count, block_count)
         };
+        LINE_MARKED_HOOK.store(blocks.as_ptr() as usize, Ordering::Relaxed);
+        BLOCK_COUNT_HOOK.store(block_count, Ordering::Relaxed);
+        HEAP_BASE_HOOK.store(heap.memory.as_ptr() as usize, Ordering::Relaxed);
+        HEAP_LEN_HOOK.store(heap_size, Ordering::Relaxed);
 
         if gc_stats_enabled() {
             unsafe {
@@ -3522,7 +3786,13 @@ impl ImmixAllocator {
 
         if trace_alloc() {
             let base = self.heap.memory.as_ptr() as usize;
-            eprintln!("[gc-alloc] {:#x} size={size}", base + point);
+            eprintln!(
+                "[gc-alloc] {:#x} size={size} thread={:#x} registered={} collections={}",
+                base + point,
+                thread_self_fast(),
+                current_mutator_registered(),
+                GC_STATS.collections.load(Ordering::Relaxed)
+            );
         }
         if aligned_size >= LINE_SIZE {
             // Multi-line span for the marker's walk-back. The span is rounded
@@ -3551,6 +3821,9 @@ impl ImmixAllocator {
             self.heap.current_block_end = block_end;
         }
         self.record_allocation(start, aligned_size);
+        if check_fresh() {
+            shadow_claim(start, aligned_size, "locked");
+        }
         self.heap.alloc_count += 1;
         self.heap.bytes_since_gc += aligned_size;
         GC_STATS
@@ -3794,6 +4067,7 @@ impl ImmixAllocator {
     /// Conservative mark: scan a memory range for values that look like heap pointers.
     /// For each match, claim the containing allocation and mark its lines.
     /// Returns newly claimed (heap offset, allocation size) pairs.
+    #[cfg_attr(ash_asan, sanitize(address = "off"))]
     fn conservative_scan_range(&mut self, start: usize, end: usize) -> Vec<(usize, usize)> {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
@@ -3992,6 +4266,12 @@ impl ImmixAllocator {
         // sweep clears them. Counted in the mark half rather than left out of
         // the split, since it marks and traces.
         self.take_dead_finalizers();
+        if std::env::var_os("ASH_GC_VERIFY_HEAP").is_some() {
+            self.verify_marked_objects();
+        }
+        if std::env::var_os("ASH_GC_STACK_ONLY").is_some() {
+            self.report_stack_only_objects(&stopped_world.snapshots);
+        }
         let t_mark = t_mark0.elapsed();
         let t_sweep0 = Instant::now();
         // The collector's own frame, so the audit can leave the sweep's
@@ -4001,6 +4281,9 @@ impl ImmixAllocator {
         let t_sweep = t_sweep0.elapsed();
         let pause = t0.elapsed();
 
+        if check_fresh() {
+            self.check_block_lists();
+        }
         let live_blocks = self.heap.used_blocks.len();
         let live_bytes = live_blocks * BLOCK_SIZE;
         if minor {
@@ -4710,6 +4993,292 @@ impl ImmixAllocator {
     /// Freed blocks' pages are returned to the OS via madvise (batched per
     /// contiguous run) so RSS actually falls after a collection instead of
     /// plateauing at high-water. Returns the number of blocks reclaimed.
+    /// `ASH_GC_CHECK_FRESH`: the free list and the used set partition the
+    /// heap's blocks, with no duplicates, and every bump region and recycle
+    /// span lies in a used block.
+    fn check_block_lists(&self) {
+        let mut seen: HashSet<usize> = HashSet::new();
+        for &b in &self.heap.free_blocks {
+            if !seen.insert(b) {
+                eprintln!("[gc-blocks] block {b:#x} is on the free list twice");
+            }
+            if self.heap.used_blocks.contains(&b) {
+                eprintln!("[gc-blocks] block {b:#x} is both free and used");
+            }
+        }
+        let total = self.heap.memory.len / BLOCK_SIZE;
+        if seen.len() + self.heap.used_blocks.len() != total {
+            eprintln!(
+                "[gc-blocks] {} free + {} used != {total} blocks",
+                seen.len(),
+                self.heap.used_blocks.len()
+            );
+        }
+        for b in self
+            .heap
+            .tlab_blocks
+            .values()
+            .chain(self.heap.noptr_tlab_blocks.values())
+        {
+            if !self.heap.used_blocks.contains(b) {
+                eprintln!("[gc-blocks] bump region block {b:#x} is not used");
+            }
+        }
+        for (b, _, _) in self
+            .heap
+            .recycle_spans
+            .iter()
+            .chain(self.heap.noptr_recycle_spans.iter())
+        {
+            if !self.heap.used_blocks.contains(b) {
+                eprintln!("[gc-blocks] span block {b:#x} is not used");
+            }
+        }
+    }
+
+    /// `ASH_GC_STACK_ONLY`: between mark and sweep, trace again from the
+    /// precise roots only (globals, root slots, persistent roots, the
+    /// published register ranges) and report the marked objects that pass
+    /// does not reach: they are alive only through the native stack scan.
+    /// An object Haxe code will use later that shows up here has no root
+    /// the interpreter published for it.
+    fn report_stack_only_objects(&self, mutators: &[MutatorSnapshot]) {
+        let heap_start = self.heap.memory.as_ptr() as usize;
+        let heap_end = heap_start + self.heap.memory.len;
+        let blocks = &self.blocks;
+        let alloc_sizes = &self.heap.alloc_sizes;
+        let objects = &self.heap.objects;
+        let mut reached: HashSet<usize> = HashSet::new();
+        let mut work: Vec<(usize, usize)> = Vec::new();
+        let mut consider =
+            |val: usize, work: &mut Vec<(usize, usize)>, reached: &mut HashSet<usize>| {
+                if val >= heap_start
+                    && val < heap_end
+                    && let Some((start, size)) =
+                        containing_allocation(blocks, alloc_sizes, objects, val - heap_start)
+                    && reached.insert(start)
+                {
+                    work.push((start, size));
+                }
+            };
+        let scan_words = |start: usize,
+                          end: usize,
+                          work: &mut Vec<(usize, usize)>,
+                          reached: &mut HashSet<usize>,
+                          consider: &mut dyn FnMut(
+            usize,
+            &mut Vec<(usize, usize)>,
+            &mut HashSet<usize>,
+        )| {
+            let mut p = start & !(WORD - 1);
+            while p + WORD <= end {
+                let raw = unsafe { *(p as *const usize) };
+                consider(raw, work, reached);
+                if raw & 0xFFF8_0000_0000_0000 == 0x7FF8_0000_0000_0000 {
+                    consider(raw & 0x0000_FFFF_FFFF_FFFF, work, reached);
+                }
+                p += WORD;
+            }
+        };
+        {
+            let root_set = self.roots.borrow();
+            for &g in root_set.globals.iter().chain(root_set.stack_roots.iter()) {
+                consider(g as usize, &mut work, &mut reached);
+            }
+            for &g in root_set.persistent_roots.iter() {
+                consider(g as usize, &mut work, &mut reached);
+            }
+            for &slot in root_set.root_slots.iter() {
+                scan_words(slot, slot + WORD, &mut work, &mut reached, &mut consider);
+            }
+        }
+        if let Some((gp, count)) = self.globals_range {
+            scan_words(
+                gp as usize,
+                gp as usize + count * WORD,
+                &mut work,
+                &mut reached,
+                &mut consider,
+            );
+        }
+        for m in mutators {
+            for &(start, size) in &m.scan_ranges {
+                scan_words(start, start + size, &mut work, &mut reached, &mut consider);
+            }
+        }
+        while let Some((start, size)) = work.pop() {
+            if blocks[start / BLOCK_SIZE].noptr {
+                continue;
+            }
+            let lo = heap_start + start;
+            scan_words(lo, lo + size, &mut work, &mut reached, &mut consider);
+        }
+        // Compare with the marked set. An object that was stack-only at the
+        // previous collection and is precisely reachable now was live all
+        // along with no published root for a while.
+        static PREV_STACK_ONLY: LazyLock<std::sync::Mutex<HashSet<usize>>> =
+            LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+        let mut prev = PREV_STACK_ONLY.lock().expect("stack-only poisoned");
+        let mut now_stack_only: HashSet<usize> = HashSet::new();
+        let mut stack_only = 0usize;
+        let mut shown = 0usize;
+        let n = GC_STATS.collections.load(Ordering::Relaxed) + 1;
+        for &begin in reached.iter() {
+            if prev.contains(&begin) {
+                let t = unsafe { *((heap_start + begin) as *const usize) };
+                let name = if OBJECT_TYPES
+                    .lock()
+                    .expect("object types poisoned")
+                    .contains(&t)
+                {
+                    let ty = t as *mut hl_type;
+                    unsafe { crate::strings::uchar_to_string((*(*ty).__bindgen_anon_1.obj).name) }
+                } else {
+                    format!("word0={t:#x}")
+                };
+                eprintln!(
+                    "[gc-stack-only] #{n} {:#x} ({name}) was stack-only at #{} and is precisely reachable now: ROOT GAP",
+                    heap_start + begin,
+                    n - 1
+                );
+            }
+        }
+        for &block_addr in &self.heap.used_blocks {
+            let first = block_addr / ALLOC_QUANTUM;
+            for (i, slot) in objects[first..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
+                .iter()
+                .enumerate()
+            {
+                let code = slot.load(Ordering::Relaxed);
+                if code & OBJECT_MARK == 0 || code & !OBJECT_MARK == 0 {
+                    continue;
+                }
+                let begin = (first + i) * ALLOC_QUANTUM;
+                if reached.contains(&begin) {
+                    continue;
+                }
+                now_stack_only.insert(begin);
+                stack_only += 1;
+                if shown < 12 {
+                    shown += 1;
+                    let t = unsafe { *((heap_start + begin) as *const usize) };
+                    let name = if OBJECT_TYPES
+                        .lock()
+                        .expect("object types poisoned")
+                        .contains(&t)
+                    {
+                        let ty = t as *mut hl_type;
+                        unsafe {
+                            crate::strings::uchar_to_string((*(*ty).__bindgen_anon_1.obj).name)
+                        }
+                    } else {
+                        format!("word0={t:#x}")
+                    };
+                    let size = match code & !OBJECT_MARK {
+                        SPAN_OBJECT => alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE,
+                        c => c as usize * ALLOC_QUANTUM,
+                    };
+                    eprintln!(
+                        "[gc-stack-only] #{n} {:#x} ({size} B, {}{}) reached only through the native stack",
+                        heap_start + begin,
+                        name,
+                        if blocks[begin / BLOCK_SIZE].noptr {
+                            ", noptr"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+        }
+        eprintln!("[gc-stack-only] #{n} {stack_only} marked objects are stack-only");
+        *prev = now_stack_only;
+    }
+
+    /// `ASH_GC_VERIFY_HEAP`: between mark and sweep, every marked object of
+    /// a class type is checked field by field: a class-typed field must hold
+    /// null, an address outside the heap, or the start of a marked object
+    /// whose type is a class. Anything else is a dangling or mistyped
+    /// reference, reported with its holder.
+    fn verify_marked_objects(&self) {
+        let base = self.heap.memory.as_ptr() as usize;
+        let end = base + self.heap.memory.len;
+        let known = OBJECT_TYPES.lock().expect("object types poisoned");
+        let mut reported = 0;
+        for &block_addr in &self.heap.used_blocks {
+            if self.blocks[block_addr / BLOCK_SIZE].noptr {
+                continue;
+            }
+            for q in block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM {
+                let code = self.heap.objects[q].load(Ordering::Relaxed);
+                if code & OBJECT_MARK == 0 || code & !OBJECT_MARK == 0 {
+                    continue;
+                }
+                let begin = base + q * ALLOC_QUANTUM;
+                let t = unsafe { *(begin as *const *mut hl_type) };
+                // Only word-zero values that `hlp_alloc_obj` has used as a
+                // type: a raw allocation's first word is anything.
+                if !known.contains(&(t as usize)) {
+                    continue;
+                }
+                let obj = unsafe { (*t).__bindgen_anon_1.obj };
+                if obj.is_null() || unsafe { (*obj).rt.is_null() } {
+                    continue;
+                }
+                let rt = unsafe { (*obj).rt };
+                let nfields = unsafe { (*rt).nfields };
+                for fid in 0..nfields {
+                    let f = unsafe { crate::obj::hlp_obj_field_fetch(t, fid) };
+                    if f.is_null() {
+                        continue;
+                    }
+                    let ft = unsafe { (*f).t };
+                    if ft.is_null() || unsafe { (*ft).kind } != hl::hl_type_kind_HOBJ {
+                        continue;
+                    }
+                    let off = unsafe { *(*rt).fields_indexes.add(fid as usize) } as usize;
+                    let p = unsafe { *((begin + off) as *const usize) };
+                    if p < base || p >= end {
+                        continue;
+                    }
+                    let found = containing_allocation(
+                        &self.blocks,
+                        &self.heap.alloc_sizes,
+                        &self.heap.objects,
+                        p - base,
+                    );
+                    let target_t = unsafe { *(p as *const *mut hl_type) };
+                    let target_kind = if known.contains(&(target_t as usize)) {
+                        unsafe { (*target_t).kind }
+                    } else {
+                        u32::MAX
+                    };
+                    let target_marked = self.heap.objects[(p - base) / ALLOC_QUANTUM]
+                        .load(Ordering::Relaxed)
+                        & OBJECT_MARK
+                        != 0;
+                    // A type word the runtime never allocated an object with
+                    // is not evidence either way: class objects and closures
+                    // come from other allocators.
+                    let ok = matches!(found, Some((b, _)) if b == p - base)
+                        && target_marked
+                        && (target_kind == u32::MAX
+                            || target_kind == hl::hl_type_kind_HOBJ
+                            || target_kind == hl::hl_type_kind_HSTRUCT);
+                    if !ok && reported < 20 {
+                        reported += 1;
+                        let name = unsafe { crate::strings::uchar_to_string((*obj).name) };
+                        eprintln!(
+                            "[gc-verify] {name} @{begin:#x} field {fid} (offset {off}) -> {p:#x}: \
+                             start={:?} marked={target_marked} target kind={target_kind}",
+                            found.map(|(b, sz)| (base + b, sz))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Every range the marker read as roots, for `ASH_GC_SWEEP_AUDIT`.
     /// `sp_floor` is the collector's own stack pointer at the sweep's entry,
     /// so the auditor's own locals are not reported as roots.
@@ -4775,6 +5344,7 @@ impl ImmixAllocator {
 
     /// Report every root word, raw or NaN-boxed, that points into
     /// `lo..hi`, which the sweep is about to hand back.
+    #[cfg_attr(ash_asan, sanitize(address = "off"))]
     fn audit_pointers_into(
         ranges: &[(&'static str, usize, usize)],
         lo: usize,
@@ -4883,6 +5453,9 @@ impl ImmixAllocator {
             // Nothing reached this block, so every bit is already clear and
             // the scan below could only confirm it.
             let touched = *block.any_marked.get_mut();
+            if check_fresh() && !keep_marks {
+                shadow_release_dead(&self.heap.objects, &self.heap.alloc_sizes, block_addr);
+            }
             if touched && !keep_marks {
                 for slot in &mut self.heap.objects
                     [block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
@@ -4960,8 +5533,65 @@ impl ImmixAllocator {
                 if let Some(ranges) = &audit_ranges {
                     let base = self.heap.memory.as_ptr() as usize;
                     for &(start, len) in &spans {
-                        let lo = base + block_addr + start * LINE_SIZE;
-                        Self::audit_pointers_into(ranges, lo, lo + len * LINE_SIZE, "RECYCLED");
+                        let lo = block_addr + start * LINE_SIZE;
+                        let hi = lo + len * LINE_SIZE;
+                        // Every allocation still recorded inside the run: a
+                        // root into one of those is a live object in a line
+                        // the sweep is about to hand out, and a mark bit on
+                        // one is a marked object whose line was not claimed.
+                        for q in lo / ALLOC_QUANTUM..hi / ALLOC_QUANTUM {
+                            let code = self.heap.objects[q].load(Ordering::Relaxed);
+                            if code & !OBJECT_MARK == 0 {
+                                continue;
+                            }
+                            let begin = q * ALLOC_QUANTUM;
+                            let size = match code & !OBJECT_MARK {
+                                SPAN_OBJECT => {
+                                    self.heap.alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE
+                                }
+                                c => c as usize * ALLOC_QUANTUM,
+                            };
+                            if code & OBJECT_MARK != 0 {
+                                eprintln!(
+                                    "[gc-audit] RECYCLED run {:#x}..{:#x} holds MARKED object {:#x} size {size} (line unmarked)",
+                                    base + lo,
+                                    base + hi,
+                                    base + begin
+                                );
+                            }
+                            Self::audit_pointers_into(
+                                ranges,
+                                base + begin,
+                                base + begin + size,
+                                "RECYCLED-OBJECT",
+                            );
+                        }
+                    }
+                }
+                // A stale reference into a run then reads 0xA5 words and
+                // faults at its first use instead of after the run is reused.
+                if poison_freed() {
+                    for &(start, len) in &spans {
+                        unsafe {
+                            std::ptr::write_bytes(
+                                self.heap
+                                    .memory
+                                    .as_mut_ptr()
+                                    .add(block_addr + start * LINE_SIZE),
+                                0xA5,
+                                len * LINE_SIZE,
+                            );
+                        }
+                    }
+                }
+                if stale_check() {
+                    let epoch = GC_STATS.collections.load(Ordering::Relaxed) as u32 + 1;
+                    let mut ep = LINE_EPOCH.lock().expect("line epochs poisoned");
+                    for &(start, len) in &spans {
+                        let first = (block_addr + start * LINE_SIZE) / LINE_SIZE;
+                        for l in first..first + len {
+                            ep.insert(l as u32, epoch);
+                        }
                     }
                 }
                 let spans_of_kind = if self.blocks[block_index].noptr {

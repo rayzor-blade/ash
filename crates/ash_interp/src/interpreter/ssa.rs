@@ -28,6 +28,36 @@ use super::{
     ref_elem_size, ref_target_kind, write_raw_kind,
 };
 
+/// `ASH_INTERP_CHECK_FRAMES=1` verifies on every SSA step that the frame on
+/// top of the stack belongs to the function being stepped and is the last
+/// published root range. Diagnostic; safe to run with.
+fn check_frames() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_INTERP_CHECK_FRAMES").is_ok_and(|v| v == "1"))
+}
+
+/// The pointer registers of `regs` with what their memory holds now and
+/// when it was last recycled, for the `ASH_GC_STALE` reports.
+fn stale_register_dump(regs: &crate::frame::RegisterFile, take: usize) -> String {
+    regs.as_slice()
+        .iter()
+        .enumerate()
+        .take(take)
+        .filter(|(_, v)| v.is_ptr() && v.as_ptr() > 4096)
+        .map(|(i, v)| {
+            let w0 = unsafe { *(v.as_ptr() as *const usize) };
+            format!(
+                "v{i}={:#x}[{} recycled@{} written@{}]",
+                v.as_ptr(),
+                crate::frame::object_type_name(w0),
+                crate::frame::line_recycled_at(v.as_ptr()),
+                regs.epoch(i as u32)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// SSA operands as HL registers. A value's index is its slot in the frame,
 /// which is what the shared `op_*` methods take; the newtypes share a layout,
 /// so the slice is reinterpreted rather than copied per call.
@@ -340,6 +370,33 @@ impl HLInterpreter {
         use air::v2::Instr as I;
         let func = prep.shim;
         let cell_base = prep.cell_base;
+        if check_frames() {
+            let top = self.stack.last().map(|f| f.function_index);
+            if top != Some(func_idx) {
+                panic!(
+                    "ssa_step for func_idx {func_idx} ({}) but the top frame is {top:?} \
+                     (depth {}), executing {ins:?}",
+                    func.name(),
+                    self.stack.len()
+                );
+            }
+            let regs = self.stack.last().unwrap().registers.as_slice();
+            if !regs.is_empty() {
+                let want = (regs.as_ptr() as usize, std::mem::size_of_val(regs));
+                let got = self.scan_range_buf.last().copied();
+                let published = *self.scan_len;
+                if got != Some(want) || published != self.scan_range_buf.len() {
+                    panic!(
+                        "top frame registers {want:#x?} are not the last published root range \
+                         {got:#x?} (table len {}, published len {published}, live={}) in {} \
+                         executing {ins:?}",
+                        self.scan_range_buf.len(),
+                        self.scan_live_published,
+                        func.name()
+                    );
+                }
+            }
+        }
 
         macro_rules! get {
             ($v:expr) => {
@@ -560,6 +617,20 @@ impl HLInterpreter {
                     B::Xor => va.binary_int_op(vb, IntBinOp::Xor),
                 };
                 let r = r.ok_or_else(|| {
+                    if crate::frame::stale_check() {
+                        eprintln!(
+                            "[stale] frame of {}: {}",
+                            func.name(),
+                            stale_register_dump(&self.stack.last().unwrap().registers, 40)
+                        );
+                        if let Some(caller) = self.stack.iter().rev().nth(1) {
+                            eprintln!(
+                                "[stale] caller {}: {}",
+                                bc.functions[caller.function_index].name(),
+                                stale_register_dump(&caller.registers, 40)
+                            );
+                        }
+                    }
                     anyhow!(
                         "{:?}: incompatible types {:?}, {:?} in {} (dst=v{}, a=v{}, b=v{})",
                         op,

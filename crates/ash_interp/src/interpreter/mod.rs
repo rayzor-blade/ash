@@ -668,8 +668,6 @@ pub struct HLInterpreter {
     utf16_strings: HashMap<usize, Vec<u16>>,
     /// Cache of field name hashes (string index → hash value).
     field_hash_cache: HashMap<usize, i32>,
-    /// Fallback storage for HVIRTUAL fields when runtime virtual indexes are unavailable.
-    virtual_fields: HashMap<(usize, usize), NanBoxedValue>,
     /// VM-lifetime storage backing every opaque `hl_symbol` token handed to Haxe.
     /// Exception objects resolve these lazily, long after a newer exception may
     /// have replaced the current stack snapshot.
@@ -964,6 +962,20 @@ impl HLInterpreter {
         let fn_gc_set_scan_roots_live = native_resolver
             .resolve_function("std", "hlp_gc_set_scan_roots_live")
             .unwrap_or(std::ptr::null_mut());
+        if crate::frame::stale_check() {
+            let probe = |name: &str| {
+                native_resolver
+                    .resolve_function("std", name)
+                    .unwrap_or(std::ptr::null_mut()) as usize
+            };
+            crate::frame::install_probes(crate::frame::StaleProbes {
+                collections: probe("hlp_gc_collections"),
+                line_recycled_at: probe("hlp_gc_line_recycled_at"),
+                allocation_start: probe("hlp_gc_allocation_start"),
+                allocation_code: probe("hlp_gc_allocation_code"),
+                object_type_name: probe("hlp_gc_object_type_name"),
+            });
+        }
         let fn_gc_set_scan_roots = native_resolver
             .resolve_function("std", "hlp_gc_set_scan_roots")
             .unwrap_or(std::ptr::null_mut());
@@ -1061,7 +1073,6 @@ impl HLInterpreter {
             gc_runtime_initialized: false,
             utf16_strings: HashMap::new(),
             field_hash_cache: HashMap::new(),
-            virtual_fields: HashMap::new(),
             stack_symbols_interned: std::collections::HashMap::new(),
             stall_armed: std::env::var_os("ASH_STALL_LOG").is_some(),
             stall_tick: 0,
@@ -1794,27 +1805,14 @@ impl HLInterpreter {
         None
     }
 
-    /// `virt->indexes[i]` is a byte offset into the virtual's OWN data area,
-    /// which only exists when the virtual is self-backed — `hl_alloc_virtual`
-    /// allocates `dataSize` extra bytes and points each field there.
-    ///
-    /// A virtual produced by `hl_to_virtual` is a VIEW: `value` holds the
-    /// wrapped object, there is no data area, and the field lives in the
-    /// wrapped object instead. Applying the offset to one of those addresses
-    /// past the end of the allocation, so the caller must take the dynamic
-    /// path and reach the field through `value`.
-    ///
-    /// `value.is_null()` is the discriminator upstream uses for exactly this
-    /// (hashlink src/std/obj.c:784, mirrored by ash's own hlp_obj_lookup).
-    unsafe fn resolve_virtual_field_offset(
-        obj_ptr: *mut u8,
-        c_type_ptr: *mut c_void,
-        field_idx: usize,
-    ) -> Option<usize> {
+    /// The slot `field_idx` of the virtual at `obj_ptr` reads and writes
+    /// through: the entry in the field pointer table laid out after the
+    /// header. `None` sends the access through the dynamic accessors by
+    /// hash, as HashLink does: the wrapped object lacks the field (null
+    /// entry), or the field is a method on a wrapped virtual, whose entry is
+    /// a raw function entry rather than a slot address.
+    unsafe fn virtual_field_address(obj_ptr: *mut u8, field_idx: usize) -> Option<*mut u8> {
         unsafe {
-            if c_type_ptr.is_null() {
-                return None;
-            }
             if obj_ptr.is_null() {
                 return None;
             }
@@ -1827,20 +1825,24 @@ impl HLInterpreter {
             {
                 return None;
             }
+            let virt = (*hdr).__bindgen_anon_1.virt;
+            if virt.is_null() || field_idx >= (*virt).nfields as usize {
+                return None;
+            }
+            let table = obj_ptr.add(std::mem::size_of::<hl::vvirtual>()) as *const *mut u8;
+            let slot = *table.add(field_idx);
+            if slot.is_null() {
+                return None;
+            }
             if !(*(obj_ptr as *const hl::vvirtual)).value.is_null() {
-                return None;
+                let ft = (*(*virt).fields.add(field_idx)).t;
+                if !ft.is_null()
+                    && matches!((*ft).kind, hl::hl_type_kind_HFUN | hl::hl_type_kind_HMETHOD)
+                {
+                    return None;
+                }
             }
-            let t = c_type_ptr as *mut hl_type;
-            if t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL {
-                return None;
-            }
-            let virt = (*t).__bindgen_anon_1.virt;
-            if virt.is_null() || (*virt).indexes.is_null() || field_idx >= (*virt).nfields as usize
-            {
-                return None;
-            }
-            let off = *(*virt).indexes.add(field_idx);
-            if off < 0 { None } else { Some(off as usize) }
+            Some(slot)
         }
     }
 
@@ -6227,28 +6229,19 @@ impl HLInterpreter {
                     }
                     frame.registers.set(dst.0, val);
                 } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                    if let Some(offset) = unsafe {
-                        Self::resolve_virtual_field_offset(
-                            obj_val.as_ptr() as *mut u8,
-                            obj_c_type,
-                            field.0,
-                        )
-                    } {
-                        let obj_ptr = obj_val.as_ptr() as *mut u8;
-                        let addr = unsafe { obj_ptr.add(offset) };
+                    if let Some(addr) =
+                        unsafe { Self::virtual_field_address(obj_val.as_ptr() as *mut u8, field.0) }
+                    {
                         let val = unsafe { Self::read_value_at(addr, dst_kind) };
                         if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
-                                "[GETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
-                                func_idx, frame.pc, obj_type_idx, field.0, offset, dst_kind, val
+                                "[GETTHIS-VIRT] f{} pc={} obj_ty={} field={} addr={:p} dst_kind={} -> {:?}",
+                                func_idx, frame.pc, obj_type_idx, field.0, addr, dst_kind, val
                             );
                         }
                         frame.registers.set(dst.0, val);
                     } else {
-                        let key = (obj_val.as_ptr(), field.0);
-                        let val = if let Some(v) = self.virtual_fields.get(&key).copied() {
-                            v
-                        } else if let Some(hfield) =
+                        let val = if let Some(hfield) =
                             Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
                         {
                             let dst_type_idx = func.regs[dst.0 as usize].0;
@@ -6343,31 +6336,23 @@ impl HLInterpreter {
                             );
                         }
                     } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                        if let Some(offset) = unsafe {
-                            Self::resolve_virtual_field_offset(
-                                obj_val.as_ptr() as *mut u8,
-                                obj_c_type,
-                                field.0,
-                            )
+                        if let Some(addr) = unsafe {
+                            Self::virtual_field_address(obj_val.as_ptr() as *mut u8, field.0)
                         } {
-                            let obj_ptr = obj_val.as_ptr() as *mut u8;
-                            let addr = unsafe { obj_ptr.add(offset) };
                             if env_flag!("ASH_DBG_FIELD") {
                                 eprintln!(
-                                    "[SETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
+                                    "[SETTHIS-VIRT] f{} pc={} obj_ty={} field={} addr={:p} src_kind={} src={:?}",
                                     func_idx,
                                     frame.pc,
                                     obj_type_idx,
                                     field.0,
-                                    offset,
+                                    addr,
                                     src_kind,
                                     src_val
                                 );
                             }
                             unsafe { Self::write_value_at(addr, src_kind, src_val) };
                         } else {
-                            self.virtual_fields
-                                .insert((obj_val.as_ptr(), field.0), src_val);
                             if let Some(hfield) =
                                 Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
                             {

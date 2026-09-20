@@ -244,6 +244,8 @@ fn cross_clang_args(target: &str, host: &str) -> Vec<String> {
 }
 
 fn main() {
+    // A `--cfg ash_asan` build (see lib.rs) is a known configuration.
+    println!("cargo::rustc-check-cfg=cfg(ash_asan)");
     pin_libclang();
 
     let target = env::var("TARGET").unwrap_or_default();

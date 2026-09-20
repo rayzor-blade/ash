@@ -11,6 +11,107 @@ pub struct RegisterFile {
     /// written at 15 without saying whose opcodes were running, and the two
     /// disagreeing is the whole bug.
     owner: usize,
+    /// `ASH_GC_STALE=1`: the collection count when each slot was last
+    /// written, for the stale-reference reports.
+    epochs: Vec<u32>,
+}
+
+/// `ASH_GC_STALE=1`: check, at every field access, that the pointers the
+/// interpreter reads and stores still start an allocation, and report the
+/// register epochs and line recycling when one does not. Read once.
+pub fn stale_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_GC_STALE").is_ok_and(|v| v == "1"))
+}
+
+/// The runtime's probes for the stale-reference check. The interpreter
+/// resolves them through its native resolver, since the runtime library is
+/// not in the global symbol scope; each is null until then.
+#[derive(Clone, Copy, Default)]
+pub struct StaleProbes {
+    /// `hlp_gc_collections`
+    pub collections: usize,
+    /// `hlp_gc_line_recycled_at`
+    pub line_recycled_at: usize,
+    /// `hlp_gc_allocation_start`
+    pub allocation_start: usize,
+    /// `hlp_gc_allocation_code`
+    pub allocation_code: usize,
+    /// `hlp_gc_object_type_name`
+    pub object_type_name: usize,
+}
+
+static PROBES: std::sync::Mutex<StaleProbes> = std::sync::Mutex::new(StaleProbes {
+    collections: 0,
+    line_recycled_at: 0,
+    allocation_start: 0,
+    allocation_code: 0,
+    object_type_name: 0,
+});
+
+pub fn install_probes(p: StaleProbes) {
+    *PROBES.lock().unwrap_or_else(|e| e.into_inner()) = p;
+}
+
+fn probes() -> StaleProbes {
+    *PROBES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The collector's collection count (0 until the probes are installed).
+pub fn collections_now() -> u32 {
+    let p = probes().collections;
+    if p == 0 {
+        return 0;
+    }
+    let f: unsafe extern "C" fn() -> u32 = unsafe { std::mem::transmute(p) };
+    unsafe { f() }
+}
+
+/// Start of the allocation holding `addr`; `usize::MAX` outside the heap or
+/// before the probes are installed, 0 for heap memory no allocation covers.
+pub fn allocation_start(addr: usize) -> usize {
+    let p = probes().allocation_start;
+    if p == 0 {
+        return usize::MAX;
+    }
+    let f: unsafe extern "C" fn(usize) -> usize = unsafe { std::mem::transmute(p) };
+    unsafe { f(addr) }
+}
+
+/// Side-table code and line flags at `addr` (`hlp_gc_allocation_code`).
+pub fn allocation_code(addr: usize) -> u32 {
+    let p = probes().allocation_code;
+    if p == 0 {
+        return u32::MAX;
+    }
+    let f: unsafe extern "C" fn(usize) -> u32 = unsafe { std::mem::transmute(p) };
+    unsafe { f(addr) }
+}
+
+/// The class name for type word `t`, or "?" when it is not an object type.
+pub fn object_type_name(t: usize) -> String {
+    let p = probes().object_type_name;
+    if p == 0 {
+        return "?".into();
+    }
+    let f: unsafe extern "C" fn(usize, *mut u8, usize) -> usize = unsafe { std::mem::transmute(p) };
+    let mut buf = [0u8; 128];
+    let n = unsafe { f(t, buf.as_mut_ptr(), buf.len()) };
+    if n == 0 {
+        "?".into()
+    } else {
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+}
+
+/// The collection that last recycled the line at `addr`, or 0.
+pub fn line_recycled_at(addr: usize) -> u32 {
+    let p = probes().line_recycled_at;
+    if p == 0 {
+        return 0;
+    }
+    let f: unsafe extern "C" fn(usize) -> u32 = unsafe { std::mem::transmute(p) };
+    unsafe { f(addr) }
 }
 
 impl RegisterFile {
@@ -18,6 +119,11 @@ impl RegisterFile {
         Self {
             registers: vec![NanBoxedValue::void(); register_count],
             owner: usize::MAX,
+            epochs: if stale_check() {
+                vec![0; register_count]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -34,7 +140,18 @@ impl RegisterFile {
         Self {
             registers: buf,
             owner: usize::MAX,
+            epochs: if stale_check() {
+                vec![0; register_count]
+            } else {
+                Vec::new()
+            },
         }
+    }
+
+    /// The collection count when `index` was last written (0 unless the
+    /// check is on).
+    pub fn epoch(&self, index: u32) -> u32 {
+        self.epochs.get(index as usize).copied().unwrap_or(0)
     }
 
     /// Hand the buffer back so the next call can have it.
@@ -64,6 +181,9 @@ impl RegisterFile {
         match self.registers.get_mut(i) {
             Some(slot) => *slot = value,
             None => RegisterFile::report(owner, i, 0, "write"),
+        }
+        if !self.epochs.is_empty() {
+            self.epochs[i] = collections_now();
         }
     }
 

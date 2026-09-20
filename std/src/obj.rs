@@ -190,6 +190,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
 
         let size = (*rt).size as usize;
         // let has_ptr = (*rt).hasPtr;
+        crate::gc::note_object_type(t);
 
         // Allocate memory — `allocate` returns zeroed memory (it memsets the
         // region against stale data in reused blocks), so zeroing again here
@@ -295,6 +296,7 @@ pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *m
                 hl_get_obj_proto(t);
             }
         }
+        crate::gc::note_object_type(t);
         let ptr =
             crate::rt::gc_alloc(size).unwrap_or_else(|| crate::rt::out_of_memory("an object"));
         let o = ptr.as_ptr() as *mut hl::vobj;

@@ -71,8 +71,14 @@ being taken:
 | `ASH_GC_GEN` | `1` makes most collections minor (unix): the blocks a collection kept are write-protected, the first store into one faults and marks it dirty, and the next collection traces only young blocks and dirty old ones. Off by default while an intermittent interpreter crash under it is open |
 | `ASH_GC_MAJOR_EVERY` | collections between majors under `ASH_GC_GEN=1` (default 8); exhaustion and `Gc.major` force one |
 | `ASH_GC_PROTECT` | `1` write-protects kept blocks and counts the ones written (`ASH_GC_STATS`) without minors |
-| `ASH_GC_COLLECT_AT_REFILLS` | `a,b,c`: collect at exactly those bump-region refills, numbered from 1 as `ASH_GC_STATS` reports them, to replay a timing-dependent collection |
+| `ASH_GC_COLLECT_AT_REFILLS` | `a,b,c`, `a-b` or `every:N`: collect at exactly those bump-region refills, numbered from 1 as `ASH_GC_STATS` reports them, to replay a timing-dependent collection |
 | `ASH_GC_SWEEP_AUDIT` | report roots that still point into a block being freed or a line run being recycled |
+| `ASH_GC_POISON` | `1` fills freed blocks and recycled line runs with `0xA5`, so a stale reference faults at its first use |
+| `ASH_GC_STALE` | `1` makes the interpreter check every pointer it reads from or stores into a field against the allocation table, and abort with the frames' registers (each with the collection it was written at) when one no longer starts an allocation or its line was recycled since |
+| `ASH_GC_CHECK_FRESH` | `1` reports memory handed out twice: every allocation claims its quanta in a shadow table that only the sweep clears, and the block lists are checked against each other |
+| `ASH_GC_VERIFY_HEAP` | `1` checks, between mark and sweep, that every class-typed field of a marked object points at the start of a marked object |
+| `ASH_GC_STACK_ONLY` | `1` lists, per collection, the marked objects that precise roots do not reach (only the native stack does), and the ones a later collection reaches precisely: a root the interpreter did not publish |
+| `ASH_INTERP_CHECK_FRAMES` | `1` verifies on every interpreter step that the top frame belongs to the function being stepped and is the last published root range |
 | `ASH_NATIVE_RECOVERY` | `0` stops the interpreter turning a SIGSEGV inside a native call into a recoverable error, so the crash banner names the real fault site |
 | `ASH_CRASH_BACKTRACE` | capture a backtrace in the crash handler (best effort; allocates in a signal handler) |
 | `ASH_JIT_NATIVE_TRAPS` | compile unresolved natives to call-time traps instead of declining the function |

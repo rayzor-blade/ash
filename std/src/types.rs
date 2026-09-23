@@ -541,33 +541,32 @@ pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut venum {
     unsafe {
+        if t.is_null() || (*t).kind != hl_type_kind_HENUM {
+            return ptr::null_mut();
+        }
         let tenum = (*t).__bindgen_anon_1.tenum;
-        if tenum.is_null() {
+        if tenum.is_null()
+            || index < 0
+            || index >= (*tenum).nconstructs
+            || (*tenum).constructs.is_null()
+        {
             return ptr::null_mut();
         }
-
-        let construct = (*tenum).constructs.offset(index as isize);
-        if construct.is_null() {
+        let construct = &*(*tenum).constructs.add(index as usize);
+        // construct.size includes t, index, alignment and all fields. Adding
+        // another venum wastes a header per value. Keep enough space for a
+        // Rust venum even when a nullary constructor ends before its padding.
+        let Ok(size) = usize::try_from(construct.size) else {
             return ptr::null_mut();
-        }
-
-        let size = (*construct).size as usize;
-        let has_ptr = (*construct).hasptr;
-
-        // Allocate memory
-        let ptr = crate::rt::gc_alloc(std::mem::size_of::<hl::venum>() + size)
-            .unwrap_or_else(|| crate::rt::out_of_memory("runtime memory"));
-
-        // Initialize the enum
-        let v = ptr.as_ptr() as *mut hl::venum;
+        };
+        let size = size.max(std::mem::size_of::<venum>());
+        // The runtime allocator already clears the whole allocation. In
+        // particular, scalar fields can start in venum's trailing padding.
+        let ptr =
+            crate::rt::gc_alloc(size).unwrap_or_else(|| crate::rt::out_of_memory("runtime memory"));
+        let v = ptr.as_ptr() as *mut venum;
         (*v).t = t;
         (*v).index = index;
-
-        // Zero-initialize the rest of the memory if needed
-        if has_ptr {
-            std::ptr::write_bytes(v.offset(1) as *mut u8, 0, size);
-        }
-
         v
     }
 }
@@ -671,10 +670,8 @@ pub unsafe extern "C" fn hlp_alloc_enum_dyn(
         if e.is_null() {
             return ptr::null_mut();
         }
-        // hlp_alloc_enum only zeroes when hasptr; upstream always MEM_ZEROs.
-        // Zero the payload so missing nullable params read as null.
-        let payload = (*c).size as usize;
-        std::ptr::write_bytes(e.offset(1) as *mut u8, 0, payload);
+        // hlp_alloc_enum returns zeroed storage, including any missing
+        // trailing nullable fields. c.size is the total, not a payload size.
         for i in 0..nargs as usize {
             crate::obj::hlp_write_dyn(
                 (e as *mut u8).add(*(*c).offsets.add(i) as usize) as *mut c_void,
@@ -1085,5 +1082,69 @@ pub fn vdynamic_new(
         #[cfg(target_pointer_width = "32")]
         __pad: 0,
         v,
+    }
+}
+
+#[cfg(test)]
+mod enum_allocation_tests {
+    use super::*;
+
+    // Keep type metadata alive for as long as the GC may retain the values.
+    fn enum_type(size: i32) -> *mut hl_type {
+        let c = Box::leak(Box::new(hl::hl_enum_construct {
+            name: ptr::null(),
+            nparams: 0,
+            params: ptr::null_mut(),
+            size,
+            hasptr: false,
+            offsets: ptr::null_mut(),
+        }));
+        let e = Box::leak(Box::new(hl::hl_type_enum {
+            name: ptr::null(),
+            nconstructs: 1,
+            constructs: c,
+            global_value: ptr::null_mut(),
+        }));
+        Box::leak(Box::new(hl_type {
+            kind: hl_type_kind_HENUM,
+            __bindgen_anon_1: hl_type__bindgen_ty_1 { tenum: e },
+            vobj_proto: ptr::null_mut(),
+            mark_bits: ptr::null_mut(),
+        }))
+    }
+
+    #[test]
+    fn constructor_size_already_includes_the_header() {
+        unsafe {
+            // 32 is an exact allocator size class. The old implementation
+            // requested 32 + sizeof(venum), moving this to a larger class.
+            let t = enum_type(32);
+            let e = hlp_alloc_enum(t, 0);
+            assert!(!e.is_null());
+            assert_eq!(crate::rt::allocation_size(e.cast()), 32);
+            assert_eq!((*e).t, t);
+            assert_eq!((*e).index, 0);
+            let start = size_of::<*mut hl_type>() + size_of::<i32>();
+            assert!(
+                std::slice::from_raw_parts(e.cast::<u8>().add(start), 32 - start)
+                    .iter()
+                    .all(|b| *b == 0)
+            );
+        }
+    }
+
+    #[test]
+    fn nullary_and_invalid_constructors_are_bounded() {
+        unsafe {
+            let t = enum_type((size_of::<*mut hl_type>() + size_of::<i32>()) as i32);
+            let e = hlp_alloc_enum(t, 0);
+            assert!(!e.is_null());
+            assert_eq!((*e).index, 0);
+            assert!(hlp_alloc_enum(t, -1).is_null());
+            assert!(hlp_alloc_enum(t, 1).is_null());
+            assert!(hlp_alloc_enum(ptr::null_mut(), 0).is_null());
+            assert!(hlp_alloc_enum(hlt_i32(), 0).is_null());
+            assert!(hlp_alloc_enum(enum_type(-1), 0).is_null());
+        }
     }
 }

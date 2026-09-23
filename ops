@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":2,"timestamp":1790169179,"nonce":"AwfResa5CT0nYJkwJ6o/NfhJehI=","title":"Enum allocator counts the header twice and over-zeros payloads","was":"Found while implementing Caribou plugin enums and checking allocation overhead."}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1790169179,"nonce":"MOG1JAPFzZDk5KMuHo+NSLlx+RA=","added":["bug","area:runtime"],"removed":null}]}

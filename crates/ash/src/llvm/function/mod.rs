@@ -3329,7 +3329,9 @@ impl<'ctx> JITModule<'ctx> {
         // object and never afterwards, so an emitted one is genuinely
         // read-only for its whole life.
         global.set_constant(true);
-        global.set_alignment(self.target_abi.pointer_align());
+        // The runtime reads a closure through `vdynamic`, whose union of
+        // i64 and f64 needs 8 even where a pointer needs 4 (wasm32).
+        global.set_alignment(self.target_abi.pointer_align().max(8));
         Ok(global.as_pointer_value().into())
     }
 

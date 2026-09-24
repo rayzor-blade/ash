@@ -645,18 +645,30 @@ mod shadow {
         *symbol as *const Symbol as *mut c_void
     }
 
+    /// The findex of the outermost frame [`capture_stack`] reports: the
+    /// host's call into the module, which no Haxe function is.
+    pub(super) const ENTRY: u32 = u32::MAX;
+
     /// The `CaptureStack` callback: the frames innermost first, the way the
     /// machine-stack walkers report them, so `haxe.NativeStackTrace`'s
-    /// arithmetic holds unchanged. With a null `output` it only counts.
+    /// arithmetic holds unchanged. That includes one frame past the program's
+    /// own: `toHaxe` drops the last entry, which on HashLink and a native
+    /// build is the C `main` that called in, so here it is the module's
+    /// `main` export. With a null `output` it only counts.
     pub unsafe extern "C" fn capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
         unsafe {
             let depth = depth().min(CAP);
             if output.is_null() {
-                return depth as i32;
+                return depth as i32 + 1;
             }
             let frames = &*STACK.frames.get();
-            let written = depth.min(capacity.max(0) as usize);
-            for (i, frame) in frames[..depth].iter().rev().take(written).enumerate() {
+            let entry = Frame {
+                pos: 0,
+                findex: ENTRY,
+            };
+            let all = frames[..depth].iter().rev().chain(std::iter::once(&entry));
+            let written = (depth + 1).min(capacity.max(0) as usize);
+            for (i, frame) in all.take(written).enumerate() {
                 *output.add(i) = symbol_for(frame.findex, frame.pos);
             }
             written as i32
@@ -716,6 +728,9 @@ pub unsafe extern "C" fn hlp_shadow_pop() {
 /// without debug info.
 #[cfg(target_family = "wasm")]
 fn format_frame(findex: u32, pos: u64) -> String {
+    if findex == shadow::ENTRY {
+        return "main".to_owned();
+    }
     let names = AOT_NAMES_BY_FINDEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());

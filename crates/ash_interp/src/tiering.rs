@@ -372,6 +372,28 @@ pub(crate) struct CraneliftTier {
     pub(crate) ctx: ash_core::cranelift::CraneliftTierContext,
 }
 
+/// `(findex, site) -> (configuration, register-image width)`; see
+/// [`TieredSharedCtx::osr_image_regs`].
+pub(crate) type OsrImageRecords =
+    HashMap<(usize, u64), (ash_core::air_pipeline::AirConfigKey, usize)>;
+
+/// Record what `entries` for `findex` were built from.
+pub(crate) fn record_osr_images(
+    ctx: &TieredSharedCtx,
+    findex: usize,
+    entries: &[OsrEntry],
+    cfg: ash_core::air_pipeline::AirConfigKey,
+    regs: usize,
+) {
+    let mut map = ctx
+        .osr_image_regs
+        .lock()
+        .expect("osr_image_regs mutex poisoned");
+    for e in entries {
+        map.insert((findex, e.site), (cfg, regs));
+    }
+}
+
 /// A Cranelift OSR entry to build for a header that turned hot after its
 /// function was compiled. Built on [`LateEntryWorker`]'s thread rather than
 /// the interpreter's: one costs little, but a program with many short hot
@@ -382,6 +404,7 @@ pub(crate) struct LateEntryJob {
     pub(crate) tier: Arc<CraneliftTier>,
     pub(crate) bead: Arc<Bead>,
     pub(crate) opt: Arc<ash_core::air_pipeline::Optimized>,
+    pub(crate) cfg: ash_core::air_pipeline::AirConfigKey,
 }
 
 /// An entry the worker built. The interpreter attaches it to the bead at
@@ -391,6 +414,9 @@ pub(crate) struct LateEntryDone {
     pub(crate) findex: usize,
     pub(crate) header_pc: usize,
     pub(crate) addr: usize,
+    /// What the entry was built from, for [`record_osr_images`].
+    pub(crate) cfg: ash_core::air_pipeline::AirConfigKey,
+    pub(crate) regs: usize,
 }
 
 /// The thread that builds late Cranelift entries, started on first use.
@@ -426,6 +452,8 @@ impl LateEntryWorker {
                                 findex: job.findex,
                                 header_pc: job.header_pc,
                                 addr,
+                                cfg: job.cfg,
+                                regs: job.opt.ser.reg_types.len(),
                             });
                             if sent.is_err() {
                                 return;
@@ -620,15 +648,19 @@ pub(crate) struct TieredSharedCtx {
     /// for a single-invocation hot loop that observation comes from the
     /// back-edge ticks, at most 64 iterations later.
     pub(crate) pending_osr: Mutex<HashMap<usize, Vec<OsrEntry>>>,
-    /// What each findex's OSR entries were built from: the configuration the
-    /// function was lowered under, and how wide the register image came out.
+    /// What each OSR entry was built from, by `(findex, site)`: the
+    /// configuration the function was lowered under, and how wide the
+    /// register image came out.
     ///
-    /// `OsrEntry` carries a site and an address and nothing else, so the
-    /// invariant that both sides of a transfer lowered the function the same
-    /// way is held by convention -- every producer remembers to call
-    /// `interpreter_config_for`. Breaking it does not fail closed: the entry
-    /// addresses its slots `value_reg(v) * 8` and reads them with no bounds
-    /// check, so the recorded symptom is a different checksum on every run.
+    /// `OsrEntry` carries a site and an address and nothing else, so this is
+    /// where an entry's configuration travels with it. Every producer records
+    /// one row per entry it stages, and a transfer reads the row for its own
+    /// site: an entry with no row is not taken. Per site because producers
+    /// replace each other's entries a site at a time (a late Cranelift door,
+    /// then the LLVM entries staged with a promote). Breaking the invariant
+    /// does not fail closed: the entry addresses its slots `value_reg(v) * 8`
+    /// and reads them with no bounds check, so the recorded symptom is a
+    /// different checksum on every run.
     ///
     /// The configuration is the invariant itself and the width is a second
     /// witness, because a pipeline difference can move a value to a different
@@ -637,7 +669,7 @@ pub(crate) struct TieredSharedCtx {
     /// is what makes this a guard rather than a coincidence detector, and it
     /// matters now that the level is a per-consumer choice rather than one
     /// process-wide `OnceLock` nobody could disagree with.
-    pub(crate) osr_image_regs: Mutex<HashMap<usize, (ash_core::air_pipeline::AirConfigKey, usize)>>,
+    pub(crate) osr_image_regs: Mutex<OsrImageRecords>,
     /// Uniform-ABI entries the backends emitted, `findex -> address`. The
     /// marshaling signature is read off the bytecode at bead registration,
     /// before any compile has happened, so the address a compile produces has
@@ -1909,10 +1941,7 @@ pub(crate) fn produce_cranelift_osr_entries(
     // Same staging map the LLVM producer uses; the fresh-install branch
     // attaches whatever is pending when it observes the new pointer.
     let staged = entries.len();
-    ctx.osr_image_regs
-        .lock()
-        .expect("osr_image_regs mutex poisoned")
-        .insert(findex, (cfg, opt.ser.reg_types.len()));
+    record_osr_images(ctx, findex, &entries, cfg, opt.ser.reg_types.len());
     ctx.pending_osr
         .lock()
         .expect("pending_osr mutex poisoned")
@@ -2057,10 +2086,7 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
             if entries.len() == 1 { "y" } else { "ies" }
         );
     }
-    ctx.osr_image_regs
-        .lock()
-        .expect("osr_image_regs mutex poisoned")
-        .insert(findex, (cfg, optimized.ser.reg_types.len()));
+    record_osr_images(ctx, findex, &entries, cfg, optimized.ser.reg_types.len());
     ctx.pending_osr
         .lock()
         .expect("pending_osr mutex poisoned")
@@ -2249,10 +2275,7 @@ pub(crate) fn compile_with_llvm(
                 }
                 // Interpreter frames read the staging map on the next install
                 // they observe, the same way they do for a late entry.
-                ctx.osr_image_regs
-                    .lock()
-                    .expect("osr_image_regs mutex poisoned")
-                    .insert(findex, (*cfg, optimized.ser.reg_types.len()));
+                record_osr_images(ctx, findex, &entries, *cfg, optimized.ser.reg_types.len());
                 ctx.pending_osr
                     .lock()
                     .expect("pending_osr mutex poisoned")

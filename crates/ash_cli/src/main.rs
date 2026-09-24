@@ -1492,12 +1492,8 @@ fn run() -> Result<()> {
         && !mode.is_empty()
         && mode != "0"
     {
-        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-            _ => ash_core::air_pipeline::AirOptLevel::O2,
-        };
+        // The level the tiers run, so a report describes code that exists.
+        let level = ash_core::air_pipeline::default_level();
         let opts = ash_core::air_pipeline::AirPassOptions::default();
         if let Some(want) = mode
             .strip_prefix("dump:")
@@ -1525,12 +1521,8 @@ fn run() -> Result<()> {
         && !mode.is_empty()
         && mode != "0"
     {
-        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-            _ => ash_core::air_pipeline::AirOptLevel::O2,
-        };
+        // The level the tiers run, so a report describes code that exists.
+        let level = ash_core::air_pipeline::default_level();
         let (funcs, sites, covered) = ash_core::air_pipeline::trap_report(&bytecode, level);
         eprintln!("[traps] {funcs} functions have a block under a handler");
         eprintln!(
@@ -1550,12 +1542,8 @@ fn run() -> Result<()> {
         && !mode.is_empty()
         && mode != "0"
     {
-        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-            _ => ash_core::air_pipeline::AirOptLevel::O2,
-        };
+        // The level the tiers run, so a report describes code that exists.
+        let level = ash_core::air_pipeline::default_level();
         for line in ash_core::air_pipeline::escape_report(&bytecode, level) {
             eprintln!("[escape] {line}");
         }
@@ -1594,12 +1582,8 @@ fn run() -> Result<()> {
         && !mode.is_empty()
         && mode != "0"
     {
-        let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-            Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
-            Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
-            Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
-            _ => ash_core::air_pipeline::AirOptLevel::O2,
-        };
+        // The level the tiers run, so a report describes code that exists.
+        let level = ash_core::air_pipeline::default_level();
         for line in ash_core::air_pipeline::osr_report(&bytecode, level) {
             eprintln!("[osr] {line}");
         }

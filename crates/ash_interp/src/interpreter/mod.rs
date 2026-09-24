@@ -3844,6 +3844,7 @@ impl HLInterpreter {
                     tier,
                     bead: Arc::clone(bound.bead()),
                     opt,
+                    cfg,
                 };
                 let tiered = self.tiered_runtime.as_mut().expect("tiered runtime");
                 let worker = tiered
@@ -3924,7 +3925,8 @@ impl HLInterpreter {
             }
         };
 
-        self.attach_late_entry(findex, header_pc, entry_addr as usize);
+        let regs = opt.ser.reg_types.len();
+        self.attach_late_entry(findex, header_pc, entry_addr as usize, cfg, regs);
     }
 
     /// Attach an entry the worker finished, if the bead still runs the
@@ -3959,14 +3961,21 @@ impl HLInterpreter {
                 }
                 continue;
             }
-            self.attach_late_entry(done.findex, done.header_pc, done.addr);
+            self.attach_late_entry(done.findex, done.header_pc, done.addr, done.cfg, done.regs);
         }
     }
 
     /// Put `entry_addr` on the bead as the door for `header_pc`. The swap
     /// replaces the whole table, so what is already installed is resent
     /// with the new entry.
-    fn attach_late_entry(&mut self, findex: usize, header_pc: usize, entry_addr: usize) {
+    fn attach_late_entry(
+        &mut self,
+        findex: usize,
+        header_pc: usize,
+        entry_addr: usize,
+        cfg: ash_core::air_pipeline::AirConfigKey,
+        regs: usize,
+    ) {
         let Some(addr) = self
             .tiered_runtime
             .as_ref()
@@ -3977,10 +3986,11 @@ impl HLInterpreter {
             return;
         };
         let mut entries = self.osr_attached.get(&findex).cloned().unwrap_or_default();
-        entries.push(OsrEntry {
+        let entry = OsrEntry {
             site: header_pc as u64,
             code: entry_addr as *mut (),
-        });
+        };
+        entries.push(entry);
         let Some(bound) = self
             .tiered_runtime
             .as_ref()
@@ -3994,6 +4004,9 @@ impl HLInterpreter {
             .swap_compiled_with_osr(addr as *mut (), entries.clone())
             .is_some()
         {
+            if let Some(t) = self.tiered_runtime.as_ref() {
+                crate::tiering::record_osr_images(&t.shared_ctx, findex, &[entry], cfg, regs);
+            }
             self.osr_attached.insert(findex, entries);
             if osr_logging() {
                 eprintln!("[osr] late-attached entry findex={findex} pc={header_pc}");
@@ -4011,17 +4024,14 @@ impl HLInterpreter {
     ) {
         // `osr::analyze` answers from the IR whether a transfer may enter at
         // all: a live trap region or a register whose address escaped means no.
+        // Asked of the body the OSR producers build, not of a fixed level.
         if osr_logging() {
-            let m = ash_core::air_pipeline::AshModule::new(bytecode);
-            let opts = ash_core::air_pipeline::AirPassOptions::default();
-            let plan = ash_core::air_pipeline::prepare_ir(
-                &m,
-                &bytecode.functions[func_idx],
-                ash_core::air_pipeline::AirOptLevel::O2,
-                &opts,
-            )
-            .ok()
-            .map(|(f, _)| ash_core::osr::analyze(&f));
+            let raw = &bytecode.functions[func_idx];
+            let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+            let m = ash_core::air_pipeline::AshModule::new(bytecode).with_callees(cfg.callees);
+            let plan = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg)
+                .ok()
+                .map(|o| ash_core::osr::analyze(&o.ir));
             match &plan {
                 Some(p) if p.eligible() => {
                     eprintln!("[osr] hot loop findex={findex} pc={header_pc} ELIGIBLE")
@@ -4072,39 +4082,53 @@ impl HLInterpreter {
 
         // Both sides have to have lowered this function the same way, because
         // the entry addresses its slots `value_reg(v) * 8` and reads them with
-        // no bounds check. Nothing in `OsrEntry` says which configuration
-        // built it, so this compares the one recorded by the producer against
-        // the one this frame's body was ACTUALLY prepared under -- recomputing
-        // it would re-derive the very assumption under test.
-        //
-        // Checked before the site lookup on purpose. A configuration
-        // difference usually moves the pcs too, so the lookup would miss and
-        // return quietly; that hides the disagreement instead of naming it,
-        // and pcs are small dense integers, so a miss is not guaranteed.
-        let built = self
-            .tiered_runtime
-            .as_ref()
-            .and_then(|t| t.shared_ctx.osr_image_regs.lock().ok())
-            .and_then(|m| m.get(&findex).copied());
-        if let Some((built_cfg, _)) = built {
-            let mine = match ssa {
-                Some((prep, _, _)) => prep.cfg,
-                None => {
-                    ash_core::air_pipeline::interpreter_config_for(&bytecode.functions[func_idx])
-                }
-            };
-            if built_cfg != mine {
-                if osr_logging() {
-                    eprintln!(
-                        "[osr] REFUSED findex={findex} pc={header_pc}: entry built under \
-                         {built_cfg:?}, this frame was prepared under {mine:?}"
-                    );
-                }
+        // no bounds check. The producer recorded the configuration it built
+        // this site's entry under; compare it with the one this frame's body
+        // was ACTUALLY prepared under -- recomputing it would re-derive the
+        // very assumption under test. An entry nobody recorded is not taken.
+        let site = header_pc as u64;
+        let mine = match ssa {
+            Some((prep, _, _)) => prep.cfg,
+            None => ash_core::air_pipeline::interpreter_config_for(&bytecode.functions[func_idx]),
+        };
+        let built = {
+            let records = self
+                .tiered_runtime
+                .as_ref()
+                .and_then(|t| t.shared_ctx.osr_image_regs.lock().ok());
+            let Some(records) = records else {
                 return Ok(None);
+            };
+            // A configuration difference usually moves the pcs too, so this
+            // site may have no row while its function has rows built under
+            // another key. Name that instead of returning quietly.
+            if osr_logging()
+                && !records.contains_key(&(findex, site))
+                && let Some((_, (other, _))) = records
+                    .iter()
+                    .find(|((f, _), (cfg, _))| *f == findex && *cfg != mine)
+            {
+                eprintln!(
+                    "[osr] REFUSED findex={findex} pc={header_pc}: entries were built under \
+                     {other:?}, this frame was prepared under {mine:?}"
+                );
             }
+            match records.get(&(findex, site)).copied() {
+                Some(r) => r,
+                None => return Ok(None),
+            }
+        };
+        if built.0 != mine {
+            if osr_logging() {
+                eprintln!(
+                    "[osr] REFUSED findex={findex} pc={header_pc}: entry built under {:?}, \
+                     this frame was prepared under {mine:?}",
+                    built.0
+                );
+            }
+            return Ok(None);
         }
 
-        let site = header_pc as u64;
         let addr = {
             let tiered = self.tiered_runtime.as_ref();
             let Some(bound) = tiered
@@ -4129,21 +4153,12 @@ impl HLInterpreter {
             Some((prep, _, _)) => prep.osr_reg_types,
             None => &body.regs,
         };
-        // Both sides have to have lowered this function the same way, because
-        // the entry addresses its slots `value_reg(v) * 8` and reads them with
-        // no bounds check. Nothing in `OsrEntry` says which configuration
-        // built it, so the register-image width is the witness: a mismatch
-        // means the entry names different variables than this frame holds, and
-        // that does not fail closed -- it returns a different answer each run.
-        // Skipping the transfer costs one interpreted loop; taking it on a
-        // disagreement costs correctness, and silently.
-        // Second witness: a pipeline difference can move a value to another
-        // register without changing how many there are, but a differently
-        // sized image means the entry would read past the buffer this frame
-        // is about to fill.
-        if let Some((_, built_regs)) = built
-            && built_regs != regs.len()
-        {
+        // The register-image width is the second witness: a pipeline
+        // difference can move a value to another register without changing
+        // how many there are, but a differently sized image means the entry
+        // would read past the buffer this frame is about to fill.
+        let built_regs = built.1;
+        if built_regs != regs.len() {
             if osr_logging() {
                 eprintln!(
                     "[osr] REFUSED findex={findex} pc={header_pc}: entry was built over \

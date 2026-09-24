@@ -175,9 +175,17 @@ impl DecodedBytecode {
     /// uses. Field and proto hashes come from the same function the decoder
     /// uses, so the compiled Haxe side computes the same values.
     ///
-    /// Errors: a class the program already declares, a native registered
-    /// twice, a program-declared native whose signature disagrees with the
-    /// registration, or a type name nothing declares.
+    /// A class the program already declares is BOUND instead: nothing is
+    /// appended, the description is checked against the program's class
+    /// (its superclass, and every field by name, hash and type), each method,
+    /// static and ctor must name a native the program declares under
+    /// `(lib, symbol)` with an agreeing signature, and the host's entries are
+    /// attached to those natives. The program's own static init makes the
+    /// class object, as it does for any class it declares.
+    ///
+    /// Errors: a bound class that disagrees with the program's, a native
+    /// registered twice, a program-declared native whose signature disagrees
+    /// with the registration, or a type name nothing declares.
     pub fn register_host_module(&mut self, m: &HostModule) -> Result<()> {
         let hl_class = self.type_index_of("hl.Class").ok_or_else(|| {
             anyhow!("cannot register host module `{}`: the program has no hl.Class type, which every class companion extends", m.lib)
@@ -188,9 +196,6 @@ impl DecodedBytecode {
         let mut seen_classes: HashSet<&str> = HashSet::new();
         let mut seen_natives: HashSet<&str> = HashSet::new();
         for c in &m.classes {
-            if self.type_index_of(&c.name).is_some() {
-                bail!("host class `{}` is already declared by the program", c.name);
-            }
             if !seen_classes.insert(&c.name) {
                 bail!(
                     "host class `{}` is declared twice in module `{}`",
@@ -240,10 +245,16 @@ impl DecodedBytecode {
     }
 
     fn append_host_module(&mut self, m: &HostModule, hl_class: usize) -> Result<()> {
+        // Bound or appended is decided against the program as decoded, before
+        // any shell exists.
+        let (bound, appended): (Vec<&HostClass>, Vec<&HostClass>) = m
+            .classes
+            .iter()
+            .partition(|c| self.type_index_of(&c.name).is_some());
         // Class types first, as empty shells, so a field, parameter or
         // superclass can name any class of the module regardless of order.
-        let mut class_indices = Vec::with_capacity(m.classes.len());
-        for c in &m.classes {
+        let mut class_indices = Vec::with_capacity(appended.len());
+        for c in &appended {
             let index = self.push_type(HLType {
                 kind: hl::hl_type_kind_HOBJ,
                 obj: Some(HLTypeObj {
@@ -267,7 +278,10 @@ impl DecodedBytecode {
         let ctor_field = self.constructor_field_index(hl_class)?;
 
         let mut new_natives: Vec<(String, usize)> = Vec::new();
-        for (c, &class_index) in m.classes.iter().zip(&class_indices) {
+        for c in &bound {
+            self.bind_host_class(&m.lib, c)?;
+        }
+        for (c, &class_index) in appended.iter().zip(&class_indices) {
             let super_ = match &c.superclass {
                 Some(name) => Some(TypeRef(self.type_index_of(name).ok_or_else(|| {
                     anyhow!(
@@ -393,6 +407,163 @@ impl DecodedBytecode {
         }
 
         self.check_declared_natives(&m.lib, &new_natives)
+    }
+
+    /// Bind `c` to the class the program declares under its name; see
+    /// [`Self::register_host_module`].
+    fn bind_host_class(&mut self, lib: &str, c: &HostClass) -> Result<()> {
+        let class_index = self
+            .type_index_of(&c.name)
+            .expect("a bound class is one the program declares");
+        let obj = self.types[class_index]
+            .obj
+            .clone()
+            .expect("type_index_of answers object types");
+        if let Some(want) = &c.superclass {
+            let have = obj
+                .super_
+                .as_ref()
+                .and_then(|s| self.types[s.0].obj.as_ref())
+                .map(|o| o.name.as_str());
+            if have != Some(want.as_str()) {
+                bail!(
+                    "host class `{}` extends `{want}`, but the program's `{}` extends {}",
+                    c.name,
+                    c.name,
+                    have.map_or("nothing".to_string(), |h| format!("`{h}`"))
+                );
+            }
+        }
+        for f in &c.fields {
+            let found = self.field_in_chain(class_index, &f.name);
+            let Some(field) = found else {
+                bail!(
+                    "host class `{}` has field `{}`, which the program's `{}` does not declare",
+                    c.name,
+                    f.name,
+                    c.name
+                );
+            };
+            if field.hashed_name != field_hash(&f.name) {
+                bail!(
+                    "field `{}.{}`: the program hashes its name to {}, the host to {}",
+                    c.name,
+                    f.name,
+                    field.hashed_name,
+                    field_hash(&f.name)
+                );
+            }
+            if !self.host_type_matches(field.type_.0, &f.ty) {
+                bail!(
+                    "field `{}.{}`: the program declares it as {}, the host as {:?}",
+                    c.name,
+                    f.name,
+                    self.type_text(field.type_.0),
+                    f.ty
+                );
+            }
+        }
+        let receiver = HostType::Obj(c.name.clone());
+        let entries = c
+            .methods
+            .iter()
+            .map(|m| (m, Some(&receiver), &m.ret))
+            .chain(c.statics.iter().map(|m| (m, None, &m.ret)))
+            .chain(c.ctor.iter().map(|m| (m, Some(&receiver), &HostType::Void)));
+        for (method, receiver, ret) in entries {
+            let declared = self.natives.iter().find(|n| {
+                n.lib.strip_prefix('?').unwrap_or(&n.lib) == lib && n.name == method.symbol
+            });
+            let Some(declared) = declared else {
+                bail!(
+                    "host method `{}.{}` names native `{lib}@{}`, which the program does not declare",
+                    c.name,
+                    method.name,
+                    method.symbol
+                );
+            };
+            let params: Vec<&HostType> = receiver.into_iter().chain(&method.params).collect();
+            let agree = self.types[declared.type_.0].fun.as_ref().is_some_and(|f| {
+                f.args.len() == params.len()
+                    && f.args
+                        .iter()
+                        .zip(&params)
+                        .all(|(a, h)| self.host_type_matches(a.0, h))
+                    && self.host_type_matches(f.ret.0, ret)
+            });
+            if !agree {
+                bail!(
+                    "native `{lib}@{}`: the program declares it as {} but the host describes it as ({}) -> {:?}",
+                    method.symbol,
+                    self.signature_text(declared.type_.0),
+                    params
+                        .iter()
+                        .map(|p| format!("{p:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    ret
+                );
+            }
+        }
+        for method in c.methods.iter().chain(&c.statics).chain(&c.ctor) {
+            self.host_natives.insert(
+                (lib.to_string(), method.symbol.clone()),
+                HostNative {
+                    addr: method.func as usize,
+                    context: method.context as usize,
+                    record: method.record,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The field `name` of the class at `class_index` or an ancestor.
+    fn field_in_chain(&self, class_index: usize, name: &str) -> Option<HLObjField> {
+        let mut cur = Some(class_index);
+        while let Some(i) = cur {
+            let obj = self.types.get(i)?.obj.as_ref()?;
+            if let Some(f) = obj.fields.iter().find(|f| f.name == name) {
+                return Some(f.clone());
+            }
+            cur = obj.super_.as_ref().map(|s| s.0);
+        }
+        None
+    }
+
+    /// Whether the program's type at `index` is what `host` describes.
+    fn host_type_matches(&self, index: usize, host: &HostType) -> bool {
+        let Some(t) = self.types.get(index) else {
+            return false;
+        };
+        match host {
+            HostType::Void => t.kind == hl::hl_type_kind_HVOID,
+            HostType::Bool => t.kind == hl::hl_type_kind_HBOOL,
+            HostType::I32 => t.kind == hl::hl_type_kind_HI32,
+            HostType::I64 => t.kind == hl::hl_type_kind_HI64,
+            HostType::F32 => t.kind == hl::hl_type_kind_HF32,
+            HostType::F64 => t.kind == hl::hl_type_kind_HF64,
+            HostType::Bytes => t.kind == hl::hl_type_kind_HBYTES,
+            HostType::Dyn => t.kind == hl::hl_type_kind_HDYN,
+            HostType::Array => t.kind == hl::hl_type_kind_HARRAY,
+            HostType::Fun => t.kind == hl::hl_type_kind_HFUN,
+            HostType::Obj(name) => t.obj.as_ref().is_some_and(|o| &o.name == name),
+            HostType::Abstract(name) => {
+                t.kind == hl::hl_type_kind_HABSTRACT && t.abs_name.as_deref() == Some(name)
+            }
+        }
+    }
+
+    /// A type for diagnostics: its class or abstract name, else its kind.
+    fn type_text(&self, index: usize) -> String {
+        match self.types.get(index) {
+            Some(t) => match (&t.obj, &t.abs_name) {
+                (Some(o), _) => format!("`{}`", o.name),
+                (_, Some(a)) => format!("abstract `{a}`"),
+                _ => kind_name(t.kind).to_string(),
+            },
+            None => "?".into(),
+        }
     }
 
     /// A program-declared native that a host also registered must agree
@@ -752,13 +923,125 @@ mod tests {
     }
 
     #[test]
-    fn a_class_the_program_declares_is_rejected() {
+    fn a_declared_class_that_disagrees_is_refused() {
         let mut bc = fixture();
         let mut m = greeter_module();
         m.classes[0].name = "String".into();
         let err = bc.register_host_module(&m).unwrap_err().to_string();
         assert!(err.contains("`String`"), "{err}");
-        assert!(err.contains("already declared"), "{err}");
+        assert!(err.contains("does not declare"), "{err}");
+    }
+
+    /// A program declaring `test.Greeter` and its natives under lib `host`
+    /// (the end-to-end fixture in ash_interp).
+    fn declaring_fixture() -> DecodedBytecode {
+        init_std_library().expect("std library");
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../ash_interp/tests/fixtures/host_module/main.hl");
+        BytecodeDecoder::decode(&path).expect("decode fixture")
+    }
+
+    fn stub(name: &str, symbol: &str, params: Vec<HostType>, ret: HostType) -> HostMethod {
+        HostMethod {
+            name: name.into(),
+            symbol: symbol.into(),
+            params,
+            ret,
+            func: stub_make as *const c_void,
+            context: std::ptr::null(),
+            record: false,
+        }
+    }
+
+    /// `test.Greeter` as the program declares it.
+    fn bound_greeter() -> HostModule {
+        let greeter = || HostType::Obj("test.Greeter".into());
+        HostModule {
+            lib: "host".into(),
+            classes: vec![HostClass {
+                name: "test.Greeter".into(),
+                superclass: None,
+                fields: vec![HostField {
+                    name: "handle".into(),
+                    ty: HostType::Abstract("host_obj".into()),
+                }],
+                methods: vec![],
+                statics: vec![
+                    stub("make", "greeter_make", vec![], greeter()),
+                    stub(
+                        "greeter_bump",
+                        "greeter_bump",
+                        vec![greeter()],
+                        HostType::I32,
+                    ),
+                    stub("adder", "greeter_adder", vec![], HostType::Fun),
+                    stub(
+                        "scale",
+                        "greeter_scale",
+                        vec![greeter(), HostType::F64, HostType::Bool],
+                        HostType::F64,
+                    ),
+                ],
+                ctor: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_declared_class_is_bound_without_appending() {
+        let mut bc = declaring_fixture();
+        let (types, natives, globals) = (bc.types.len(), bc.natives.len(), bc.globals.len());
+        bc.register_host_module(&bound_greeter()).expect("bind");
+        assert_eq!(bc.types.len(), types);
+        assert_eq!(bc.natives.len(), natives);
+        assert_eq!(bc.globals.len(), globals);
+        // The program's static init makes the class object, not the host.
+        assert!(bc.host_classes.is_empty());
+        for symbol in [
+            "greeter_make",
+            "greeter_bump",
+            "greeter_adder",
+            "greeter_scale",
+        ] {
+            assert!(
+                bc.host_natives
+                    .contains_key(&("host".to_string(), symbol.to_string())),
+                "{symbol} not attached"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_field_of_another_type_is_refused() {
+        let mut bc = declaring_fixture();
+        let mut m = bound_greeter();
+        m.classes[0].fields[0].ty = HostType::I32;
+        let err = bc.register_host_module(&m).unwrap_err().to_string();
+        assert!(err.contains("test.Greeter.handle"), "{err}");
+        assert!(err.contains("abstract `host_obj`"), "{err}");
+        assert!(bc.host_natives.is_empty(), "a refusal attaches nothing");
+    }
+
+    #[test]
+    fn a_bound_method_whose_native_is_undeclared_is_refused() {
+        let mut bc = declaring_fixture();
+        let mut m = bound_greeter();
+        m.classes[0]
+            .statics
+            .push(stub("missing", "greeter_missing", vec![], HostType::Void));
+        let err = bc.register_host_module(&m).unwrap_err().to_string();
+        assert!(err.contains("host@greeter_missing"), "{err}");
+        assert!(err.contains("does not declare"), "{err}");
+    }
+
+    #[test]
+    fn a_bound_native_with_another_signature_is_refused() {
+        let mut bc = declaring_fixture();
+        let mut m = bound_greeter();
+        m.classes[0].statics[1].params.clear();
+        let err = bc.register_host_module(&m).unwrap_err().to_string();
+        assert!(err.contains("host@greeter_bump"), "{err}");
+        assert!(err.contains("the program declares it as"), "{err}");
     }
 
     #[test]
@@ -770,7 +1053,7 @@ mod tests {
             .register_host_module(&greeter_module())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("test.Greeter"), "{err}");
+        assert!(err.contains("registered twice"), "{err}");
         assert_eq!(
             bc.types.len(),
             ntypes,

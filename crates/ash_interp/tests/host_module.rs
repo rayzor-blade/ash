@@ -11,7 +11,7 @@
 //! child is plain `main`.
 
 use ash_core::bytecode::BytecodeDecoder;
-use ash_core::host_module::{HostClass, HostMethod, HostModule, HostType};
+use ash_core::host_module::{HostClass, HostField, HostMethod, HostModule, HostType};
 use ash_core::native_lib::{self, NativeFunctionResolver};
 use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
 use std::collections::HashMap;
@@ -39,7 +39,17 @@ fn main() {
     }
     let exe = std::env::current_exe().expect("current exe");
     let mut failed = false;
-    for mode in ["interp", "hybrid", "cranelift", "llvm", "jit"] {
+    // `bind-*` registers the same natives against the program's own
+    // `test.Greeter` instead of a companion class of the host's.
+    for mode in [
+        "interp",
+        "hybrid",
+        "cranelift",
+        "llvm",
+        "jit",
+        "bind-interp",
+        "bind-jit",
+    ] {
         let out = Command::new(&exe)
             .env(CHILD_MODE, mode)
             .output()
@@ -238,18 +248,41 @@ fn host_module() -> HostModule {
     }
 }
 
+/// The same natives described as the program's own `test.Greeter`, for a
+/// registration that binds to the class rather than adding a companion.
+fn bound_module() -> HostModule {
+    let mut m = host_module();
+    let class = &mut m.classes[0];
+    class.name = "test.Greeter".into();
+    class.fields = vec![HostField {
+        name: "handle".into(),
+        ty: HostType::Abstract("host_obj".into()),
+    }];
+    m
+}
+
 /// Run the fixture with the module registered and leave the way the CLI
 /// does. The program's output is this process's stdout.
 fn child(mode: &str) -> ! {
+    let (bind, mode) = match mode.strip_prefix("bind-") {
+        Some(rest) => (true, rest),
+        None => (false, mode),
+    };
     let path = fixture();
     assert!(path.exists(), "fixture not built: {}", path.display());
     native_lib::choose_std_linkage(&path);
     native_lib::init_std_library().expect("std library");
 
     let mut bc = BytecodeDecoder::decode(&path).expect("decode");
-    bc.register_host_module(&host_module()).expect("register");
-    assert!(bc.type_index_of("host.Greeters").is_some());
-    assert!(bc.type_index_of("host.$Greeters").is_some());
+    if bind {
+        let types = bc.types.len();
+        bc.register_host_module(&bound_module()).expect("bind");
+        assert_eq!(bc.types.len(), types, "binding appends no type");
+    } else {
+        bc.register_host_module(&host_module()).expect("register");
+        assert!(bc.type_index_of("host.Greeters").is_some());
+        assert!(bc.type_index_of("host.$Greeters").is_some());
+    }
     let greeter = bc.type_index_of("test.Greeter").expect("program class");
     let bc = Arc::new(bc);
 
@@ -331,9 +364,14 @@ fn child(mode: &str) -> ! {
                 .unwrap(),
         )
     };
-    let greeters = bc.type_index_of("host.Greeters").unwrap();
-    let class_obj = unsafe { get_global(interp.c_type_of(greeters)) };
-    assert!(!class_obj.is_null(), "host class has no class object");
+    let class = if bind {
+        "test.Greeter"
+    } else {
+        "host.Greeters"
+    };
+    let class_index = bc.type_index_of(class).unwrap();
+    let class_obj = unsafe { get_global(interp.c_type_of(class_index)) };
+    assert!(!class_obj.is_null(), "{class} has no class object");
     if mode != "interp" {
         interp.quiesce_promotions();
     }

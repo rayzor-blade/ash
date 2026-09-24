@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1790284226,"nonce":"6kW6TN3VXtcQMj6mip5Tr1sUnow=","status":1}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1790286791,"nonce":"yPeJr5RUFxG5MPSb0t5kEbtEzhM=","message":"Fixed in 179c442: the remaining producer was emit_static_closure (AOT's constant vclosure for an unbound StaticClosure), aligned to the pointer size. Debug wasm unit suite 1062/1069 (7 crashed) -\u003e 1069/1069.","files":null}]}

@@ -1962,6 +1962,11 @@ fn emit_optimized(
             version
         );
     }
+    // Every function went through the pipeline, so this is where its cost
+    // over a whole program shows.
+    for line in ash_core::air_pipeline::pass_time_report() {
+        eprintln!("{line}");
+    }
     Ok(())
 }
 

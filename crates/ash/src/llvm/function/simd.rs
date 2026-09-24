@@ -419,7 +419,8 @@ impl<'ctx> JITModule<'ctx> {
             .build_shuffle_vector(one, ty.get_undef(), mask, "splat")?)
     }
 
-    /// The address of element `index` of a `NativeArray`.
+    /// The address of element `index` of a `NativeArray`, past the header of
+    /// the target being compiled for.
     fn array_run(
         &self,
         arr: BasicValueEnum<'ctx>,
@@ -438,7 +439,7 @@ impl<'ctx> JITModule<'ctx> {
         let off = self.builder.build_int_add(
             byte,
             ctx.i64_type()
-                .const_int(crate::layout::VARRAY_DATA_OFFSET as u64, false),
+                .const_int(self.target_abi.varray_data_offset(), false),
             "arr_off",
         )?;
         Ok(unsafe {

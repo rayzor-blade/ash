@@ -59,6 +59,14 @@ A hello world is a few megabytes, nearly all of it runtime. A library
 compiled into the runtime is in every module whether used or not, which is
 why SQLite became a side module (1.9 MB out of a 3.96 MB hello world).
 
+## SIMD
+
+Modules are built with the SIMD128 proposal on, so vector code -- the
+`ash-simd` value types, and loops the optimiser widens -- runs as v128
+instructions. Every current engine supports it (wasmtime, V8, SpiderMonkey,
+JavaScriptCore). `ASH_WASM_SIMD=0` at build time leaves it off for an engine
+that does not; the same code then runs lane by lane.
+
 ## Threads
 
 `sys.thread` on wasm has two modes:

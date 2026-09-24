@@ -429,7 +429,14 @@ pub(crate) fn target_machine(
         // same two switches, and both halves have to agree or the program's
         // calls stay unlowered while the runtime's are rewritten.
         enable_wasm_sjlj();
-        "+exception-handling".to_string()
+        // SIMD128 lets the vector IR the vectorizer and the `simd` primitives
+        // emit become v128 instructions instead of being scalarised lane by
+        // lane. `ASH_WASM_SIMD=0` leaves it off, for an engine without it.
+        if std::env::var("ASH_WASM_SIMD").is_ok_and(|v| v == "0") {
+            "+exception-handling".to_string()
+        } else {
+            "+exception-handling,+simd128".to_string()
+        }
     } else {
         default_features(&lower_triple(triple))
     };

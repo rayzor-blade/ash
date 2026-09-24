@@ -1667,10 +1667,10 @@ pub(crate) fn prepare_worker_closure_dependencies(
         }
         for cfg in bodies {
             let bare;
-            let view = if cfg.callees_visible {
+            let view = if cfg.callees == ash_core::air_pipeline::CalleeView::All {
                 &module
             } else {
-                bare = module.without_callees_view();
+                bare = module.view(cfg.callees);
                 &bare
             };
             let Ok(optimized) = ash_core::air_pipeline::optimized_with_config(view, raw, cfg)
@@ -1838,10 +1838,10 @@ pub(crate) fn produce_cranelift_osr_entries(
     }
     let shared = tier.ctx.air_module();
     let bare;
-    let osr_module = if cfg.callees_visible {
+    let osr_module = if cfg.callees == ash_core::air_pipeline::CalleeView::All {
         shared
     } else {
-        bare = shared.without_callees_view();
+        bare = shared.view(cfg.callees);
         &bare
     };
     let Ok(opt) = ash_core::air_pipeline::optimized_with_config(osr_module, raw, cfg) else {
@@ -1969,11 +1969,7 @@ pub(crate) fn osr_plan_for(
     if cfg != ash_core::air_pipeline::AirConfigKey::standard() {
         return None;
     }
-    let m = if cfg.callees_visible {
-        ash_core::air_pipeline::AshModule::new(&bytecode)
-    } else {
-        ash_core::air_pipeline::AshModule::new(&bytecode).without_callees()
-    };
+    let m = ash_core::air_pipeline::AshModule::new(&bytecode).with_callees(cfg.callees);
     let optimized = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg).ok()?;
     let plan = ash_core::osr::analyze(&optimized.ir);
     let eligible: std::collections::HashSet<usize> = plan

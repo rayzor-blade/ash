@@ -3800,11 +3800,7 @@ impl HLInterpreter {
         let raw = &bytecode.functions[func_idx];
         // Lowered as the interpreter walks it: OSR transfers by position.
         let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
-        let m = if cfg.callees_visible {
-            ash_core::air_pipeline::AshModule::new(bytecode)
-        } else {
-            ash_core::air_pipeline::AshModule::new(bytecode).without_callees()
-        };
+        let m = ash_core::air_pipeline::AshModule::new(bytecode).with_callees(cfg.callees);
         let Ok(opt) = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg) else {
             return;
         };

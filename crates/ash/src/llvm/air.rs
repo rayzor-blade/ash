@@ -7,7 +7,9 @@
 
 use std::sync::OnceLock;
 
-use crate::air_pipeline::{self, AirOptLevel, AirPassOptions, AshModule, PipelineError};
+use crate::air_pipeline::{
+    self, AirOptLevel, AirPassOptions, AshModule, CalleeView, PipelineError,
+};
 use crate::bytecode::DecodedBytecode;
 use crate::types::HLFunction;
 
@@ -21,21 +23,21 @@ pub(crate) fn prepare_llvm(
     bc: &DecodedBytecode,
     f: &HLFunction,
     hot_reload: bool,
-    isolate_callees: bool,
+    callees: CalleeView,
 ) -> Result<air::v2::ir::Function, PipelineError> {
     let level = match (hot_reload, level()) {
         (true, AirOptLevel::O3) => AirOptLevel::O2,
         (_, level) => level,
     };
-    let callees_visible = !(hot_reload || isolate_callees);
-    let module = if callees_visible {
-        AshModule::new(bc)
+    let callees = if hot_reload {
+        CalleeView::None
     } else {
-        AshModule::new(bc).without_callees()
+        callees
     };
+    let module = AshModule::new(bc).with_callees(callees);
     let opts = pass_options();
     // Through the shared cache, not a private pipeline run. AIR for a findex
-    // is a pure function of (level, fma, callees_visible), which is exactly
+    // is a pure function of (level, fma, callees), which is exactly
     // what AirConfigKey keys on, so promotion has no reason to recompute what
     // the Cranelift tier already produced -- and in Auto mode Cranelift always
     // runs first, so this is a hit. Recomputing meant every LLVM promotion
@@ -44,7 +46,7 @@ pub(crate) fn prepare_llvm(
     let cfg = air_pipeline::AirConfigKey {
         level,
         fma: opts.fma,
-        callees_visible,
+        callees,
     };
     let opt = air_pipeline::optimized_with_config(&module, f, cfg)?;
     // What this body bound: the callees it copied in, and, with the callees
@@ -53,7 +55,7 @@ pub(crate) fn prepare_llvm(
     let inlined = opt.ir.inline_sites.iter().map(|site| site.callee as usize);
     let called = opt.ir.blocks.iter().flat_map(|b| {
         b.instrs.iter().filter_map(|i| match i {
-            air::v2::ir::Instr::Call { fun, .. } if callees_visible => Some(*fun),
+            air::v2::ir::Instr::Call { fun, .. } if callees != CalleeView::None => Some(*fun),
             _ => None,
         })
     });
@@ -127,7 +129,7 @@ pub(crate) fn promotion_wants_full_module(
 ) -> bool {
     // The same key `prepare_llvm` will ask under, because it is the same
     // question about the same body. Asking `optimized` here instead meant
-    // asking the cache under `callees_visible: true` while handing it a
+    // asking the cache under `CalleeView::All` while handing it a
     // module with the callees hidden: on a miss that stores a body lowered
     // WITHOUT the inliner under the key every other consumer -- the
     // interpreter, the Cranelift tier, the OSR sites -- reads for the body
@@ -138,16 +140,16 @@ pub(crate) fn promotion_wants_full_module(
         (true, AirOptLevel::O3) => AirOptLevel::O2,
         (_, level) => level,
     };
-    let callees_visible = !hot_reload;
-    let m = if callees_visible {
-        AshModule::new(bc)
+    let callees = if hot_reload {
+        CalleeView::None
     } else {
-        AshModule::new(bc).without_callees()
+        CalleeView::All
     };
+    let m = AshModule::new(bc).with_callees(callees);
     let cfg = air_pipeline::AirConfigKey {
         level,
         fma: pass_options().fma,
-        callees_visible,
+        callees,
     };
     // Undecidable means take the safe side: the shared module is what the
     // promote path did before this choice existed.

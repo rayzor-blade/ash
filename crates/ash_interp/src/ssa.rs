@@ -250,10 +250,10 @@ impl Cache {
         // for. Both go through the same cache, so neither runs twice.
         let air_cfg = ash_core::air_pipeline::interpreter_config_for(raw);
         let bare;
-        let view = if air_cfg.callees_visible {
+        let view = if air_cfg.callees == ash_core::air_pipeline::CalleeView::All {
             m
         } else {
-            bare = m.without_callees_view();
+            bare = m.view(air_cfg.callees);
             &bare
         };
         self.bodies[func_idx] =

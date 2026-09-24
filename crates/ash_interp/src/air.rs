@@ -421,10 +421,14 @@ impl Cache {
         // what OSR compiles; everything else drops the inliner so its callees
         // stay compiled. See `air_pipeline::interpreter_config_for`.
         let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
-        let m = if cfg.callees_visible {
-            with_callees
-        } else {
-            without_callees
+        let frameless;
+        let m = match cfg.callees {
+            ash_core::air_pipeline::CalleeView::All => with_callees,
+            ash_core::air_pipeline::CalleeView::None => without_callees,
+            ash_core::air_pipeline::CalleeView::Frameless => {
+                frameless = with_callees.view(cfg.callees);
+                &frameless
+            }
         };
         // The AIR pipeline runs HERE, on the mutator, inside the execute
         // phase -- not on a broker thread like the tiers that consume it. Its

@@ -645,16 +645,19 @@ impl<'ctx> JITModule<'ctx> {
             // function back into HashLink opcodes here made the old bytecode
             // translator the real backend and discarded AIR's phis, cells,
             // resolved fields and effects before code generation.
-            // A shadow-stack target isolates callees too: Haxe's stack
-            // arithmetic (`__skipStack`, the `sub(1)` in callStack) counts
-            // one frame per Haxe function, and an inlined callee has none.
-            let air = crate::llvm::air::prepare_llvm(
-                &self.bytecode,
-                &f,
-                self.hot_reload,
-                self.lazy_compilation || self.shadow_frames(),
-            )
-            .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
+            // A shadow-stack target inlines only frameless callees: Haxe's
+            // stack arithmetic (`__skipStack`, the `sub(1)` in callStack)
+            // counts one frame per Haxe function, and an inlined callee has
+            // none, so only a callee no trace can see inside may lose it.
+            let callees = if self.lazy_compilation {
+                crate::air_pipeline::CalleeView::None
+            } else if self.shadow_frames() {
+                crate::air_pipeline::CalleeView::Frameless
+            } else {
+                crate::air_pipeline::CalleeView::All
+            };
+            let air = crate::llvm::air::prepare_llvm(&self.bytecode, &f, self.hot_reload, callees)
+                .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
 
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {

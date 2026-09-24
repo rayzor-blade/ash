@@ -27,7 +27,7 @@
 //! empty. Every path in this module goes through `lower_with(.., AshModule)`.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -63,10 +63,10 @@ pub struct AshModule<'b> {
     native_at: Arc<HashMap<usize, usize>>,
     /// `findex` -> index into `bc.functions`.
     function_at: Arc<HashMap<usize, usize>>,
-    /// Whether [`ModuleInfo::callee`] hands out bodies. Off means the inliner
-    /// is inert, which is how a caller measures the module without letting
-    /// inlining reshape the functions it is measuring.
-    offer_callees: bool,
+    /// Which bodies [`ModuleInfo::callee`] hands out. [`CalleeView::None`]
+    /// makes the inliner inert, which is how a caller measures the module
+    /// without letting inlining reshape the functions it is measuring.
+    callees: CalleeView,
     /// Callees already lowered, by findex.
     ///
     /// The inliner asks for a body once per candidate site, and handing it
@@ -75,6 +75,8 @@ pub struct AshModule<'b> {
     /// whoever asks, so it is done once: measured on deltablue, the inliner
     /// was 11.2ms of the 15.2ms this pipeline spent preparing bodies.
     lowered: Mutex<HashMap<usize, Function>>,
+    /// [`Self::is_frameless`] answers, by findex.
+    frameless: Mutex<HashMap<usize, bool>>,
 }
 
 impl<'b> AshModule<'b> {
@@ -95,15 +97,21 @@ impl<'b> AshModule<'b> {
                     .map(|(i, f)| (f.findex as usize, i))
                     .collect(),
             ),
-            offer_callees: true,
+            callees: CalleeView::All,
             lowered: Mutex::new(HashMap::new()),
+            frameless: Mutex::new(HashMap::new()),
         }
     }
 
     /// Withhold callee bodies, making [`air::v2::passes::Inlining`] inert even
     /// at `O3`.
-    pub fn without_callees(mut self) -> Self {
-        self.offer_callees = false;
+    pub fn without_callees(self) -> Self {
+        self.with_callees(CalleeView::None)
+    }
+
+    /// Offer the callee bodies `callees` admits.
+    pub fn with_callees(mut self, callees: CalleeView) -> Self {
+        self.callees = callees;
         self
     }
 
@@ -111,13 +119,62 @@ impl<'b> AshModule<'b> {
     /// findex maps — for the callers that need both views of one module, or
     /// that hold the with-callees view by reference.
     pub fn without_callees_view(&self) -> AshModule<'b> {
+        self.view(CalleeView::None)
+    }
+
+    /// The same module offering the callees `callees` admits, sharing the
+    /// findex maps.
+    pub fn view(&self, callees: CalleeView) -> AshModule<'b> {
         AshModule {
             bc: self.bc,
             native_at: Arc::clone(&self.native_at),
             function_at: Arc::clone(&self.function_at),
-            offer_callees: false,
+            callees,
             lowered: Mutex::new(HashMap::new()),
+            frameless: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether function `findex` can never be on the stack when a trace is
+    /// taken: it raises nothing, opens no trap region, and calls only natives
+    /// that cannot throw and functions that are frameless themselves.
+    /// Inlining such a callee is invisible to a shadow call stack, which
+    /// counts one frame per Haxe function. Recursion is not frameless.
+    fn is_frameless(&self, findex: usize, visiting: &mut HashSet<usize>) -> bool {
+        use air::v2::ir::{Effect, Instr, Terminator};
+        if let Some(&known) = self
+            .frameless
+            .lock()
+            .expect("frameless cache poisoned")
+            .get(&findex)
+        {
+            return known;
+        }
+        if !visiting.insert(findex) {
+            return false;
+        }
+        let answer = self.lowered_body(findex).is_some_and(|body| {
+            body.blocks.iter().all(|b| {
+                !matches!(
+                    b.term,
+                    Terminator::Throw { .. } | Terminator::Rethrow { .. } | Terminator::Trap { .. }
+                ) && b.instrs.iter().all(|i| match i {
+                    Instr::Call { fun, .. } => match self.native(*fun) {
+                        Some(n) => {
+                            nothrow_native(n.lib.strip_prefix('?').unwrap_or(&n.lib), &n.name)
+                        }
+                        None => self.is_frameless(*fun, visiting),
+                    },
+                    other => !other.may_throw() && other.effect() != Effect::ClobberAll,
+                })
+            })
+        });
+        visiting.remove(&findex);
+        self.frameless
+            .lock()
+            .expect("frameless cache poisoned")
+            .insert(findex, answer);
+        answer
     }
 
     pub fn bytecode(&self) -> &'b DecodedBytecode {
@@ -245,7 +302,7 @@ impl<'b> ModuleInfo for AshModule<'b> {
     }
 
     fn callee(&self, findex: usize) -> Option<CalleeBody> {
-        if !self.offer_callees {
+        if self.callees == CalleeView::None {
             return None;
         }
         // Measurement knob: how much of `air prepare` is the inliner asking
@@ -253,20 +310,30 @@ impl<'b> ModuleInfo for AshModule<'b> {
         if std::env::var_os("ASH_AIR_NO_INLINE").is_some() {
             return None;
         }
-        if let Some(hit) = self
+        let body = self.lowered_body(findex)?;
+        self.offer(findex, body)
+    }
+}
+
+impl AshModule<'_> {
+    /// The callee's own body, lowered once and cached.
+    ///
+    /// Lowered against a module that offers no callees: this is the callee's
+    /// own body, and letting it inline its own callees here would expand the
+    /// same work at every site that asks for it. With its positions, so the
+    /// markers the inliner copies still say which line of the callee a frame
+    /// is stopped on.
+    fn lowered_body(&self, findex: usize) -> Option<Function> {
+        let cached = self
             .lowered
             .lock()
             .expect("callee cache poisoned")
             .get(&findex)
-        {
-            return Some(CalleeBody::Air(Box::new(hit.clone())));
+            .cloned();
+        if cached.is_some() {
+            return cached;
         }
         let f = self.function(findex)?;
-        // Lowered against a module that offers no callees: this is the callee's
-        // own body, and letting it inline its own callees here would expand
-        // the same work at every site that asks for it.
-        // With its positions, so the markers the inliner copies still say
-        // which line of the callee a frame is stopped on.
         let bare = self.without_callees_view();
         let body =
             air::v2::lower::lower_with_positions(&f.ops, &reg_types_of(f), &bare, positions_of(f))
@@ -275,8 +342,30 @@ impl<'b> ModuleInfo for AshModule<'b> {
             .lock()
             .expect("callee cache poisoned")
             .insert(findex, body.clone());
+        Some(body)
+    }
+
+    /// `body` as this view hands it to the inliner. A frameless callee loses
+    /// its position markers: no trace can be taken inside it, and without
+    /// them the caller's frame keeps reporting the caller's own line.
+    fn offer(&self, findex: usize, mut body: Function) -> Option<CalleeBody> {
+        if self.callees == CalleeView::Frameless {
+            if !self.is_frameless(findex, &mut HashSet::new()) {
+                return None;
+            }
+            for b in &mut body.blocks {
+                b.instrs
+                    .retain(|i| !matches!(i, air::v2::ir::Instr::Pos { .. }));
+            }
+        }
         Some(CalleeBody::Air(Box::new(body)))
     }
+}
+
+/// Natives a frameless callee may call: they return or abort, and never
+/// raise an HL exception.
+fn nothrow_native(lib: &str, name: &str) -> bool {
+    matches!((lib, name), ("std", "alloc_bytes"))
 }
 
 /// A function's register-type table as v2 type refs. ash indexes the module
@@ -548,8 +637,21 @@ pub struct Optimized {
 pub struct AirConfigKey {
     pub level: OptLevel,
     pub fma: bool,
-    /// Whether the inliner may see callee bodies.
-    pub callees_visible: bool,
+    /// Which callee bodies the inliner may see.
+    pub callees: CalleeView,
+}
+
+/// Which callee bodies the inliner is offered.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum CalleeView {
+    /// Every bytecode function.
+    All,
+    /// Only callees that can never be on the stack when a trace is taken
+    /// ([`AshModule::is_frameless`]). What a shadow-call-stack target
+    /// inlines, since there each Haxe function is one counted frame.
+    Frameless,
+    /// None: the inliner is inert.
+    None,
 }
 
 impl AirConfigKey {
@@ -558,7 +660,7 @@ impl AirConfigKey {
         Self {
             level: default_level(),
             fma: fma(),
-            callees_visible: true,
+            callees: CalleeView::All,
         }
     }
 
@@ -589,7 +691,7 @@ impl AirConfigKey {
     /// checksum on every run until the OSR sites were moved onto this key.
     pub fn interpreter() -> Self {
         Self {
-            callees_visible: false,
+            callees: CalleeView::None,
             level: interpreter_level(),
             ..Self::standard()
         }

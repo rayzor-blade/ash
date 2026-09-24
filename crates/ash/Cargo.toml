@@ -10,7 +10,14 @@ keywords = ["Virtual Machine", "VM", "JIT", "Compiler", "Haxe", "HashLink"]
 # `llvm` (default): the LLVM JIT tier and the AOT compiler. Without it the
 # interpreter and Cranelift tier build alone and nothing links LLVM.
 [features]
-default = ["llvm"]
+default = ["llvm", "embedded-runtime"]
+# Carry the ash_std cdylib inside the crate, read at build time from the
+# workspace's target directory (`cargo build -p ash_std` first). It is what
+# `ash` runs a program against when no runtime is staged beside it, and what
+# an AOT build unpacks when the machine has none. A host that links ash_std
+# itself turns this off, and then builds from a git checkout, which has no
+# target directory.
+embedded-runtime = []
 llvm = ["dep:inkwell", "dep:ash_wasm_link", "dep:gimli"]
 # Register every backend LLVM was built with, not only the targets ash
 # supports, so `--target` can emit objects for the rest. The binary grows by

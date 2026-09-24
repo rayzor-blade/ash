@@ -342,6 +342,13 @@ fn main() {
     // Static resolution for std@ natives; see the function's own comment.
     generate_std_symbol_table(&out_dir);
 
+    if env::var_os("CARGO_FEATURE_EMBEDDED_RUNTIME").is_some() {
+        embed_runtime(&out_dir, &target);
+    }
+}
+
+/// Copy the ash_std cdylib into `OUT_DIR` for `include_bytes!`.
+fn embed_runtime(out_dir: &Path, target: &str) {
     // MSVC drops the `lib` prefix on cdylibs: ash_std.dll, not libash_std.dll.
     let lib_filename = if target.contains("windows") {
         "ash_std.dll".to_string()
@@ -373,7 +380,7 @@ fn main() {
     // it is how a promotion ends up naming a helper no symbol answers to.
     let for_profile = |prof: &str| {
         vec![
-            target_dir.join(&target).join(prof).join(&lib_filename),
+            target_dir.join(target).join(prof).join(&lib_filename),
             target_dir.join(prof).join(&lib_filename),
         ]
     };
@@ -403,6 +410,8 @@ fn main() {
             panic!(
                 "Could not find the ash_std cdylib to embed. Build it first:\n\
                  \x20   cargo build -p ash_std\n\
+                 or build ash_core with default-features = false, which leaves \
+                 the `embedded-runtime` feature off.\n\
                  Tried:\n{}",
                 candidates
                     .iter()

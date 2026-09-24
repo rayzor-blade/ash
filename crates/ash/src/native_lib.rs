@@ -213,17 +213,34 @@ fn usable_system_libhl(_ext: &str) -> Option<std::path::PathBuf> {
 /// nobody has to have built the workspace to compile one. The bytes are the
 /// library, whatever the file they are stored under is called.
 pub fn write_embedded_runtime(dest: &Path) -> Result<()> {
-    const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
+    let Some(runtime) = embedded_runtime() else {
+        anyhow::bail!(
+            "this build of ash_core carries no runtime (the `embedded-runtime` feature is off)"
+        );
+    };
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(dest, RUNTIME)?;
+    std::fs::write(dest, runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
+}
+
+/// The ash_std cdylib this crate was built with, when the
+/// `embedded-runtime` feature carried one.
+fn embedded_runtime() -> Option<&'static [u8]> {
+    #[cfg(feature = "embedded-runtime")]
+    {
+        Some(include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a")))
+    }
+    #[cfg(not(feature = "embedded-runtime"))]
+    {
+        None
+    }
 }
 
 pub fn init_std_library() -> Result<()> {
@@ -346,8 +363,14 @@ pub fn init_std_library() -> Result<()> {
                     let temp_dir = TempDir::new().expect("Failed to create temp dir");
                     let mut path = temp_dir.path().join("libash_std");
                     path.set_extension(ext);
-                    let std_lib_bytes: &[u8] =
-                        include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
+                    let Some(std_lib_bytes) = embedded_runtime() else {
+                        eprintln!(
+                            "[ash] no ash_std to load: none is staged beside the program or \
+                             the executable, and this build carries none (the \
+                             `embedded-runtime` feature is off)"
+                        );
+                        std::process::exit(1);
+                    };
                     std::fs::write(&path, std_lib_bytes).expect("Failed to write std library");
                     #[cfg(unix)]
                     {

@@ -18,7 +18,7 @@ all-targets = ["llvm", "ash_core/all-targets"]
 [dependencies]
 # Reading a wasm module for `ash wasm`: the parser only, no engine.
 ash_wasm_runtime = { path = "../ash_wasm_runtime", default-features = false, features = ["validate"] }
-ash_core = { path = "../ash", default-features = false }
+ash_core = { path = "../ash", default-features = false, features = ["embedded-runtime"] }
 ash_interp = { path = "../ash_interp", default-features = false }
 ash_trace = { path = "../ash_trace" }
 anyhow = { workspace = true }

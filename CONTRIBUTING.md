@@ -83,6 +83,11 @@ The `llvm` feature (default on) gates the LLVM tier and the AOT compiler.
 `--no-default-features` links no LLVM and refuses `--build`, `--emit-aot`,
 `--hot-reload` and `--jit-tier=llvm`.
 
+`ash_core`'s `embedded-runtime` feature is what reads that library in; the
+`ash` binary turns it on. A host that depends on `ash_core` and links
+`ash_std` itself leaves it off (`default-features = false`), and then builds
+from a git checkout, which has no target directory to read from.
+
 `make` builds the host target in release with LTO; `make all` builds every
 installed target.
 

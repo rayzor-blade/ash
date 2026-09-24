@@ -3159,6 +3159,75 @@ fn redundant_guard_elim_drops_a_bounds_check_the_loop_guard_proved() {
     verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
 }
 
+/// The edge a decided guard abandons can lead to a block that stays
+/// reachable, here the loop's join, which merges `acc` from the guard and
+/// from the taken arm. Its phi has to lose the guard's arm when the branch
+/// folds; leaving it failed verify ("phi arity 3 but block has 2
+/// predecessors") and kept the function out of every compiled tier.
+#[test]
+fn redundant_guard_elim_drops_the_abandoned_edge_from_a_reachable_join() {
+    // r0 i, r1 n, r2 step, r3 acc
+    let regs = vec![t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        },
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(2),
+        },
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(0),
+        },
+        Opcode::Label, // 4: loop header
+        Opcode::JSGte {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 6,
+        }, // 5: exit to 12 when i >= n
+        Opcode::JSLt {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 3,
+        }, // 6: guard, decided true: to 10; false falls into the join
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(3),
+            b: Reg(2),
+        }, // 7: join
+        Opcode::Add {
+            dst: Reg(0),
+            a: Reg(0),
+            b: Reg(2),
+        }, // 8
+        Opcode::JAlways { offset: -6 }, // 9: back to 4
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // 10: the taken arm
+        Opcode::JAlways { offset: -5 }, // 11: into the join at 7
+        Opcode::Ret { ret: Reg(3) }, // 12
+    ];
+    let mut f = lower(&ops, &regs).unwrap();
+    verify(&f).unwrap_or_else(|e| panic!("fixture must verify: {e}\n{}", f.dump()));
+    let before = f.dump();
+    let stats = run_pass(
+        &mut f,
+        &RedundantGuardElim {
+            info: &NoModuleInfo,
+        },
+        PassOptions::default(),
+    );
+    assert_eq!(stats.eliminated, 1, "guard not decided:\n{before}");
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+}
+
 #[test]
 fn redundant_guard_elim_keeps_a_guard_on_a_different_value() {
     // The bounds test is against m, not the n the loop guard proved.

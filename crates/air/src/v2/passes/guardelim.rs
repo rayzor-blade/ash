@@ -338,8 +338,21 @@ impl Pass for RedundantGuardElim<'_> {
             else {
                 continue;
             };
-            let target = if take_true { if_true } else { if_false };
+            let (target, dropped) = if take_true {
+                (if_true, if_false)
+            } else {
+                (if_false, if_true)
+            };
             f.blocks[b].term = Terminator::Jump { target };
+            // The edge to `dropped` is gone. If that block stays reachable
+            // from elsewhere, its phis must lose the arm for this edge here:
+            // the pruning below only drops arms of blocks that became
+            // unreachable.
+            if dropped != target {
+                for phi in &mut f.blocks[dropped.idx()].phis {
+                    phi.incoming.retain(|(pred, _)| pred.idx() != b);
+                }
+            }
             stats.eliminated += 1;
         }
         // The block the guard used to reach -- a throw, in the shape this

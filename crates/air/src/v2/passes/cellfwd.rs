@@ -24,13 +24,12 @@
 //! `CellIncr` and `CellDecr` can change it, and all three are visible here.
 //!
 //! For a cell whose address IS taken, a callee could hold that address and
-//! write through it, so the run additionally ends at anything that is not
-//! pure or a plain read. That still covers the case that matters: the
-//! accumulator loops store and immediately reload, with nothing in between,
-//! and adjacency needs no aliasing argument at all — no instruction executes
-//! between the write and the read, so the read must return what was written.
-//! (These cells are address-taken exactly once, outside the loop, to print
-//! the result; refusing the whole cell on that basis was too blunt.)
+//! write through it, so the run additionally ends at anything that may write
+//! memory or call. An instruction that can only throw or allocate does not
+//! end it: a throw leaves the block before the load runs, and an allocation
+//! writes memory nothing held an address to. (These cells are typically
+//! address-taken once, outside the loop, to print the result; refusing the
+//! whole cell on that basis was too blunt.)
 //!
 //! Block boundaries end the run because a predecessor may have stored
 //! something else; a cross-block version is mem2reg, and that is a larger
@@ -42,6 +41,19 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
 pub struct CellForwarding;
+
+/// Whether `ins` may write memory an escaped cell's address could reach:
+/// a store, a call, or a dynamic field set. Throwing and allocating do not.
+/// A position marker is `WriteMem` only so a shadow-stack backend keeps it in
+/// place; it writes that backend's frame slot, which no cell aliases, and
+/// lowering puts one at every line boundary.
+fn may_write(ins: &Instr) -> bool {
+    match ins {
+        Instr::Pos { .. } => false,
+        Instr::DynSet { .. } => true,
+        other => matches!(other.effect(), Effect::WriteMem | Effect::ClobberAll),
+    }
+}
 
 impl Pass for CellForwarding {
     fn name(&self) -> &'static str {
@@ -81,7 +93,7 @@ impl Pass for CellForwarding {
                 // can alias -- `write_class` already reports it as aliasing
                 // nothing. Treating it as a barrier ends every forwarding run
                 // at every line boundary, and lowering emits one there.
-                if ins.effect() > Effect::ReadMem && !matches!(ins, Instr::Pos { .. }) {
+                if may_write(ins) {
                     live.retain(|c, _| !escaped.contains(c));
                 }
                 match ins {

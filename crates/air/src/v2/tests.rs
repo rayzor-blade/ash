@@ -6698,6 +6698,67 @@ fn cellfwd_resolves_forwarding_chains() {
     );
 }
 
+/// An address-taken cell forwards across an instruction that can only throw:
+/// if the null check throws, the load never runs. A call between the store
+/// and the load still ends the run, since a callee may hold the address.
+#[test]
+fn cellfwd_forwards_an_escaped_cell_across_a_throw_but_not_a_call() {
+    use super::passes::CellForwarding;
+    let build = |call: bool| {
+        let mut f = empty_func(vec![t(0), t(1)]);
+        let c0 = CellId(0);
+        f.cells = vec![CellData {
+            reg: 0,
+            ty: t(0),
+            reason: PinReason::RefTaken,
+        }];
+        let v0 = f.new_value(t(0), 0);
+        let v1 = f.new_value(t(0), 0);
+        let v2 = f.new_value(t(1), 1);
+        let between = if call {
+            Instr::Call {
+                dst: f.new_value(t(1), 1),
+                fun: 1,
+                args: vec![v2],
+            }
+        } else {
+            Instr::NullCheck { value: v2 }
+        };
+        f.blocks.push(Block {
+            phis: vec![],
+            instrs: vec![
+                Instr::Int { dst: v0, idx: 0 },
+                Instr::CellSet { cell: c0, src: v0 },
+                Instr::CellRef { dst: v2, cell: c0 },
+                between,
+                Instr::CellGet { dst: v1, cell: c0 },
+            ],
+            term: Terminator::Ret { value: v1 },
+            handler: None,
+        });
+        f
+    };
+    let mut f = build(false);
+    verify(&f).unwrap_or_else(|e| panic!("fixture must verify: {e}\n{}", f.dump()));
+    let stats = CellForwarding.run(&mut f, &PassOptions::default()).unwrap();
+    assert_eq!(
+        stats.eliminated,
+        1,
+        "forwarded across the throw:\n{}",
+        f.dump()
+    );
+    verify(&f).unwrap();
+
+    let mut f = build(true);
+    let stats = CellForwarding.run(&mut f, &PassOptions::default()).unwrap();
+    assert_eq!(
+        stats.eliminated,
+        0,
+        "a call may write through the address:\n{}",
+        f.dump()
+    );
+}
+
 // ── Liveness ────────────────────────────────────────────────────────────────
 
 /// Every value live on entry to a block is defined in a block that dominates

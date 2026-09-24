@@ -345,6 +345,18 @@ impl HLInterpreter {
         })
     }
 
+    /// This thread's stack, `[low, high)`. Darwin answers with the high end
+    /// and the size.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn thread_stack_bounds() -> Option<(usize, usize)> {
+        unsafe {
+            let this = libc::pthread_self();
+            let high = libc::pthread_get_stackaddr_np(this) as usize;
+            let size = libc::pthread_get_stacksize_np(this);
+            (high != 0 && size != 0).then(|| (high.saturating_sub(size), high))
+        }
+    }
+
     /// The native stack by unwind table: `(pc, cfa)` per frame, innermost
     /// first, as many as `out` holds. The canonical frame address is the
     /// stack pointer in the caller at the call, an address inside the caller
@@ -479,18 +491,36 @@ impl HLInterpreter {
                     eprintln!("[trace-walk] unknown pc={pc:#x} cfa={cfa:#x}");
                 }
             }
-            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            #[cfg(not(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "macos", target_arch = "aarch64")
+            )))]
             let _ = last_compiled;
-            // A frame the unwinder had no table for ends its walk; on x86-64
-            // Linux the compiled frames keep frame pointers, so the chain
-            // continues from that frame's saved-rbp slot, two words under
-            // its CFA, or from the trap boundary's frame pointer for a throw
-            // the unwinder could not follow at all.
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            // A frame the unwinder had no table for ends its walk, and the
+            // chain of frame records continues from there. On x86-64 Linux
+            // only the compiled frames keep frame pointers, so the chain
+            // starts at the last compiled frame's saved-rbp slot, two words
+            // under its CFA, or at the trap boundary's frame pointer for a
+            // throw the unwinder could not follow at all. On Apple arm64
+            // every frame keeps its record (x29, x30) two words under its
+            // CFA, the runtime's included, so the chain starts at the last
+            // frame the unwinder reported, whatever it was: the one it could
+            // not step out of is typically a runtime frame whose caller is
+            // compiled code.
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "macos", target_arch = "aarch64")
+            ))]
             {
                 let innermost_pc = last_compiled.map_or(0, |(pc, _)| pc);
+                #[cfg(target_os = "linux")]
                 let chain_start = match last_compiled {
                     Some((_, cfa)) => cfa.wrapping_sub(2 * std::mem::size_of::<usize>()),
+                    None => _frame_hint as usize,
+                };
+                #[cfg(target_os = "macos")]
+                let chain_start = match inner[..count].last() {
+                    Some(&(_, cfa)) => cfa.wrapping_sub(2 * std::mem::size_of::<usize>()),
                     None => _frame_hint as usize,
                 };
                 if chain_start != 0 {

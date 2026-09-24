@@ -1285,6 +1285,9 @@ pub struct DecodedBytecode {
     pub host_natives: std::collections::HashMap<(String, String), crate::native_lib::HostNative>,
     /// Classes a host registered, in registration order.
     pub host_classes: Vec<crate::host_module::HostClassEntry>,
+    /// The registrations themselves, in order, so a program decoded again
+    /// (a hot reload) can be given the same ones.
+    pub host_modules: Vec<crate::host_module::RegisteredModule>,
 }
 
 /// HashLink's field hash of `name`, the one the decoder stores for every

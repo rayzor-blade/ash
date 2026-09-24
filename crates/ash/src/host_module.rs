@@ -95,6 +95,30 @@ impl HostType {
     }
 }
 
+/// A registration a `DecodedBytecode` has taken, kept to replay onto the
+/// program decoded again.
+///
+/// Send and Sync although `HostModule` holds pointers: they are C entries and
+/// their context words, which the host keeps alive for as long as the
+/// program can call them -- the same promise `DecodedBytecode::host_natives`
+/// relies on when it stores them as addresses.
+#[derive(Debug, Clone)]
+pub struct RegisteredModule(pub HostModule);
+
+unsafe impl Send for RegisteredModule {}
+unsafe impl Sync for RegisteredModule {}
+
+impl DecodedBytecode {
+    /// `bc` given every registration `like` took, in the same order: what a
+    /// program decoded again needs to be the program that was running.
+    pub fn register_host_modules_of(&mut self, like: &[RegisteredModule]) -> Result<()> {
+        for m in like {
+            self.register_host_module(&m.0)?;
+        }
+        Ok(())
+    }
+}
+
 /// Where a registered class landed in the program's tables.
 #[derive(Debug, Clone)]
 pub struct HostClassEntry {
@@ -229,6 +253,9 @@ impl DecodedBytecode {
             self.host_classes.len(),
         );
         let result = self.append_host_module(m, hl_class);
+        if result.is_ok() {
+            self.host_modules.push(RegisteredModule(m.clone()));
+        }
         if result.is_err() {
             self.types.truncate(mark.0);
             self.natives.truncate(mark.1);
@@ -920,6 +947,36 @@ mod tests {
         assert_eq!(bc.host_classes[0].type_index, class);
         assert_eq!(bc.host_classes[0].companion_index, companion);
         assert_eq!(bc.host_classes[0].global_index, nglobals);
+    }
+
+    #[test]
+    fn a_program_decoded_again_takes_the_same_registrations() {
+        let mut bc = fixture();
+        bc.register_host_module(&greeter_module())
+            .expect("register");
+        let mut again = fixture();
+        again
+            .register_host_modules_of(&bc.host_modules)
+            .expect("replay");
+        assert_eq!(again.types.len(), bc.types.len());
+        assert_eq!(again.globals.len(), bc.globals.len());
+        let natives = |b: &DecodedBytecode| -> Vec<(String, String, i32)> {
+            b.natives
+                .iter()
+                .map(|n| (n.lib.clone(), n.name.clone(), n.findex))
+                .collect()
+        };
+        assert_eq!(
+            natives(&again),
+            natives(&bc),
+            "same natives at the same findexes"
+        );
+        let mut keys: Vec<_> = again.host_natives.keys().cloned().collect();
+        let mut want: Vec<_> = bc.host_natives.keys().cloned().collect();
+        keys.sort();
+        want.sort();
+        assert_eq!(keys, want);
+        assert_eq!(again.host_modules.len(), 1);
     }
 
     #[test]

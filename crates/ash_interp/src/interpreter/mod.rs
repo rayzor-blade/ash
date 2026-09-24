@@ -479,6 +479,10 @@ pub struct HLInterpreter {
     /// them would only cost a malloc, but the unwind path is where a long-lived
     /// program would otherwise leak its whole call depth of buffers.
     reg_pool: Vec<Vec<NanBoxedValue>>,
+    /// What a host registered into the program this interpreter was built
+    /// for, so `enable_reload` can give the same registrations to the copy
+    /// it decodes from disk.
+    host_modules: Vec<ash_core::host_module::RegisteredModule>,
 
     /// findex → what to run, as a dense table.
     ///
@@ -1002,6 +1006,7 @@ impl HLInterpreter {
             targets,
             code_addr_findex: HashMap::new(),
             reg_pool: Vec::new(),
+            host_modules: bytecode.host_modules.clone(),
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
             hot_loops: std::collections::HashSet::new(),
@@ -1128,7 +1133,10 @@ impl HLInterpreter {
         };
         // The function table as it is now, sized by the program's highest
         // findex, function or native.
-        let old_bc = ash_core::bytecode::BytecodeDecoder::decode(hl_path)?;
+        // With the host's registrations, or the baseline every reload is
+        // diffed against is a program with fewer natives than the one running.
+        let mut old_bc = ash_core::bytecode::BytecodeDecoder::decode(hl_path)?;
+        old_bc.register_host_modules_of(&self.host_modules)?;
         let max_findex = old_bc
             .functions
             .iter()

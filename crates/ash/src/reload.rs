@@ -140,7 +140,7 @@ pub fn perform_reload(
     use inkwell::context::Context;
 
     // Step 1: Re-decode
-    let new_bytecode = BytecodeDecoder::decode(path)?;
+    let new_bytecode = decode_as(path, old_bytecode)?;
 
     // Step 2: Diff
     let diff = diff_bytecode(old_bytecode, &new_bytecode);
@@ -169,8 +169,7 @@ pub fn perform_reload(
     // module after the first was looked up is never compiled. The context
     // and every module are leaked: old code may still be on a call stack.
     let context = Box::leak(Box::new(Context::create()));
-    let decoded =
-        crate::bytecode::BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
+    let decoded = decode_as(path, old_bytecode)?;
 
     // Compiled callers load `module_ctx.functions_ptrs[findex]` at each call
     // under hot reload, so the new body goes into that table; `functions_ptrs`
@@ -516,6 +515,15 @@ pub fn init_reload_context(
     });
 }
 
+/// The program at `path`, given every host registration `like` took: a
+/// reload must not drop the natives and classes a host added to the program
+/// it replaces.
+fn decode_as(path: &std::path::Path, like: &DecodedBytecode) -> anyhow::Result<DecodedBytecode> {
+    let mut bc = crate::bytecode::BytecodeDecoder::decode(path)?;
+    bc.register_host_modules_of(&like.host_modules)?;
+    Ok(bc)
+}
+
 /// The name of every function the type table names, by findex:
 /// `Type.proto` for a method, `Type.field` for a bound one.
 fn function_names(bc: &DecodedBytecode) -> HashMap<usize, String> {
@@ -605,7 +613,7 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
-    let new_bytecode = crate::bytecode::BytecodeDecoder::decode(&ctx.bytecode_path)
+    let new_bytecode = decode_as(&ctx.bytecode_path, &ctx.old_bytecode)
         .map_err(|e| format!("{}: {e}", ctx.bytecode_path.display()))?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
     if let Some(why) = refusal(&ctx.old_bytecode, &new_bytecode, &diff) {
@@ -657,9 +665,7 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
     match ctx.staged.take() {
         Some(bc) => Ok(bc),
-        None => Ok(crate::bytecode::BytecodeDecoder::decode(
-            &ctx.bytecode_path,
-        )?),
+        None => decode_as(&ctx.bytecode_path, &ctx.old_bytecode),
     }
 }
 
@@ -744,7 +750,7 @@ pub fn do_reload() -> Option<DecodedBytecode> {
                     diff.changed.len()
                 );
                 // Re-decode for both the stored state and the caller
-                if let Ok(new_bc) = crate::bytecode::BytecodeDecoder::decode(&ctx.bytecode_path) {
+                if let Ok(new_bc) = decode_as(&ctx.bytecode_path, &ctx.old_bytecode) {
                     let ret = new_bc.clone();
                     ctx.old_bytecode = new_bc;
                     return Some(ret);

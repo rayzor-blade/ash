@@ -52,6 +52,7 @@ fn load_smoke_cases() -> Vec<ParityCase> {
 fn run_matrix(mode: AshMode) {
     let mode_name = match mode {
         AshMode::Interp => "interp",
+        AshMode::Jit => "jit",
         AshMode::Hybrid { .. } => "hybrid",
     };
 

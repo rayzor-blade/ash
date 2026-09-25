@@ -163,6 +163,11 @@ jobs:
       - name: Run parity matrix (hybrid promotion-heavy)
         run: cargo test -p ash --test parity_matrix parity_matrix_hybrid_promotion_heavy -- --nocapture
 
+      # Compiled only: a function every tier refuses fails here, where hybrid
+      # quietly keeps interpreting it.
+      - name: Run parity matrix (jit)
+        run: cargo test -p ash --test parity_matrix parity_matrix_jit -- --nocapture
+
   parity-nightly-slow:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-22.04

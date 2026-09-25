@@ -72,6 +72,10 @@ pub struct ParityCase {
 #[derive(Clone, Copy, Debug)]
 pub enum AshMode {
     Interp,
+    /// `--mode jit`: every function compiled before its first call, so a
+    /// function no compiled tier accepts fails the run instead of staying
+    /// interpreted the way it does under `Hybrid`.
+    Jit,
     Hybrid {
         jit_threshold: u64,
         jit_max_args: usize,
@@ -271,6 +275,9 @@ pub fn run_ash(
     match mode {
         AshMode::Interp => {
             cmd.arg("--mode").arg("interp");
+        }
+        AshMode::Jit => {
+            cmd.arg("--mode").arg("jit");
         }
         AshMode::Hybrid {
             jit_threshold,

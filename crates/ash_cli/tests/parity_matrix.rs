@@ -175,6 +175,7 @@ fn validate_output(
 fn run_parity_matrix(mode: AshMode) {
     let mode_name = match mode {
         AshMode::Interp => "interp",
+        AshMode::Jit => "jit",
         AshMode::Hybrid { .. } => "hybrid",
     };
 
@@ -375,6 +376,12 @@ fn run_parity_matrix(mode: AshMode) {
 fn parity_matrix_interp() {
     let _guard = lock_matrix();
     run_parity_matrix(AshMode::Interp);
+}
+
+#[test]
+fn parity_matrix_jit() {
+    let _guard = lock_matrix();
+    run_parity_matrix(AshMode::Jit);
 }
 
 #[test]

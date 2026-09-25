@@ -27,6 +27,9 @@ jobs:
 
       - name: Install HashLink (pinned)
         run: |
+          # ash installs nothing from the runner image's Microsoft source, and
+          # when that repository fails (403) the update fails the job.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
@@ -95,6 +98,9 @@ jobs:
 
       - name: Install LLVM 21 toolchain
         run: |
+          # ash installs nothing from the runner image's Microsoft source, and
+          # when that repository fails (403) the update fails the job.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y wget gpg software-properties-common \
             libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
@@ -139,6 +145,9 @@ jobs:
 
       - name: Install LLVM 21 toolchain
         run: |
+          # ash installs nothing from the runner image's Microsoft source, and
+          # when that repository fails (403) the update fails the job.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y wget gpg software-properties-common \
             libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
@@ -194,6 +203,9 @@ jobs:
 
       - name: Install LLVM 21 toolchain
         run: |
+          # ash installs nothing from the runner image's Microsoft source, and
+          # when that repository fails (403) the update fails the job.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y wget gpg software-properties-common \
             libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev

@@ -357,11 +357,12 @@ impl HLInterpreter {
         }
     }
 
-    /// The native stack by unwind table: `(pc, cfa)` per frame, innermost
+    /// The native stack by unwind table: `(pc, cfa, fp)` per frame, innermost
     /// first, as many as `out` holds. The canonical frame address is the
     /// stack pointer in the caller at the call, an address inside the caller
     /// just above the frame, which orders the frame against anything else on
-    /// the same stack.
+    /// the same stack. `fp` is the frame-pointer register (rbp, x29) as that
+    /// frame had it: its own frame record when the frame keeps one.
     ///
     /// The unwinder passes through the runtime's frames by their tables and
     /// through compiled frames whose tier registered one; it reports the
@@ -369,7 +370,7 @@ impl HLInterpreter {
     /// first and classified by the caller, because classification asks the
     /// loader and the unwinder is already holding its lock.
     #[cfg(unix)]
-    fn unwind_frames(out: &mut [(usize, usize)]) -> usize {
+    fn unwind_frames(out: &mut [(usize, usize, usize)]) -> usize {
         unsafe extern "C" {
             fn _Unwind_Backtrace(
                 trace: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
@@ -377,11 +378,17 @@ impl HLInterpreter {
             ) -> i32;
             fn _Unwind_GetIP(context: *mut c_void) -> usize;
             fn _Unwind_GetCFA(context: *mut c_void) -> usize;
+            fn _Unwind_GetGR(context: *mut c_void, index: i32) -> usize;
         }
+        // The frame pointer's DWARF register number.
+        #[cfg(target_arch = "x86_64")]
+        const FP_REGISTER: i32 = 6;
+        #[cfg(target_arch = "aarch64")]
+        const FP_REGISTER: i32 = 29;
         const URC_NO_REASON: i32 = 0;
         const URC_END_OF_STACK: i32 = 5;
         struct Walk<'a> {
-            out: &'a mut [(usize, usize)],
+            out: &'a mut [(usize, usize, usize)],
             len: usize,
         }
         unsafe extern "C" fn visit(context: *mut c_void, argument: *mut c_void) -> i32 {
@@ -391,7 +398,11 @@ impl HLInterpreter {
                 if pc == 0 || walk.len == walk.out.len() {
                     return URC_END_OF_STACK;
                 }
-                walk.out[walk.len] = (pc, _Unwind_GetCFA(context));
+                walk.out[walk.len] = (
+                    pc,
+                    _Unwind_GetCFA(context),
+                    _Unwind_GetGR(context, FP_REGISTER),
+                );
                 walk.len += 1;
                 URC_NO_REASON
             }
@@ -466,12 +477,12 @@ impl HLInterpreter {
 
         #[cfg(unix)]
         {
-            let mut inner = [(0usize, 0usize); MAX_FRAMES];
+            let mut inner = [(0usize, 0usize, 0usize); MAX_FRAMES];
             let count = Self::unwind_frames(&mut inner);
             // The last compiled frame the unwinder reached: where a frame
             // chain continues if the unwinder stopped at one without a table.
             let mut last_compiled: Option<(usize, usize)> = None;
-            for &(pc, cfa) in inner.iter().take(count) {
+            for &(pc, cfa, fp) in inner.iter().take(count) {
                 if Self::native_image_owns_pc(pc) {
                     if debug {
                         eprintln!("[trace-walk] runtime pc={pc:#x} cfa={cfa:#x}");
@@ -486,7 +497,7 @@ impl HLInterpreter {
                         eprintln!("[trace-walk] compiled pc={pc:#x} cfa={cfa:#x}");
                     }
                     self.push_jit_frames(&mut functions, pc, cfa);
-                    last_compiled = Some((pc, cfa));
+                    last_compiled = Some((pc, fp));
                 } else if debug {
                     eprintln!("[trace-walk] unknown pc={pc:#x} cfa={cfa:#x}");
                 }
@@ -497,16 +508,15 @@ impl HLInterpreter {
             )))]
             let _ = last_compiled;
             // A frame the unwinder had no table for ends its walk, and the
-            // chain of frame records continues from there. On x86-64 Linux
-            // only the compiled frames keep frame pointers, so the chain
-            // starts at the last compiled frame's saved-rbp slot, two words
-            // under its CFA, or at the trap boundary's frame pointer for a
-            // throw the unwinder could not follow at all. On Apple arm64
-            // every frame keeps its record (x29, x30) two words under its
-            // CFA, the runtime's included, so the chain starts at the last
-            // frame the unwinder reported, whatever it was: the one it could
-            // not step out of is typically a runtime frame whose caller is
-            // compiled code.
+            // chain of frame records continues from there, starting at the
+            // record the frame pointer named in the last frame that keeps
+            // one. On x86-64 Linux only the compiled frames keep frame
+            // pointers, so that is the last compiled frame, or the trap
+            // boundary's frame pointer for a throw the unwinder could not
+            // follow at all. On Apple arm64 every frame keeps its record,
+            // the runtime's included, so it is the last frame the unwinder
+            // reported, whatever it was: the one it could not step out of is
+            // typically a runtime frame whose caller is compiled code.
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64"),
                 all(target_os = "macos", target_arch = "aarch64")
@@ -515,12 +525,12 @@ impl HLInterpreter {
                 let innermost_pc = last_compiled.map_or(0, |(pc, _)| pc);
                 #[cfg(target_os = "linux")]
                 let chain_start = match last_compiled {
-                    Some((_, cfa)) => cfa.wrapping_sub(2 * std::mem::size_of::<usize>()),
+                    Some((_, fp)) => fp,
                     None => _frame_hint as usize,
                 };
                 #[cfg(target_os = "macos")]
                 let chain_start = match inner[..count].last() {
-                    Some(&(_, cfa)) => cfa.wrapping_sub(2 * std::mem::size_of::<usize>()),
+                    Some(&(_, _, fp)) => fp,
                     None => _frame_hint as usize,
                 };
                 if chain_start != 0 {
@@ -540,16 +550,31 @@ impl HLInterpreter {
                                 let words = frame as *const usize;
                                 let caller = *words;
                                 let return_pc = *words.add(1);
+                                // `return_pc` is in the function whose record
+                                // `caller` is, and that frame's address is its
+                                // CFA, the same measure the unwinder reports:
+                                // two words above its record. `frame` itself
+                                // lies below the frame the walk came from, so
+                                // ordering by it dropped the first caller.
+                                let at = if caller > frame {
+                                    caller.wrapping_add(2 * std::mem::size_of::<usize>())
+                                } else {
+                                    frame.wrapping_add(2 * std::mem::size_of::<usize>())
+                                };
                                 if return_pc != innermost_pc
                                     && !Self::native_image_owns_pc(return_pc)
-                                    && functions.last().is_none_or(|c| c.addr < frame)
+                                    && functions.last().is_none_or(|c| c.addr < at)
                                 {
                                     if debug {
                                         eprintln!(
                                             "[trace-walk] chain pc={return_pc:#x} frame={frame:#x}"
                                         );
                                     }
-                                    self.push_jit_frames(&mut functions, return_pc, frame);
+                                    self.push_jit_frames(&mut functions, return_pc, at);
+                                } else if debug {
+                                    eprintln!(
+                                        "[trace-walk] chain skipped pc={return_pc:#x} frame={frame:#x} caller={caller:#x}"
+                                    );
                                 }
                                 if caller <= frame
                                     || caller >= stack_high

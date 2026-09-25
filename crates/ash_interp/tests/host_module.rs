@@ -55,7 +55,14 @@ fn main() {
             .output()
             .expect("spawn child");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let ok = out.status.success() && stdout.trim() == "45\n70";
+        // The third line: whether Type.resolveClass sees the host's own
+        // class, which only exists when it was appended rather than bound.
+        let want = if mode.starts_with("bind-") {
+            "45\n70\nfalse"
+        } else {
+            "45\n70\ntrue"
+        };
+        let ok = out.status.success() && stdout.trim() == want;
         println!(
             "host_module::{mode} ... {}",
             if ok { "ok" } else { "FAILED" }

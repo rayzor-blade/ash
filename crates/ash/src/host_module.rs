@@ -10,7 +10,10 @@
 use crate::bytecode::{DecodedBytecode, field_hash};
 use crate::hl;
 use crate::native_lib::HostNative;
-use crate::types::{HLNative, HLObjField, HLObjProto, HLType, HLTypeFun, HLTypeObj, TypeRef};
+use crate::opcodes::{Opcode, RefFun, RefGlobal, RefString, Reg};
+use crate::types::{
+    HLFunction, HLNative, HLObjField, HLObjProto, HLType, HLTypeFun, HLTypeObj, TypeRef,
+};
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -168,6 +171,31 @@ fn kind_name(kind: hl::hl_type_kind) -> &'static str {
 }
 
 impl DecodedBytecode {
+    /// The findex a static `class.field` is bound to: the binding on the
+    /// class's `$Class` companion, whose field index counts every
+    /// ancestor's fields first.
+    pub fn bound_static(&self, class: &str, field: &str) -> Option<usize> {
+        let companion = self.type_index_of(&companion_name(class))?;
+        let obj = self.types[companion].obj.as_ref()?;
+        let mut chain = Vec::new();
+        let mut cur = Some(companion);
+        while let Some(i) = cur {
+            let o = self.types.get(i)?.obj.as_ref()?;
+            chain.push(o);
+            cur = o.super_.as_ref().map(|s| s.0);
+        }
+        let index = chain
+            .iter()
+            .rev()
+            .flat_map(|o| o.fields.iter())
+            .position(|f| f.name == field)?;
+        obj.bindings
+            .chunks(2)
+            .find(|pair| pair.first().is_some_and(|&fid| fid as usize == index))
+            .and_then(|pair| pair.get(1))
+            .map(|&findex| findex as usize)
+    }
+
     /// Index of the object type named `name`, program or host.
     pub fn type_index_of(&self, name: &str) -> Option<usize> {
         self.types
@@ -433,7 +461,119 @@ impl DecodedBytecode {
             });
         }
 
-        self.check_declared_natives(&m.lib, &new_natives)
+        self.check_declared_natives(&m.lib, &new_natives)?;
+        let appended: Vec<(String, usize, usize)> = self.host_classes
+            [self.host_classes.len() - class_indices.len()..]
+            .iter()
+            .map(|e| (e.name.clone(), e.global_index, e.companion_index))
+            .collect();
+        self.register_by_name_at_type_init(&appended);
+        Ok(())
+    }
+
+    /// Make the program's module init put `classes` into `Type`'s table of
+    /// types by name, so `Type.resolveClass` finds them.
+    ///
+    /// Module init creates that table with `Type.init`, registers its own
+    /// classes, and returns early unless `Type.init` made the table, so the
+    /// host's cannot go in before it runs. Instead the call to `Type.init` in
+    /// the entrypoint is pointed at a function added here, which calls it,
+    /// registers each class object (its companion's global) under its name
+    /// with `Type.register`, and returns `Type.init`'s answer. A program that
+    /// never reaches `Type` by name has nothing to do this for.
+    fn register_by_name_at_type_init(&mut self, classes: &[(String, usize, usize)]) {
+        if classes.is_empty() {
+            return;
+        }
+        let (Some(init), Some(register)) = (
+            self.bound_static("Type", "init"),
+            self.bound_static("Type", "register"),
+        ) else {
+            return;
+        };
+        let Some(entry) = self
+            .functions
+            .iter()
+            .position(|f| f.findex as u32 == self.entrypoint)
+        else {
+            return;
+        };
+        let Some(call_at) = self.functions[entry]
+            .ops
+            .iter()
+            .position(|op| matches!(op, Opcode::Call0 { fun, .. } if fun.0 == init))
+        else {
+            return;
+        };
+        let bool_t = self.type_of_kind(hl::hl_type_kind_HBOOL);
+        let bytes_t = self.type_of_kind(hl::hl_type_kind_HBYTES);
+        let void_t = self.type_of_kind(hl::hl_type_kind_HVOID);
+        let fun_t = self.push_type(HLType {
+            kind: hl::hl_type_kind_HFUN,
+            fun: Some(HLTypeFun {
+                args: Vec::new(),
+                ret: TypeRef(bool_t),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        // r0 Type.init's answer, r1 the name (a string constant loads as its
+        // UTF-16 bytes), r2 register's void result, then one register per
+        // class object.
+        let mut regs = vec![TypeRef(bool_t), TypeRef(bytes_t), TypeRef(void_t)];
+        let mut ops = vec![Opcode::Call0 {
+            dst: Reg(0),
+            fun: RefFun(init),
+        }];
+        for (name, global, companion) in classes {
+            let class_reg = Reg(regs.len() as u32);
+            regs.push(TypeRef(*companion));
+            self.strings.push(name.clone());
+            ops.push(Opcode::GetGlobal {
+                dst: class_reg,
+                global: RefGlobal(*global),
+            });
+            ops.push(Opcode::String {
+                dst: Reg(1),
+                ptr: RefString(self.strings.len() - 1),
+            });
+            ops.push(Opcode::Call2 {
+                dst: Reg(2),
+                fun: RefFun(register),
+                arg0: Reg(1),
+                arg1: class_reg,
+            });
+        }
+        ops.push(Opcode::Ret { ret: Reg(0) });
+
+        let findex = self
+            .functions
+            .iter()
+            .map(|f| f.findex)
+            .chain(self.natives.iter().map(|n| n.findex))
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        let debug = if self.has_debug {
+            vec![0; ops.len() * 2]
+        } else {
+            Vec::new()
+        };
+        self.functions.push(HLFunction {
+            type_: TypeRef(fun_t),
+            findex,
+            ops,
+            regs,
+            debug,
+            ref_: 0,
+            obj: None,
+            field_name: None,
+            field_ref: None,
+        });
+        if let Opcode::Call0 { fun, .. } = &mut self.functions[entry].ops[call_at] {
+            *fun = RefFun(findex as usize);
+        }
     }
 
     /// Bind `c` to the class the program declares under its name; see

@@ -55,5 +55,7 @@ class Main {
 		Sys.println(bump(g) + add(5));
 		// 30 * 1.5 + 10, then 30 * 0.5 with nothing added.
 		Sys.println(Greeter.scale(g, 1.5, true) + Greeter.scale(g, 0.5, false));
+		// A class the host adds is found by name like the program's own.
+		Sys.println(Type.resolveClass("host.Greeters") != null);
 	}
 }

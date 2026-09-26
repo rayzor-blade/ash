@@ -480,6 +480,26 @@
                 data-copy="irm https://ash.rayzor.tech/install.ps1 | iex">Copy</button>
             </div>
           </div>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px">Emitting objects for a target outside the supported set (MIPS, LoongArch, SPARC, ...)? Install the <strong style="color:#221d1a;font-weight:600">-dev</strong> build instead: the same <code>ash</code> with every LLVM backend registered.</p>
+          <div
+            style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9;margin-bottom:10px">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+              <div style="overflow-x:auto">
+                <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">curl -fsSL https://ash.rayzor.tech/install.sh | sh -s -- --dev</span></div>
+              </div>
+              <button class="copy-btn" data-copy="curl -fsSL https://ash.rayzor.tech/install.sh | sh -s -- --dev">Copy</button>
+            </div>
+          </div>
+          <div
+            style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9;margin-bottom:10px">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+              <div style="overflow-x:auto">
+                <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">$env:ASH_DEV=1; irm https://ash.rayzor.tech/install.ps1 | iex</span></div>
+              </div>
+              <button class="copy-btn" data-copy="$env:ASH_DEV=1; irm https://ash.rayzor.tech/install.ps1 | iex">Copy</button>
+            </div>
+          </div>
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:0">The second line is for Windows PowerShell. A -dev build exists for Linux x86_64, macOS arm64 and Windows x86_64; elsewhere the installer takes the standard build.</p>
         </div>
 
         <div>
@@ -562,7 +582,7 @@
               <button class="copy-btn" data-copy="ash --build mygame.wasm --target wasm32-wasip1 mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">Ash brings its own wasm linker; the wasm runtime it links against is built once from a checkout for now. Your program behaves the same in the browser as it does natively, exceptions and threads included. <a href="wasm.html" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The WebAssembly guide</a>.
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">Ash brings its own wasm linker and runtime. <code>ash run mygame.wasm</code> runs the module, and the build writes a page beside it that <code>ash serve</code> serves to a browser. Your program behaves the same there as it does natively, exceptions and threads included. <a href="wasm.html" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The WebAssembly guide</a>.
           </p>
         </div>
       </div>
@@ -649,8 +669,8 @@
           style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.08)">
           The last row builds and is checked in CI, but nothing runs it there yet. <code>ash --emit-aot out.o --target &lt;triple&gt; prog.hl</code>
           writes the object; linking it needs that platform's toolchain and a runtime built for it. The
-          <code>-dev</code> release (<code>ASH_DEV=1 curl -fsSL https://ash.rayzor.tech/install.sh | sh</code>,
-          Linux x86_64 and macOS aarch64) is the same ash built with every backend LLVM has: MIPS, LoongArch,
+          <code>-dev</code> release (<code>curl -fsSL https://ash.rayzor.tech/install.sh | sh -s -- --dev</code>,
+          Linux x86_64, macOS aarch64 and Windows x86_64) is the same ash built with every backend LLVM has: MIPS, LoongArch,
           SPARC and the rest, unchecked beyond emitting. <code>ash --version</code> says <code>(all LLVM targets)</code>
           when you have it. Benchmark numbers come from Linux on x86_64.</div>
       </div>

@@ -510,18 +510,21 @@ fn link_wasm_module(
     runtime: Option<&Path>,
     quiet: bool,
 ) -> Result<()> {
-    // A program that names an HDLL is not refused. There is no dlopen in the
-    // sandbox and no second module to open, so its primitives resolve to the
-    // stub that raises when one is REACHED -- which is the same treatment a
-    // native binary gives a primitive whose library is missing, and it lets a
-    // program that merely mentions `haxe.Http` run.
+    // A program that names an HDLL is not refused. A library shipped as a
+    // `.wasm` side module beside the output is loaded at run time; any other
+    // library's primitives resolve to the stub that raises when one is
+    // REACHED -- the same treatment a native binary gives a primitive whose
+    // library is missing, and it lets a program that merely mentions
+    // `haxe.Http` run.
     //
     // Saying so is still worth it: the failure, if it comes, arrives at a call
     // deep in a library rather than here.
-    if kind == Runtime::Shared && !quiet {
+    let hdlls = side_modules_beside(out);
+    if kind == Runtime::Shared && hdlls.is_empty() && !quiet {
         crate::progress::note(&format!(
-            "[ash] this program names HDLLs and {triple} cannot load one. It will \
-             build and run; a primitive that is actually reached raises there."
+            "[ash] this program names HDLLs and no .wasm side module is beside {}. \
+             It will build and run; a primitive that is actually reached raises there.",
+            out.display()
         ));
     }
     let runtime = match runtime {
@@ -546,7 +549,6 @@ fn link_wasm_module(
     // paying for the rewrite to produce something that can never suspend --
     // which is what a module that never imports `env.ash_host_fiber_yield`
     // would be.
-    let hdlls = side_modules_beside(out);
     if !hdlls.is_empty() && !quiet {
         crate::progress::note(&format!(
             "[ash] {} native {} beside the output will be loaded at run time, so this \

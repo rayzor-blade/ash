@@ -283,6 +283,10 @@ fn host_can_supply(module: &str, name: &str) -> bool {
         || module == "GOT.func"
         || (module == "env" && (name == "__linear_memory" || name == "__indirect_function_table"))
         || (module == "env" && name == "__c_longjmp")
+        // wasi-threads: a threaded module starts a thread through it, and
+        // imports the shared memory its host makes.
+        || (module == "wasi" && name == "thread-spawn")
+        || (module == "env" && name == "memory")
 }
 
 impl Layout {
@@ -2510,5 +2514,7 @@ mod host_import_tests {
         assert!(host_can_supply("env", "__linear_memory"));
         assert!(host_can_supply("env", "__indirect_function_table"));
         assert!(host_can_supply("env", "__c_longjmp"));
+        assert!(host_can_supply("wasi", "thread-spawn"));
+        assert!(host_can_supply("env", "memory"));
     }
 }

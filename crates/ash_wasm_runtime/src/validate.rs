@@ -30,6 +30,10 @@ fn is_host_supplied(module: &str, name: &str) -> bool {
         // linked module defines and exports it, so seeing it here says the
         // trap path was lowered, not that a host has to supply anything.
         || (module == "env" && name == "__c_longjmp")
+        // wasi-threads: a threaded module starts a thread through it, and
+        // imports the shared memory its host makes.
+        || (module == "wasi" && name == "thread-spawn")
+        || (module == "env" && name == "memory")
 }
 
 /// One import, as reported.

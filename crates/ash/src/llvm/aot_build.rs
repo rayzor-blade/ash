@@ -285,7 +285,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
                 out.display()
             ));
         }
-        if shared_runtime {
+        if shared_runtime && !triple.starts_with("wasm") {
             // An HDLL brings its own copy of the runtime unless the binary
             // shares one, and two collectors in a process crash as soon as one
             // meets the other's objects. So this object must take the runtime

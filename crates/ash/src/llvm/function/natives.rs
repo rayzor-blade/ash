@@ -185,7 +185,14 @@ impl<'ctx> JITModule<'ctx> {
             // with the casts the host chose between the two sides' types.
             if let Some(link) = crate::native_lib::host_link(lib, &native_func.name) {
                 let caller_name = format!("{}_{}_linked", lib, name);
-                return self.generate_native_caller_linked(&caller_name, func_type, &link);
+                let arg_types: Vec<usize> = type_fun.args.iter().map(|t| t.0).collect();
+                return self.generate_native_caller_linked(
+                    &caller_name,
+                    func_type,
+                    &link,
+                    &arg_types,
+                    type_fun.ret.0,
+                );
             }
             if context != 0 || record {
                 return Err(anyhow!(
@@ -389,10 +396,12 @@ impl<'ctx> JITModule<'ctx> {
     /// callee's type where the host named a cast, the callee called by its
     /// symbol with its own signature, the result cast back.
     fn generate_native_caller_linked(
-        &self,
+        &mut self,
         caller_name: &str,
         fn_type: FunctionType<'ctx>,
         link: &crate::native_lib::HostLink,
+        arg_types: &[usize],
+        ret_type: usize,
     ) -> Result<FunctionValue<'ctx>> {
         if let Some(existing) = self.module.get_function(caller_name) {
             return Ok(existing);
@@ -424,6 +433,14 @@ impl<'ctx> JITModule<'ctx> {
             None => self.context.void_type().fn_type(&callee_params, false),
         };
         let callee = self.aot_runtime_fn(&link.symbol, callee_type);
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        // The program's type of each value a cast sees, as the constant the
+        // object holds for it; resolved before the body is positioned.
+        let mut arg_descs = Vec::with_capacity(arg_types.len());
+        for &t in arg_types {
+            arg_descs.push(self.get_initialized_type(t)?);
+        }
+        let ret_desc = self.get_initialized_type(ret_type)?;
 
         let saved_block = self.builder.get_insert_block();
         let function = self.module.add_function(caller_name, fn_type, None);
@@ -435,10 +452,12 @@ impl<'ctx> JITModule<'ctx> {
             let target = word(link.params[i]);
             let value = match &link.arg_casts[i] {
                 Some(cast) => {
-                    let cast_fn =
-                        self.aot_runtime_fn(cast, target.fn_type(&[param.get_type().into()], false));
+                    let cast_fn = self.aot_runtime_fn(
+                        cast,
+                        target.fn_type(&[param.get_type().into(), ptr_type.into()], false),
+                    );
                     self.builder
-                        .build_call(cast_fn, &[param.into()], "cast")?
+                        .build_call(cast_fn, &[param.into(), arg_descs[i].into()], "cast")?
                         .try_as_basic_value()
                         .basic()
                         .ok_or_else(|| anyhow!("{cast} returned nothing"))?
@@ -464,10 +483,12 @@ impl<'ctx> JITModule<'ctx> {
             (Some(value), Some(want)) => {
                 let value = match &link.ret_cast {
                     Some(cast) => {
-                        let cast_fn =
-                            self.aot_runtime_fn(cast, want.fn_type(&[value.get_type().into()], false));
+                        let cast_fn = self.aot_runtime_fn(
+                            cast,
+                            want.fn_type(&[value.get_type().into(), ptr_type.into()], false),
+                        );
                         self.builder
-                            .build_call(cast_fn, &[value.into()], "cast")?
+                            .build_call(cast_fn, &[value.into(), ret_desc.into()], "cast")?
                             .try_as_basic_value()
                             .basic()
                             .ok_or_else(|| anyhow!("{cast} returned nothing"))?

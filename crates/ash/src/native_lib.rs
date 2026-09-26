@@ -563,9 +563,11 @@ pub enum Word {
 /// A host's native linked ahead of time: the AOT calls `symbol` directly,
 /// with the callee's own machine signature, and casts at the boundary.
 /// `arg_casts[i]` names a function taking the program's argument `i` as it
-/// holds it and returning it as the callee's parameter `i`; `None` passes
-/// it as it is, which the two machine types must then agree on.
-/// `ret_cast` does the same for the result, callee to program. Between two
+/// holds it, and the program's `hl_type` for it, and returning it as the
+/// callee's parameter `i`; `None` passes it as it is, which the two
+/// machine types must then agree on. `ret_cast` does the same for the
+/// result, callee to program: the value, then the program's type for it,
+/// which is what a cast producing one of the program's objects allocates. Between two
 /// integer or boolean words of different widths no cast is named: the
 /// value is widened or narrowed where it is passed. `after`, when set, is
 /// called with nothing once the callee returns, before the result is cast:

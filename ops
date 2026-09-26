@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1790450722,"nonce":"G0217xz0dzmQ8xyLPcaJT/b0a8M=","message":"Landed and pushed: 2d8d2ca (ash_std's cdylib links libsetjmp on wasm) and bc3cb91 (emit_aot and AotRequest in ash_core::llvm::aot_build).","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1790450722,"nonce":"6njo+t09sIcQfMQDulZr33XZtfU=","status":2}]}

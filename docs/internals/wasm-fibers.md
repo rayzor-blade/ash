@@ -1,8 +1,8 @@
 # wasm: suspending a fiber inside a module
 
 With `ASH_WASM_FIBERS=1` at build time a Haxe thread can stop part-way
-through a call inside a single-threaded wasm module and resume later, with
-no engine feature and no host driver. The flag sets `LinkOptions::fibers`;
+through a call inside a wasm module and resume later, with no engine feature
+and no host driver. The flag sets `LinkOptions::fibers`;
 with it off, `link` returns exactly what `emit` produced and nothing in
 `fiber.rs` runs, so the byte-identical guarantee holds structurally.
 
@@ -14,8 +14,16 @@ there, and `stack_range()`/`saved_sp()` stop returning null because a
 suspended fiber's live values are spilled into linear memory where the
 collector can scan them. JSPI cannot offer that: the engine holds the stack.
 
-Not provided: parallelism, suspension from inside a host callback,
-reentrancy (`Fiber::resume` may not be called from a suspendable frame).
+The transform works per instance: its globals are defined by the module, not
+shared, so in a threaded module (`wasm32-wasip1-threads`) every agent has its
+own fiber state and its own scheduler. Fibers on different agents suspend
+independently while the agents run in parallel; parallelism itself comes from
+the agents ([wasm-threads.md](wasm-threads.md)), and this is what lets a
+thread on any of them block.
+
+Not provided: suspension from inside a host callback, reentrancy
+(`Fiber::resume` may not be called from a suspendable frame), moving a
+suspended fiber to another agent.
 
 ## Borrowed from Asyncify
 

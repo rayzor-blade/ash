@@ -69,17 +69,35 @@ that does not; the same code then runs lane by lane.
 
 ## Threads
 
-`sys.thread` on wasm has two modes:
+`sys.thread` on wasm is built from two mechanisms, and a program gets real
+parallelism in a browser by using both:
 
-- **Fibers** (`ASH_WASM_FIBERS=1` at build time): threads are cooperative,
-  on one agent. A worker blocked in `Deque.pop(true)` suspends inside the
-  module and resumes where it stopped when the main thread pushes. No
-  parallelism; the whole `threads` suite passes.
-- **Workers / wasmtime threads**: each Haxe thread is another instance of the
-  same module over shared memory, and they run at the same time. A page
-  needs cross-origin isolation (COOP/COEP) for shared memory, and Workers
-  must be created before the program starts because a Worker created from
-  inside a synchronous wasm call never loads.
+- **Agents** (`--target wasm32-wasip1-threads`): each Haxe thread is another
+  instance of the same module over shared memory, on an agent of its own — a
+  Worker in a page, an OS thread under wasmtime — and they run at the same
+  time on separate cores.
+- **Fibers** (`ASH_WASM_FIBERS=1` at build time): a thread blocked in
+  `Deque.pop(true)`, a lock or `Sys.sleep` suspends inside the module and
+  resumes where it stopped. Every agent has its own instance, so its own
+  fiber state and its own scheduler; fibers on different agents suspend and
+  resume independently of each other.
+
+Built with both, Haxe threads are fibers spread over agents: one agent per
+thread for as many agents as the host gives, in parallel, each able to block
+without stopping the others. A thread created when no agent is free runs as a
+fiber on the main scheduler and takes turns there. `examples/browser/` runs
+four threads this way in a page, one Worker each.
+
+| build | threads run | a blocking thread |
+|---|---|---|
+| `wasm32-wasip1` | one at a time, each body run to completion | cannot block: waiting on another thread hangs |
+| `wasm32-wasip1` + fibers | taking turns on one agent | suspends; the others run |
+| `wasm32-wasip1-threads` + fibers | in parallel, one agent each | suspends; the others run |
+
+A page needs cross-origin isolation (COOP/COEP) for shared memory, and its
+Workers must be created before the program starts, because a Worker created
+from inside a synchronous wasm call never loads. The number of Workers the
+page starts is the number of threads that run in parallel.
 
 Design and measurements: [internals/wasm-fibers.md](../internals/wasm-fibers.md),
 [internals/wasm-threads.md](../internals/wasm-threads.md).

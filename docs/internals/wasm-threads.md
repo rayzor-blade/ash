@@ -1,8 +1,8 @@
 # wasm: shared memory, Workers, threads
 
 What krio built under the worker-per-fiber row, what it measured, and what
-it costs to use. [wasm-fibers.md](wasm-fibers.md) is the single-agent
-alternative.
+it costs to use. [wasm-fibers.md](wasm-fibers.md) is how a thread on any
+agent blocks; ash builds threaded modules with both.
 
 ## Suspension is not parallelism
 
@@ -11,11 +11,15 @@ alternative.
 | JSPI / wasmtime async | yes | no — single agent |
 | Asyncify / ash's transform | yes | no — single agent |
 | Workers over shared memory | yes | yes |
+| Workers + ash's transform | yes | yes |
 
 The first two rows give fiber semantics: a producer/consumer pair works
 because one runs while the other is suspended. A program that expects a
 worker to keep computing while the main thread blocks on `lock.wait()` needs
-the third row, because with one agent the blocked one is the only one.
+Workers, because with one agent the blocked one is the only one. ash ships
+the last row: `wasm32-wasip1-threads` with `ASH_WASM_FIBERS=1` puts each Haxe
+thread on an agent of its own, and each agent's instance suspends its own
+fibers.
 
 ## What krio built
 
@@ -188,9 +192,10 @@ is module instantiation per thread, paid about once because the
 instantiations overlap.
 
 Nothing configures the pool. A page has no environment to read a worker
-count from, and a wasm worker runs a fiber body straight through, so the
-pool grows: an agent per live thread, as many as the host gives. A host that
-says no runs those threads on the main scheduler. A thread does not share
+count from, so the pool grows: an agent per live thread, as many as the host
+gives, each running its thread as a fiber on its own scheduler. A host that
+says no runs those threads as fibers on the main scheduler, taking turns
+with it. A thread does not share
 its WASI context, socket table or loaded libraries; each instance builds its
 own, as wasmtime's wasi-threads does.
 

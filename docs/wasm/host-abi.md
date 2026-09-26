@@ -24,8 +24,9 @@ A host in another language implements the same imports.
 `env.ash_host_fiber_yield`. A wasm module has no addressable call stack and
 no instruction that switches between two, so suspending a fiber is the one
 operation it cannot perform for itself. wasmtime answers it with its own
-fibers; a page answers it with JSPI, or the module is built with
-`ASH_WASM_FIBERS=1` and suspends without engine support.
+fibers; the browser host needs the module built with `ASH_WASM_FIBERS=1`,
+which suspends without engine support. Each thread's instance drives its own
+fiber globals, so fibers on different agents suspend independently.
 
 Two companions when fibers are on: `ash_host_fiber_state` and
 `ash_host_fiber_arm`, through which the host reads and writes the transform's

@@ -715,14 +715,14 @@ fn dispatch_to_worker(id: u32, body: FiberBody, ctx: *mut c_void) -> bool {
 
 /// The same, where an agent is another instance of this module.
 ///
-/// A wasm worker runs a fiber body straight through: there is no addressable
-/// stack to switch away from, so it cannot hold a second fiber and come back
-/// to the first. A fixed pool of N would therefore let N threads run and make
-/// the next one WAIT for one of them to finish, which is not what a thread
-/// is. So the pool grows: one agent per live thread, asked for when the
-/// thread is created, as many as the host will give. A host that will give no
-/// more says so by failing to start one, and that thread runs on the main
-/// scheduler.
+/// Each agent runs its thread as a fiber on its own scheduler, and with the
+/// fiber transform that fiber suspends when it blocks without stopping any
+/// other agent. Without the transform a body runs straight through, so a
+/// fixed pool of N would let N threads run and make the next one WAIT for one
+/// of them to finish, which is not what a thread is. So the pool grows: one
+/// agent per live thread, asked for when the thread is created, as many as
+/// the host will give. A host that will give no more says so by failing to
+/// start one, and that thread runs on the main scheduler.
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
 fn dispatch_to_worker(id: u32, body: FiberBody, ctx: *mut c_void) -> bool {
     let Some(pool) = worker_pool() else {

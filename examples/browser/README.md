@@ -162,21 +162,25 @@ and there is no filesystem -- `path_open` is `ENOTSUP` and every descriptor
 above the standard three is `EBADF`. A program that reads a file fails the
 way it would with the file absent.
 
-Nothing waits. `poll_oneoff` reports its subscriptions expired at once, so
-`Sys.sleep` returns immediately.
+Waiting is real where a page can wait. `poll_oneoff` blocks on
+`Atomics.wait`, which a Worker may do, so `Sys.sleep` sleeps. On a page that
+is not cross-origin isolated there is no `SharedArrayBuffer` to wait on, and
+a sleep returns immediately.
 
-## Fibers, which are the other mechanism
+## Fibers, and how they combine with Workers
 
-Threads above are Workers, each with its own instance over one shared memory.
-A fiber is the unrelated thing: one instance, one stack running at a time,
-control moving between fibers only where one of them blocks -- a `Deque.pop`,
-a lock, an explicit yield. `docs/wasm/fibers.md` calls it suspension rather
-than parallelism, and it is.
+Workers give parallelism: each Haxe thread is an instance of the module on an
+agent of its own, and the agents run at the same time. Fibers give blocking:
+a thread in a `Deque.pop`, a lock or a sleep suspends and later resumes where
+it stopped. The threaded demos are built with both, and every Haxe thread in
+them is a fiber.
 
-Both are needed and neither replaces the other. A thread that blocks has to be
-able to give its agent up, which is what the fiber transform is for; a page
-that warms no agent still runs a threaded program, on fibers, taking turns --
-and the threads demo says so when it happens.
+Each agent's instance has its own fiber globals and its own scheduler, so a
+fiber suspending on one agent stops nothing on another. Four threads on four
+Workers run in parallel and block independently; only a thread that finds no
+free agent shares one, running as a fiber on the main scheduler and taking
+turns with the main thread. The threads demo says when that happens, and a
+page that warms no agents runs the whole program that way.
 
 ash's link-time transform rewrites the module so its frames can unwind back to
 a scheduler and rewind to exactly where they stopped, and the host drives the

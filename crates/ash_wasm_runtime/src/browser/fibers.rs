@@ -1,7 +1,7 @@
 //! Suspending a fiber in a page.
 //!
 //! Not JSPI, and not a worker parked on `Atomics.wait`. ash already carries a
-//! link-time transform (`docs/wasm/fibers.md`) that rewrites a module so its
+//! link-time transform (`docs/internals/wasm-fibers.md`) that rewrites a module so its
 //! frames can unwind themselves back to a scheduler and rewind to exactly
 //! where they stopped, and it works: the Haxe threads suite goes from a
 //! timeout to 22 of 22 under it. A module built with `ASH_WASM_FIBERS=1`
@@ -13,14 +13,15 @@
 //! the whole point of having the transform: a host needs to be able to
 //! suspend, not to have an engine that can.
 //!
-//! # What this is not
+//! # Fibers and Workers
 //!
-//! Parallelism. Fibers take turns on the page's one thread and control moves
-//! between them only where one of them blocks, so two of them never run at
-//! once and a fiber that does not yield starves the rest and the page with
-//! it. Running wasm on more than one core in a browser is Web Workers over a
-//! shared memory, which is what COOP/COEP are for and is a different
-//! mechanism from this one.
+//! This suspends; it does not parallelise. Within one agent fibers take turns,
+//! and control moves between them only where one of them blocks. Parallelism
+//! comes from Workers over a shared memory: each Haxe thread gets an instance
+//! on an agent of its own, and every instance has its own `Fibers`, so a
+//! threaded module runs its fibers on several agents at once and each suspends
+//! without stopping the others. A thread with no agent of its own runs on the
+//! main scheduler and takes turns there.
 //!
 //! # What a module without the transform gets
 //!

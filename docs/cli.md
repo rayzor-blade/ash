@@ -2,6 +2,8 @@
 
 ```
 ash [OPTIONS] <file.hl> [PROGRAM_ARGS]...
+ash run [--dir PATH]... <module.wasm> [PROGRAM_ARGS]...
+ash serve [DIR] [--port N]
 ash wasm [--validate] <module.wasm>
 ```
 
@@ -85,6 +87,24 @@ compare, never a wrong answer. The value must be attached with `=`.
 | `--hot-reload` | route direct calls through indirect dispatch so a function can be replaced at run time |
 | `ash wasm <module>` | list a wasm module's functions, tables, exports and imports, grouped by who supplies them |
 | `ash wasm --validate <module>` | exit non-zero and name what a host would still have to provide |
+
+## WebAssembly
+
+`ash --build app.wasm --target wasm32-wasip1 main.hl` links against the wasm
+runtime installed beside `ash` (`wasm32-wasip1/ash_runtime.o`; the threads
+target has its own directory) and writes a page beside the module:
+`index.html`, `worker.js`, `thread.js`, `display.js` and the browser host
+(`ash_browser.js`, `ash_browser_bg.wasm`, from the `browser` directory beside
+`ash`). An `index.html` without ash's first-line comment is left alone.
+
+| Command | |
+|--------|---|
+| `ash run <module> [args]` | run the module under wasmtime; the exit status is the program's, and a `wasm32-wasip1-threads` module runs its threads in parallel. `--dir PATH` makes a directory visible beyond the working one |
+| `ash serve [dir]` | serve a directory on `127.0.0.1` (port 8731, `--port N`), every response carrying the COOP/COEP headers a threaded module needs |
+
+`ASH_RUNTIME` names a different runtime object and `ASH_BROWSER_HOST` a
+different directory for the browser host. [wasm/README.md](wasm/README.md)
+covers threads, fibers and native libraries.
 
 Tuning flags beyond these, environment variables and the profiler are in
 [debugging.md](debugging.md).

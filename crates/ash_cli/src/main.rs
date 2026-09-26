@@ -27,6 +27,32 @@ enum Command {
         #[arg(long, visible_alias = "analyze")]
         analyse: bool,
     },
+    /// Run a WebAssembly module `ash --build` produced, under wasmtime.
+    ///
+    /// The exit status is the program's. A module built for
+    /// `wasm32-wasip1-threads` runs its threads in parallel.
+    Run {
+        /// The `.wasm` module.
+        module: PathBuf,
+        /// A directory to make visible to the program, beyond the working one.
+        #[arg(long = "dir", value_name = "PATH")]
+        dirs: Vec<PathBuf>,
+        /// Everything after the module belongs to the program.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        program_args: Vec<String>,
+    },
+    /// Serve a directory to a browser on localhost.
+    ///
+    /// Every response carries the cross-origin isolation headers a threaded
+    /// module needs for its shared memory.
+    Serve {
+        /// The directory to serve: the one `--build` wrote a module and its
+        /// page into.
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        #[arg(long, default_value_t = 8731)]
+        port: u16,
+    },
 }
 
 /// The version, and which LLVM backends the build registers: the supported
@@ -48,7 +74,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
         .multiple(true)
 ))]
 struct Cli {
-    /// Read a WebAssembly module instead of running bytecode.
+    /// Work with a WebAssembly module instead of running bytecode.
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -295,6 +321,7 @@ static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod trace;
+mod web;
 use ash_interp::interpreter::HLExceptionPropagation;
 
 /// Put ash's runtime beside `program` under the name its HDLLs import.
@@ -981,6 +1008,17 @@ fn run() -> Result<()> {
     {
         return run_wasm(module, *validate, *analyse);
     }
+    if let Some(Command::Run {
+        module,
+        dirs,
+        program_args,
+    }) = &cli.command
+    {
+        std::process::exit(web::run_module(module, dirs, program_args)?);
+    }
+    if let Some(Command::Serve { dir, port }) = &cli.command {
+        return web::serve(dir, *port);
+    }
 
     #[cfg(not(feature = "llvm"))]
     refuse_llvm_flags(&cli)?;
@@ -1274,7 +1312,11 @@ fn run() -> Result<()> {
             name.push(".o");
             exe.with_file_name(name)
         });
-        return ash_core::llvm::aot_build::emit_aot(ash_core::llvm::aot_build::AotRequest {
+        let wasm_page = exe
+            .as_ref()
+            .filter(|_| cli.target.as_deref().is_some_and(|t| t.starts_with("wasm")))
+            .cloned();
+        ash_core::llvm::aot_build::emit_aot(ash_core::llvm::aot_build::AotRequest {
             file: &hl_path,
             out: &out,
             exe: exe.as_deref(),
@@ -1285,7 +1327,11 @@ fn run() -> Result<()> {
             abi_version: cli.abi_version,
             quiet: cli.quiet,
             links: Default::default(),
-        });
+        })?;
+        if let Some(module) = wasm_page {
+            web::write_page(&module, cli.quiet)?;
+        }
+        return Ok(());
     }
 
     match cli.mode {

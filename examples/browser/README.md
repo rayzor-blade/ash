@@ -4,11 +4,6 @@ HashLink bytecode compiled to a WebAssembly module by ash, with a browser
 compatible runtime. The host below answers what a sandbox cannot do for
 itself.
 
-    # the host
-    cargo build --release -p ash_browser --target wasm32-unknown-unknown
-    wasm-bindgen --target web --out-dir examples/browser \
-      target/wasm32-unknown-unknown/release/ash_browser.wasm
-
     # the program the page runs. ASH_WASM_FIBERS is what makes its thread
     # able to suspend; without it the worker runs to its first block and
     # stays there, and the page never finishes.
@@ -23,16 +18,31 @@ itself.
     ASH_WASM_FIBERS=1 ash --build ../entities.wasm \
       --target wasm32-wasip1-threads entities.hl
 
-    ./examples/browser/serve.py
+    cd ../../.. && ash serve examples/browser
 
 Then open <http://127.0.0.1:8731>. It starts a worker, which fetches the
 module and runs it; there is nothing to click. `?demo=threads` and
 `?demo=entities` run the other two.
 
-`serve.py` rather than `python3 -m http.server` because of the threaded demo:
-it needs a `SharedArrayBuffer`, a page only has one when it is cross-origin
+Each build also puts the browser host (`ash_browser.js`,
+`ash_browser_bg.wasm`) beside the module, from the `browser` directory
+installed beside `ash`, and writes `worker.js`, `thread.js` and `display.js`,
+which ash carries as copies of the ones here. This directory's `index.html`
+has no generated-by-ash comment, so the builds leave it alone.
+
+`ash serve` rather than any static server because of the threaded demo: it
+needs a `SharedArrayBuffer`, a page only has one when it is cross-origin
 isolated, and that means two headers on every response. The single-threaded
-demo does not care and works under either.
+demo does not care and works under any server.
+
+To build the host from source rather than take the installed one:
+
+    cargo build --release -p ash_browser --target wasm32-unknown-unknown
+    wasm-bindgen --target web --out-dir target/release/browser \
+      target/wasm32-unknown-unknown/release/ash_browser.wasm
+
+A dev build of `ash` looks for it in `target/release/browser`;
+`ASH_BROWSER_HOST` names any other directory.
 
 ## Threads
 

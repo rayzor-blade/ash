@@ -13,8 +13,9 @@ boundary each sits on:
   so its contents are ordinary linkage, not imports. Everything a sandbox can
   do by itself lives there: WASI already supplies a clock, randomness, stdout
   and a filesystem.
-- **`native`** is a wasmtime host, shipped as the `ash-wasm-run` binary. No
-  browser, no JavaScript, no wasm-bindgen. The conformance suite runs on it.
+- **`native`** is a wasmtime host: `ash run` in the `ash` binary, and the
+  `ash-wasm-run` binary the conformance suite runs on. No browser, no
+  JavaScript, no wasm-bindgen.
 - **`browser`** is the same contract behind a WASI preview-1 shim.
 
 A host in another language implements the same imports.

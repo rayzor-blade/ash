@@ -214,7 +214,7 @@ has a block traps rather than reading the main thread's.
 **In a browser.** A page starts a Worker where wasmtime starts an OS thread:
 338 ms for four threads against 1016 ms serial, 3.01x; under node's
 `worker_threads`, 2.17x. Two costs a page adds: shared memory needs COOP and
-COEP on every response (`examples/browser/serve.py` sets them), and agents
+COEP on every response (`ash serve` sends them), and agents
 must be warmed before the program starts, because a Worker created from
 inside a synchronous wasm call never loads — which is also the real bound on
 how many threads a page can run.

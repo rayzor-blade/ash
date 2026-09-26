@@ -102,7 +102,7 @@ if (threaded && !self.crossOriginIsolated) {
   write(
     "This page is not cross-origin isolated, so it has no SharedArrayBuffer " +
       "and the threaded module cannot be given a memory. Serve it with " +
-      "examples/browser/serve.py.",
+      "`ash serve examples/browser`.",
     "err",
   );
 }

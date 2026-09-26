@@ -159,6 +159,7 @@ dependencies = [
  "libc",
  "rustc-demangle",
  "tikv-jemallocator",
+ "tokio",
  "windows-sys 0.59.0",
 ]
 

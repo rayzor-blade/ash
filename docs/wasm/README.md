@@ -26,13 +26,14 @@ has to instantiate it and answer those imports — a **host**.
 
 Two hosts ship with ash, both in `crates/ash_wasm_runtime`:
 
-- **`ash-wasm-run`**, a wasmtime host. `ash-wasm-run game.wasm` runs the
-  module from a terminal; the conformance suite runs on it. wasmtime's own
-  fibers answer the suspending import.
-- **The browser host** (`crates/ash_browser`, `examples/browser/`): the same
-  contract behind a WASI shim, with Workers for threads and WebSocket for
-  the socket client half. `examples/browser/README.md` walks through
-  serving a module.
+- **`ash run game.wasm`**, a wasmtime host built into `ash`, runs the module
+  from a terminal. The conformance suite runs the same host as the
+  `ash-wasm-run` binary, which starts threads only when given `--threads`.
+- **The browser host** (`crates/ash_browser`): the same contract behind a
+  WASI shim, with Workers for threads and WebSocket for the socket client
+  half. A wasm build writes a page for it beside the module, and
+  `ash serve <dir>` serves that directory with the headers a threaded module
+  needs. `examples/browser/README.md` explains the page.
 
 Writing your own host: [host-abi.md](host-abi.md) is the contract — the
 imports, the socket API, and the one import every host must supply.

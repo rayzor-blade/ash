@@ -324,6 +324,18 @@ fn main() {
     let host = env::var("HOST").unwrap_or_default();
     let cross_clang_args = cross_clang_args(&target, &host);
 
+    // A crate depending on this one builds its cdylib too, and on wasm that
+    // links on its own: the setjmp lowering's `__wasm_longjmp` and friends
+    // are in WASI's `libsetjmp`, beside its libc.
+    if target.starts_with("wasm")
+        && let Some(sysroot) = cross_clang_args
+            .iter()
+            .find_map(|a| a.strip_prefix("--sysroot="))
+    {
+        println!("cargo:rustc-cdylib-link-arg=-L{sysroot}/lib/{target}");
+        println!("cargo:rustc-cdylib-link-arg=-lsetjmp");
+    }
+
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.

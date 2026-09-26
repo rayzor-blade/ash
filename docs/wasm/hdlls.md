@@ -64,12 +64,16 @@ Three things a Rust library needs:
   RUSTFLAGS="-C relocation-model=pic -C target-feature=+mutable-globals" \
     cargo +nightly build --release --target wasm32-wasip1 -Z build-std=std,panic_abort
   wasm-ld --experimental-pic -shared --unresolved-symbols=import-dynamic \
-    --no-entry --export=hlp_greet -o rustlib.wasm libyourlib.a
+    --no-entry --gc-sections --no-export-dynamic --export=hlp_greet \
+    --whole-archive libyourlib.a --no-whole-archive -o rustlib.wasm
   ```
 
   `--unresolved-symbols=import-dynamic` rather than `--import-undefined`:
   Rust's std needs the address of `errno`, which is data, and the latter
-  covers functions only.
+  covers functions only. `--no-export-dynamic` exports only what `--export`
+  names; without it `-shared` exports every Rust symbol and `--gc-sections`
+  can drop nothing. `rust-lld -flavor wasm` from the Rust toolchain accepts
+  the same flags.
 - **Size discipline.** A library pulling in all of `std` is around 770 KB,
   mostly `std`. `#![no_std]` over the program's allocator keeps one small.
 
@@ -148,6 +152,10 @@ has.
 
 - The browser loader. The steps above run against `WebAssembly.instantiate`;
   fetching a library only when the program uses it is the reason to do it.
+- Threaded programs. A `wasm32-wasip1-threads` program's memory is shared,
+  so a library built for `wasm32-wasip1` is refused at load, and a Rust
+  library built for the threads target does not link as a side module: its
+  `std` reaches `errno` through a TLS relocation against an imported symbol.
 - Lazy loading: everything beside the program is loaded at start-up.
 - Unloading.
 - `fmt` stays compiled into the runtime: its digests and zlib streams are

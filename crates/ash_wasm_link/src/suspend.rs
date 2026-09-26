@@ -4,9 +4,7 @@
 //! out of a call and later rewind back into it. Instrumenting one costs code
 //! size and speed, so the analysis that decides *which* is not a detail of the
 //! transform -- it is the thing that makes the transform affordable or not.
-//! `docs/wasm/fibers.md` records the measurement that settled the shape of
-//! this module; the short version is that the answer at this level is bad, and
-//! knowing exactly how bad is why the analysis ships before the rewrite.
+//! `docs/internals/wasm-fibers.md` describes the seeds and the indirect-call targets.
 //!
 //! A function must be instrumented when it can be on the stack at the moment a
 //! fiber suspends: it calls a suspend point, or it calls something that can.
@@ -24,8 +22,7 @@
 //!
 //! It is also worth almost nothing, and this module exists so that stays
 //! measurable rather than being rediscovered: `tests/suspend_set.rs` prints
-//! both policies over a real module, and `docs/wasm/fibers.md` records what
-//! they came to. A Haxe program has thousands of functions sharing a few
+//! both policies over a real module. A Haxe program has thousands of functions sharing a few
 //! dozen wasm signatures, so once any suspending function is in the table
 //! under a common signature every `call_indirect` of that signature has to be
 //! assumed to suspend. The information that would separate them -- a virtual

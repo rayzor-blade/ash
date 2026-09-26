@@ -141,11 +141,8 @@ fn wrapping_every_body_renumbers_every_branch_that_leaves_one() {
 /// The transform that replaces Binaryen's `Flatten`, over the suspend set the
 /// analysis actually produces.
 ///
-/// This is the one number in the fiber design that nothing could predict:
-/// whether ash's own output keeps values on the stack across calls, and how
-/// much it costs to get them into locals. `docs/wasm/fibers.md` took its
-/// operand-stack statistics from a disassembly's folded rendering and said so;
-/// this counts them.
+/// Counts, on a real module, how many values ash's own output keeps on the
+/// operand stack across calls and what it costs to move them into locals.
 #[test]
 fn emptying_the_stack_across_calls_on_a_real_module() {
     let Some(bytes) = module() else {

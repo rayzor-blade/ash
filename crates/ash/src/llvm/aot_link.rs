@@ -431,11 +431,11 @@ const RUNTIME_OBJECT: &str = "ash_runtime.o";
 /// suspension, and no sockets until a host lends it those.
 /// Whether to instrument the module for fibers.
 ///
-/// An env var rather than a flag, matching how every other experimental
-/// codegen switch here is reached, and because
-/// the transform is unproven in a real build: `docs/wasm/fibers.md` has it
-/// working and measured on linked modules, and nothing has yet run a Haxe
-/// program that actually suspends.
+/// `ASH_WASM_FIBERS=1` turns it on; off, the linked module is exactly what
+/// `emit` produced. Safe to run with: a module that never suspends behaves
+/// the same either way. An env var rather than a flag, matching how every
+/// other experimental codegen switch here is reached. See
+/// `docs/internals/wasm-fibers.md`.
 fn fiber_transform_requested() -> bool {
     matches!(
         std::env::var("ASH_WASM_FIBERS").as_deref(),

@@ -1,8 +1,7 @@
-//! The fiber transform, built one checkable piece at a time.
+//! The fiber transform.
 //!
-//! The design is `docs/wasm/fibers.md`. This module holds the rewrite; what
-//! is here so far is its foundation, which is the part with no precedent we
-//! can copy.
+//! The design is `docs/internals/wasm-fibers.md`. This module holds the rewrite;
+//! [`crate::suspend`] decides which functions it instruments.
 //!
 //! # Emptying the operand stack across a call
 //!
@@ -13,8 +12,9 @@
 //!
 //! Binaryen solves this with a separate `Flatten` pass that rewrites the whole
 //! function into a form where nothing is ever on the stack across a call.
-//! That pass aborts on `try_table`, which every module ash links contains, so
-//! it is not available to us (`docs/wasm/fibers.md` has the stack trace).
+//! That pass has no `try_table` case, and every module ash links contains
+//! one, so it is not available to us ("No flatten" in
+//! `docs/internals/wasm-fibers.md`).
 //!
 //! [`empty_stack_at_calls`] does the same job locally and without a tree. At
 //! each call site the operand stack is popped into locals and pushed straight
@@ -274,7 +274,7 @@ impl Drive {
 pub struct Dispatch {
     /// Functions given a dispatch.
     pub functions: usize,
-    /// Functions left alone, for the reasons in [`can_instrument`] or because
+    /// Functions left alone, for the reasons in `can_instrument` or because
     /// a jump target could not be given an empty operand stack.
     pub refused: usize,
     /// Of those, the ones holding a value that cannot be written to linear

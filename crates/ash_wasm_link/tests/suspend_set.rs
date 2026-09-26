@@ -1,11 +1,8 @@
 //! How much of a real module a fiber transform would have to instrument.
 //!
-//! `docs/wasm/fibers.md` records this number, and it decides whether the
-//! transform is worth building: every instrumented function pays code size and
-//! a state check on every call. The figure there was first obtained with a
-//! throwaway script, which is not a thing anyone can re-run after the emitter
-//! changes. This is the same measurement against the crate's own decoder, so
-//! the claim stays checkable.
+//! Every instrumented function pays code size and a state check on every
+//! call, so this number decides what the transform costs. Measured with the
+//! crate's own decoder, so it can be re-run after the emitter changes.
 //!
 //! Point it at a linked module:
 //!
@@ -134,9 +131,9 @@ fn the_suspend_set_over_a_real_module() {
     let mut all = yield_seeds.clone();
     all.extend(ash_wasm_link::fiber::imports_named(&bytes, BLOCKING).expect("reading imports"));
 
-    // Written out so the set can be diffed against another instrumenter's.
-    // `docs/wasm/fibers.md` makes ours being a subset of Binaryen's the
-    // exit condition for this step, and a count alone cannot show that.
+    // Written out so the set can be diffed against another instrumenter's:
+    // ours should be a subset of Binaryen's, and a count alone cannot show
+    // that.
     if let Ok(path) = std::env::var("ASH_LINK_TEST_NAMES") {
         let names = names(&bytes);
         let mut lines: Vec<String> = p

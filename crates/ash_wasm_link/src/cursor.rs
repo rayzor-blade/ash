@@ -10,8 +10,8 @@
 //! stack, because anything there is live across a suspend and has to be
 //! spilled. Binaryen's answer is the `Flatten` pass, which rewrites the
 //! function into a form where nothing is ever on the stack across a call --
-//! and which aborts on `try_table`, so it is not available to us (see
-//! `docs/wasm/fibers.md`). `wasmparser`'s [`wasmparser::FuncValidator`]
+//! and which has no `try_table` case, so it is not available to us (see
+//! `docs/internals/wasm-fibers.md`, "No flatten"). `wasmparser`'s [`wasmparser::FuncValidator`]
 //! already computes the typed operand stack as a side effect of validating,
 //! on the flat operator stream, with no tree and no special case for EH. Run
 //! it in lockstep and the information Flatten exists to manufacture is simply

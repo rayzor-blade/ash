@@ -1,4 +1,5 @@
 pub mod air;
+pub mod aot_build;
 pub mod aot_data;
 pub mod aot_link;
 pub mod aot_shard;

@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bumped whenever a slot is added, removed or changes signature.
-pub const RT_VERSION: u32 = 2;
+pub const RT_VERSION: u32 = 3;
 
 /// `timeout_ns` value meaning "no deadline" for [`RuntimeVTable::park`].
 pub const RT_NO_TIMEOUT: u64 = u64::MAX;
@@ -118,6 +118,9 @@ macro_rules! runtime_table {
 runtime_table! {
     // ── Heap ────────────────────────────────────────────────────────────
     gc_alloc(size: usize) -> *mut u8 = ash::gc_alloc;
+    // A class instance of `size` bytes: a host may reserve room past the
+    // fields for its own use.
+    gc_alloc_object(size: usize) -> *mut u8 = ash::gc_alloc;
     gc_alloc_noptr(size: usize) -> *mut u8 = ash::gc_alloc_noptr;
     alloc_locked(size: usize) -> *mut u8 = ash::alloc_locked;
     alloc_locked_noptr(size: usize) -> *mut u8 = ash::alloc_locked_noptr;
@@ -255,6 +258,13 @@ pub fn foreign_threads_seen() -> bool {
 #[inline(always)]
 pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
     NonNull::new(unsafe { call::gc_alloc(size) })
+}
+
+/// Zeroed memory for a class instance of `size` bytes; see the
+/// `gc_alloc_object` slot.
+#[inline(always)]
+pub fn gc_alloc_object(size: usize) -> Option<NonNull<u8>> {
+    NonNull::new(unsafe { call::gc_alloc_object(size) })
 }
 
 /// Zeroed memory that never holds a heap pointer: byte buffers, strings,

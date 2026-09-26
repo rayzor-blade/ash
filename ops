@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1790461800,"nonce":"lQ9vku+OXz888HJz87E0WEAeMtM=","added":["debt","area:wasm"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1790462575,"nonce":"6vTxsFyCJa7BajFbov1VsSmaXW0=","message":"Separate from this one: a side module cannot load into a threaded program at all yet, see c639f0d.","files":null}]}

@@ -4129,27 +4129,30 @@ impl ImmixAllocator {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
         let threads = mark_threads();
-        // Below a few hundred roots the spawn costs more than the trace saves.
-        if threads <= 1 || initial.len() < 256 {
-            let blocks = &self.blocks;
-            let alloc_sizes = &self.heap.alloc_sizes;
-            let mut worklist = initial;
-            while let Some((start, size)) = worklist.pop() {
-                scan_allocation_shared(
-                    blocks,
-                    alloc_sizes,
-                    &self.heap.objects,
-                    heap_start,
-                    heap_end,
-                    start,
-                    size,
-                    &mut worklist,
-                );
-            }
-            // Not needless: on every target but wasm the parallel marker
-            // follows, and this is what skips it.
-            #[allow(clippy::needless_return)]
-            return;
+        // The trace starts here, and only work left past a budget goes to
+        // the pool: a small heap is traced before waking the workers would
+        // have paid off. Marks are claimed atomically, so the pool picks up
+        // where this left off.
+        const SERIAL_BUDGET: usize = 4096;
+        let blocks = &self.blocks;
+        let alloc_sizes = &self.heap.alloc_sizes;
+        let mut worklist = initial;
+        let mut budget = SERIAL_BUDGET;
+        while threads <= 1 || budget > 0 || worklist.len() < 256 {
+            let Some((start, size)) = worklist.pop() else {
+                return;
+            };
+            scan_allocation_shared(
+                blocks,
+                alloc_sizes,
+                &self.heap.objects,
+                heap_start,
+                heap_end,
+                start,
+                size,
+                &mut worklist,
+            );
+            budget = budget.saturating_sub(1);
         }
 
         // Compiled out on wasm rather than merely skipped: the spawn would
@@ -4166,7 +4169,7 @@ impl ImmixAllocator {
             let alloc_sizes: &[u32] = &self.heap.alloc_sizes;
             let objects = &self.heap.objects;
             let queue = MarkQueue {
-                work: std::sync::Mutex::new(initial),
+                work: std::sync::Mutex::new(worklist),
                 ready: std::sync::Condvar::new(),
                 idle: std::sync::atomic::AtomicUsize::new(0),
                 done: AtomicBool::new(false),

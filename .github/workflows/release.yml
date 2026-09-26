@@ -22,8 +22,78 @@ permissions:
   contents: write
 
 jobs:
+  # What `ash --build x.wasm` links against and what the page it writes loads.
+  # Both are wasm, so the same for every platform: built once here and packaged
+  # beside every binary, where ash looks for them.
+  wasm-assets:
+    name: build (wasm runtime and browser host)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, rust-src
+          targets: wasm32-wasip1, wasm32-wasip1-threads, wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-wasm-assets
+
+      # ash_std's build runs bindgen, which needs libclang.
+      - uses: ./.github/actions/llvm21
+
+      - name: Cache the WASI sysroot
+        id: wasi-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/wasi-sysroot
+          key: wasi-sdk-25-sysroot-v1
+
+      - name: Fetch the WASI sysroot
+        if: steps.wasi-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL -o /tmp/wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+          mkdir -p /tmp/wasi-sdk && tar -xzf /tmp/wasi-sdk.tar.gz -C /tmp/wasi-sdk --strip-components=1
+          mv /tmp/wasi-sdk/share/wasi-sysroot ~/wasi-sysroot
+          ls ~/wasi-sysroot/lib/wasm32-wasip1/libsetjmp.a
+
+      - name: Build the runtime objects
+        run: |
+          ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot
+          ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot --target wasm32-wasip1-threads
+
+      # wasm-bindgen's CLI must be the version the crate locked, or the
+      # generated JS does not match the module.
+      - name: Build the browser host
+        run: |
+          cargo build --release -p ash_browser --target wasm32-unknown-unknown
+          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+          wasm-bindgen --target web --out-dir wasm-assets/browser \
+            target/wasm32-unknown-unknown/release/ash_browser.wasm
+
+      - name: Stage
+        run: |
+          for triple in wasm32-wasip1 wasm32-wasip1-threads; do
+            mkdir -p "wasm-assets/$triple"
+            cp "target/release/$triple/ash_runtime.o" "wasm-assets/$triple/"
+          done
+          rm -f wasm-assets/browser/*.d.ts
+          find wasm-assets -type f -exec ls -la {} \;
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-assets
+          path: wasm-assets
+          if-no-files-found: error
+
   build:
     name: build (${{ matrix.target }})
+    needs: wasm-assets
     runs-on: ${{ matrix.os }}
     # A retired or saturated runner image must fail this leg, not stall the
     # release behind it.
@@ -113,14 +183,27 @@ jobs:
           ./target/release/ash --mode interp crates/ash/test/tests/test_basic.hl
           ./target/release/ash --mode hybrid crates/ash/test/tests/test_basic.hl
 
+      - name: Fetch the wasm runtime and browser host
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-assets
+          path: wasm-assets
+
       - name: Package
-        run: ./scripts/package_release.sh "${{ matrix.target }}"
+        run: ./scripts/package_release.sh "${{ matrix.target }}" wasm-assets
 
       - name: Smoke test the packaged binary
         run: |
           tar xzf "dist/ash-${{ matrix.target }}.tar.gz" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/ash" --mode interp crates/ash/test/tests/test_basic.hl
           "$RUNNER_TEMP/ash" --version
+          # The installed layout, end to end: build a module from the
+          # packaged runtime, run it, and check the page was written.
+          mkdir -p "$RUNNER_TEMP/web"
+          "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/web/basic.wasm" --target wasm32-wasip1 \
+            crates/ash/test/tests/test_basic.hl
+          "$RUNNER_TEMP/ash" run "$RUNNER_TEMP/web/basic.wasm"
+          test -s "$RUNNER_TEMP/web/index.html" && test -s "$RUNNER_TEMP/web/ash_browser_bg.wasm"
 
       # What the -dev tarball exists for: an object for a triple the default
       # build refuses.
@@ -141,11 +224,20 @@ jobs:
   # Its own job rather than a matrix leg: the runner has no LLVM development
   # files, so this one installs them before it can build at all.
   windows:
-    name: build (windows-x86_64)
+    name: build (${{ matrix.target }})
+    needs: wasm-assets
     runs-on: windows-2022
     # Same budget as the matrix: a stalled runner must fail this leg rather
     # than hold the release behind it.
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+          # Every LLVM backend, like the other -dev tarballs.
+          - target: windows-x86_64-dev
+            features: all-targets
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -154,7 +246,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-release
+          shared-key: ${{ matrix.target }}-release
 
 
       # The development files LLVM.org's Windows installer leaves out.
@@ -238,7 +330,7 @@ jobs:
         shell: bash
         run: |
           cargo build --release -p ash_std
-          cargo build --release -p ash
+          cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
       # LLVM pulls zlib, zstd and libxml2 in through IMPORT libraries, so those
       # DLLs have to sit beside the exe: Windows searches the executable's own
@@ -267,11 +359,18 @@ jobs:
             throw "the env provides no $($missing -join ', ') to sit beside the binary"
           }
 
+      - name: Fetch the wasm runtime and browser host
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-assets
+          path: wasm-assets
+
       - name: Package (windows)
         shell: bash
         run: |
           mkdir -p dist
           cp target/release/ash.exe dist/
+          cp -R wasm-assets/. dist/
           
           # Copy the Conda/LLVM runtime DLLs bundled in the previous step
           cp target/release/*.dll dist/
@@ -291,23 +390,23 @@ jobs:
           
           # Compress inside the dist directory
           cd dist
-          tar -czf ash-windows-x86_64.tar.gz ash.exe *.dll
-          
+          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe *.dll wasm32-wasip1 wasm32-wasip1-threads browser
+
           # Generate SHA256
-          sha256sum ash-windows-x86_64.tar.gz > ash-windows-x86_64.tar.gz.sha256
+          sha256sum ash-${{ matrix.target }}.tar.gz > ash-${{ matrix.target }}.tar.gz.sha256
           cd ..
 
       - name: Upload artifact (windows)
         uses: actions/upload-artifact@v4
         with:
-          name: ash-windows-x86_64
+          name: ash-${{ matrix.target }}
           # Path must point to the newly created tarball inside dist/
-          path: dist/ash-windows-x86_64.tar.gz
+          path: dist/ash-${{ matrix.target }}.tar.gz
           if-no-files-found: error        
 
   publish:
     name: Publish release
-    needs: [build, windows]
+    needs: [wasm-assets, build, windows]
 
     # `always()` so one platform failing still publishes the others -- the
     # "at least one tarball" step below is what makes an empty release an

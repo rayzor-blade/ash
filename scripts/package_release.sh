@@ -10,10 +10,16 @@
 # install; they stay dynamic and the installer prints the apt line if one
 # is missing.
 #
-# Usage: scripts/package_release.sh <target-name>   e.g. macos-aarch64
+# Usage: scripts/package_release.sh <target-name> [wasm-assets-dir]
+#   e.g. scripts/package_release.sh macos-aarch64 wasm-assets
+#
+# The optional directory holds the wasm runtime objects and the browser host
+# (release.yml's wasm-assets job); its contents go beside the binary, where
+# `ash --build x.wasm` and the page it writes look for them.
 set -euo pipefail
 
-TARGET="${1:?usage: package_release.sh <target-name>}"
+TARGET="${1:?usage: package_release.sh <target-name> [wasm-assets-dir]}"
+WASM_ASSETS="${2:-}"
 BIN="target/release/ash"
 test -x "$BIN" || { echo "error: $BIN not built" >&2; exit 1; }
 
@@ -105,6 +111,13 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 else
   echo "dynamic dependencies (expected to come from distro packages):"
   ldd "$DIST/ash" | grep -v "linux-vdso\|ld-linux\|libc\.\|libm\.\|libgcc\|libpthread\|libdl" || true
+fi
+
+if [[ -n "$WASM_ASSETS" ]]; then
+  test -f "$WASM_ASSETS/wasm32-wasip1/ash_runtime.o" \
+    || { echo "error: $WASM_ASSETS holds no wasm32-wasip1/ash_runtime.o" >&2; exit 1; }
+  cp -R "$WASM_ASSETS/." "$DIST/"
+  echo "bundled wasm runtime and browser host from $WASM_ASSETS"
 fi
 
 mkdir -p dist

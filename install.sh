@@ -2,10 +2,21 @@
 # Ash installer — https://github.com/rayzor-blade/ash
 #
 #   curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh -s -- --dev
 #
 # Drops the `ash` binary (and, on macOS, its bundled dylibs) into ~/.ash/bin
 # and adds that directory to your PATH. Ash requires a 64-bit target.
+#
+# --dev (or ASH_DEV=1) takes the -dev build: every LLVM backend, for
+# `--emit-aot` objects for targets outside the supported set.
 set -eu
+
+for arg in "$@"; do
+  case "$arg" in
+    --dev) ASH_DEV=1 ;;
+    *) echo "error: unknown option $arg (the only one is --dev)" >&2; exit 1 ;;
+  esac
+done
 
 REPO="rayzor-blade/ash"
 DEST="${ASH_INSTALL_DIR:-$HOME/.ash/bin}"
@@ -20,12 +31,13 @@ case "$os/$arch" in
   *) echo "error: unsupported platform $os/$arch (ash requires a 64-bit target)" >&2; exit 1 ;;
 esac
 
-# ASH_DEV=1 takes the -dev build: every LLVM backend, for `--target` triples
-# outside the supported set. Built for Linux x86_64 and macOS arm64.
+# The -dev build exists for Linux x86_64, macOS arm64 and Windows x86_64.
+# Elsewhere the standard build is installed: it registers the supported
+# targets, wasm included, and lacks only the rest of LLVM's backends.
 if [ -n "${ASH_DEV:-}" ]; then
   case "$target" in
     linux-x86_64|macos-aarch64) target="${target}-dev" ;;
-    *) echo "error: no -dev build for ${target}; it exists for linux-x86_64 and macos-aarch64" >&2; exit 1 ;;
+    *) echo "note: no -dev build for ${target}; installing the standard build" >&2 ;;
   esac
 fi
 

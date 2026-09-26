@@ -1,9 +1,13 @@
 # Ash installer for Windows — https://github.com/rayzor-blade/ash
 #
 #   irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex
+#   $env:ASH_DEV=1; irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex
 #
 # Downloads the `ash` binary and its bundled DLLs into ~/.ash/bin
 # and adds that directory to your User PATH. Ash requires a 64-bit target.
+#
+# ASH_DEV=1 takes the -dev build: every LLVM backend, for `--emit-aot`
+# objects for targets outside the supported set.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue' # Speeds up Invoke-WebRequest significantly
@@ -15,7 +19,7 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 
 $Repo = "rayzor-blade/ash"
 $Dest = if ($env:ASH_INSTALL_DIR) { $env:ASH_INSTALL_DIR } else { Join-Path $HOME ".ash\bin" }
-$Target = "windows-x86_64"
+$Target = if ($env:ASH_DEV) { "windows-x86_64-dev" } else { "windows-x86_64" }
 
 $Asset = "ash-${Target}.tar.gz"
 $Url = "https://github.com/$Repo/releases/latest/download/$Asset"

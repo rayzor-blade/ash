@@ -1284,6 +1284,7 @@ fn run() -> Result<()> {
             allow_refused: cli.allow_refused,
             abi_version: cli.abi_version,
             quiet: cli.quiet,
+            links: Default::default(),
         });
     }
 

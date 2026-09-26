@@ -547,6 +547,66 @@ pub fn host_native(library_name: &str, function_name: &str) -> Option<HostNative
         .copied()
 }
 
+/// A machine type at a linked call: what a value is to the callee once the
+/// source types are erased.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Word {
+    /// One byte, zero or one.
+    Bool,
+    I32,
+    I64,
+    F32,
+    F64,
+    Ptr,
+}
+
+/// A host's native linked ahead of time: the AOT calls `symbol` directly,
+/// with the callee's own machine signature, and casts at the boundary.
+/// `arg_casts[i]` names a function taking the program's argument `i` as it
+/// holds it and returning it as the callee's parameter `i`; `None` passes
+/// it as it is, which the two machine types must then agree on.
+/// `ret_cast` does the same for the result, callee to program. Between two
+/// integer or boolean words of different widths no cast is named: the
+/// value is widened or narrowed where it is passed. `after`, when set, is
+/// called with nothing once the callee returns, before the result is cast:
+/// where a host raises what its callee left pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostLink {
+    pub symbol: String,
+    pub params: Vec<Word>,
+    /// `None` for a callee that returns nothing.
+    pub ret: Option<Word>,
+    pub arg_casts: Vec<Option<String>>,
+    pub ret_cast: Option<String>,
+    pub after: Option<String>,
+}
+
+static HOST_LINKS: OnceLock<Mutex<HashMap<String, HostLink>>> = OnceLock::new();
+
+fn host_links() -> &'static Mutex<HashMap<String, HostLink>> {
+    HOST_LINKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Replace the host's links, by `(lib, name)`, for the next AOT build.
+pub fn set_host_links(links: &HashMap<(String, String), HostLink>) {
+    let mut table = host_links().lock().expect("link registry poisoned");
+    table.clear();
+    for ((lib, name), link) in links {
+        let clean_lib = lib.strip_prefix('?').unwrap_or(lib);
+        table.insert(symbol_key(clean_lib, bare_native_name(name)), link.clone());
+    }
+}
+
+/// The host's link for `(lib, name)`, under either spelling.
+pub fn host_link(library_name: &str, function_name: &str) -> Option<HostLink> {
+    let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
+    host_links()
+        .lock()
+        .expect("link registry poisoned")
+        .get(&symbol_key(clean_lib, bare_native_name(function_name)))
+        .cloned()
+}
+
 /// The context word a tier passes first when calling `(lib, name)`, or
 /// zero for a native that takes none.
 pub fn host_native_context(library_name: &str, function_name: &str) -> usize {

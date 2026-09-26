@@ -181,6 +181,12 @@ impl<'ctx> JITModule<'ctx> {
         let record = crate::native_lib::host_native_record(lib, &native_func.name);
 
         if self.aot {
+            // A host's native it links ahead of time: its callee by name,
+            // with the casts the host chose between the two sides' types.
+            if let Some(link) = crate::native_lib::host_link(lib, &native_func.name) {
+                let caller_name = format!("{}_{}_linked", lib, name);
+                return self.generate_native_caller_linked(&caller_name, func_type, &link);
+            }
             if context != 0 || record {
                 return Err(anyhow!(
                     "host native {lib}@{name} carries a context word, which cannot be linked ahead of time"
@@ -377,6 +383,149 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.position_at_end(block);
         }
         Ok(function)
+    }
+
+    /// A caller for a native the host links: each argument cast to the
+    /// callee's type where the host named a cast, the callee called by its
+    /// symbol with its own signature, the result cast back.
+    fn generate_native_caller_linked(
+        &self,
+        caller_name: &str,
+        fn_type: FunctionType<'ctx>,
+        link: &crate::native_lib::HostLink,
+    ) -> Result<FunctionValue<'ctx>> {
+        if let Some(existing) = self.module.get_function(caller_name) {
+            return Ok(existing);
+        }
+        let caller_params = fn_type.get_param_types();
+        if caller_params.len() != link.params.len() || link.arg_casts.len() != link.params.len() {
+            return Err(anyhow!(
+                "{}: the program declares {} arguments, the link {}",
+                link.symbol,
+                caller_params.len(),
+                link.params.len()
+            ));
+        }
+        let word = |w: crate::native_lib::Word| -> BasicTypeEnum<'ctx> {
+            use crate::native_lib::Word;
+            match w {
+                Word::Bool => self.context.bool_type().into(),
+                Word::I32 => self.context.i32_type().into(),
+                Word::I64 => self.context.i64_type().into(),
+                Word::F32 => self.context.f32_type().into(),
+                Word::F64 => self.context.f64_type().into(),
+                Word::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
+            }
+        };
+        let callee_params: Vec<BasicMetadataTypeEnum> =
+            link.params.iter().map(|&w| word(w).into()).collect();
+        let callee_type = match link.ret {
+            Some(w) => word(w).fn_type(&callee_params, false),
+            None => self.context.void_type().fn_type(&callee_params, false),
+        };
+        let callee = self.aot_runtime_fn(&link.symbol, callee_type);
+
+        let saved_block = self.builder.get_insert_block();
+        let function = self.module.add_function(caller_name, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        let mut args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(link.params.len());
+        for (i, param) in function.get_param_iter().enumerate() {
+            let target = word(link.params[i]);
+            let value = match &link.arg_casts[i] {
+                Some(cast) => {
+                    let cast_fn =
+                        self.aot_runtime_fn(cast, target.fn_type(&[param.get_type().into()], false));
+                    self.builder
+                        .build_call(cast_fn, &[param.into()], "cast")?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| anyhow!("{cast} returned nothing"))?
+                }
+                None if param.get_type() == target => param,
+                None => self.widen_or_narrow(param, target).ok_or_else(|| {
+                    anyhow!(
+                        "{}: argument {i} is {:?} to the program and {:?} to the callee, with no cast",
+                        link.symbol,
+                        param.get_type(),
+                        link.params[i]
+                    )
+                })??,
+            };
+            args.push(value.into());
+        }
+        let call = self.builder.build_call(callee, &args, "call")?;
+        if let Some(after) = &link.after {
+            let after_fn = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
+            self.builder.build_call(after_fn, &[], "")?;
+        }
+        match (call.try_as_basic_value().basic(), fn_type.get_return_type()) {
+            (Some(value), Some(want)) => {
+                let value = match &link.ret_cast {
+                    Some(cast) => {
+                        let cast_fn =
+                            self.aot_runtime_fn(cast, want.fn_type(&[value.get_type().into()], false));
+                        self.builder
+                            .build_call(cast_fn, &[value.into()], "cast")?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| anyhow!("{cast} returned nothing"))?
+                    }
+                    None if value.get_type() == want => value,
+                    None => self.widen_or_narrow(value, want).ok_or_else(|| {
+                        anyhow!(
+                            "{}: the result is {:?} to the callee and {:?} to the program, with no cast",
+                            link.symbol,
+                            value.get_type(),
+                            want
+                        )
+                    })??,
+                };
+                self.builder.build_return(Some(&value))?
+            }
+            // A result the program declares none for is dropped.
+            (_, None) => self.builder.build_return(None)?,
+            (None, want) => {
+                return Err(anyhow!(
+                    "{}: the callee returns {:?}, the program declares {:?}",
+                    link.symbol,
+                    link.ret,
+                    want
+                ));
+            }
+        };
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
+    /// `value` as the integer type `target` when both are integers (a bool
+    /// is one bit): sign-extended, zero-extended from a bool, or truncated.
+    /// `None` when either is not an integer.
+    fn widen_or_narrow(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Option<Result<BasicValueEnum<'ctx>>> {
+        let (BasicValueEnum::IntValue(v), BasicTypeEnum::IntType(t)) = (value, target) else {
+            return None;
+        };
+        let from = v.get_type().get_bit_width();
+        let to = t.get_bit_width();
+        let cast = if to > from && from == 1 {
+            self.builder.build_int_z_extend(v, t, "widen")
+        } else if to > from {
+            self.builder.build_int_s_extend(v, t, "widen")
+        } else if to == 1 {
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::NE, v, v.get_type().const_zero(), "truth")
+        } else {
+            self.builder.build_int_truncate(v, t, "narrow")
+        };
+        Some(cast.map(Into::into).map_err(Into::into))
     }
 
     fn generate_missing_native_trap(

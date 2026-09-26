@@ -23,6 +23,10 @@ pub struct AotRequest<'a> {
     /// HashLink generation the staged runtime must answer to.
     pub abi_version: u32,
     pub quiet: bool,
+    /// The host's natives it links directly, by `(lib, name)`: each called
+    /// by its symbol, casting at the boundary. Empty for a program that
+    /// uses none.
+    pub links: std::collections::HashMap<(String, String), crate::native_lib::HostLink>,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -43,7 +47,9 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         allow_refused,
         abi_version,
         quiet,
+        links,
     } = request;
+    crate::native_lib::set_host_links(&links);
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
     if let Some(pgo) = &pgo {
         let path = if pgo.is_empty() {

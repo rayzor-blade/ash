@@ -174,8 +174,9 @@ impl<'ctx> JITModule<'ctx> {
         // called `write` linked ahead of `libSystem`'s, and the runtime's own
         // `println!` jumped into Haxe code and faulted -- before printing a
         // single line. Nothing outside this object is meant to call a
-        // bytecode body: `main` and `ash_module_init` are the only entries,
-        // and `ash_functions` above is the only table. Internalizing here
+        // bytecode body: `main`, `ash_module_init` and the host's exports are
+        // the only entries, and `ash_functions` above is the only table.
+        // Internalizing here
         // rather than at creation is deliberate -- a not-yet-lowered callee
         // is declared through the same path, and an internal declaration is
         // invalid IR.
@@ -184,7 +185,10 @@ impl<'ctx> JITModule<'ctx> {
                 continue;
             }
             let name = function.get_name().to_string_lossy();
-            if name == "main" || name == "ash_module_init" {
+            if name == "main"
+                || name == "ash_module_init"
+                || self.aot_exports.iter().any(|e| e.export.symbol == name)
+            {
                 continue;
             }
             function.as_global_value().set_linkage(Linkage::Internal);

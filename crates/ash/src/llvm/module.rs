@@ -80,6 +80,8 @@ pub struct JITModule<'ctx> {
     /// A host's linked natives whose callee is in a side module, as
     /// (library, symbol): each a slot the startup routine fills by symbol.
     pub(crate) aot_link_slots: Vec<(String, String)>,
+    /// What the host's exports resolved to; see `host_export`.
+    pub(crate) aot_exports: Vec<crate::host_export::ResolvedExport>,
     /// Runtime helpers that would not resolve, and the ones a compile has hit.
     ///
     /// `declare_native` returns a `FunctionValue` rather than a `Result`, so a
@@ -333,7 +335,7 @@ fn timing_enabled() -> bool {
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
         let abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
-        Self::build(context, path, false, abi).expect("Failed to build JIT module")
+        Self::build(context, path, false, abi, &[]).expect("Failed to build JIT module")
     }
 
     /// The same construction, with every pointer the lowering needs expressed
@@ -344,12 +346,23 @@ impl<'ctx> JITModule<'ctx> {
     /// the switch would already have an address baked into it.
     pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::host()?;
-        Self::build(context, path, true, abi)
+        Self::build(context, path, true, abi, &[])
     }
 
     pub fn new_aot_for_target(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
+        Self::new_aot_with_exports(context, path, triple, &[])
+    }
+
+    /// An AOT module that also defines `exports`, resolved against the
+    /// program before anything is lowered.
+    pub fn new_aot_with_exports(
+        context: &'ctx Context,
+        path: &Path,
+        triple: &str,
+        exports: &[crate::host_export::HostExport],
+    ) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
-        Self::build(context, path, true, abi)
+        Self::build(context, path, true, abi, exports)
     }
 
     fn build(
@@ -357,23 +370,25 @@ impl<'ctx> JITModule<'ctx> {
         path: &Path,
         aot: bool,
         target_abi: crate::target_abi::TargetAbi,
+        exports: &[crate::host_export::HostExport],
     ) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
         crate::native_lib::choose_std_linkage(path);
         init_std_library();
 
-        let bytecode =
+        let mut bytecode =
             BytecodeDecoder::decode_for_abi(path, &target_abi).expect("Failed to decode bytecode");
+        let aot_exports = bytecode.add_host_exports(exports)?;
         // Any native outside the runtime means an HDLL, which brings its own
         // copy of the runtime unless this object shares one. Known here,
         // before a single symbol is declared, because declaring them is what
-        // commits to a linkage.
+        // commits to a linkage. A native the host links is not an HDLL.
         let aot_shared_runtime = aot
-            && bytecode
-                .natives
-                .iter()
-                .any(|n| !crate::native_lib::is_runtime_lib(&n.lib));
+            && bytecode.natives.iter().any(|n| {
+                !crate::native_lib::is_runtime_lib(&n.lib)
+                    && crate::native_lib::host_link(&n.lib, &n.name).is_none()
+            });
         phase_timer!(timing, "decode", t);
         t = std::time::Instant::now();
 
@@ -408,6 +423,7 @@ impl<'ctx> JITModule<'ctx> {
             findex_to_name: None,
             aot_hdll_natives: Vec::new(),
             aot_link_slots: Vec::new(),
+            aot_exports,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
@@ -458,13 +474,21 @@ impl<'ctx> JITModule<'ctx> {
         phase_timer!(timing, "initialize_globals", t);
         t = std::time::Instant::now();
 
-        // Discover and load external HDLL libraries
+        // Discover and load external HDLL libraries. A native the host links
+        // is in none of them.
         let search_dir = path.parent().unwrap_or(Path::new("."));
+        let from_libraries: Vec<_> = module
+            .bytecode
+            .natives
+            .iter()
+            .filter(|n| !aot || crate::native_lib::host_link(&n.lib, &n.name).is_none())
+            .cloned()
+            .collect();
         module
             .native_function_resolver
             .discover_and_load_libraries(
                 search_dir,
-                &module.bytecode.natives,
+                &from_libraries,
                 module.target_abi.native_dynamic_loading,
             )
             .expect("Failed to discover HDLL libraries");
@@ -852,6 +876,7 @@ impl<'ctx> JITModule<'ctx> {
             findex_to_name: None,
             aot_hdll_natives: Vec::new(),
             aot_link_slots: Vec::new(),
+            aot_exports: Vec::new(),
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,

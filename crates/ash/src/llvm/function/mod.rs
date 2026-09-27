@@ -58,6 +58,7 @@ mod air_emit;
 mod calls;
 mod casts;
 mod enums;
+mod exports;
 mod memory;
 mod natives;
 mod objects;

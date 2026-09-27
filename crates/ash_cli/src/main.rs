@@ -1329,6 +1329,7 @@ fn run() -> Result<()> {
             links: Default::default(),
             objects: Default::default(),
             wasm_fibers: false,
+            exports: Vec::new(),
         })?;
         if let Some(module) = wasm_page {
             web::write_page(&module, cli.quiet)?;

@@ -34,6 +34,9 @@ pub struct AotRequest<'a> {
     /// `ASH_WASM_FIBERS=1` does; either one turns it on. Ignored for other
     /// targets.
     pub wasm_fibers: bool,
+    /// Program members to define C functions for, which the host's other
+    /// objects call by symbol; see `host_export`.
+    pub exports: Vec<crate::host_export::HostExport>,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -57,6 +60,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         links,
         objects: language_objects,
         wasm_fibers,
+        exports,
     } = request;
     // A process may build several programs. These caches are keyed by
     // findex or caller, which name different code in each, so a build
@@ -100,7 +104,8 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     crate::air_pipeline::set_shadow_frames(
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
-    let mut jit = crate::llvm::module::JITModule::new_aot_for_target(context, file, &triple)?;
+    let mut jit =
+        crate::llvm::module::JITModule::new_aot_with_exports(context, file, &triple, &exports)?;
 
     let findexes: Vec<usize> = jit
         .bytecode_functions()
@@ -181,6 +186,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         }
     }
 
+    jit.emit_host_exports()?;
     jit.finalize_aot_data()?;
     jit.emit_late_init()?;
     jit.emit_main()?;

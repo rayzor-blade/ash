@@ -16,15 +16,63 @@ impl<'ctx> JITModule<'ctx> {
     /// each calls the function its export resolved to.
     pub(crate) fn emit_host_exports(&mut self) -> Result<()> {
         let exports = std::mem::take(&mut self.aot_exports);
-        for e in &exports {
+        let module = crate::air_pipeline::AshModule::new(&self.bytecode);
+        let cannot_throw: Vec<bool> = exports
+            .iter()
+            .map(|e| {
+                let x = &e.export;
+                module.frameless(e.findex)
+                    && x.arg_casts
+                        .iter()
+                        .chain(std::iter::once(&x.ret_cast))
+                        .flatten()
+                        .all(|c| c.starts_with("ash:"))
+            })
+            .collect();
+        drop(module);
+        for (e, &cannot_throw) in exports.iter().zip(&cannot_throw) {
             let body = self.export_body(e)?;
-            if self.traps_are_wasm_handlers() {
+            if cannot_throw {
+                self.export_unguarded(e, body)?;
+            } else if self.traps_are_wasm_handlers() {
                 self.export_boundary_wasm(e, body)?;
             } else {
                 self.export_boundary(e, body)?;
             }
         }
         self.aot_exports = exports;
+        Ok(())
+    }
+
+    /// `symbol` for a member that cannot throw, whose casts cannot either:
+    /// the body alone, with no trap, which the optimizer folds into it.
+    fn export_unguarded(&self, e: &ResolvedExport, body: FunctionValue<'ctx>) -> Result<()> {
+        let x = &e.export;
+        if self.module.get_function(&x.symbol).is_some() {
+            return Err(anyhow!(
+                "export `{}`: the symbol is already defined",
+                x.symbol
+            ));
+        }
+        let saved_block = self.builder.get_insert_block();
+        let wrapper = self
+            .module
+            .add_function(&x.symbol, body.get_type(), Some(Linkage::External));
+        self.stamp_host_cpu(wrapper);
+        let entry = self.context.append_basic_block(wrapper, "entry");
+        self.builder.position_at_end(entry);
+        let args: Vec<BasicMetadataValueEnum> =
+            wrapper.get_param_iter().map(|p| p.into()).collect();
+        let result = self
+            .builder
+            .build_call(body, &args, "result")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("export body returned nothing"))?;
+        self.builder.build_return(Some(&result))?;
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
         Ok(())
     }
 

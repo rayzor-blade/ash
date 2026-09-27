@@ -16,7 +16,7 @@ use ash_core::host_export::{ExportKind, HostExport};
 use ash_core::llvm::aot_build::{AotRequest, emit_aot};
 use ash_core::native_lib::{HostLink, Word};
 
-const ALL_CHECKS: u32 = 2047;
+const ALL_CHECKS: u32 = 32767;
 const UNIT: u64 = 7;
 
 fn export(symbol: &str, class: &str, member: &str, kind: ExportKind, args: usize) -> HostExport {
@@ -29,6 +29,7 @@ fn export(symbol: &str, class: &str, member: &str, kind: ExportKind, args: usize
         ret_cast: None,
         raise: "exports_test_raise".to_string(),
         unit: UNIT,
+        casts_nothrow: false,
     }
 }
 
@@ -138,6 +139,13 @@ fn build(
             "half",
             ExportKind::Static,
             1,
+        ),
+        export(
+            "exports_test_grow",
+            "Counter",
+            "grow",
+            ExportKind::Method,
+            2,
         ),
         HostExport {
             arg_casts: vec![Some("ash:unbox_f64".to_string())],

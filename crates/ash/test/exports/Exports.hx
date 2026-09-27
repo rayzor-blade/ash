@@ -16,6 +16,11 @@ class Counter {
 		return count;
 	}
 
+	public function grow(by:Int):Int {
+		count += by;
+		return count;
+	}
+
 	public static function add(a:Int, b:Int):Int
 		return a + b;
 

@@ -157,28 +157,59 @@ impl<'b> AshModule<'b> {
         if !visiting.insert(findex) {
             return false;
         }
-        let answer = self.lowered_body(findex).is_some_and(|body| {
-            body.blocks.iter().all(|b| {
-                !matches!(
-                    b.term,
-                    Terminator::Throw { .. } | Terminator::Rethrow { .. } | Terminator::Trap { .. }
-                ) && b.instrs.iter().all(|i| match i {
-                    Instr::Call { fun, .. } => match self.native(*fun) {
-                        Some(n) => {
-                            nothrow_native(n.lib.strip_prefix('?').unwrap_or(&n.lib), &n.name)
-                        }
-                        None => self.is_frameless(*fun, visiting),
-                    },
-                    other => !other.may_throw() && other.effect() != Effect::ClobberAll,
-                })
-            })
-        });
+        let answer = self
+            .lowered_body(findex)
+            .is_some_and(|body| self.body_frameless(&body, None, visiting));
         visiting.remove(&findex);
         self.frameless
             .lock()
             .expect("frameless cache poisoned")
             .insert(findex, answer);
         answer
+    }
+
+    /// Whether function `findex` would be frameless if its first parameter,
+    /// the receiver, were known not to be null: its own null checks of that
+    /// parameter are the only thing it may raise.
+    pub(crate) fn frameless_given_receiver(&self, findex: usize) -> bool {
+        use air::v2::ir::Instr;
+        let Some(body) = self.lowered_body(findex) else {
+            return false;
+        };
+        let receiver = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instrs)
+            .find_map(|i| match i {
+                Instr::Param { dst, reg: 0 } => Some(*dst),
+                _ => None,
+            });
+        let mut visiting = HashSet::from([findex]);
+        receiver.is_some() && self.body_frameless(&body, receiver, &mut visiting)
+    }
+
+    /// `body` raises nothing, opens no trap region and calls only what cannot
+    /// throw; a null check of `checked` is allowed.
+    fn body_frameless(
+        &self,
+        body: &Function,
+        checked: Option<air::v2::ir::ValueId>,
+        visiting: &mut HashSet<usize>,
+    ) -> bool {
+        use air::v2::ir::{Effect, Instr, Terminator};
+        body.blocks.iter().all(|b| {
+            !matches!(
+                b.term,
+                Terminator::Throw { .. } | Terminator::Rethrow { .. } | Terminator::Trap { .. }
+            ) && b.instrs.iter().all(|i| match i {
+                Instr::NullCheck { value } if Some(*value) == checked => true,
+                Instr::Call { fun, .. } => match self.native(*fun) {
+                    Some(n) => nothrow_native(n.lib.strip_prefix('?').unwrap_or(&n.lib), &n.name),
+                    None => self.is_frameless(*fun, visiting),
+                },
+                other => !other.may_throw() && other.effect() != Effect::ClobberAll,
+            })
+        })
     }
 
     pub fn bytecode(&self) -> &'b DecodedBytecode {

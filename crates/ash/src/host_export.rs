@@ -45,6 +45,10 @@ pub enum ExportKind {
 /// the result and its type; `None` widens the result to a word. `raise` is
 /// called with the exception a member threw. `unit` is what a `Void` member
 /// returns, and what any member returns after a raise.
+///
+/// An export whose member cannot throw has no trap: it is called as a plain
+/// function. So is one whose member can throw only on a null receiver, which
+/// the export tests first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExport {
     pub symbol: String,
@@ -55,6 +59,9 @@ pub struct HostExport {
     pub ret_cast: Option<String>,
     pub raise: String,
     pub unit: u64,
+    /// The host's word that none of the casts it names raises, so they need
+    /// no trap around them. The `ash:` casts never raise either way.
+    pub casts_nothrow: bool,
 }
 
 /// An export resolved against one program: the function its symbol calls,
@@ -65,6 +72,8 @@ pub(crate) struct ResolvedExport {
     pub findex: usize,
     pub params: Vec<usize>,
     pub ret: usize,
+    /// Whether the first parameter is the receiver of an instance member.
+    pub receiver: bool,
 }
 
 impl DecodedBytecode {
@@ -86,10 +95,10 @@ impl DecodedBytecode {
                 e.class
             )
         })?;
-        let findex = match e.kind {
-            ExportKind::Static => self.static_function(class, e)?,
-            ExportKind::Method => self.method_caller(class, e)?,
-            ExportKind::Constructor => self.constructor_caller(class, e)?,
+        let (findex, receiver) = match e.kind {
+            ExportKind::Static => (self.static_function(class, e)?, false),
+            ExportKind::Method => (self.method_caller(class, e)?, true),
+            ExportKind::Constructor => (self.constructor_caller(class, e)?, false),
             ExportKind::Getter | ExportKind::Setter => self.variable_accessor(class, e)?,
         };
         let fun = self.function_type_of(findex)?;
@@ -108,6 +117,7 @@ impl DecodedBytecode {
             findex,
             params: fun.args.iter().map(|a| a.0).collect(),
             ret: fun.ret.0,
+            receiver,
         })
     }
 
@@ -221,7 +231,9 @@ impl DecodedBytecode {
         let dst = Reg(regs.len() as u32);
         regs.push(fun.ret.clone());
         let args: Vec<Reg> = (0..fun.args.len() as u32).map(Reg).collect();
-        let call = if pindex >= 0 {
+        // A method no class below this one overrides is called directly, so
+        // what it can throw is what its own body can.
+        let call = if pindex >= 0 && self.overridden_below(class, &e.member, target) {
             Opcode::CallMethod {
                 dst,
                 field: RefField(pindex as usize),
@@ -241,7 +253,39 @@ impl DecodedBytecode {
             own.args[0] = TypeRef(class);
             self.push_fun_type(own)
         };
-        Ok(self.push_export_function(type_, regs, vec![call, Opcode::Ret { ret: dst }]))
+        let ops = vec![
+            Opcode::NullCheck { reg: Reg(0) },
+            call,
+            Opcode::Ret { ret: dst },
+        ];
+        Ok(self.push_export_function(type_, regs, ops))
+    }
+
+    /// Whether a class at or below `class` gives `member` a body other than
+    /// `target`.
+    fn overridden_below(&self, class: usize, member: &str, target: usize) -> bool {
+        self.types.iter().enumerate().any(|(i, t)| {
+            let Some(obj) = t.obj.as_ref() else {
+                return false;
+            };
+            let mut cur = Some(i);
+            let mut below = false;
+            while let Some(c) = cur {
+                if c == class {
+                    below = true;
+                    break;
+                }
+                cur = self.types[c]
+                    .obj
+                    .as_ref()
+                    .and_then(|o| o.super_.as_ref().map(|s| s.0));
+            }
+            below
+                && obj
+                    .proto
+                    .iter()
+                    .any(|p| p.name == member && p.findex as usize != target)
+        })
     }
 
     fn constructor_caller(&mut self, class: usize, e: &HostExport) -> Result<usize> {
@@ -276,7 +320,7 @@ impl DecodedBytecode {
         Ok(self.push_export_function(type_, regs, ops))
     }
 
-    fn variable_accessor(&mut self, class: usize, e: &HostExport) -> Result<usize> {
+    fn variable_accessor(&mut self, class: usize, e: &HostExport) -> Result<(usize, bool)> {
         let setter = e.kind == ExportKind::Setter;
         let void = self.kind_type(hl::hl_type_kind_HVOID);
         if let Some((field, ty)) = self.flat_field(class, &e.member) {
@@ -286,6 +330,7 @@ impl DecodedBytecode {
                     vec![TypeRef(class), ty.clone()],
                     vec![TypeRef(class), ty.clone(), TypeRef(void)],
                     vec![
+                        Opcode::NullCheck { reg: Reg(0) },
                         Opcode::SetField {
                             obj: Reg(0),
                             field,
@@ -299,6 +344,7 @@ impl DecodedBytecode {
                     vec![TypeRef(class)],
                     vec![TypeRef(class), ty.clone()],
                     vec![
+                        Opcode::NullCheck { reg: Reg(0) },
                         Opcode::Field {
                             dst: Reg(1),
                             obj: Reg(0),
@@ -314,7 +360,7 @@ impl DecodedBytecode {
                 ret,
                 ..Default::default()
             });
-            return Ok(self.push_export_function(type_, regs, ops));
+            return Ok((self.push_export_function(type_, regs, ops), true));
         }
         let (companion, global) = self.companion(class, e)?;
         let is_function = self.bound_function(companion, &e.member).is_some();
@@ -372,7 +418,7 @@ impl DecodedBytecode {
             ret,
             ..Default::default()
         });
-        Ok(self.push_export_function(type_, regs, ops))
+        Ok((self.push_export_function(type_, regs, ops), false))
     }
 
     /// The program's type of a primitive kind, created if it has none.

@@ -17,31 +17,65 @@ impl<'ctx> JITModule<'ctx> {
     pub(crate) fn emit_host_exports(&mut self) -> Result<()> {
         let exports = std::mem::take(&mut self.aot_exports);
         let module = crate::air_pipeline::AshModule::new(&self.bytecode);
-        let cannot_throw: Vec<bool> = exports
+        let guards: Vec<Guard> = exports
             .iter()
             .map(|e| {
                 let x = &e.export;
-                module.frameless(e.findex)
-                    && x.arg_casts
+                let casts_nothrow = x.casts_nothrow
+                    || x.arg_casts
                         .iter()
                         .chain(std::iter::once(&x.ret_cast))
                         .flatten()
-                        .all(|c| c.starts_with("ash:"))
+                        .all(|c| c.starts_with("ash:"));
+                if !casts_nothrow {
+                    Guard::Trap
+                } else if module.frameless(e.findex) {
+                    Guard::None
+                } else if e.receiver && module.frameless_given_receiver(e.findex) {
+                    Guard::NullReceiver
+                } else {
+                    Guard::Trap
+                }
             })
             .collect();
         drop(module);
-        for (e, &cannot_throw) in exports.iter().zip(&cannot_throw) {
-            let body = self.export_body(e)?;
-            if cannot_throw {
-                self.export_unguarded(e, body)?;
-            } else if self.traps_are_wasm_handlers() {
-                self.export_boundary_wasm(e, body)?;
-            } else {
-                self.export_boundary(e, body)?;
+        for (e, guard) in exports.iter().zip(guards) {
+            let symbol = e.export.symbol.as_str();
+            let body = self.export_body(e, &format!("ash_export_body_{symbol}"), None)?;
+            match guard {
+                Guard::None => self.export_unguarded(e, body)?,
+                Guard::Trap => self.export_trapped(e, body, symbol, Linkage::External)?,
+                // A null receiver takes the trapped path, where the member's
+                // own null check raises; any other runs the body bare.
+                Guard::NullReceiver => {
+                    let trapped = format!("ash_export_trapped_{symbol}");
+                    self.export_trapped(e, body, &trapped, Linkage::Internal)?;
+                    let trapped = self
+                        .module
+                        .get_function(&trapped)
+                        .ok_or_else(|| anyhow!("export `{symbol}`: no trapped path"))?;
+                    let fast =
+                        self.export_body(e, &format!("ash_export_fast_{symbol}"), Some(trapped))?;
+                    self.export_unguarded(e, fast)?;
+                }
             }
         }
         self.aot_exports = exports;
         Ok(())
+    }
+
+    fn export_trapped(
+        &mut self,
+        e: &ResolvedExport,
+        body: FunctionValue<'ctx>,
+        name: &str,
+        linkage: Linkage,
+    ) -> Result<()> {
+        if self.traps_are_wasm_handlers() {
+            self.export_boundary_wasm(e, body, name, linkage)
+        } else {
+            self.export_boundary(e, body, name, linkage)
+        }
     }
 
     /// `symbol` for a member that cannot throw, whose casts cannot either:
@@ -79,22 +113,26 @@ impl<'ctx> JITModule<'ctx> {
     /// `symbol`: the body inside a trap, so a throw reaches `raise` rather
     /// than the caller. Kept out of the optimizer, as every function that
     /// calls `setjmp` is.
-    fn export_boundary(&self, e: &ResolvedExport, body: FunctionValue<'ctx>) -> Result<()> {
+    fn export_boundary(
+        &self,
+        e: &ResolvedExport,
+        body: FunctionValue<'ctx>,
+        name: &str,
+        linkage: Linkage,
+    ) -> Result<()> {
         let x = &e.export;
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let fn_type = body.get_type();
-        if self.module.get_function(&x.symbol).is_some() {
+        if self.module.get_function(name).is_some() {
             return Err(anyhow!(
-                "export `{}`: the symbol is already defined",
+                "export `{}`: `{name}` is already defined",
                 x.symbol
             ));
         }
         let saved_block = self.builder.get_insert_block();
-        let wrapper = self
-            .module
-            .add_function(&x.symbol, fn_type, Some(Linkage::External));
+        let wrapper = self.module.add_function(name, fn_type, Some(linkage));
         self.stamp_host_cpu(wrapper);
         for name in ["noinline", "optnone"] {
             let attr = self.context.create_enum_attribute(
@@ -173,20 +211,22 @@ impl<'ctx> JITModule<'ctx> {
         &mut self,
         e: &ResolvedExport,
         body: FunctionValue<'ctx>,
+        name: &str,
+        linkage: Linkage,
     ) -> Result<()> {
         let x = &e.export;
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        if self.module.get_function(&x.symbol).is_some() {
+        if self.module.get_function(name).is_some() {
             return Err(anyhow!(
-                "export `{}`: the symbol is already defined",
+                "export `{}`: `{name}` is already defined",
                 x.symbol
             ));
         }
         let saved_block = self.builder.get_insert_block();
         let wrapper = self
             .module
-            .add_function(&x.symbol, body.get_type(), Some(Linkage::External));
+            .add_function(name, body.get_type(), Some(linkage));
         self.stamp_host_cpu(wrapper);
         let start = self.context.append_basic_block(wrapper, "start");
         let thrown = self.context.append_basic_block(wrapper, "thrown");
@@ -242,8 +282,15 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// Words in, word out: the casts around one call of the member.
-    fn export_body(&mut self, e: &ResolvedExport) -> Result<FunctionValue<'ctx>> {
+    /// Words in, word out: the casts around one call of the member, as an
+    /// internal function `name`. With `null_exit`, a null receiver is
+    /// answered by calling it with the same words instead.
+    fn export_body(
+        &mut self,
+        e: &ResolvedExport,
+        name: &str,
+        null_exit: Option<FunctionValue<'ctx>>,
+    ) -> Result<FunctionValue<'ctx>> {
         let x = &e.export;
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -267,7 +314,7 @@ impl<'ctx> JITModule<'ctx> {
         let words: Vec<BasicMetadataTypeEnum> = vec![i64_type.into(); e.params.len()];
         let saved_block = self.builder.get_insert_block();
         let body = self.module.add_function(
-            &format!("ash_export_body_{}", x.symbol),
+            name,
             i64_type.fn_type(&words, false),
             Some(Linkage::Internal),
         );
@@ -284,6 +331,35 @@ impl<'ctx> JITModule<'ctx> {
                 None => self.word_to(word, target_ty, self.types_[e.params[i]].kind)?,
             };
             args.push(value.into());
+        }
+        if let Some(exit) = null_exit {
+            let receiver = match args.first() {
+                Some(BasicMetadataValueEnum::PointerValue(p)) => *p,
+                _ => {
+                    return Err(anyhow!(
+                        "export `{}`: the receiver is not an object",
+                        x.symbol
+                    ));
+                }
+            };
+            let is_null = self.builder.build_is_null(receiver, "receiver_null")?;
+            let exit_block = self.context.append_basic_block(body, "null_receiver");
+            let call_block = self.context.append_basic_block(body, "call");
+            self.builder
+                .build_conditional_branch(is_null, exit_block, call_block)?;
+            self.builder.position_at_end(exit_block);
+            let words: Vec<BasicMetadataValueEnum> =
+                body.get_param_iter().map(|p| p.into()).collect();
+            let answer = self
+                .builder
+                .build_call(exit, &words, "trapped")?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| {
+                    anyhow!("export `{}`: the trapped path returned nothing", x.symbol)
+                })?;
+            self.builder.build_return(Some(&answer))?;
+            self.builder.position_at_end(call_block);
         }
         let call = self.builder.build_call(target, &args, "member")?;
         let result = match (call.try_as_basic_value().basic(), ret_kind) {
@@ -454,4 +530,14 @@ impl<'ctx> JITModule<'ctx> {
             other => return Err(anyhow!("no word form for {other:?}")),
         })
     }
+}
+
+/// What stands between a host's call and the member.
+enum Guard {
+    /// Nothing: the member and its casts cannot throw.
+    None,
+    /// A trap, so a throw reaches `raise`.
+    Trap,
+    /// A test of the receiver: only a null one can make the member throw.
+    NullReceiver,
 }

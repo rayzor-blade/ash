@@ -12,6 +12,7 @@ u64 exports_test_get_made(void);
 u64 exports_test_fail(u64);
 u64 exports_test_half(u64);
 u64 exports_test_half_boxed(u64);
+u64 exports_test_grow(u64, u64);
 
 static int raised;
 
@@ -49,5 +50,11 @@ int exports_test_drive(void) {
        reads as NaN, and a NaN comes back canonical. */
     if (real(exports_test_half_boxed(bits(3.0))) == 1.5) ok |= 512;
     if (exports_test_half_boxed(0x7ffc000000000001ULL) == 0x7ff8000000000000ULL) ok |= 1024;
+    /* A null receiver raises and answers unit, whether or not the export
+       needs a trap for anything else. */
+    if (exports_test_get_count(0) == 7 && raised == 2) ok |= 2048;
+    if (exports_test_bump(0, 1) == 7 && raised == 3) ok |= 4096;
+    if ((int)exports_test_grow(c, 1) == 41) ok |= 8192;
+    if (exports_test_grow(0, 1) == 7 && raised == 4) ok |= 16384;
     return ok;
 }

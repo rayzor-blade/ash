@@ -277,8 +277,9 @@ fn llvm_config(args: &[&str]) -> Option<String> {
 }
 
 /// Compile the C++ the LLVM C API cannot express: a target machine's
-/// exception model (`cpp/wasm_exception_model.cpp`) and where MCJIT loaded
-/// an object's sections (`cpp/jit_sections.cpp`). Without it, a wasm build
+/// exception model (`cpp/wasm_exception_model.cpp`), a call turned into an
+/// invoke (`cpp/call_to_invoke.cpp`) and where MCJIT loaded an object's
+/// sections (`cpp/jit_sections.cpp`). Without it, a wasm build
 /// is refused rather than emitted wrong and a compiled frame reports its
 /// function's entry line, which is what the cfg carries.
 fn build_wasm_exception_shim() {
@@ -286,7 +287,9 @@ fn build_wasm_exception_shim() {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join("cpp");
     let src = cpp.join("wasm_exception_model.cpp");
     let sections = cpp.join("jit_sections.cpp");
+    let invoke = cpp.join("call_to_invoke.cpp");
     println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", invoke.display());
     println!("cargo:rerun-if-changed={}", sections.display());
     println!("cargo:rerun-if-env-changed=LLVM_SYS_211_PREFIX");
     println!("cargo:rustc-check-cfg=cfg(no_wasm_exception_shim)");
@@ -303,7 +306,12 @@ fn build_wasm_exception_shim() {
     let mut build = cc::Build::new();
     // The warnings would all be LLVM's headers', reported on every build of a
     // file that is fifteen lines long.
-    build.cpp(true).warnings(false).file(&src).file(&sections);
+    build
+        .cpp(true)
+        .warnings(false)
+        .file(&src)
+        .file(&sections)
+        .file(&invoke);
     // Include paths, language level and the defines that decide LLVM's own
     // ABI, all of which must match the library being linked. Warning and
     // debug flags are dropped: they say nothing about compatibility and are

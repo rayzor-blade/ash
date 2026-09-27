@@ -476,17 +476,7 @@ impl<'ctx> JITModule<'ctx> {
             let j = i - skip;
             let target = word(link.params[j]);
             let value = match &link.arg_casts[j] {
-                Some(cast) => {
-                    let cast_fn = self.aot_runtime_fn(
-                        cast,
-                        target.fn_type(&[param.get_type().into(), ptr_type.into()], false),
-                    );
-                    self.builder
-                        .build_call(cast_fn, &[param.into(), arg_descs[i].into()], "cast")?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| anyhow!("{cast} returned nothing"))?
-                }
+                Some(cast) => self.emit_host_cast(cast, param, arg_descs[i], target)?,
                 None if param.get_type() == target => param,
                 None => self.widen_or_narrow(param, target).ok_or_else(|| {
                     anyhow!(
@@ -581,17 +571,7 @@ impl<'ctx> JITModule<'ctx> {
         match (call.try_as_basic_value().basic(), fn_type.get_return_type()) {
             (Some(value), Some(want)) => {
                 let value = match &link.ret_cast {
-                    Some(cast) => {
-                        let cast_fn = self.aot_runtime_fn(
-                            cast,
-                            want.fn_type(&[value.get_type().into(), ptr_type.into()], false),
-                        );
-                        self.builder
-                            .build_call(cast_fn, &[value.into(), ret_desc.into()], "cast")?
-                            .try_as_basic_value()
-                            .basic()
-                            .ok_or_else(|| anyhow!("{cast} returned nothing"))?
-                    }
+                    Some(cast) => self.emit_host_cast(cast, value, ret_desc, want)?,
                     None if value.get_type() == want => value,
                     None => self.widen_or_narrow(value, want).ok_or_else(|| {
                         anyhow!(

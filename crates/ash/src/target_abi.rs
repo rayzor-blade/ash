@@ -261,7 +261,11 @@ fn pointer_bytes_for_triple(triple: &str) -> Option<u32> {
         .map(|&(_, bytes)| bytes)
 }
 
-/// Turn on the backend's setjmp/longjmp lowering, once per process.
+/// Turn on the backend's setjmp/longjmp lowering and its exception handling,
+/// once per process: a trap in compiled code is an exception handler
+/// (`llvm::function::wasm_traps`), and without `-wasm-enable-eh` the backend
+/// drops every `invoke`'s unwind edge; the runtime's own `setjmp`s still
+/// take the setjmp lowering.
 ///
 /// These are LLVM command-line options rather than target-machine settings,
 /// which is why this reaches for the option parser: there is no other way in.
@@ -282,6 +286,7 @@ fn enable_wasm_sjlj() {
         let args = [
             c"ash".as_ptr(),
             c"-wasm-enable-sjlj".as_ptr(),
+            c"-wasm-enable-eh".as_ptr(),
             c"-wasm-use-legacy-eh=false".as_ptr(),
         ];
         let overview = c"ash wasm codegen";

@@ -185,8 +185,10 @@ impl<'ctx> JITModule<'ctx> {
                 continue;
             }
             let name = function.get_name().to_string_lossy();
+            // The backend recognises a personality by its name.
             if name == "main"
                 || name == "ash_module_init"
+                || name == crate::llvm::function::wasm_traps::PERSONALITY
                 || self.aot_exports.iter().any(|e| e.export.symbol == name)
             {
                 continue;

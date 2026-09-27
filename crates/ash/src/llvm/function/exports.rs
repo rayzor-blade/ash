@@ -18,7 +18,11 @@ impl<'ctx> JITModule<'ctx> {
         let exports = std::mem::take(&mut self.aot_exports);
         for e in &exports {
             let body = self.export_body(e)?;
-            self.export_boundary(e, body)?;
+            if self.traps_are_wasm_handlers() {
+                self.export_boundary_wasm(e, body)?;
+            } else {
+                self.export_boundary(e, body)?;
+            }
         }
         self.aot_exports = exports;
         Ok(())
@@ -114,6 +118,82 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// `symbol` on wasm: the body called under a trap that is an exception
+    /// handler (see `wasm_traps`), so entering it costs no `setjmp` and the
+    /// function is optimized.
+    fn export_boundary_wasm(
+        &mut self,
+        e: &ResolvedExport,
+        body: FunctionValue<'ctx>,
+    ) -> Result<()> {
+        let x = &e.export;
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if self.module.get_function(&x.symbol).is_some() {
+            return Err(anyhow!(
+                "export `{}`: the symbol is already defined",
+                x.symbol
+            ));
+        }
+        let saved_block = self.builder.get_insert_block();
+        let wrapper = self
+            .module
+            .add_function(&x.symbol, body.get_type(), Some(Linkage::External));
+        self.stamp_host_cpu(wrapper);
+        let start = self.context.append_basic_block(wrapper, "start");
+        let thrown = self.context.append_basic_block(wrapper, "thrown");
+        self.builder.position_at_end(start);
+
+        const HANDLER: u32 = 0;
+        let slot = self.builder.build_alloca(ptr_type, "export_trap_slot")?;
+        self.builder.build_store(slot, ptr_type.const_null())?;
+        let mut traps = super::wasm_traps::WasmTraps::default();
+        traps.slots.insert(HANDLER, slot);
+        traps.landings.push((HANDLER, thrown));
+        traps.covered.push((start, HANDLER));
+        self.wasm_traps = Some(traps);
+
+        self.arm_wasm_trap(HANDLER)?;
+        let args: Vec<BasicMetadataValueEnum> =
+            wrapper.get_param_iter().map(|p| p.into()).collect();
+        let result = self
+            .builder
+            .build_call(body, &args, "result")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("export body returned nothing"))?;
+        let remove = self.declare_native("hlp_remove_trap_jit", &[], None);
+        self.builder.build_call(remove, &[], "")?;
+        self.builder.build_return(Some(&result))?;
+
+        self.builder.position_at_end(thrown);
+        let get_exc = self.declare_native("hlp_get_exc_value", &[], Some(ptr_type.into()));
+        let exc = self
+            .builder
+            .build_call(get_exc, &[], "exception")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("hlp_get_exc_value returned nothing"))?;
+        let clear = self.declare_native("hlp_clear_exc_value", &[], None);
+        self.builder.build_call(clear, &[], "")?;
+        let raise = self.aot_runtime_fn(
+            &x.raise,
+            self.context.void_type().fn_type(&[ptr_type.into()], false),
+        );
+        self.builder.build_call(raise, &[exc.into()], "")?;
+        self.builder
+            .build_return(Some(&i64_type.const_int(x.unit, false)))?;
+
+        self.finish_wasm_traps(wrapper)?;
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        if !wrapper.verify(true) {
+            return Err(anyhow!("export `{}`: invalid function", x.symbol));
+        }
+        Ok(())
+    }
+
     /// Words in, word out: the casts around one call of the member.
     fn export_body(&mut self, e: &ResolvedExport) -> Result<FunctionValue<'ctx>> {
         let x = &e.export;
@@ -152,17 +232,7 @@ impl<'ctx> JITModule<'ctx> {
             let target_ty = BasicTypeEnum::try_from(target_params[i])
                 .map_err(|_| anyhow!("export `{}`: parameter {i} has no value type", x.symbol))?;
             let value = match &x.arg_casts[i] {
-                Some(cast) => {
-                    let cast_fn = self.aot_runtime_fn(
-                        cast,
-                        target_ty.fn_type(&[i64_type.into(), ptr_type.into()], false),
-                    );
-                    self.builder
-                        .build_call(cast_fn, &[word.into(), param_descs[i].into()], "cast")?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| anyhow!("{cast} returned nothing"))?
-                }
+                Some(cast) => self.emit_host_cast(cast, word.into(), param_descs[i], target_ty)?,
                 None => self.word_to(word, target_ty, self.types_[e.params[i]].kind)?,
             };
             args.push(value.into());
@@ -171,18 +241,9 @@ impl<'ctx> JITModule<'ctx> {
         let result = match (call.try_as_basic_value().basic(), ret_kind) {
             (_, hl::hl_type_kind_HVOID) | (None, _) => i64_type.const_int(x.unit, false),
             (Some(value), _) => match &x.ret_cast {
-                Some(cast) => {
-                    let cast_fn = self.aot_runtime_fn(
-                        cast,
-                        i64_type.fn_type(&[value.get_type().into(), ptr_type.into()], false),
-                    );
-                    self.builder
-                        .build_call(cast_fn, &[value.into(), ret_desc.into()], "ret_cast")?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| anyhow!("{cast} returned nothing"))?
-                        .into_int_value()
-                }
+                Some(cast) => self
+                    .emit_host_cast(cast, value, ret_desc, i64_type.into())?
+                    .into_int_value(),
                 None => self.word_from(value, ret_kind)?,
             },
         };
@@ -191,6 +252,94 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.position_at_end(block);
         }
         Ok(body)
+    }
+
+    /// `value` through the host's cast named `cast`, answering `target`.
+    ///
+    /// A name in the `ash:` namespace is a conversion emitted inline rather
+    /// than a function called, for the NaN-boxed words many interpreters
+    /// use, where a number is its own `f64` bits and every other value is a
+    /// quiet NaN with bits set under `0x7ffc_0000_0000_0000`:
+    /// `ash:unbox_f64` reads a word as a float, NaN when it is not a number;
+    /// `ash:box_f64` writes a float as a word, a NaN as the canonical
+    /// `0x7ff8_0000_0000_0000` so it cannot read as a boxed value.
+    /// Any other name is called as `cast(value, t) -> target`, `t` being
+    /// `desc`, the program's type for the value.
+    pub(super) fn emit_host_cast(
+        &mut self,
+        cast: &str,
+        value: BasicValueEnum<'ctx>,
+        desc: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        const BOXED: u64 = 0x7ffc_0000_0000_0000;
+        const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
+        let b = &self.builder;
+        let i64_type = self.context.i64_type();
+        let f64_type = self.context.f64_type();
+        match cast {
+            "ash:unbox_f64" => {
+                let word = match value {
+                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
+                    BasicValueEnum::IntValue(v) => b.build_int_z_extend(v, i64_type, "word")?,
+                    other => {
+                        return Err(anyhow!("{cast} takes a word, not {:?}", other.get_type()));
+                    }
+                };
+                let tag = b.build_and(word, i64_type.const_int(BOXED, false), "boxed_bits")?;
+                let is_num = b.build_int_compare(
+                    IntPredicate::NE,
+                    tag,
+                    i64_type.const_int(BOXED, false),
+                    "is_num",
+                )?;
+                let bits = b.build_bit_cast(word, f64_type, "num")?.into_float_value();
+                let nan = f64_type.const_float(f64::NAN);
+                let num = b
+                    .build_select(is_num, bits, nan, "unboxed")?
+                    .into_float_value();
+                Ok(match target {
+                    BasicTypeEnum::FloatType(t) if t == f64_type => num.into(),
+                    BasicTypeEnum::FloatType(t) => {
+                        b.build_float_trunc(num, t, "unboxed_f32")?.into()
+                    }
+                    other => return Err(anyhow!("{cast} answers a float, not {other:?}")),
+                })
+            }
+            "ash:box_f64" => {
+                let num = match value {
+                    BasicValueEnum::FloatValue(v) if v.get_type() == f64_type => v,
+                    BasicValueEnum::FloatValue(v) => b.build_float_ext(v, f64_type, "num")?,
+                    other => {
+                        return Err(anyhow!("{cast} takes a float, not {:?}", other.get_type()));
+                    }
+                };
+                let is_nan =
+                    b.build_float_compare(inkwell::FloatPredicate::UNO, num, num, "is_nan")?;
+                let bits = b.build_bit_cast(num, i64_type, "bits")?.into_int_value();
+                let canonical = i64_type.const_int(CANONICAL_NAN, false);
+                let word = b
+                    .build_select(is_nan, canonical, bits, "boxed")?
+                    .into_int_value();
+                Ok(match target {
+                    BasicTypeEnum::IntType(t) if t == i64_type => word.into(),
+                    other => return Err(anyhow!("{cast} answers a word, not {other:?}")),
+                })
+            }
+            _ if cast.starts_with("ash:") => Err(anyhow!("no built-in cast `{cast}`")),
+            _ => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let cast_fn = self.aot_runtime_fn(
+                    cast,
+                    target.fn_type(&[value.get_type().into(), ptr_type.into()], false),
+                );
+                self.builder
+                    .build_call(cast_fn, &[value.into(), desc.into()], "cast")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("{cast} returned nothing"))
+            }
+        }
     }
 
     /// A word as a value of `ty`: an integer narrowed, a float by its bits,

@@ -24,7 +24,7 @@ pub(crate) fn prepare_llvm(
     f: &HLFunction,
     hot_reload: bool,
     callees: CalleeView,
-) -> Result<air::v2::ir::Function, PipelineError> {
+) -> Result<(air::v2::ir::Function, bool), PipelineError> {
     let level = match (hot_reload, level()) {
         (true, AirOptLevel::O3) => AirOptLevel::O2,
         (_, level) => level,
@@ -60,7 +60,10 @@ pub(crate) fn prepare_llvm(
         })
     });
     crate::reload::note_inlined(f.findex as usize, inlined.chain(called));
-    Ok(opt.ir.clone())
+    // Where every function keeps a shadow frame, one no trace can be taken
+    // inside needs none.
+    let frameless = callees == CalleeView::Frameless && module.frameless(f.findex as usize);
+    Ok((opt.ir.clone(), frameless))
 }
 
 /// The v2 opt level, from `ASH_AIR_LEVEL` — the same variable, and now the

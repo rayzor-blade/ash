@@ -11,8 +11,8 @@ object at build time, so the command above needs no other toolchain. The
 target is `wasm32-wasip1`; a browser runs the same core module through a
 WASI preview-1 shim.
 
-What works: the language, the standard library, exceptions (`setjmp`-based,
-as natively), `sys.thread` threads that block and resume inside the module
+What works: the language, the standard library, exceptions (a `try` is a
+wasm exception handler, a throw a `longjmp`), `sys.thread` threads that block and resume inside the module
 (`ASH_WASM_FIBERS=1`), real parallel threads via Workers or wasmtime
 threads, sockets through host imports. Native `.hdll` files do not load; a
 library ships a `.wasm` side module instead ([hdlls.md](hdlls.md)), and Haxe

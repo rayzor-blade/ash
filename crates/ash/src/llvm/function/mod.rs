@@ -63,6 +63,7 @@ mod memory;
 mod natives;
 mod objects;
 mod simd;
+pub(crate) mod wasm_traps;
 
 /// Compile unresolved natives to call-time trap stubs instead of failing the
 /// whole function compile — matching HashLink's disabled_primitive semantics
@@ -657,8 +658,10 @@ impl<'ctx> JITModule<'ctx> {
             } else {
                 crate::air_pipeline::CalleeView::All
             };
-            let air = crate::llvm::air::prepare_llvm(&self.bytecode, &f, self.hot_reload, callees)
-                .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
+            let (air, frameless) =
+                crate::llvm::air::prepare_llvm(&self.bytecode, &f, self.hot_reload, callees)
+                    .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
+            self.frameless_body = frameless;
 
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {
@@ -3930,6 +3933,10 @@ impl<'ctx> JITModule<'ctx> {
             inkwell::attributes::Attribute::get_named_enum_kind_id("optnone"),
             0,
         );
+        // A wasm trap is an exception handler, whose edges the optimizer sees.
+        if self.traps_are_wasm_handlers() {
+            return 0;
+        }
         let mut n = 0;
         for (findex, fv) in cache {
             let has_trap = match self.findexes.get(findex) {

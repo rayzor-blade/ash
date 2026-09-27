@@ -11,6 +11,7 @@ u64 exports_test_set_count(u64, u64);
 u64 exports_test_get_made(void);
 u64 exports_test_fail(u64);
 u64 exports_test_half(u64);
+u64 exports_test_half_boxed(u64);
 
 static int raised;
 
@@ -44,5 +45,9 @@ int exports_test_drive(void) {
     if ((int)exports_test_fail(0) == 0 && raised == 1) ok |= 64;
     if (real(exports_test_half(bits(3.0))) == 1.5) ok |= 128;
     if ((int)exports_test_add((u64)-4, 1) == -3) ok |= 256;
+    /* The inline NaN-boxing casts: a number is its bits, anything else
+       reads as NaN, and a NaN comes back canonical. */
+    if (real(exports_test_half_boxed(bits(3.0))) == 1.5) ok |= 512;
+    if (exports_test_half_boxed(0x7ffc000000000001ULL) == 0x7ff8000000000000ULL) ok |= 1024;
     return ok;
 }

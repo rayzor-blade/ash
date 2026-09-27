@@ -748,6 +748,9 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<()> {
         let remove = self.declare_native("hlp_remove_trap_jit", &[], None);
         self.builder.build_call(remove, &[], "")?;
+        if let Some(handler) = self.wasm_traps.as_ref().and_then(|t| t.current) {
+            self.disarm_wasm_trap(handler)?;
+        }
         Ok(())
     }
 }

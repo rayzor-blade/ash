@@ -16,7 +16,7 @@ use ash_core::host_export::{ExportKind, HostExport};
 use ash_core::llvm::aot_build::{AotRequest, emit_aot};
 use ash_core::native_lib::{HostLink, Word};
 
-const ALL_CHECKS: u32 = 511;
+const ALL_CHECKS: u32 = 2047;
 const UNIT: u64 = 7;
 
 fn export(symbol: &str, class: &str, member: &str, kind: ExportKind, args: usize) -> HostExport {
@@ -139,6 +139,17 @@ fn build(
             ExportKind::Static,
             1,
         ),
+        HostExport {
+            arg_casts: vec![Some("ash:unbox_f64".to_string())],
+            ret_cast: Some("ash:box_f64".to_string()),
+            ..export(
+                "exports_test_half_boxed",
+                "Counter",
+                "half",
+                ExportKind::Static,
+                1,
+            )
+        },
     ];
     let exe = dir.join(exe_name);
     emit_aot(AotRequest {

@@ -140,6 +140,10 @@ impl<'b> AshModule<'b> {
     /// that cannot throw and functions that are frameless themselves.
     /// Inlining such a callee is invisible to a shadow call stack, which
     /// counts one frame per Haxe function. Recursion is not frameless.
+    pub(crate) fn frameless(&self, findex: usize) -> bool {
+        self.is_frameless(findex, &mut HashSet::new())
+    }
+
     fn is_frameless(&self, findex: usize, visiting: &mut HashSet<usize>) -> bool {
         use air::v2::ir::{Effect, Instr, Terminator};
         if let Some(&known) = self

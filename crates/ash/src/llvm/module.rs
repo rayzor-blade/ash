@@ -82,6 +82,11 @@ pub struct JITModule<'ctx> {
     pub(crate) aot_link_slots: Vec<(String, String)>,
     /// What the host's exports resolved to; see `host_export`.
     pub(crate) aot_exports: Vec<crate::host_export::ResolvedExport>,
+    /// The trap regions of the function being lowered, on wasm.
+    pub(crate) wasm_traps: Option<super::function::wasm_traps::WasmTraps<'ctx>>,
+    /// Whether the function being lowered is frameless: no trace can be
+    /// taken inside it, so it keeps no shadow frame.
+    pub(crate) frameless_body: bool,
     /// Runtime helpers that would not resolve, and the ones a compile has hit.
     ///
     /// `declare_native` returns a `FunctionValue` rather than a `Result`, so a
@@ -424,6 +429,8 @@ impl<'ctx> JITModule<'ctx> {
             aot_hdll_natives: Vec::new(),
             aot_link_slots: Vec::new(),
             aot_exports,
+            wasm_traps: None,
+            frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
@@ -877,6 +884,8 @@ impl<'ctx> JITModule<'ctx> {
             aot_hdll_natives: Vec::new(),
             aot_link_slots: Vec::new(),
             aot_exports: Vec::new(),
+            wasm_traps: None,
+            frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,

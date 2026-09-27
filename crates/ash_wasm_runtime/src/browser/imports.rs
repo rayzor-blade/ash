@@ -342,6 +342,10 @@ fn install_wasi(wasi: &Object, host: &Rc<Host>) {
         install(wasi, name, refuse.clone().into());
     }
 
+    // A page has no signals. Imported by wasi-libc's `raise` whether or not a
+    // program calls it, and an unbound import fails instantiation.
+    install(wasi, "proc_raise", constant(errno::NOSYS).into());
+
     let bad = constant(errno::BADF);
     for name in [
         "fd_advise",

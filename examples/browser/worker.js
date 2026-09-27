@@ -58,7 +58,10 @@ function warmAgents(count) {
       if (data.state === "ready") announce();
       idle.push(worker);
     };
-    worker.onerror = (e) => post("err", `agent: ${e.message}`);
+    // A Worker that fails to load reports no message; the likeliest cause is
+    // a browser that cannot start a module Worker from inside a Worker.
+    worker.onerror = (e) =>
+      post("err", `agent: ${e.message || "thread.js did not start (module Workers inside a Worker unsupported?)"}`);
     agents.push(worker);
   }
   return Promise.all(ready);

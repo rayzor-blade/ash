@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bumped whenever a slot is added, removed or changes signature.
-pub const RT_VERSION: u32 = 4;
+pub const RT_VERSION: u32 = 5;
 
 /// `timeout_ns` value meaning "no deadline" for [`RuntimeVTable::park`].
 pub const RT_NO_TIMEOUT: u64 = u64::MAX;
@@ -157,6 +157,10 @@ runtime_table! {
     gc_scan_roots_done() = crate::gc::gc_scan_roots_done;
     gc_clear_scan_roots() = crate::gc::gc_clear_scan_roots;
     gc_add_scan_root(ptr: *const c_void, size: usize) = crate::gc::gc_add_scan_root;
+    // Data outside the heap scanned at every collection for the rest of the
+    // process (an AOT program's constants). Not an interpreter snapshot:
+    // registering one must not change when collections run.
+    gc_add_static_range(ptr: *const c_void, size: usize) = crate::gc::gc_add_static_range;
     gc_set_scan_roots_live(ranges: *const (usize, usize), len: *const usize) = crate::gc::gc_set_scan_roots_live;
     gc_set_scan_roots(ranges: *const (usize, usize), count: usize) = crate::gc::gc_set_scan_roots;
     gc_track_external(bytes: u64) = crate::gc::gc_track_external;
@@ -203,14 +207,14 @@ runtime_table! {
 pub use call::{
     add_root_slot, block_yield, current_ctx, current_handle, current_id, current_owner, fiber_poll,
     fiber_poll_epoch_address, fibers_active, gc_add_persistent, gc_add_scan_root,
-    gc_clear_scan_roots, gc_dump_memory, gc_enable, gc_get_flags, gc_get_live_objects, gc_init,
-    gc_lock, gc_lock_held_depth, gc_lock_unwind_to, gc_major, gc_print_stats, gc_profile,
-    gc_register_fiber_stack, gc_registered_threads, gc_remove_persistent, gc_scan_roots_done,
-    gc_set_flags, gc_set_globals, gc_set_scan_roots, gc_set_scan_roots_live, gc_set_stack_top,
-    gc_stats, gc_track_external, gc_unlock, gc_unregister_fiber_stack, gc_update_fiber_sp,
-    gc_walk_heap, is_gc_blocking, is_worker_lane, mark_size, new_waiter, register_thread,
-    remove_root_slot, schedule_step, thread_create, unregister_thread, update_gc_blocking_depth,
-    wake,
+    gc_add_static_range, gc_clear_scan_roots, gc_dump_memory, gc_enable, gc_get_flags,
+    gc_get_live_objects, gc_init, gc_lock, gc_lock_held_depth, gc_lock_unwind_to, gc_major,
+    gc_print_stats, gc_profile, gc_register_fiber_stack, gc_registered_threads,
+    gc_remove_persistent, gc_scan_roots_done, gc_set_flags, gc_set_globals, gc_set_scan_roots,
+    gc_set_scan_roots_live, gc_set_stack_top, gc_stats, gc_track_external, gc_unlock,
+    gc_unregister_fiber_stack, gc_update_fiber_sp, gc_walk_heap, is_gc_blocking, is_worker_lane,
+    mark_size, new_waiter, register_thread, remove_root_slot, schedule_step, thread_create,
+    unregister_thread, update_gc_blocking_depth, wake,
 };
 
 // ── Typed wrappers over the C-shaped slots ──────────────────────────────

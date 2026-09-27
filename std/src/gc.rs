@@ -3105,6 +3105,11 @@ pub struct ImmixAllocator {
     blocks: Vec<Block>,
     roots: Rc<RefCell<RootSet>>,
     globals_range: Option<(*const *mut c_void, usize)>,
+    /// Data outside the heap that may hold heap pointers for the life of the
+    /// program -- an AOT program's constants blob. Process-wide and never
+    /// replaced, unlike the per-thread snapshot ranges an interpreter
+    /// publishes, and registering one does not change when collections run.
+    static_ranges: Vec<(usize, usize)>,
     /// Registered fiber stacks for conservative scanning. Each OS-thread
     /// mutator owns one id-0 main-stack descriptor; nonzero fiber ids are
     /// process-unique.
@@ -3546,6 +3551,7 @@ impl ImmixAllocator {
             })),
             fiber_stacks: Vec::new(),
             globals_range: None,
+            static_ranges: Vec::new(),
             finalizables: HashSet::new(),
         }
     }
@@ -4640,6 +4646,9 @@ impl ImmixAllocator {
             }
             all_newly_marked.extend(newly_marked);
         }
+        for (start, end) in self.static_ranges.clone() {
+            all_newly_marked.extend(self.conservative_scan_range(start, end));
+        }
 
         // Conservative scan of interpreter-provided ranges
         for mutator in mutators {
@@ -5106,6 +5115,9 @@ impl ImmixAllocator {
                 &mut consider,
             );
         }
+        for &(start, end) in &self.static_ranges {
+            scan_words(start, end, &mut work, &mut reached, &mut consider);
+        }
         for m in mutators {
             for &(start, size) in &m.scan_ranges {
                 scan_words(start, start + size, &mut work, &mut reached, &mut consider);
@@ -5297,6 +5309,9 @@ impl ImmixAllocator {
                 gp as usize,
                 gp as usize + count * std::mem::size_of::<usize>(),
             ));
+        }
+        for &(start, end) in &self.static_ranges {
+            out.push(("static", start, end));
         }
         for mutator in mutators {
             for &(rs, sz) in &mutator.scan_ranges {
@@ -5664,6 +5679,9 @@ impl ImmixAllocator {
                             gp as usize + count * std::mem::size_of::<usize>(),
                         );
                     }
+                    for &(start, end) in &self.static_ranges {
+                        audit("static", start, end);
+                    }
                     for mutator in mutators {
                         for &(rs, sz) in &mutator.scan_ranges {
                             audit("range", rs, rs + sz);
@@ -5943,6 +5961,16 @@ impl ImmixAllocator {
         self.roots.borrow_mut().persistent_roots.remove(&ptr);
     }
 
+    /// Scan `size` bytes at `ptr` conservatively at every collection, for the
+    /// rest of the process. For data outside the heap, not for an
+    /// interpreter's frames: see [`Self::add_scan_range`].
+    pub fn add_static_range(&mut self, ptr: *const c_void, size: usize) {
+        let start = ptr as usize;
+        if start != 0 && size != 0 {
+            self.static_ranges.push((start, start.saturating_add(size)));
+        }
+    }
+
     pub fn clear_scan_ranges(&mut self) {
         self.heap.safepoint_mode = true;
         clear_current_scan_ranges();
@@ -6189,6 +6217,19 @@ pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
 pub(crate) unsafe extern "C" fn gc_clear_scan_roots() {
     let mut gc = gc_locked();
     gc.clear_scan_ranges();
+}
+
+/// Scan a data range outside the heap at every collection, for the life of
+/// the process: an AOT program's constants blob.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_gc_add_static_range(ptr: *const c_void, size: usize) {
+    unsafe {
+        crate::rt::gc_add_static_range(ptr, size);
+    }
+}
+
+pub(crate) unsafe extern "C" fn gc_add_static_range(ptr: *const c_void, size: usize) {
+    gc_locked().add_static_range(ptr, size);
 }
 
 /// Add an interpreter-provided conservative scan range.
@@ -6822,6 +6863,24 @@ mod tests {
             assert!(object_marked(&gc, offset(&gc, callback)));
             assert!(!object_marked(&gc, offset(&gc, unrelated)));
         }
+    }
+
+    #[test]
+    fn a_static_range_is_a_root_and_leaves_collections_undeferred() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let held = gc.allocate(16).unwrap();
+        let unrelated = gc.allocate(16).unwrap();
+        // Data outside the heap, like an AOT program's constants blob.
+        let data = vec![0usize, held.as_ptr() as usize, 0];
+        gc.add_static_range(data.as_ptr().cast(), data.len() * WORD);
+        assert!(
+            !gc.heap.safepoint_mode,
+            "a static range is not an interpreter snapshot: registering one \
+             must not defer collections to safepoints"
+        );
+        gc.mark_roots(&[]);
+        assert!(object_marked(&gc, offset(&gc, held)));
+        assert!(!object_marked(&gc, offset(&gc, unrelated)));
     }
 
     #[test]

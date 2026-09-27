@@ -1385,10 +1385,12 @@ impl<'ctx> JITModule<'ctx> {
             // stack scan nor the TLAB walk reaches. Constants are immortal --
             // outside the arena, so never marked and never swept -- but a field
             // can be assigned a heap object later, and that pointer has to be
-            // found. One range covers every constant, where the routine needed
-            // a `hlp_gc_register_root` per object.
+            // found. One static range covers every constant, where the routine
+            // needed a `hlp_gc_register_root` per object. Not an interpreter
+            // scan range: those are per thread, live only once published, and
+            // registering one defers collections to safepoints.
             let add_scan_ty = void_type.fn_type(&[ptr_type.into(), size_type.into()], false);
-            let add_scan = self.aot_symbol("hlp_gc_add_scan_root", add_scan_ty);
+            let add_scan = self.aot_symbol("hlp_gc_add_static_range", add_scan_ty);
             let blob_type = blob.get_value_type().into_struct_type();
             let (_, machine) = self
                 .target_abi
@@ -1712,17 +1714,23 @@ impl<'ctx> JITModule<'ctx> {
                 let find = self.aot_symbol("hlp_aot_symbol", find_ty);
                 let slots = self.aot_link_slots.clone();
                 for (lib, symbol) in &slots {
-                    let Some(slot) = self.module.get_global(&format!("ash_link_{lib}_{symbol}")) else {
+                    let Some(slot) = self.module.get_global(&format!("ash_link_{lib}_{symbol}"))
+                    else {
                         continue;
                     };
                     let lib_s = self.builder.build_global_string_ptr(lib, "aot_link_lib")?;
-                    let sym_s = self.builder.build_global_string_ptr(symbol, "aot_link_sym")?;
+                    let sym_s = self
+                        .builder
+                        .build_global_string_ptr(symbol, "aot_link_sym")?;
                     let addr = self
                         .builder
                         .build_indirect_call(
                             find_ty,
                             find,
-                            &[lib_s.as_pointer_value().into(), sym_s.as_pointer_value().into()],
+                            &[
+                                lib_s.as_pointer_value().into(),
+                                sym_s.as_pointer_value().into(),
+                            ],
                             "link_addr",
                         )?
                         .try_as_basic_value()

@@ -406,8 +406,13 @@ impl<'ctx> JITModule<'ctx> {
         if let Some(existing) = self.module.get_function(caller_name) {
             return Ok(existing);
         }
+        // An initialiser's first argument is the program's object, which
+        // the callee never sees.
+        let skip = usize::from(link.init.is_some());
         let caller_params = fn_type.get_param_types();
-        if caller_params.len() != link.params.len() || link.arg_casts.len() != link.params.len() {
+        if caller_params.len() != link.params.len() + skip
+            || link.arg_casts.len() != link.params.len()
+        {
             return Err(anyhow!(
                 "{}: the program declares {} arguments, the link {}",
                 link.symbol,
@@ -448,9 +453,10 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.position_at_end(entry);
 
         let mut args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(link.params.len());
-        for (i, param) in function.get_param_iter().enumerate() {
-            let target = word(link.params[i]);
-            let value = match &link.arg_casts[i] {
+        for (i, param) in function.get_param_iter().enumerate().skip(skip) {
+            let j = i - skip;
+            let target = word(link.params[j]);
+            let value = match &link.arg_casts[j] {
                 Some(cast) => {
                     let cast_fn = self.aot_runtime_fn(
                         cast,
@@ -468,7 +474,7 @@ impl<'ctx> JITModule<'ctx> {
                         "{}: argument {i} is {:?} to the program and {:?} to the callee, with no cast",
                         link.symbol,
                         param.get_type(),
-                        link.params[i]
+                        link.params[j]
                     )
                 })??,
             };
@@ -478,6 +484,32 @@ impl<'ctx> JITModule<'ctx> {
         if let Some(after) = &link.after {
             let after_fn = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
             self.builder.build_call(after_fn, &[], "")?;
+        }
+        // An initialiser binds the program's object to what the callee made.
+        // The object stays live across the call: it is init's first argument,
+        // and the program's frame that allocated it holds it too. A callee
+        // that throws skips init, leaving the object unbound, as a throwing
+        // constructor leaves it.
+        if let Some(init) = &link.init {
+            let object = function.get_nth_param(0).ok_or_else(|| anyhow!("{init}: no object"))?;
+            let made = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| anyhow!("{}: an initialiser's callee returns nothing", link.symbol))?;
+            let init_fn = self.aot_runtime_fn(
+                init,
+                self.context.void_type().fn_type(
+                    &[object.get_type().into(), made.get_type().into(), ptr_type.into()],
+                    false,
+                ),
+            );
+            self.builder
+                .build_call(init_fn, &[object.into(), made.into(), arg_descs[0].into()], "")?;
+            self.builder.build_return(None)?;
+            if let Some(block) = saved_block {
+                self.builder.position_at_end(block);
+            }
+            return Ok(function);
         }
         match (call.try_as_basic_value().basic(), fn_type.get_return_type()) {
             (Some(value), Some(want)) => {

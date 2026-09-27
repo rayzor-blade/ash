@@ -571,7 +571,11 @@ pub enum Word {
 /// integer or boolean words of different widths no cast is named: the
 /// value is widened or narrowed where it is passed. `after`, when set, is
 /// called with nothing once the callee returns, before the result is cast:
-/// where a host raises what its callee left pending.
+/// where a host raises what its callee left pending. `init`, when set, makes
+/// the native an initialiser: its first argument, the object the program
+/// just allocated, is not passed, and `init` is called with it, the
+/// callee's result and the object's `hl_type`, to bind the two; the
+/// native returns nothing, and `arg_casts` covers the passed arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostLink {
     pub symbol: String,
@@ -581,6 +585,7 @@ pub struct HostLink {
     pub arg_casts: Vec<Option<String>>,
     pub ret_cast: Option<String>,
     pub after: Option<String>,
+    pub init: Option<String>,
 }
 
 static HOST_LINKS: OnceLock<Mutex<HashMap<String, HostLink>>> = OnceLock::new();

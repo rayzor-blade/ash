@@ -57,7 +57,9 @@ Who does what: the page starts the `thread.js` agents and gives each one end
 of a `MessageChannel`, passing the other ends to `worker.js`. Some browsers
 (Chrome on Android) cannot start a Worker from inside a Worker, so
 `worker.js` makes its own only when the page passes no ports; an agent that
-fails to start is left out either way. `worker.js` gives `run` a `spawn`
+fails to start is left out either way. Chrome also refuses those nested
+Workers on an HTTPS origin whose self-signed certificate was clicked through;
+serve over plain `http://localhost`, which is a secure context, instead. `worker.js` gives `run` a `spawn`
 function; the host hands that function the compiled module, the shared
 memory, a thread id, the guest's `startArg`, and a shared `control` buffer,
 which `spawn` posts over an idle agent's port; `thread.js` receives them and

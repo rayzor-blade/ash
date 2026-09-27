@@ -1851,8 +1851,14 @@ fn emit(
     ordered.sort_by_key(|(i, _)| *i);
     for (_, ty) in &ordered {
         types.ty().function(
-            ty.params().iter().map(val_type).collect::<Vec<_>>(),
-            ty.results().iter().map(val_type).collect::<Vec<_>>(),
+            ty.params()
+                .iter()
+                .map(val_type)
+                .collect::<Result<Vec<_>>>()?,
+            ty.results()
+                .iter()
+                .map(val_type)
+                .collect::<Result<Vec<_>>>()?,
         );
     }
     module.section(&types);
@@ -2479,15 +2485,26 @@ fn constructor_body(
     Ok(strip_size_prefix(function))
 }
 
-fn val_type(v: &wasmparser::ValType) -> wasm_encoder::ValType {
-    use wasm_encoder::ValType as E;
-    match v {
-        wasmparser::ValType::I32 => E::I32,
-        wasmparser::ValType::I64 => E::I64,
-        wasmparser::ValType::F32 => E::F32,
-        wasmparser::ValType::F64 => E::F64,
-        wasmparser::ValType::V128 => E::V128,
-        wasmparser::ValType::Ref(_) => E::FUNCREF,
+/// `v` as the encoder spells it; a reference type keeps its heap type, so an
+/// exception handler's `exnref` stays one.
+fn val_type(v: &wasmparser::ValType) -> Result<wasm_encoder::ValType> {
+    use wasm_encoder::reencode::Reencode as _;
+    wasm_encoder::reencode::RoundtripReencoder
+        .val_type(*v)
+        .map_err(|e| anyhow!("re-encoding a value type: {e}"))
+}
+
+#[cfg(test)]
+mod val_type_tests {
+    use super::val_type;
+
+    #[test]
+    fn a_reference_type_keeps_its_heap_type() {
+        let exn = wasmparser::ValType::Ref(wasmparser::RefType::EXNREF);
+        assert_eq!(
+            val_type(&exn).unwrap(),
+            wasm_encoder::ValType::Ref(wasm_encoder::RefType::EXNREF)
+        );
     }
 }
 

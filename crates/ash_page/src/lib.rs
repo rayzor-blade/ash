@@ -17,6 +17,9 @@ const INDEX_HTML: &str = include_str!("../page/index.html");
 const WORKER_JS: &str = include_str!("../page/worker.js");
 const THREAD_JS: &str = include_str!("../page/thread.js");
 const DISPLAY_JS: &str = include_str!("../page/display.js");
+/// The window's page side; a program reaches it with
+/// `ash_host_agent("window", block)`. See docs/wasm/window.md.
+const WINDOW_MJS: &str = include_str!("../page/window.mjs");
 const HOST_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/host/ash_browser.js"));
 const HOST_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/host/ash_browser_bg.wasm"));
 
@@ -58,6 +61,7 @@ pub fn files(module_name: &str) -> Vec<(&'static str, Cow<'static, [u8]>)> {
         ("worker.js", Cow::Borrowed(WORKER_JS.as_bytes())),
         ("thread.js", Cow::Borrowed(THREAD_JS.as_bytes())),
         ("display.js", Cow::Borrowed(DISPLAY_JS.as_bytes())),
+        ("window.mjs", Cow::Borrowed(WINDOW_MJS.as_bytes())),
         ("ash_browser.js", Cow::Borrowed(HOST_JS.as_bytes())),
         ("ash_browser_bg.wasm", Cow::Borrowed(HOST_WASM)),
     ]

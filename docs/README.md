@@ -11,6 +11,7 @@ For running Haxe programs on ash:
 | [hdll.md](hdll.md) | writing a native library |
 | [wasm/README.md](wasm/README.md) | the wasm target: hosts, threads, what is in scope |
 | [wasm/host-abi.md](wasm/host-abi.md) | what a host implements: the fiber import, sockets |
+| [wasm/window.md](wasm/window.md) | the window in a page: the shared-memory block a program and `window.mjs` exchange events and commands through |
 | [wasm/hdlls.md](wasm/hdlls.md) | native libraries as wasm side modules |
 | [mbhaxe.md](mbhaxe.md) | the MarbleGame fixture |
 

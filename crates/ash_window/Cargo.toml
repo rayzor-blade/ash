@@ -1,0 +1,9 @@
+[package]
+name = "ash_window"
+version = "0.1.0"
+edition = "2024"
+description = "The program's side of the window block a page's window.mjs fills: docs/wasm/window.md"
+publish = false
+
+# None: a guest library depends on this, and it must add nothing to a module.
+[dependencies]

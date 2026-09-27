@@ -1327,6 +1327,7 @@ fn run() -> Result<()> {
             abi_version: cli.abi_version,
             quiet: cli.quiet,
             links: Default::default(),
+            objects: Default::default(),
         })?;
         if let Some(module) = wasm_page {
             web::write_page(&module, cli.quiet)?;

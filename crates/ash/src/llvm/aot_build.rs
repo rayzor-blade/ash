@@ -27,6 +27,9 @@ pub struct AotRequest<'a> {
     /// by its symbol, casting at the boundary. Empty for a program that
     /// uses none.
     pub links: std::collections::HashMap<(String, String), crate::native_lib::HostLink>,
+    /// Relocatable objects emitted by other language frontends. They join the
+    /// final executable through Ash's linker and remain owned by the caller.
+    pub objects: Vec<PathBuf>,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -48,6 +51,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         abi_version,
         quiet,
         links,
+        objects: language_objects,
     } = request;
     crate::native_lib::set_host_links(&links);
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
@@ -311,6 +315,8 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         } else {
             crate::llvm::aot_link::Runtime::Static
         };
+        let scratch_objects = objects.clone();
+        objects.extend(language_objects);
         let linked = crate::llvm::aot_link::link_executable(
             &objects,
             exe,
@@ -328,7 +334,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
                 exe.display()
             ));
         } else {
-            for part in &objects {
+            for part in &scratch_objects {
                 let _ = std::fs::remove_file(part);
             }
         }

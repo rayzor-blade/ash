@@ -319,8 +319,10 @@ pub unsafe extern "C" fn hlp_aot_symbol(lib: *const c_char, symbol: *const c_cha
         if lib.is_null() || symbol.is_null() {
             return std::ptr::null_mut();
         }
-        let (Ok(lib), Ok(symbol)) = (CStr::from_ptr(lib).to_str(), CStr::from_ptr(symbol).to_str())
-        else {
+        let (Ok(lib), Ok(symbol)) = (
+            CStr::from_ptr(lib).to_str(),
+            CStr::from_ptr(symbol).to_str(),
+        ) else {
             return std::ptr::null_mut();
         };
         let handle = library(lib);

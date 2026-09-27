@@ -512,7 +512,8 @@ impl<'ctx> JITModule<'ctx> {
                 let resolved = self.context.append_basic_block(function, "callee_resolved");
                 let missing = self.context.append_basic_block(function, "callee_missing");
                 let is_null = self.builder.build_is_null(target, "callee_missing_p")?;
-                self.builder.build_conditional_branch(is_null, missing, resolved)?;
+                self.builder
+                    .build_conditional_branch(is_null, missing, resolved)?;
                 self.builder.position_at_end(missing);
                 let reporter = self.aot_runtime_fn(
                     "hlp_aot_native_missing",
@@ -521,10 +522,15 @@ impl<'ctx> JITModule<'ctx> {
                         .fn_type(&[ptr_type.into(), ptr_type.into()], false),
                 );
                 let lib_s = self.builder.build_global_string_ptr(lib, "link_lib")?;
-                let sym_s = self.builder.build_global_string_ptr(&link.symbol, "link_sym")?;
+                let sym_s = self
+                    .builder
+                    .build_global_string_ptr(&link.symbol, "link_sym")?;
                 self.builder.build_call(
                     reporter,
-                    &[lib_s.as_pointer_value().into(), sym_s.as_pointer_value().into()],
+                    &[
+                        lib_s.as_pointer_value().into(),
+                        sym_s.as_pointer_value().into(),
+                    ],
                     "",
                 )?;
                 self.builder.build_unreachable()?;
@@ -544,20 +550,28 @@ impl<'ctx> JITModule<'ctx> {
         // that throws skips init, leaving the object unbound, as a throwing
         // constructor leaves it.
         if let Some(init) = &link.init {
-            let object = function.get_nth_param(0).ok_or_else(|| anyhow!("{init}: no object"))?;
-            let made = call
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| anyhow!("{}: an initialiser's callee returns nothing", link.symbol))?;
+            let object = function
+                .get_nth_param(0)
+                .ok_or_else(|| anyhow!("{init}: no object"))?;
+            let made = call.try_as_basic_value().basic().ok_or_else(|| {
+                anyhow!("{}: an initialiser's callee returns nothing", link.symbol)
+            })?;
             let init_fn = self.aot_runtime_fn(
                 init,
                 self.context.void_type().fn_type(
-                    &[object.get_type().into(), made.get_type().into(), ptr_type.into()],
+                    &[
+                        object.get_type().into(),
+                        made.get_type().into(),
+                        ptr_type.into(),
+                    ],
                     false,
                 ),
             );
-            self.builder
-                .build_call(init_fn, &[object.into(), made.into(), arg_descs[0].into()], "")?;
+            self.builder.build_call(
+                init_fn,
+                &[object.into(), made.into(), arg_descs[0].into()],
+                "",
+            )?;
             self.builder.build_return(None)?;
             if let Some(block) = saved_block {
                 self.builder.position_at_end(block);
@@ -626,8 +640,12 @@ impl<'ctx> JITModule<'ctx> {
         } else if to > from {
             self.builder.build_int_s_extend(v, t, "widen")
         } else if to == 1 {
-            self.builder
-                .build_int_compare(inkwell::IntPredicate::NE, v, v.get_type().const_zero(), "truth")
+            self.builder.build_int_compare(
+                inkwell::IntPredicate::NE,
+                v,
+                v.get_type().const_zero(),
+                "truth",
+            )
         } else {
             self.builder.build_int_truncate(v, t, "narrow")
         };

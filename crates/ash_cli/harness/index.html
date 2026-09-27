@@ -33,7 +33,16 @@ if (!self.crossOriginIsolated) {
 // agent, because the one running the program never returns to its event loop
 // and a frame drawn there would not reach the page until the program ended.
 let display = null;
-const screen = document.getElementById("screen");
+// The canvas can be given away once: to display.js, or to an agent that
+// draws on it itself (a GPU agent keeps it as its surface).
+let screenTaken = false;
+const takeScreen = () => {
+  if (screenTaken) return null;
+  screenTaken = true;
+  const screen = document.getElementById("screen");
+  screen.hidden = false;
+  return screen.transferControlToOffscreen();
+};
 const worker = new Worker("./worker.js", { type: "module" });
 worker.onmessage = ({ data }) => {
   if (data.kind === "done") {
@@ -45,14 +54,23 @@ worker.onmessage = ({ data }) => {
   if (data.kind === "spawn-agent") {
     const agent = new Worker(new URL(`./${data.name}_agent.mjs`, location.href), { type: "module" });
     agent.onerror = (e) => write(`${data.name} agent: ${e.message}`, "err");
+    // An agent that draws asks for the canvas once, right after it starts:
+    // `{ canvas }` if it was still here to give, `{ canvas: null }` if not.
+    let answered = false;
+    agent.onmessage = ({ data: asked }) => {
+      if (asked?.kind !== "canvas" || answered) return;
+      answered = true;
+      const canvas = takeScreen();
+      agent.postMessage({ canvas }, canvas ? [canvas] : []);
+    };
     agent.postMessage({ memory: data.memory, address: data.address });
     return;
   }
   if (data.kind === "display") {
     if (!display) {
+      const canvas = takeScreen();
+      if (!canvas) return; // an agent that draws already has it
       display = new Worker("./display.js");
-      screen.hidden = false;
-      const canvas = screen.transferControlToOffscreen();
       display.postMessage({ canvas }, [canvas]);
     }
     display.postMessage(data);

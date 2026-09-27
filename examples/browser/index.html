@@ -71,6 +71,16 @@ requestAnimationFrame(tick);
 // this thread out of the paint path and leaves the counter above measuring a
 // thread with nothing to do.
 let display = null;
+// The canvas can be given away once: to display.js, or to an agent that
+// draws on it itself (a GPU agent keeps it as its surface).
+let screenTaken = false;
+const takeScreen = () => {
+  if (screenTaken) return null;
+  screenTaken = true;
+  const screen = document.getElementById("screen");
+  screen.hidden = false;
+  return screen.transferControlToOffscreen();
+};
 
 worker.onmessage = ({ data }) => {
   if (data.kind === "done") {
@@ -81,6 +91,15 @@ worker.onmessage = ({ data }) => {
   if (data.kind === "spawn-agent") {
     const agent = new Worker(new URL(`./${data.name}_agent.mjs`, location.href), { type: "module" });
     agent.onerror = (e) => write(`${data.name} agent: ${e.message}`, "err");
+    // An agent that draws asks for the canvas once, right after it starts:
+    // `{ canvas }` if it was still here to give, `{ canvas: null }` if not.
+    let answered = false;
+    agent.onmessage = ({ data: asked }) => {
+      if (asked?.kind !== "canvas" || answered) return;
+      answered = true;
+      const canvas = takeScreen();
+      agent.postMessage({ canvas }, canvas ? [canvas] : []);
+    };
     agent.postMessage({ memory: data.memory, address: data.address });
     return;
   }
@@ -133,11 +152,9 @@ document.getElementById("which").textContent = drawing
 const args = [module.slice(2)];
 if (drawing) args.push(String(wanted));
 if (drawing) {
-  const screen = document.getElementById("screen");
-  screen.hidden = false;
   display = new Worker("./display.js");
   display.onerror = (e) => write(`display: ${e.message}`, "err");
-  const canvas = screen.transferControlToOffscreen();
+  const canvas = takeScreen();
   display.postMessage({ canvas }, [canvas]);
 }
 worker.postMessage({ module, args, display: drawing });

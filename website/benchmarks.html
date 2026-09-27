@@ -16,13 +16,13 @@
   <meta property="og:site_name" content="Ash">
   <meta property="og:title" content="Ash — HashLink Bytecode Runtime">
   <meta property="og:description"
-    content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM — benchmarked against HashLink's JIT and HL/C on every push.">
+    content="Compare Ash, HashLink JIT, hl2-ir, HL/C, and Haxe JVM benchmark results. Timings and checksums are collected in CI.">
   <meta property="og:url" content="https://ash.rayzor.tech/">
   <meta property="og:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Ash — HashLink Bytecode Runtime">
   <meta name="twitter:description"
-    content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM.">
+    content="Compare Ash, HashLink JIT, hl2-ir, HL/C, and Haxe JVM benchmark results. Timings and checksums are collected in CI.">
   <meta name="twitter:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <script type="application/ld+json">
 {
@@ -31,7 +31,7 @@
   "name": "Ash",
   "operatingSystem": "macOS, Linux, Windows",
   "applicationCategory": "DeveloperApplication",
-  "description": "A runtime for HashLink bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM.",
+  "description": "A faster runtime for Haxe's HashLink bytecode, benchmarked against HashLink's own JIT, with support for native executables and WebAssembly.",
   "url": "https://ash.rayzor.tech/",
   "image": "https://ash.rayzor.tech/ash-mark-tight.png",
   "license": "https://opensource.org/license/isc-license-txt",
@@ -308,11 +308,10 @@
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         Faster than HashLink's JIT</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Across
-        fib(40), Mandelbrot, n-body, inlined calls, method calls, and free-function calls, Ash's tiered JIT is measured
-        against HashLink's released JIT, its in-development hl2-ir JIT, and its ahead-of-time HL/C output — all run the
-        same bytecode and are checksum-verified. These numbers refresh automatically from the CI pipeline with each push
-        to <code>main</code>.</p>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">These benchmarks
+        cover fib(40), Mandelbrot, n-body, and several kinds of function calls. They compare Ash with HashLink's
+        released JIT, the experimental hl2-ir JIT, compiled HL/C output, and Haxe's JVM target. Results are checked
+        against accepted checksums and published by CI on each push to <code>main</code>.</p>
 
       <div
         style="margin-top:32px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
@@ -330,7 +329,7 @@
               hl2-ir</span>
             <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
                 style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C
-              <span style="color:#8a807a">(AOT, not a VM)</span></span>
+              <span style="color:#8a807a">(AOT)</span></span>
             <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
                 style="width:11px;height:11px;border-radius:2px;background:#6e7f8c;display:inline-block"></span>Haxe
               JVM</span>
@@ -345,26 +344,21 @@
               benchmark results…</div>
             <noscript>
               <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">The
-                benchmark table needs JavaScript; the raw numbers live in <a
+                benchmark table requires JavaScript. You can read the raw results in <a
                   href="bench/results.json">bench/results.json</a>.</div>
             </noscript>
           </div>
         </div>
-        <div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is the
-          pure wall time of one run, verified against the benchmark's accepted checksums before it is published.
-          <strong style="color:#5c5450">Two kinds of row, marked AOT.</strong> The lanes tagged
-          <span class="aot-tag">AOT</span> — <code>Ash AOT</code> and <code>HashLink/C</code> — were compiled to a
-          native binary before timing began, so their bars are this bytecode running as ordinary compiled code. The
-          rest are still compiling inside the window being measured, which is the honest reason to read the two groups
-          apart rather than as one ranking. <code>haxe -hl main.c</code> emits C for the system compiler to build;
-          <code>ash</code> emits the object itself, with no C in the path. Both are built through LLVM — the HL/C
-          lane is compiled with <code>clang</code> rather than the default <code>cc</code>, because ash's back end is
-          LLVM by construction and leaving that unmatched would measure two compilers as much as two designs. Both
-          builds take one to six seconds and are
-          excluded from their bars, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is
-          measured in
-          its own CI job, so the engines within a row share a machine but different rows may not — compare engines
-          within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.
+        <div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Bars show median
+          elapsed time for checksum-verified runs.
+          <strong style="color:#5c5450">Compilation time depends on the execution mode.</strong>
+          <code>Ash AOT</code> and <code>HashLink/C</code>, tagged <span class="aot-tag">AOT</span>, are compiled
+          to native binaries before timing starts. Their builds take one to six seconds, excluded from the bars.
+          Haxe-to-JVM compilation is also excluded. JIT compilation happens during execution and is included in the timing.
+          <code>haxe -hl main.c</code> generates C, which this benchmark compiles with <code>clang</code>.
+          Ash emits object code directly through LLVM. Using clang for HL/C keeps both native builds on LLVM.
+          Each benchmark runs in a separate CI job. Engines within a row share a machine, but different rows and
+          sweeps may use different hardware. Compare engines within the same row. Hover over a timing to see its CPU.
         </div>
       </div>
 
@@ -533,7 +527,7 @@
           empty.style.borderBottom = 'none';
           var note = el('div', null,
             "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0");
-          note.textContent = 'The latest run produced no publishable rows; previous numbers remain in the run artifacts.';
+          note.textContent = 'The latest run has no publishable results. Previous results are available in the CI run artifacts.';
           empty.appendChild(note);
           mount.appendChild(empty);
         }
@@ -599,7 +593,7 @@
           row.style.borderBottom = 'none';
           var msg = el('div', null,
             "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0");
-          msg.textContent = 'No published benchmark run is available yet — numbers land with the first CI publish. (' + err.message + ')';
+          msg.textContent = 'Could not load benchmark results. (' + err.message + ')';
           row.appendChild(msg);
           mount.appendChild(row);
         });

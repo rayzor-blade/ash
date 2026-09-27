@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ash — HashLink Bytecode Runtime</title>
   <meta name="description"
-    content="Ash runs HashLink (.hl) bytecode compiled from Haxe. It runs the official Haxe test suite on every push, and it is faster than HashLink's own JIT.">
+    content="Ash runs Haxe's HashLink (.hl) bytecode faster than HashLink's own JIT. It also compiles to native executables and WebAssembly.">
   <meta name="author" content="Damilare Akinlaja">
   <meta name="keywords" content="HashLink, Haxe, bytecode, runtime, JIT, Rust, virtual machine">
   <meta name="robots" content="index, follow">
@@ -16,13 +16,13 @@
   <meta property="og:site_name" content="Ash">
   <meta property="og:title" content="Ash — HashLink Bytecode Runtime">
   <meta property="og:description"
-    content="A faster runner for HashLink bytecode. Drop-in, and tested against Haxe's own suite on every push.">
+    content="A faster runtime for HashLink bytecode, benchmarked against HashLink's own JIT and tested against the official Haxe suite on every push.">
   <meta property="og:url" content="https://ash.rayzor.tech/">
   <meta property="og:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Ash — HashLink Bytecode Runtime">
   <meta name="twitter:description"
-    content="A faster runner for HashLink bytecode.">
+    content="A faster runtime for Haxe's HashLink bytecode.">
   <meta name="twitter:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <script type="application/ld+json">
 {
@@ -31,7 +31,7 @@
   "name": "Ash",
   "operatingSystem": "macOS, Linux, Windows",
   "applicationCategory": "DeveloperApplication",
-  "description": "A runtime for HashLink bytecode compiled from Haxe. Faster than HashLink's own JIT, and tested against the official Haxe suite.",
+  "description": "A faster runtime for Haxe's HashLink bytecode, benchmarked against HashLink's own JIT, with support for native executables and WebAssembly.",
   "url": "https://ash.rayzor.tech/",
   "image": "https://ash.rayzor.tech/ash-mark-tight.png",
   "license": "https://opensource.org/license/isc-license-txt",
@@ -301,11 +301,10 @@
           </div>
           <h1
             style="font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:clamp(38px,6vw,68px);line-height:1.08;letter-spacing:-0.01em;color:#221d1a;margin:0">
-            A <span style="font-weight:700;color:#6D4C41">faster</span> Runner for<br>HashLink bytecode.</h1>
+            A <span style="font-weight:700;color:#6D4C41">faster</span> runtime for<br>HashLink bytecode.</h1>
           <p style="font-size:clamp(15px,1.8vw,17.5px);line-height:1.65;color:#5c5450;max-width:520px;margin:24px 0 0">
-            Ash runs the HashLink (<code>.hl</code>) bytecode your Haxe compiler already produces. Point it at a
-            file and it runs, no changes to your project. It gets faster as it goes: the code you run most is compiled
-            while your program is running.</p>
+            Ash runs <code>.hl</code> files compiled from Haxe. Its tiered JIT compiles frequently used functions
+            in the background. You can also compile the same bytecode to a native executable or WebAssembly.</p>
           <div style="display:flex;gap:14px;flex-wrap:wrap;margin:36px 0 0">
             <a href="#setup"
               style="background:#221d1a;color:#f5f1ea;padding:13px 26px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14.5px;white-space:nowrap">Get
@@ -353,10 +352,10 @@
         Features</div>
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
-        The <span style="font-weight:700;font-style:italic;color:#6D4C41">ash</span> approach to running HashLink</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">Run the same
-        bytecode you already build. Ash speeds it up as it runs, ships as one binary, and can also compile your program
-        to a native executable or to WebAssembly.</p>
+        How <span style="font-weight:700;font-style:italic;color:#6D4C41">ash</span> runs your code</h2>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">Ash handles
+        compilation, garbage collection, and threading. It uses the bytecode and native library interfaces your
+        HashLink project already targets.</p>
       <div
         style="margin-top:36px;display:flex;flex-wrap:wrap;gap:1px;background:rgba(34,29,26,0.12);border:1px solid rgba(34,29,26,0.12);border-radius:14px;overflow:hidden">
 
@@ -364,18 +363,18 @@
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">01</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Faster while it runs</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Your program starts immediately, and the
-            code it runs most gets compiled in the background while it keeps going.</p>
+            Tiered JIT</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Execution starts in the interpreter.
+            Frequently called functions are compiled in the background while the program runs.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">02</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Nothing to change</h3>
+            Existing bytecode</h3>
           <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Point ash at the <code>.hl</code> file
-            Haxe already produces. No recompiling, no flags, no changes to your project.</p>
+            Haxe already produces. You can use your existing HashLink build configuration.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
@@ -391,45 +390,45 @@
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">04</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Memory that behaves</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The collector only takes the memory your
-            program actually uses, and gives it back when it stops needing it.</p>
+            Garbage collection</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The collector allocates memory as the
+            heap grows and releases unused memory back to the system.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">05</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Threads that work</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0"><code>sys.thread</code> works as you
-            expect, including in the browser. Threads waiting on a lock or a sleep never hold up the rest.</p>
+            Haxe threads</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Use <code>sys.thread</code> for threads,
+            locks, and queues. Browser builds support parallel threads through Web Workers and shared memory.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">06</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Runs in a browser</h3>
+            WebAssembly</h3>
           <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Build the same program to WebAssembly and
-            ship it as a web page, threads and all.</p>
+            run it with <code>ash run</code> or serve the generated browser page with <code>ash serve</code>.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">07</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Your libraries still load</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The <code>.hdll</code> libraries you
-            already use keep working, loaded the same way HashLink loads them.</p>
+            Native libraries</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Ash loads <code>.hdll</code> libraries
+            through HashLink's native interface. Use libraries built for your platform and architecture.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">08</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            One file to install</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The standard library is built in. There is
-            nothing to install beside it and no runtime to ship with your game.</p>
+            Built-in standard library</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Programs that use only the standard
+            library run with the Ash binary alone. HDLLs also need the shared runtime included in the release.</p>
         </div>
 
       </div>
@@ -443,8 +442,8 @@
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         Install, compile, run</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">One script, no
-        toolchain. Prebuilt binaries for macOS, Linux and Windows on aarch64 and x86_64.</p>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">The installer
+        downloads a prebuilt release for your platform. You'll also need Haxe to compile source code to bytecode.</p>
 
       <div style="margin-top:40px;display:flex;flex-direction:column;gap:36px;max-width:800px">
 
@@ -454,8 +453,8 @@
             <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">
               Install Ash</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Drops the <code>ash</code> binary
-            into <code>~/.ash/bin</code> and adds them to your <code>PATH</code>. Ash requires a 64-bit target.</p>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Installs <code>ash</code>
+            in <code>~/.ash/bin</code> and adds that directory to your <code>PATH</code>. Ash requires a 64-bit system.</p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
@@ -467,7 +466,7 @@
                 data-copy="curl -fsSL https://ash.rayzor.tech/install.sh | sh">Copy</button>
             </div>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:5px 0 8px">for Windows users in PowerShell:
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:5px 0 8px">On Windows, run this in PowerShell:
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -480,7 +479,7 @@
                 data-copy="irm https://ash.rayzor.tech/install.ps1 | iex">Copy</button>
             </div>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px">Emitting objects for a target outside the supported set (MIPS, LoongArch, SPARC, ...)? Install the <strong style="color:#221d1a;font-weight:600">-dev</strong> build instead: the same <code>ash</code> with every LLVM backend registered.</p>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px">To emit object files for additional targets such as MIPS, LoongArch, or SPARC, install the <strong style="color:#221d1a;font-weight:600">-dev</strong> build. It includes every LLVM backend.</p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9;margin-bottom:10px">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
@@ -499,7 +498,7 @@
               <button class="copy-btn" data-copy="$env:ASH_DEV=1; irm https://ash.rayzor.tech/install.ps1 | iex">Copy</button>
             </div>
           </div>
-          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:0">The second line is for Windows PowerShell. A -dev build exists for Linux x86_64, macOS arm64 and Windows x86_64; elsewhere the installer takes the standard build.</p>
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:0">The second command is for PowerShell. The -dev build is available for Linux x86_64, macOS arm64, and Windows x86_64. On other platforms, the installer uses the standard build.</p>
         </div>
 
         <div>
@@ -528,8 +527,8 @@
             <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Run
               it</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Give it a
-            <code>.hl</code> file. Tell it what kind of program yours is and it tunes itself to match.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Pass your
+            <code>.hl</code> file to Ash. Optionally, choose a preset for a game, server, or short script.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -551,7 +550,7 @@
           </div>
           <div
             style="margin-top:14px;padding:14px 16px;border:1px dashed rgba(34,29,26,0.2);border-radius:8px;font-size:13px;line-height:1.65;color:#5c5450">
-            Want to build it yourself, or work on ash? The steps are in the <a
+            For instructions on building Ash from source, see the <a
               href="https://github.com/rayzor-blade/ash#building" target="_blank" rel="noopener">README</a>.
           </div>
         </div>
@@ -560,7 +559,7 @@
               style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">04</span>
             <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Build an executable</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles and links in one command. It uses the C toolchain already on your machine, the same one a C program needs. Set <code>CC</code> if you want a different one.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles the bytecode and links an executable using your system's C toolchain. Set <code>CC</code> to select a different compiler driver.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -571,7 +570,7 @@
               <button class="copy-btn" data-copy="ash --build mygame mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px"><strong style="color:#221d1a;font-weight:600">Executables are built for the machine you build on.</strong> WebAssembly is the exception, and takes the same command.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px"><strong style="color:#221d1a;font-weight:600">Native executables target the build machine.</strong> To build WebAssembly, add <code>--target wasm32-wasip1</code>.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -582,7 +581,7 @@
               <button class="copy-btn" data-copy="ash --build mygame.wasm --target wasm32-wasip1 mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">Ash brings its own wasm linker and runtime. <code>ash run mygame.wasm</code> runs the module, and the build writes a page beside it that <code>ash serve</code> serves to a browser. Your program behaves the same there as it does natively, exceptions and threads included. <a href="wasm.html" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The WebAssembly guide</a>.
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">Ash includes the wasm linker and runtime. Run the module with <code>ash run mygame.wasm</code>, or use <code>ash serve</code> to open the generated page in a browser. See the <a href="wasm.html" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">WebAssembly guide</a> for thread support, browser setup, and limitations.
           </p>
         </div>
       </div>
@@ -596,8 +595,8 @@
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(30px,4.6vw,58px);line-height:1.05;color:#221d1a;margin:0 0 18px;letter-spacing:-0.02em">
         <span id="conf-pct" style="color:#a8703c">100%</span> of Haxe's own<br>test suite passes</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:600px;margin:0">Speed is
-        worth nothing if the answers come out wrong. Ash runs Haxe's official test suite unmodified, on every push.
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:600px;margin:0">CI runs
+        the official Haxe test suite without modifications on every push. The results show pass rates for each execution mode.
         <span id="conf-sub"></span></p>
 
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin:34px 0 0">
@@ -618,7 +617,7 @@
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         Supported platforms</h2>
       <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash
-        <em>runs on</em> macOS, Linux and Windows, on both Intel and ARM. It can also compile to other target triples, and the browser.</p>
+        <em>runs on</em> macOS, Linux, and Windows. The table below lists runtime platforms, WebAssembly support, and targets that support object-file output.</p>
 
       <div
         style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden;max-width:640px;background:#ffffff">
@@ -654,9 +653,9 @@
             style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
             WebAssembly</div>
           <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">Runs in a browser or under a WASI
-            host, threads included. <a href="conformance.html"
+            host, with support for threads. <a href="conformance.html"
               style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35);white-space:nowrap">See
-              how it scores &rarr;</a></div>
+              test results &rarr;</a></div>
         </div>
         <div
           style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-top:1px solid rgba(34,29,26,0.08)">
@@ -667,12 +666,12 @@
         </div>
         <div
           style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.08)">
-          The last row builds and is checked in CI, but nothing runs it there yet. <code>ash --emit-aot out.o --target &lt;triple&gt; prog.hl</code>
-          writes the object; linking it needs that platform's toolchain and a runtime built for it. The
+          CI checks object-file generation for the targets in the last row; it does not execute the output. <code>ash --emit-aot out.o --target &lt;triple&gt; prog.hl</code>
+          writes an object file. Linking requires the target platform's toolchain and runtime. The
           <code>-dev</code> release (<code>curl -fsSL https://ash.rayzor.tech/install.sh | sh -s -- --dev</code>,
-          Linux x86_64, macOS aarch64 and Windows x86_64) is the same ash built with every backend LLVM has: MIPS, LoongArch,
-          SPARC and the rest, unchecked beyond emitting. <code>ash --version</code> says <code>(all LLVM targets)</code>
-          when you have it. Benchmark numbers come from Linux on x86_64.</div>
+          Linux x86_64, macOS aarch64 and Windows x86_64) includes all LLVM backends, including MIPS, LoongArch,
+          and SPARC. These additional targets are only checked for object-file generation. <code>ash --version</code> reports <code>(all LLVM targets)</code>
+          for this build. Benchmarks run on Linux x86_64.</div>
       </div>
     </section>
 

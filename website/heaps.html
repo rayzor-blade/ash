@@ -94,7 +94,7 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <div data-track="mac">
 <div class="eyebrow" style="margin-top:28px">Heaps.io · macOS arm64</div>
 <h1 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(32px,6vw,62px);line-height:1.08;letter-spacing:-.025em;margin:20px 0 18px">Run Heaps games<br>on Apple Silicon.</h1>
-<p style="font-size:clamp(16px,2vw,19px);line-height:1.65;color:#5c5450;max-width:720px;margin:0">Ash runs Heaps HashLink bytecode natively on Apple Silicon. Use matching Heaps and hlsdl sources, place the HDLLs beside your <code>.hl</code> file, and let Ash provide the single compatible HashLink runtime.</p>
+<p style="font-size:clamp(16px,2vw,19px);line-height:1.65;color:#5c5450;max-width:720px;margin:0">Ash runs Heaps HashLink bytecode natively on Apple Silicon. Use matching Heaps and hlsdl sources, and place the HDLLs beside your <code>.hl</code> file. Ash provides the shared HashLink runtime.</p>
 
 <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:32px">
 <a href="https://github.com/rayzor-blade/ash/raw/refs/heads/main/examples/heaps_base2d/bin/sdl.hdll" style="background:#221d1a;color:#f5f1ea;padding:13px 22px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600">Download sdl.hdll · macOS arm64 →</a>
@@ -107,14 +107,14 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <div data-track="win">
 <div class="eyebrow" style="margin-top:28px">Heaps.io · Windows x86_64</div>
 <h1 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(32px,6vw,62px);line-height:1.08;letter-spacing:-.025em;margin:20px 0 18px">Run Heaps games<br>on Windows.</h1>
-<p style="font-size:clamp(16px,2vw,19px);line-height:1.65;color:#5c5450;max-width:720px;margin:0">Ash runs Heaps HashLink bytecode on Windows x86_64 with HashLink's own prebuilt HDLLs. Place them beside your <code>.hl</code> file along with the DLLs they import, and let Ash provide the single compatible HashLink runtime.</p>
+<p style="font-size:clamp(16px,2vw,19px);line-height:1.65;color:#5c5450;max-width:720px;margin:0">Ash runs Heaps HashLink bytecode on Windows x86_64 with HashLink's own prebuilt HDLLs. Place them beside your <code>.hl</code> file along with the DLLs they import. Ash provides the shared HashLink runtime.</p>
 
 <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:32px">
 <a href="https://github.com/HaxeFoundation/hashlink/releases" style="background:#221d1a;color:#f5f1ea;padding:13px 22px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600">HashLink win64 releases →</a>
 <a href="https://github.com/rayzor-blade/ash/tree/main/examples/heaps_base2d" style="border:1px solid rgba(34,29,26,.2);color:#221d1a;padding:13px 22px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:13px">Base2D example</a>
 </div>
 
-<div class="note" style="margin-top:24px;max-width:820px"><strong>Where the HDLLs come from:</strong> a HashLink win64 release archive, unmodified — <code>fmt.hdll</code>, <code>ui.hdll</code>, <code>uv.hdll</code>, <code>sdl.hdll</code>. The same archive carries <code>SDL3.dll</code> and <code>OpenAL32.dll</code>, which are ordinary DLLs rather than HDLLs and which nothing stages for you.</div>
+<div class="note" style="margin-top:24px;max-width:820px"><strong>Library downloads:</strong> use <code>fmt.hdll</code>, <code>ui.hdll</code>, <code>uv.hdll</code>, and <code>sdl.hdll</code> from a HashLink win64 release archive. Copy any required DLL dependencies from the same archive, including <code>SDL3.dll</code> and <code>OpenAL32.dll</code>.</div>
 </div>
 
 <nav class="toc" aria-label="Contents">
@@ -132,7 +132,7 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 
 <section id="mac-install" style="margin-top:56px">
 <div class="eyebrow">01 · Install matching libraries</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Keep Haxe and native sides in sync</h2>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Match the externs to the native libraries</h2>
 <p style="line-height:1.7;color:#5c5450;max-width:760px">The Haxe externs determine which native symbols appear in <code>game.hl</code>. Pair current Heaps with HashLink's hlsdl source; mixing an older hlsdl checkout with a newer <code>sdl.hdll</code> produces unresolved or mismatched symbols.</p>
 <pre class="shell"><span style="color:#caa06f">$</span> haxelib git heaps https://github.com/HeapsIO/heaps.git
 <span style="color:#caa06f">$</span> haxelib git hlsdl https://github.com/HaxeFoundation/hashlink.git master libs/sdl
@@ -142,7 +142,7 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 
 <section id="mac-compile" style="margin-top:64px">
 <div class="eyebrow">02 · Compile</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Build ordinary HashLink bytecode</h2>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Compile to HashLink bytecode</h2>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">
 <div class="card"><div class="step">compile.hxml</div><pre style="font-size:13px;line-height:1.75;margin:0;overflow-x:auto">-lib heaps
 -lib hlsdl
@@ -151,7 +151,7 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <div class="card"><div class="step">Build</div><pre style="font-size:13px;line-height:1.75;margin:0;overflow-x:auto"><span style="color:#a8703c">$</span> haxe compile.hxml
 <span style="color:#a8703c">$</span> cp /path/to/sdl.hdll bin/</pre></div>
 </div>
-<p style="line-height:1.7;color:#5c5450;margin-top:18px">Keep every native library used by the program—commonly <code>sdl.hdll</code>, <code>fmt.hdll</code>, <code>ui.hdll</code>, and <code>uv.hdll</code>—in the same directory as <code>game.hl</code>.</p>
+<p style="line-height:1.7;color:#5c5450;margin-top:18px">Place the required native libraries in the same directory as <code>game.hl</code>. Common dependencies are <code>sdl.hdll</code>, <code>fmt.hdll</code>, <code>ui.hdll</code>, and <code>uv.hdll</code>.</p>
 </section>
 
 <section id="mac-run" style="margin-top:64px">
@@ -161,24 +161,24 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 
 [ash] Loading HDLL-compatible ash_std at .../libhl.dylib
 [ash] Loading HDLL: sdl from "bin/sdl.hdll"</pre>
-<p style="line-height:1.7;color:#5c5450;max-width:780px">That first compatibility-runtime line matters: it confirms Ash and the C HDLLs share one GC and one set of HashLink type globals. No <code>DYLD_LIBRARY_PATH</code> is required. Ash's macOS release places both <code>libhl.dylib</code> and its <code>libhl.1.dylib</code> alias beside the executable.</p>
+<p style="line-height:1.7;color:#5c5450;max-width:780px">The first log line confirms that Ash and the HDLLs share a garbage collector and HashLink type globals. No <code>DYLD_LIBRARY_PATH</code> is required. Ash's macOS release places both <code>libhl.dylib</code> and its <code>libhl.1.dylib</code> alias beside the executable.</p>
 <div class="note" style="margin-top:20px"><strong>Heaps lifecycle:</strong> <code>Main.main()</code> runs as soon as bytecode and HDLL loading complete. <code>hxd.App.init()</code> runs later, after Heaps creates its window, event loop, engine, and graphics context. In the Base2D example the measured gap was about 1.39 seconds. Do not add sleeps, pause the sentinel, or manually drive <code>hxd.System.mainLoop()</code>; those workarounds create an artificial delay.</div>
 </section>
 
 <section id="mac-ship" style="margin-top:64px">
 <div class="eyebrow">04 · Ship</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Move the runtime with the game</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Ash compiles its standard library into the executable, so an ordinary program runs from the binary alone. Native extensions are the exception: an HDLL imports <code>hl_*</code> from <code>@rpath/libhl.dylib</code>, and dyld resolves that against a file on disk &mdash; it cannot see the copy inside Ash. Every rule below follows from that one fact.</p>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Package the runtime and libraries</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">The Ash binary includes its standard library, but HDLLs need a shared runtime on disk. They import <code>hl_*</code> symbols from <code>@rpath/libhl.dylib</code>, which dyld loads separately. Include Ash's shared runtime when packaging a game that uses HDLLs.</p>
 
 <div class="card" style="margin-bottom:12px">
-<div class="step">Six rules</div>
+<div class="step">Packaging checklist</div>
 <div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
-<div><strong style="color:#221d1a">Ship both names.</strong> <code>libhl.dylib</code> and <code>libhl.1.dylib</code>. HDLLs disagree about which they link, and the versioned name is what upstream uses.</div>
-<div><strong style="color:#221d1a">Both are Ash's runtime.</strong> Copies of Ash's own library, never a HashLink build. A stale one shadows a fresh one silently.</div>
-<div><strong style="color:#221d1a">Re-sign what you copied.</strong> A signed Mach-O stops validating once it moves.</div>
-<div><strong style="color:#221d1a">Clear quarantine.</strong> Anything a browser downloaded carries an attribute that blocks loading.</div>
+<div><strong style="color:#221d1a">Include both filenames.</strong> HDLLs may link to either <code>libhl.dylib</code> or <code>libhl.1.dylib</code>. Upstream HashLink uses the versioned name.</div>
+<div><strong style="color:#221d1a">Use Ash's runtime for both.</strong> Both files must come from the same Ash release. An old copy can take precedence during loading.</div>
+<div><strong style="color:#221d1a">Re-sign after modifying libraries.</strong> Changes to Mach-O load paths can invalidate their signatures.</div>
+<div><strong style="color:#221d1a">Check quarantine attributes.</strong> Browser downloads may carry a quarantine attribute that prevents loading.</div>
 <div><strong style="color:#221d1a">Match the architecture.</strong> <code>lipo -archs</code> on every HDLL.</div>
-<div><strong style="color:#221d1a">One runtime instance.</strong> Two copies of <code>libhl</code> means two garbage collectors, and the crash surfaces far from the cause.</div>
+<div><strong style="color:#221d1a">Load one runtime instance.</strong> Loading two copies of <code>libhl</code> creates separate garbage collectors and can cause memory corruption.</div>
 </div>
 </div>
 
@@ -204,44 +204,44 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <pre class="shell"><span style="color:#caa06f">$</span> lipo -archs game/*.hdll
 <span style="color:#caa06f">$</span> otool -L game/*.hdll | grep -E 'libhl|libash_std'
 <span style="color:#caa06f">$</span> codesign -v game/*.hdll</pre>
-<p style="color:#5c5450;line-height:1.65;margin:14px 0 0">An rpath that points anywhere but the game directory loads a second runtime. Check <code>otool -l</code> for <code>LC_RPATH</code> and keep only <code>@loader_path</code>.</p>
+<p style="color:#5c5450;line-height:1.65;margin:14px 0 0">An rpath outside the game directory can resolve to another runtime. Check <code>LC_RPATH</code> entries with <code>otool -l</code> and use <code>@loader_path</code> for the packaged libraries.</p>
 </div>
 </section>
 
 <section id="mac-troubleshoot" style="margin-top:64px">
 <div class="eyebrow">05 · Troubleshoot</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Read the first failure, not the cascade</h2>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Troubleshoot loading and crashes</h2>
 <div style="display:flex;flex-direction:column;gap:12px">
-<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Shader calls crash after startup</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Confirm <code>glCreateShader</code> is not merely the first visible symptom. A second <code>libhl</code> can create the shader successfully and then crash while hlsdl boxes its numeric ID. Use this relocatable HDLL and verify the compatibility-runtime line appears before any HDLL line.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Shader calls crash after startup</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Check for a second <code>libhl</code> instance. <code>glCreateShader</code> may succeed, with the crash occurring when hlsdl boxes the returned ID. Use the linked relocatable HDLL and check that the compatibility-runtime log line appears before any HDLL load.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Unresolved sdl@hlp_* symbol</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Your Haxe hlsdl externs and native <code>sdl.hdll</code> are from different revisions. Recompile <code>game.hl</code> after selecting hlsdl 1.17.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No compatibility-runtime line</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Update Ash. Older macOS builds mishandled a bare bytecode filename such as <code>ash game.hl</code> and selected the static runtime before discovering HDLLs in the current directory.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Minimize/restore crash in hybrid mode</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Use a current Ash build. Its HashLink callback compatibility layer preserves safe defaults when hlsdl supplies null wrapper callbacks; the Base2D example is tested through repeated minimize/restore cycles.</p></div>
 
-<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">library load disallowed by system policy</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The signature stopped validating when the file moved. Re-sign it: <code>codesign --force -s -</code>. Every one of these messages names a <em>missing</em> library when the library is present and merely unloadable.</p></div>
-<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">code signature not valid for use in process</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Same cause, or a quarantine attribute from a browser download. Run <code>xattr -cr</code> first, then re-sign.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">library load disallowed by system policy</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The library may be present but blocked by an invalid signature. Re-sign the affected file with <code>codesign --force -s -</code>, followed by its path.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">code signature not valid for use in process</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Check the signature and quarantine attributes. Clear quarantine on the affected files with <code>xattr -cr</code>, then re-sign them.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">slice is not valid mach-o file</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Not a macOS binary, or the wrong architecture. Some Haxe library releases ship a Windows DLL under the <code>.hdll</code> name. Check with <code>file x.hdll</code> &mdash; expect <code>Mach-O … arm64</code>.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Required library 'x' not found</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The bytecode imports an HDLL that is not in the directory. Ash requires it at startup even when the feature goes unused, so stage it or rebuild the bytecode without that library.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No error, but random crashes or corruption</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Two runtime instances, usually an rpath resolving <code>@rpath/libhl.dylib</code> to a copy outside the game directory. Two <code>libhl</code> images mean two garbage collectors managing the same objects.</p></div>
 </div>
-<div class="note" style="margin-top:20px"><strong>Dependencies travel with the HDLL.</strong> An <code>fmt.hdll</code> built against shared libpng and libjpeg needs those dylibs staged too; one that links them statically does not. <code>otool -L</code> tells you which you have.</div>
+<div class="note" style="margin-top:20px"><strong>Include the HDLL dependencies.</strong> An <code>fmt.hdll</code> built against shared libpng and libjpeg needs those dylibs staged too; one that links them statically does not. <code>otool -L</code> tells you which you have.</div>
 </section>
 
 <section id="mac-diagnose" style="margin-top:64px">
 <div class="eyebrow">06 · Diagnose</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">When it runs, but badly</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Each flag is read once at startup and costs nothing when unset.</p>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Diagnose performance problems</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Set these environment variables before starting Ash. They are read once at startup.</p>
 <div class="card">
 <div style="display:flex;flex-direction:column;gap:13px;color:#5c5450;line-height:1.6">
-<div><code style="color:#a8703c">ASH_GC_STATS=1</code> &mdash; every collection: pause, blocks freed, live set. Start here for stutter. A pause past roughly 50&nbsp;ms is a visible hitch and long enough to break audio.</div>
+<div><code style="color:#a8703c">ASH_GC_STATS=1</code> &mdash; logs the pause duration, freed blocks, and live set for each collection. Start here when investigating stutter. Pauses around 50&nbsp;ms can cause visible hitches and audio interruptions.</div>
 <div><code style="color:#a8703c">ASH_GC_HEAP_MB=n</code> &mdash; heap cap, defaulting to a share of machine RAM. Raise it if allocation fails.</div>
-<div><code style="color:#a8703c">ASH_PROFILE=phases</code> &mdash; where wall-clock time went, split by phase.</div>
-<div><code style="color:#a8703c">ASH_TIER1_PROBE=1</code> &mdash; one line per compile with findex and timestamp; gaps are stalls.</div>
+<div><code style="color:#a8703c">ASH_PROFILE=phases</code> &mdash; reports elapsed time for each execution phase.</div>
+<div><code style="color:#a8703c">ASH_TIER1_PROBE=1</code> &mdash; logs each compilation with a function index and timestamp. Use the timings to investigate compilation stalls.</div>
 <div><code style="color:#a8703c">ASH_WORKERS=n</code> &mdash; scheduler threads, defaulting to cores minus one.</div>
-<div><code style="color:#a8703c">ASH_GC_STRESS=1</code> &mdash; collects constantly. Very slow, and the fastest way to expose a rooting bug.</div>
+<div><code style="color:#a8703c">ASH_GC_STRESS=1</code> &mdash; runs frequent collections to help reproduce GC rooting bugs. Expect a substantial slowdown.</div>
 <div><code style="color:#a8703c">ASH_LIBHL=system|embedded</code> &mdash; overrides runtime selection when you suspect the wrong <code>libhl</code>.</div>
 </div>
 </div>
-<div class="note" style="margin-top:20px"><strong>Reporting a stall.</strong> A <code>sample &lt;pid&gt;</code> captured while the game is stuck is worth more than any description: it names the thread and the function, and separates a garbage-collection pause from a compile from a lock wait &mdash; three problems that feel identical from outside.</div>
+<div class="note" style="margin-top:20px"><strong>Reporting a stall.</strong> Capture <code>sample &lt;pid&gt;</code> while the game is stalled and include it in the report. The thread stacks help distinguish a GC pause, compilation, and a lock wait.</div>
 </section>
 
 </div>
@@ -250,20 +250,20 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 
 <section id="win-install" style="margin-top:56px">
 <div class="eyebrow">01 · Install matching libraries</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Keep Haxe and native sides in sync</h2>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Match the externs to the native libraries</h2>
 <p style="line-height:1.7;color:#5c5450;max-width:760px">The Haxe externs determine which native symbols appear in <code>game.hl</code>. Pair current Heaps with HashLink's hlsdl source, and take the compiled HDLLs from a HashLink release of the same generation; older externs against a newer <code>sdl.hdll</code> produce unresolved or mismatched symbols.</p>
 <pre class="shell"><span style="color:#caa06f">&gt;</span> haxelib git heaps https://github.com/HeapsIO/heaps.git
 <span style="color:#caa06f">&gt;</span> haxelib git hlsdl https://github.com/HaxeFoundation/hashlink.git master libs/sdl
 <span style="color:#caa06f">&gt;</span> haxelib path heaps
 <span style="color:#caa06f">&gt;</span> haxelib path hlsdl</pre>
-<p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:22px">Ash itself installs globally, once:</p>
+<p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:22px">Install Ash with PowerShell:</p>
 <pre class="shell"><span style="color:#caa06f">&gt;</span> irm https://ash.rayzor.tech/install.ps1 | iex</pre>
 <p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:18px">That puts <code>ash.exe</code> in <code>~\.ash\bin</code> and adds the directory to your user PATH. The HashLink runtime travels with it &mdash; <code>libhl.dll</code> and the <code>libhl.1.dll</code> alias that HashLink 1.x builds import &mdash; so there is nothing further to install, and nothing to copy per game.</p>
 </section>
 
 <section id="win-compile" style="margin-top:64px">
 <div class="eyebrow">02 · Compile</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Build ordinary HashLink bytecode</h2>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Compile to HashLink bytecode</h2>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">
 <div class="card"><div class="step">compile.hxml</div><pre style="font-size:13px;line-height:1.75;margin:0;overflow-x:auto">-lib heaps
 -lib hlsdl
@@ -272,7 +272,7 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <div class="card"><div class="step">Build</div><pre style="font-size:13px;line-height:1.75;margin:0;overflow-x:auto"><span style="color:#a8703c">&gt;</span> haxe compile.hxml
 <span style="color:#a8703c">&gt;</span> copy hashlink-win64\*.hdll bin\</pre></div>
 </div>
-<p style="line-height:1.7;color:#5c5450;margin-top:18px">Keep every native library the program uses—commonly <code>sdl.hdll</code>, <code>fmt.hdll</code>, <code>ui.hdll</code>, and <code>uv.hdll</code>—in the same directory as <code>game.hl</code>, together with the plain DLLs they import: <code>SDL3.dll</code> for <code>sdl.hdll</code>, <code>OpenAL32.dll</code> for <code>openal.hdll</code>. Both ship in the same HashLink archive as the HDLLs.</p>
+<p style="line-height:1.7;color:#5c5450;margin-top:18px">Place the required HDLLs beside <code>game.hl</code>, along with their DLL dependencies. Common HDLLs include <code>sdl.hdll</code>, <code>fmt.hdll</code>, <code>ui.hdll</code>, and <code>uv.hdll</code>. SDL needs <code>SDL3.dll</code>; OpenAL needs <code>OpenAL32.dll</code>. These DLLs are included in the HashLink release archive.</p>
 </section>
 
 <section id="win-run" style="margin-top:64px">
@@ -282,15 +282,15 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 
 [ash] Loading HDLL-compatible ash_std at ...\libhl.dll
 [ash] Loading HDLL: sdl from "bin\sdl.hdll"</pre>
-<p style="line-height:1.7;color:#5c5450;max-width:780px">That first compatibility-runtime line matters: it confirms Ash and the C HDLLs share one GC and one set of HashLink type globals. Nothing needs adding to <code>PATH</code> for the runtime itself &mdash; Ash's Windows release places <code>libhl.dll</code> and its <code>libhl.1.dll</code> alias beside the executable, and the loader searches that directory first.</p>
+<p style="line-height:1.7;color:#5c5450;max-width:780px">The first log line confirms that Ash and the HDLLs share a garbage collector and HashLink type globals. Nothing needs adding to <code>PATH</code> for the runtime itself &mdash; Ash's Windows release places <code>libhl.dll</code> and its <code>libhl.1.dll</code> alias beside the executable, and the loader searches that directory first.</p>
 <div class="note" style="margin-top:20px"><strong>Heaps lifecycle:</strong> <code>Main.main()</code> runs as soon as bytecode and HDLL loading complete. <code>hxd.App.init()</code> runs later, after Heaps creates its window, event loop, engine, and graphics context. Do not add sleeps or manually drive <code>hxd.System.mainLoop()</code>; those workarounds create an artificial delay.</div>
-<div class="note" style="margin-top:12px"><strong><code>ui.Sentinel</code> does not arm.</strong> HashLink's watchdog suspends the thread it watches and rewrites that thread's instruction pointer to graft a call onto it &mdash; against Ash that is a stack carrying JIT frames. <code>hl_thread_start</code> answers null, HashLink's own "no thread was started", so a program that asks for a sentinel runs without a watchdog rather than not running.</div>
+<div class="note" style="margin-top:12px"><strong><code>ui.Sentinel</code> is disabled.</strong> HashLink's watchdog modifies the watched thread's instruction pointer, which is incompatible with Ash's JIT frames. Ash returns null from <code>hl_thread_start</code> for this request, so the program runs without the watchdog.</div>
 </section>
 
 <section id="win-ship" style="margin-top:64px">
 <div class="eyebrow">04 · Ship</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">What travels with the game</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Ash is installed once and runs from wherever the installer put it; the runtime it hands the HDLLs is the <code>libhl.dll</code> sitting beside <code>ash.exe</code> there. Nothing about that needs copying, renaming, or repointing. What ships with the game is the native code the bytecode asks for &mdash; the HDLLs, and the plain DLLs those import.</p>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Package the game libraries</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">On a machine with Ash installed, HDLLs use the <code>libhl.dll</code> beside <code>ash.exe</code>. Package your game with its required HDLLs and their DLL dependencies. Leave the runtime in the Ash installation directory.</p>
 
 <div class="card" style="margin-bottom:12px">
 <div class="step">In the game directory</div>
@@ -303,48 +303,48 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 </div>
 
 <div class="card">
-<div class="step">Three rules</div>
+<div class="step">Packaging checklist</div>
 <div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
-<div><strong style="color:#221d1a">The runtime is not yours to stage.</strong> Ash ships <code>libhl.dll</code> and the <code>libhl.1.dll</code> alias beside its own executable. Do not put a copy in the game directory, and never a HashLink <code>libhl.dll</code> &mdash; a second runtime is a second garbage collector, and the crash surfaces far from the cause.</div>
-<div><strong style="color:#221d1a">Ship the plain DLLs.</strong> <code>SDL3.dll</code> and <code>OpenAL32.dll</code> are ordinary dependencies rather than HDLLs, and nothing stages them for you. They come from the same HashLink archive as the HDLLs.</div>
-<div><strong style="color:#221d1a">Match the architecture.</strong> Every HDLL must be a 64-bit PE. A Mach-O or ELF file under a <code>.hdll</code> name fails at load, and Ash says which it found.</div>
+<div><strong style="color:#221d1a">Use the installed runtime.</strong> Ash includes <code>libhl.dll</code> and its <code>libhl.1.dll</code> alias beside <code>ash.exe</code>. Keep copies out of the game directory: loading a second runtime creates a separate garbage collector and can corrupt memory.</div>
+<div><strong style="color:#221d1a">Include dependent DLLs.</strong> Copy <code>SDL3.dll</code> and, if needed, <code>OpenAL32.dll</code> from the HashLink archive into the game directory.</div>
+<div><strong style="color:#221d1a">Match the architecture.</strong> Every HDLL must be a Windows x86_64 binary. Ash reports the detected format if a library is built for another platform.</div>
 </div>
 </div>
 
-<div class="note" style="margin-top:20px"><strong>Ash comes from the installer, not from your build.</strong> <code>install.ps1</code> puts it in <code>~\.ash\bin</code> with its runtime and adds that to PATH. A machine running the game needs Ash the way it would need any interpreter &mdash; installed once, not copied in beside every title.</div>
+<div class="note" style="margin-top:20px"><strong>Install Ash on the target machine.</strong> <code>install.ps1</code> places Ash and its runtime in <code>~\.ash\bin</code> and adds the directory to PATH. That installation can run multiple games.</div>
 </section>
 
 <section id="win-troubleshoot" style="margin-top:64px">
 <div class="eyebrow">05 · Troubleshoot</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Read the first failure, not the cascade</h2>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Troubleshoot loading and crashes</h2>
 <div style="display:flex;flex-direction:column;gap:12px">
-<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">The specified procedure could not be found (127)</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The HDLL imports a symbol this runtime does not export. Windows resolves every import before it maps a module, so one absent symbol fails the whole library before any of its code runs &mdash; and the message names neither the symbol nor where it wanted it from. Update Ash first; if it persists, the HDLL is from a HashLink generation whose ABI Ash has not caught up with.</p></div>
-<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">The specified module could not be found (126)</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">A DLL the HDLL depends on is missing &mdash; not the HDLL itself. <code>sdl.hdll</code> wants <code>SDL3.dll</code>; <code>openal.hdll</code> wants <code>OpenAL32.dll</code>. Put them beside the HDLL.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">The specified procedure could not be found (127)</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The HDLL imports a symbol that the runtime does not export. Windows rejects the library before running its code, but this error does not identify the missing symbol. Update Ash first. If the error persists, check whether the HDLL requires a HashLink ABI that Ash does not yet support.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">The specified module could not be found (126)</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Check for missing DLL dependencies beside the HDLL. <code>sdl.hdll</code> requires <code>SDL3.dll</code>, and <code>openal.hdll</code> requires <code>OpenAL32.dll</code>.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">%1 is not a valid Win32 application</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Not a Windows binary, or the wrong architecture &mdash; some Haxe library releases ship a macOS or Linux build under the <code>.hdll</code> name. Ash names the format it actually found in its own error, ahead of the loader's text.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Unresolved sdl@hlp_* symbol</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Your Haxe hlsdl externs and native <code>sdl.hdll</code> are from different revisions. Recompile <code>game.hl</code> against externs matching the HDLL you staged.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No compatibility-runtime line</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Ash chose its built-in runtime, which leaves the HDLLs bound to a second copy whose collector was never started. It selects the shared one when it finds HDLLs beside the bytecode &mdash; check they are in that directory, and that <code>libhl.dll</code> sits beside <code>ash.exe</code>.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Required library 'x' not found</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The bytecode imports an HDLL that is not in the directory. Ash requires it at startup even when the feature goes unused, so stage it or rebuild the bytecode without that library.</p></div>
-<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No error, but random crashes or corruption</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Two runtime instances, usually a HashLink <code>libhl.dll</code> reachable ahead of Ash's own. Two <code>libhl</code> images mean two garbage collectors managing the same objects, and the crash lands nowhere near the cause.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No error, but random crashes or corruption</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Check whether a HashLink <code>libhl.dll</code> is being loaded before Ash's copy. Two runtime instances can leave separate garbage collectors managing the same objects, causing crashes later in execution.</p></div>
 </div>
-<div class="note" style="margin-top:20px"><strong>Dependencies travel with the HDLL.</strong> An <code>fmt.hdll</code> built against shared libpng and libjpeg needs those DLLs staged too; one that links them statically does not. The loader will not tell you which you have &mdash; read the HDLL's import table.</div>
+<div class="note" style="margin-top:20px"><strong>Include the HDLL dependencies.</strong> An <code>fmt.hdll</code> built against shared libpng and libjpeg needs those DLLs staged too; one that links them statically does not. Check the HDLL's import table to see which DLLs it needs.</div>
 </section>
 
 <section id="win-diagnose" style="margin-top:64px">
 <div class="eyebrow">06 · Diagnose</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">When it runs, but badly</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Each flag is read once at startup and costs nothing when unset.</p>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Diagnose performance problems</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Set these environment variables before starting Ash. They are read once at startup.</p>
 <div class="card">
 <div style="display:flex;flex-direction:column;gap:13px;color:#5c5450;line-height:1.6">
-<div><code style="color:#a8703c">ASH_GC_STATS=1</code> &mdash; every collection: pause, blocks freed, live set. Start here for stutter. A pause past roughly 50&nbsp;ms is a visible hitch and long enough to break audio.</div>
+<div><code style="color:#a8703c">ASH_GC_STATS=1</code> &mdash; logs the pause duration, freed blocks, and live set for each collection. Start here when investigating stutter. Pauses around 50&nbsp;ms can cause visible hitches and audio interruptions.</div>
 <div><code style="color:#a8703c">ASH_GC_HEAP_MB=n</code> &mdash; heap cap, defaulting to a share of machine RAM. Raise it if allocation fails.</div>
-<div><code style="color:#a8703c">ASH_PROFILE=phases</code> &mdash; where wall-clock time went, split by phase. The sampling profiler is macOS and Linux only; this one works everywhere.</div>
-<div><code style="color:#a8703c">ASH_TIER1_PROBE=1</code> &mdash; one line per compile with findex and timestamp; gaps are stalls.</div>
+<div><code style="color:#a8703c">ASH_PROFILE=phases</code> &mdash; reports elapsed time for each execution phase. The sampling profiler is macOS and Linux only; this one works everywhere.</div>
+<div><code style="color:#a8703c">ASH_TIER1_PROBE=1</code> &mdash; logs each compilation with a function index and timestamp. Use the timings to investigate compilation stalls.</div>
 <div><code style="color:#a8703c">ASH_WORKERS=n</code> &mdash; scheduler threads, defaulting to cores minus one.</div>
-<div><code style="color:#a8703c">ASH_GC_STRESS=1</code> &mdash; collects constantly. Very slow, and the fastest way to expose a rooting bug.</div>
+<div><code style="color:#a8703c">ASH_GC_STRESS=1</code> &mdash; runs frequent collections to help reproduce GC rooting bugs. Expect a substantial slowdown.</div>
 <div><code style="color:#a8703c">ASH_STD_LINKAGE=dynamic</code> &mdash; forces the shared runtime even with no HDLLs present, to A/B against the built-in one.</div>
 </div>
 </div>
-<div class="note" style="margin-top:20px"><strong>Reporting a crash.</strong> Ash has no crash handler on Windows yet, so a fault ends the process without printing anything. Record what the program had reached, and whether the timing changes between runs: a fault that lands at a different moment each time is usually a collection, one that lands at the same point is usually the code that ran just before it.</div>
+<div class="note" style="margin-top:20px"><strong>Reporting a crash.</strong> Ash has no crash handler on Windows yet, so a fault may end the process without a diagnostic. Include the last output, the steps to reproduce the crash, and whether it occurs at the same point on each run. That helps narrow down GC, timing, and code-generation issues.</div>
 </section>
 
 </div>

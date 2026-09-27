@@ -16,13 +16,13 @@
   <meta property="og:site_name" content="Ash">
   <meta property="og:title" content="Ash — HashLink Bytecode Runtime">
   <meta property="og:description"
-    content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM — benchmarked against HashLink's JIT and HL/C on every push.">
+    content="Results from the official Haxe test suite across Ash execution modes, including passes, failures, and skipped tests.">
   <meta property="og:url" content="https://ash.rayzor.tech/">
   <meta property="og:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Ash — HashLink Bytecode Runtime">
   <meta name="twitter:description"
-    content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM.">
+    content="Results from the official Haxe test suite across Ash execution modes, including passes, failures, and skipped tests.">
   <meta name="twitter:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <script type="application/ld+json">
 {
@@ -31,7 +31,7 @@
   "name": "Ash",
   "operatingSystem": "macOS, Linux, Windows",
   "applicationCategory": "DeveloperApplication",
-  "description": "A runtime for HashLink bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM.",
+  "description": "A faster runtime for Haxe's HashLink bytecode, benchmarked against HashLink's own JIT, with support for native executables and WebAssembly.",
   "url": "https://ash.rayzor.tech/",
   "image": "https://ash.rayzor.tech/ash-mark-tight.png",
   "license": "https://opensource.org/license/isc-license-txt",
@@ -293,9 +293,10 @@
         Conformance</div>
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
-        Measured against Haxe's own test suite</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Being fast is
-        worth nothing if the answers are wrong. Ash runs the official Haxe test suite unmodified, from CI on every push.
+        Haxe test suite results</h2>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">CI runs the
+        official Haxe test suite without modifications on every push. The table shows passes, failures, and skipped
+        tests for each Ash execution mode.
       </p>
 
       <div id="conf-engines" style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px"></div>
@@ -307,13 +308,13 @@
             conformance results…</div>
           <noscript>
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">The
-              conformance table needs JavaScript; the raw results live in <a
+              conformance table requires JavaScript. You can read the raw results in <a
                 href="bench/conformance.json">bench/conformance.json</a>.</div>
           </noscript>
         </div>
         <div id="conf-footnote"
           style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.1)">
-          The official Haxe test suite, unmodified, run on every push.</div>
+          Results from the unmodified official Haxe test suite, run in CI on every push.</div>
       </div>
 
       <p id="conf-provenance"
@@ -476,9 +477,9 @@
         // table, where a number without an engine beside it would mislead.
         var foot = document.getElementById('conf-footnote');
         var nat = data.missing_natives || [];
-        foot.textContent = 'The official Haxe test suite, unmodified, run on every push. ' +
+        foot.textContent = 'Results from the unmodified official Haxe test suite, run in CI on every push. ' +
           (nat.length ? nat.length + ' stdlib native' + (nat.length === 1 ? '' : 's') + ' unresolved.'
-            : 'Every stdlib native these suites ask for resolves.');
+            : 'All standard library native functions required by these suites resolve.');
         if (nat.length) foot.title = nat.join(', ');
 
         // Stock HashLink's result for the same bytecode, when the run had a
@@ -617,7 +618,7 @@
           mount.textContent = '';
           var msg = el('div', null,
             "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px");
-          msg.textContent = 'No published conformance run is available yet. (' + err.message + ')';
+          msg.textContent = 'Could not load conformance results. (' + err.message + ')';
           mount.appendChild(msg);
         });
     })();

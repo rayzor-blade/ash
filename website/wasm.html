@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WebAssembly — Ash</title>
-<meta name="description" content="Compile Haxe to WebAssembly with Ash: build the .hl, link a .wasm, run it under wasmtime or in a browser with real parallel threads, and write native libraries in Rust as wasm side modules.">
+<meta name="description" content="Build WebAssembly from Haxe bytecode with Ash. Run it in a terminal or browser, configure parallel threads, and write Rust libraries as wasm side modules.">
 <meta name="theme-color" content="#f5f1ea">
 <link rel="canonical" href="https://ash.rayzor.tech/wasm.html">
 <link rel="icon" type="image/png" href="ash-mark-tight.png">
@@ -100,13 +100,13 @@ td:first-child{white-space:nowrap}
 <main style="max-width:1080px;margin:0 auto;padding:clamp(40px,7vw,72px) clamp(24px,6vw,64px) 80px">
 
 <div class="eyebrow">WebAssembly</div>
-<h1 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(32px,6vw,62px);line-height:1.08;letter-spacing:-.025em;margin:20px 0 18px">Haxe to WebAssembly,<br>threads included.</h1>
-<p style="font-size:clamp(16px,2vw,19px);max-width:760px;margin:0">Ash compiles HashLink bytecode to a WebAssembly module. It is compiled code, not an interpreter shipped to the browser. The same <code>ash</code> binary builds the module, runs it from a terminal, and serves it to a browser, where its Haxe threads run in parallel on Web Workers. Native libraries ship beside it as their own <code>.wasm</code> files.</p>
+<h1 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(32px,6vw,62px);line-height:1.08;letter-spacing:-.025em;margin:20px 0 18px">Compile Haxe<br>to WebAssembly.</h1>
+<p style="font-size:clamp(16px,2vw,19px);max-width:760px;margin:0">Ash compiles HashLink bytecode to WebAssembly. Use <code>ash</code> to build the module, run it in a terminal, or serve it to a browser. Browser builds can run Haxe threads in parallel using Web Workers. For single-threaded programs under <code>ash run</code>, native libraries can be built as separate <code>.wasm</code> modules.</p>
 
 <div class="grid">
-<div class="card"><div class="step">One binary</div><p>The installed <code>ash</code> carries LLVM, its own wasm linker, the wasm runtime and the browser host. Nothing else to install.</p></div>
-<div class="card"><div class="step">Real threads</div><p>Each <code>sys.thread</code> thread gets a Worker of its own over one shared memory. Four threads ran 3.01x faster than the same work done serially, in a real page.</p></div>
-<div class="card"><div class="step">Native libraries</div><p>An HDLL becomes a <code>dylink.0</code> side module that shares the program's memory and collector. Same <code>@:hlNative</code> declarations, same <code>DEFINE_PRIM</code> resolvers.</p></div>
+<div class="card"><div class="step">Included tools</div><p>The Ash release includes LLVM, a wasm linker, the wasm runtime, and the browser host. You also need Haxe to compile your source to bytecode.</p></div>
+<div class="card"><div class="step">Parallel threads</div><p>Haxe threads run on Web Workers with shared memory. A browser benchmark with four threads measured a 3.01× speedup over the serial version.</p></div>
+<div class="card"><div class="step">Native libraries</div><p>Build native libraries as <code>dylink.0</code> side modules. They share the program's memory and collector and use the existing <code>@:hlNative</code> and <code>DEFINE_PRIM</code> interfaces.</p></div>
 </div>
 
 <nav class="toc" aria-label="Contents">
@@ -118,8 +118,8 @@ td:first-child{white-space:nowrap}
 
 <section id="install">
 <div class="eyebrow">01 · Install</div>
-<h2>Install ash</h2>
-<p>The same install as for native work. The archive puts the wasm runtime (<code>wasm32-wasip1/</code> and <code>wasm32-wasip1-threads/</code>) and the browser host (<code>browser/</code>) beside the <code>ash</code> binary, which is where it looks for them.</p>
+<h2>Install Ash</h2>
+<p>Use the standard Ash installer. It places the wasm runtime directories (<code>wasm32-wasip1/</code> and <code>wasm32-wasip1-threads/</code>) and the browser host (<code>browser/</code>) beside the <code>ash</code> binary automatically.</p>
 <pre class="shell"><span class="p">$</span> curl -fsSL https://ash.rayzor.tech/install.sh | sh</pre>
 <p>On Windows, in PowerShell: <code>irm https://ash.rayzor.tech/install.ps1 | iex</code>. You also need <a href="https://haxe.org/download/">Haxe</a> to compile the program to bytecode.</p>
 <div class="note"><strong>Check the install.</strong> <code>ls ~/.ash/bin/wasm32-wasip1</code> should list <code>ash_runtime.o</code>. If it does not, the install predates wasm packaging: run the install command again.</div>
@@ -127,8 +127,8 @@ td:first-child{white-space:nowrap}
 
 <section id="program">
 <div class="eyebrow">02 · A Haxe program</div>
-<h2>Write it and compile it to bytecode</h2>
-<p>Nothing wasm-specific goes into the Haxe side. This program starts four threads, has each one compute on its own, and waits for all four results on a <code>Deque</code>.</p>
+<h2>Compile a Haxe program</h2>
+<p>This example uses the standard Haxe threading API. It starts four threads, gives each one a computation, and collects the results through a <code>Deque</code>.</p>
 <div class="file">Main.hx</div>
 <pre class="code"><span class="kn">import</span><span class="w"> </span><span class="nn">sys</span><span class="p">.</span><span class="nn">thread</span><span class="p">.</span><span class="nn">Deque</span><span class="p">;</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">sys</span><span class="p">.</span><span class="nn">thread</span><span class="p">.</span><span class="nn">Thread</span><span class="p">;</span>
@@ -156,27 +156,27 @@ td:first-child{white-space:nowrap}
 
 <section id="build">
 <div class="eyebrow">03 · Build &amp; run</div>
-<h2>Build a module, run it from a terminal</h2>
+<h2>Build and run the module</h2>
 <pre class="shell"><span class="p">$</span> ash --build main.wasm --target wasm32-wasip1 main.hl
 <span class="p">$</span> ash run main.wasm
 <span class="o">Hello from Haxe, compiled to wasm by ash</span>
 <span class="o">4 threads: [1104406912,1614248833,2124090754,486449027] in 604ms</span></pre>
-<p>Ash compiles the bytecode through the same pipeline as its native builds (AIR, then LLVM, then a wasm32 object) and links it with its own linker. The module is a library rather than a command: it exports <code>main</code> and imports what a sandbox cannot do for itself, such as clocks, output and suspending a fiber. Something has to instantiate it and answer those imports: a <strong>host</strong>.</p>
+<p>Ash compiles the bytecode through AIR and LLVM to a wasm32 object, then links the module with its own linker. The module exports <code>main</code> and imports services such as clocks, output, and fiber suspension. A <strong>host</strong> instantiates the module and provides those services.</p>
 <div class="grid">
-<div class="card"><div class="step">ash run</div><p>A wasmtime host built into <code>ash</code>. Arguments after the module are the program's; <code>--dir PATH</code> makes a directory visible beyond the working one.</p></div>
-<div class="card"><div class="step">The browser</div><p>The same contract behind a WASI shim, with Workers for threads. <code>--build</code> writes the page for it; see <a href="#browser">05</a>.</p></div>
-<div class="card"><div class="step">Your own</div><p><a href="https://github.com/rayzor-blade/ash/blob/main/docs/wasm/host-abi.md">docs/wasm/host-abi.md</a> lists every import. <code>ash wasm main.wasm</code> groups a module's imports by who must answer them, and <code>ash wasm --validate</code> fails if a host could not run it.</p></div>
+<div class="card"><div class="step">ash run</div><p>The Wasmtime host built into <code>ash</code>. Arguments after the module path go to the program. Use <code>--dir PATH</code> to allow access to a directory in addition to the working directory.</p></div>
+<div class="card"><div class="step">The browser</div><p>A WASI shim provides the host services, and Workers run the threads. <code>--build</code> generates the page; see <a href="#browser">browser setup</a>.</p></div>
+<div class="card"><div class="step">Custom host</div><p><a href="https://github.com/rayzor-blade/ash/blob/main/docs/wasm/host-abi.md">docs/wasm/host-abi.md</a> lists the required imports. <code>ash wasm main.wasm</code> groups imports by provider. Use <code>ash wasm --validate</code> to check host compatibility.</p></div>
 </div>
 <div class="note"><strong>Exceptions use the standard wasm exception-handling proposal.</strong> Ash lowers <code>setjmp</code> into it, so every module carries <code>exnref</code>. It is supported from Chrome 137, Firefox 131 and Safari 18.4.</div>
 </section>
 
 <section id="threads">
 <div class="eyebrow">04 · Threads</div>
-<h2>Parallel threads that can block</h2>
-<p>The build above runs its four threads one at a time. Threads on wasm come from two mechanisms, and a program needs both to run them in parallel:</p>
+<h2>Configure parallel threads</h2>
+<p>The build above runs the four thread bodies sequentially. Parallel execution with blocking calls requires two features:</p>
 <ul class="plain">
-<li><strong>Agents</strong>, from <code>--target wasm32-wasip1-threads</code>. Each Haxe thread is another instance of the same module over one shared memory, on an agent of its own: a Worker in a page, an OS thread under <code>ash run</code>.</li>
-<li><strong>Fibers</strong>, from <code>ASH_WASM_FIBERS=1</code> at build time. A thread blocked in <code>Deque.pop(true)</code>, a lock or <code>Sys.sleep</code> suspends inside the module and resumes where it stopped. Every agent has its own instance, so its own fiber state and scheduler: a fiber blocking on one agent stops nothing on another.</li>
+<li><strong>Agents</strong>, from <code>--target wasm32-wasip1-threads</code>. Each agent runs an instance of the module with shared memory. In a browser, an agent is a Web Worker; under <code>ash run</code>, it is an OS thread.</li>
+<li><strong>Fibers</strong>, from <code>ASH_WASM_FIBERS=1</code> at build time. Fibers let calls such as <code>Deque.pop(true)</code>, lock waits, and <code>Sys.sleep</code> suspend and resume. Each agent has its own fiber state and scheduler, so a blocked fiber does not stop other agents.</li>
 </ul>
 <pre class="shell"><span class="p">$</span> ASH_WASM_FIBERS=1 ash --build main.wasm --target wasm32-wasip1-threads main.hl
 <span class="p">$</span> ash run main.wasm</pre>
@@ -188,46 +188,46 @@ td:first-child{white-space:nowrap}
 <tr><td><code>wasm32-wasip1-threads</code> + fibers</td><td>in parallel, one agent each</td><td>suspends; the others run</td></tr>
 </tbody>
 </table></div>
-<p>The runtime asks the host for one agent per thread, for as long as the host keeps saying yes. A thread created when no agent is free runs as a fiber on the main scheduler, taking turns with the main thread, so a program never fails for want of agents; it only loses parallelism.</p>
+<p>The runtime requests an agent for each thread. With fibers enabled, a thread created when all agents are busy runs on the main scheduler instead. It shares execution time with the main thread until it finishes.</p>
 </section>
 
 <section id="browser">
 <div class="eyebrow">05 · The browser</div>
-<h2>Build a page, serve it</h2>
+<h2>Run in a browser</h2>
 <p>A wasm build also writes a page beside the module. <code>ash serve</code> serves a directory on localhost with the two headers a threaded module needs.</p>
 <pre class="shell"><span class="p">$</span> mkdir -p site
 <span class="p">$</span> ASH_WASM_FIBERS=1 ash --build site/main.wasm --target wasm32-wasip1-threads main.hl
 <span class="p">$</span> ash serve site
 <span class="o">serving /home/you/site at http://127.0.0.1:8731/</span></pre>
-<p>Open the address and the program's output appears on the page; each thread is handed to a Worker of its own. <code>ash serve --port N</code> picks another port. <code>?arg=value</code> in the address adds to <code>Sys.args()</code>.</p>
+<p>Open the local address to see the output. Threads use available Workers, with fiber scheduling as the fallback. Use <code>ash serve --port N</code> to change the port and add <code>?arg=value</code> to the URL to pass an argument through <code>Sys.args()</code>.</p>
 
-<h3>What the build writes</h3>
+<h3>Generated files</h3>
 <div class="table-wrap"><table>
 <thead><tr><th>File</th><th>Runs on</th><th>Does</th></tr></thead>
 <tbody>
 <tr><td><code>main.wasm</code></td><td></td><td>The program.</td></tr>
-<tr><td><code>index.html</code></td><td>the page's main thread</td><td>Starts <code>worker.js</code> and prints what it posts. Never runs the program: a Haxe main loop does not return, and on the main thread that is a frozen tab. Rewritten on each build while its first comment says ash generated it; delete that line to keep your own page.</td></tr>
-<tr><td><code>worker.js</code></td><td>a module Worker</td><td>Warms the thread agents, fetches the module, and calls <code>run</code>. Terminates every agent when the program ends.</td></tr>
-<tr><td><code>thread.js</code></td><td>one Worker per thread</td><td>A second instance of the module over the shared memory, entered at <code>wasi_thread_start</code>.</td></tr>
-<tr><td><code>display.js</code></td><td>a Worker that owns the canvas</td><td>Started on the first frame a program presents. The agent running the program never returns to its event loop, so a frame drawn there would not reach the page until the program ended.</td></tr>
+<tr><td><code>index.html</code></td><td>the page's main thread</td><td>Starts <code>worker.js</code> and displays its output. The program runs in a Worker so a blocking Haxe main loop does not freeze the tab. Ash overwrites this file on each build if its first comment marks it as generated. Remove that comment to keep a custom page.</td></tr>
+<tr><td><code>worker.js</code></td><td>a module Worker</td><td>Starts the thread Workers, fetches the module, and calls <code>run</code>. Terminates the Workers when the program exits.</td></tr>
+<tr><td><code>thread.js</code></td><td>one Worker per thread</td><td>Instantiates the module with shared memory and enters at <code>wasi_thread_start</code>.</td></tr>
+<tr><td><code>display.js</code></td><td>a Worker that owns the canvas</td><td>Starts when the program presents its first frame. Drawing runs in a separate Worker because the program's main loop can block its Worker's event loop.</td></tr>
 <tr><td><code>ash_browser.js</code>, <code>ash_browser_bg.wasm</code></td><td></td><td>The host: WASI from the browser (output to <code>console</code>, clocks from <code>performance.now</code>, randomness from <code>crypto</code>, no filesystem) and Workers for threads.</td></tr>
 </tbody>
 </table></div>
 
-<h3>Putting it on a real server</h3>
-<p>Copy the directory as it is. The server must send these on every response, or a threaded module has no shared memory and fails when it is instantiated; a single-threaded module needs neither. <code>WebAssembly.instantiate</code> refuses a <code>file://</code> page, so it has to be served either way.</p>
+<h3>Deploy to a web server</h3>
+<p>Upload the generated directory and configure the server to send these headers on every response. Threaded builds need them for shared memory. Single-threaded builds do not need the headers. Serve either build over HTTP(S); opening the page through <code>file://</code> will not work.</p>
 <pre class="code">Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp</pre>
 
-<h3>Why the page is built this way</h3>
+<h3>Worker startup and scheduling</h3>
 <ul class="plain">
-<li><strong>The thread agents start before the program.</strong> Creating a Worker needs the creating agent to return to its event loop, and the agent asking for a thread is inside a synchronous call into wasm that will not return until the thread answers. A Worker created on demand never loads and the program hangs. <code>worker.js</code> warms one agent per core but one, and that count is how many threads run in parallel.</li>
-<li><strong>A thread with no agent still runs.</strong> When none is idle the host is told so and the thread runs as a fiber on the main scheduler; the page prints which.</li>
-<li><strong>Build with <code>ASH_WASM_FIBERS=1</code>.</strong> Without it a thread that blocks never gives its agent back, and a thread with no agent never gets a turn.</li>
+<li><strong>Workers start before the program.</strong> Worker startup requires the parent to return to its event loop. A synchronous wasm call can block that loop while waiting for a thread, so creating Workers on demand can deadlock. <code>worker.js</code> starts the pool in advance, with one Worker per core minus one.</li>
+<li><strong>Busy pools fall back to fibers.</strong> If no Worker is idle, the thread runs as a fiber on the main scheduler. The page reports which scheduler each thread uses.</li>
+<li><strong>Build with <code>ASH_WASM_FIBERS=1</code>.</strong> Fibers allow blocking threads to yield and let the main scheduler run threads that have no available Worker.</li>
 </ul>
 
-<h3>Your own page</h3>
-<p>Keep <code>worker.js</code>, <code>thread.js</code>, <code>display.js</code> and the host files, and talk to <code>worker.js</code> from any page:</p>
+<h3>Use a custom page</h3>
+<p>Keep <code>worker.js</code>, <code>thread.js</code>, <code>display.js</code> and the host files, and send messages to <code>worker.js</code> from your page:</p>
 <div class="file">your page</div>
 <pre class="code"><span class="kd">const</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Worker</span><span class="p">(</span><span class="s2">&quot;./worker.js&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;module&quot;</span><span class="w"> </span><span class="p">});</span>
 <span class="nx">worker</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
@@ -237,22 +237,22 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
 <span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">text</span><span class="p">)</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">text</span><span class="p">);</span>
 <span class="p">};</span>
 <span class="nx">worker</span><span class="p">.</span><span class="nx">postMessage</span><span class="p">({</span><span class="w"> </span><span class="nx">module</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;./main.wasm&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;main.wasm&quot;</span><span class="p">],</span><span class="w"> </span><span class="nx">display</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">});</span></pre>
-<p><code>args</code> becomes <code>Sys.args()</code>, <code>argv[0]</code> included. <code>display: true</code> lets a program that draws send frames; see <code>index.html</code> for handing them to <code>display.js</code>.</p>
+<p><code>args</code> becomes <code>Sys.args()</code>, <code>argv[0]</code> included. <code>display: true</code> enables frame output. See the generated <code>index.html</code> for the code that passes frames to <code>display.js</code>.</p>
 
-<h3>What a page gives a program</h3>
+<h3>Browser runtime support</h3>
 <ul class="plain">
-<li><strong>Output</strong> goes to the console and to the page a line at a time. Lines printed by threads arrive after the program's, because they are forwarded through <code>worker.js</code>, which handles messages only once the program returns.</li>
-<li><strong><code>Sys.sleep</code></strong> sleeps, through <code>Atomics.wait</code> in the Worker. On a page without cross-origin isolation it returns at once.</li>
-<li><strong>No filesystem.</strong> Opening a file fails the way it would with the file absent.</li>
-<li><strong>Sockets</strong>: the client half, over WebSocket.</li>
-<li><strong>Drawing</strong>: several threads can write one framebuffer in shared memory, painted by <code>display.js</code> at display rate. Only a description of the buffer crosses between agents, never pixels. <a href="https://github.com/rayzor-blade/ash/tree/main/examples/browser">examples/browser</a> has a demo.</li>
+<li><strong>Output</strong> goes to the console and page, one line at a time. Thread output is forwarded through <code>worker.js</code> and appears after the main program returns, when that Worker can process messages.</li>
+<li><strong><code>Sys.sleep</code></strong> uses <code>Atomics.wait</code> in the Worker. Without cross-origin isolation, it returns immediately.</li>
+<li><strong>Filesystem:</strong> file access is unavailable. Opening a file returns a file-not-found error.</li>
+<li><strong>Sockets:</strong> client connections use WebSocket.</li>
+<li><strong>Drawing:</strong> threads can write to a shared framebuffer, which <code>display.js</code> renders at the display refresh rate. Messages contain buffer metadata; the pixels stay in shared memory. <a href="https://github.com/rayzor-blade/ash/tree/main/examples/browser">examples/browser</a> has a demo.</li>
 </ul>
 </section>
 
 <section id="hdll">
 <div class="eyebrow">06 · A native library in Rust</div>
 <h2>Write an HDLL as a wasm side module</h2>
-<p>A wasm module cannot <code>dlopen</code>, so a native library for a wasm build is its own <code>.wasm</code> placed beside the program. It is a <code>dylink.0</code> side module: it imports the program's linear memory and function table, so it works on the same heap the collector scans, and it imports each runtime function it calls by name, the way an HDLL links against <code>libhl</code>. The Haxe declarations do not change.</p>
+<p>For wasm builds, compile each native library to a <code>dylink.0</code> side module and place its <code>.wasm</code> file beside the program. The side module imports the program's memory, function table, and runtime functions. This keeps its allocations on the heap scanned by the collector. The Haxe declarations stay the same.</p>
 
 <h3>The Haxe side</h3>
 <div class="file">Hello.hx</div>
@@ -265,10 +265,10 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
 <span class="w">		</span><span class="n">Sys</span><span class="p">.</span><span class="n">println</span><span class="p">(</span><span class="s1">&#39;fib(30) = </span><span class="si">${</span><span class="n">fib</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">);</span>
 <span class="w">	</span><span class="p">}</span>
 <span class="p">}</span></pre>
-<p><code>@:hlNative("hello", "greet")</code> is answered by an export named <code>hlp_greet</code> in <code>hello.wasm</code>: the file's stem is the library, and the resolver is <code>hlp_</code> plus the primitive's name, not prefixed with the library.</p>
+<p><code>@:hlNative("hello", "greet")</code> resolves to the <code>hlp_greet</code> export in <code>hello.wasm</code>. The filename supplies the library name. Resolver names use <code>hlp_</code> followed by the primitive name, without a library prefix.</p>
 
 <h3>The Rust side</h3>
-<p>The crate depends on <a href="https://github.com/rayzor-blade/hl_abi">hl_abi</a>, which declares HashLink's C ABI (the <code>#[repr(C)]</code> layouts, the runtime functions and <code>define_prim!</code>) and defines no symbol of its own.</p>
+<p>The crate depends on <a href="https://github.com/rayzor-blade/hl_abi">hl_abi</a>, which declares HashLink's C ABI (the <code>#[repr(C)]</code> layouts, the runtime functions and <code>define_prim!</code>) without defining runtime symbols.</p>
 <div class="file">hello/Cargo.toml</div>
 <pre class="code"><span class="k">[package]</span>
 <span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;hello&quot;</span>
@@ -311,13 +311,13 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
 <span class="n">define_prim</span><span class="o">!</span><span class="p">(</span><span class="n">hlp_fib</span><span class="p">,</span><span class="w"> </span><span class="n">hello_fib</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Pi_i&quot;</span><span class="p">);</span>
 <span class="n">define_prim</span><span class="o">!</span><span class="p">(</span><span class="n">hlp_greet</span><span class="p">,</span><span class="w"> </span><span class="n">hello_greet</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;POBi__B&quot;</span><span class="p">);</span></pre>
 <ul class="plain">
-<li><strong>The program's allocator.</strong> Rust's default on wasm is its own <code>dlmalloc</code> over its own arena. <code>ProgramAllocator</code> forwards to the program's <code>malloc</code>, so one allocator owns the one heap.</li>
+<li><strong>The program's allocator.</strong> Rust's default wasm allocator uses its own arena. <code>ProgramAllocator</code> forwards allocations to the program's <code>malloc</code> so both use the same allocator.</li>
 <li><strong>Strings are UTF-16.</strong> A Haxe <code>String</code> arrives as a <code>vstring</code>, whose <code>length</code> counts UTF-16 units. Text goes back as NUL-terminated UTF-16 in <code>hl.Bytes</code> allocated by the collector (<code>hlp_alloc_bytes</code>), and <code>String.fromUCS2</code> reads it.</li>
-<li><strong>Collector memory.</strong> Anything the program will hold comes from the runtime's allocators. A GC pointer kept only in the library's own memory is invisible to the collector.</li>
+<li><strong>GC ownership.</strong> Allocate objects retained by Haxe through the runtime's allocators. The collector cannot see a GC pointer stored only in the library's private memory.</li>
 </ul>
 
 <h3>Build it</h3>
-<p>A side module is position-independent, and the <code>std</code> that rustup ships is not, so it is rebuilt with <code>-Z build-std</code> on nightly (<code>rustup component add rust-src</code>, <code>rustup target add wasm32-wasip1</code>). Link with the <code>rust-lld</code> that ships with the toolchain:</p>
+<p>Side modules require position-independent code. Rebuild Rust's <code>std</code> with <code>-Z build-std</code> on nightly; the prebuilt version from rustup is not position-independent. Install <code>rust-src</code> and the <code>wasm32-wasip1</code> target for that toolchain, then link with its <code>rust-lld</code>:</p>
 <pre class="shell"><span class="p">$</span> cd hello
 <span class="p">$</span> RUSTFLAGS=&quot;-C relocation-model=pic -C target-feature=+mutable-globals&quot; \
     cargo +nightly build --release --target wasm32-wasip1 -Z build-std=std,panic_abort
@@ -333,8 +333,8 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
 <li><code>--unresolved-symbols=import-dynamic</code> covers data as well as functions: Rust's <code>std</code> takes the address of <code>errno</code>.</li>
 </ul>
 
-<h3>Put it beside the program, then build the program</h3>
-<p>Order matters. <code>ash --build</code> reads the imports of every side module beside its output and exports exactly those functions from the program. A library added after the build finds nothing to link against.</p>
+<h3>Add the library before building the program</h3>
+<p>Place the side module in the output directory before running <code>ash --build</code>. Ash reads its imports and exports the required functions from the main module. Rebuild the program whenever you add a library or change its imports.</p>
 <pre class="shell"><span class="p">$</span> haxe -main Hello -hl hello.hl
 <span class="p">$</span> mkdir -p out &amp;&amp; cp hello/hello.wasm out/
 <span class="p">$</span> ash --build out/app.wasm --target wasm32-wasip1 hello.hl
@@ -343,18 +343,18 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
 <span class="o">[ash] loaded native library: hello</span>
 <span class="o">Hello, wasm!</span>
 <span class="o">fib(30) = 832040</span></pre>
-<p>A library can use only the libc functions the runtime contains; the build names any it is missing rather than letting the load fail. A primitive whose library is absent raises the same "not loaded" error a native binary raises for a missing HDLL, and only when it is reached. C libraries and the details of the mechanism: <a href="https://github.com/rayzor-blade/ash/blob/main/docs/wasm/hdlls.md">docs/wasm/hdlls.md</a>.</p>
-<div class="note"><strong>Two limits, for now.</strong> Side modules load under <code>ash run</code>; the browser host does not load them yet, so in a page a primitive from one raises when it is reached. And they load only into a single-threaded (<code>wasm32-wasip1</code>) program: a threaded program's memory is shared, and a Rust library built for <code>wasm32-wasip1-threads</code> does not link as a side module yet.</div>
+<p>Libraries can use the libc functions provided by the runtime. The build reports any missing functions. If a library is absent, calling one of its primitives raises a "not loaded" error. For C libraries and linking details, see <a href="https://github.com/rayzor-blade/ash/blob/main/docs/wasm/hdlls.md">docs/wasm/hdlls.md</a>.</p>
+<div class="note"><strong>Host restrictions.</strong> Side modules currently load only under <code>ash run</code> in single-threaded <code>wasm32-wasip1</code> programs. Calling a side-module primitive in the browser raises an error. Rust libraries targeting <code>wasm32-wasip1-threads</code> cannot yet link as side modules.</div>
 </section>
 
 <section id="limits">
 <div class="eyebrow">07 · Limits</div>
-<h2>What is not there yet</h2>
+<h2>Current limitations</h2>
 <ul class="plain">
-<li><strong>Side modules in a page, or in a threaded program.</strong> The browser host does not load native libraries yet, and a threaded program cannot load one anywhere. <code>ash run</code> loads them into single-threaded programs.</li>
-<li><strong>Native <code>.hdll</code> files</strong> never load in a wasm build. A library ships as a side module instead.</li>
+<li><strong>Side modules:</strong> currently supported only in single-threaded programs under <code>ash run</code>. Browser and threaded builds cannot load them yet.</li>
+<li><strong>Native <code>.hdll</code> files:</strong> rebuild these libraries as wasm side modules.</li>
 <li><strong><code>fmt</code> compression and hashing.</strong> Eight Haxe suite cases need those primitives; every other in-scope case passes on wasm.</li>
-<li><strong>Size.</strong> A hello world is a couple of megabytes, nearly all of it runtime. Unreachable code is dropped, but anything whose address sits in data is kept.</li>
+<li><strong>Binary size:</strong> a hello-world module is roughly two megabytes, mostly runtime code. The linker removes unreachable code but retains functions referenced by data.</li>
 </ul>
 </section>
 

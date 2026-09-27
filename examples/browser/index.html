@@ -85,6 +85,7 @@ const takeScreen = () => {
 worker.onmessage = ({ data }) => {
   if (data.kind === "done") {
     counting = false;
+    for (const agent of threadAgents) agent.terminate();
     document.title = data.trapped ? "HashLink in wasm — trapped" : "HashLink in wasm — done";
     return;
   }
@@ -157,5 +158,36 @@ if (drawing) {
   const canvas = takeScreen();
   display.postMessage({ canvas }, [canvas]);
 }
-worker.postMessage({ module, args, display: drawing });
+// The agents Haxe threads run on, made here rather than in worker.js: some
+// browsers (Chrome on Android) cannot start a Worker from inside a Worker.
+// Each gets one end of a channel and worker.js the other, and threads are
+// handed over it. One that fails to start is left out; the threads it would
+// have run take turns on the main scheduler.
+const threadAgents = [];
+function startThreadAgents(count) {
+  return Promise.all(Array.from({ length: count }, () => new Promise((settle) => {
+    const agent = new Worker("./thread.js", { type: "module" });
+    let started = false;
+    agent.onmessage = ({ data }) => {
+      if (data.kind === "agent") {
+        if (data.state === "ready" && !started) {
+          started = true;
+          const channel = new MessageChannel();
+          agent.postMessage({ port: channel.port2 }, [channel.port2]);
+          threadAgents.push(agent);
+          settle(channel.port1);
+        }
+        return;
+      }
+      write(data.text, data.kind === "err" ? "err" : data.kind === "meta" ? "meta" : "");
+    };
+    agent.onerror = (e) => {
+      if (started) return write(`thread agent: ${e.message}`, "err");
+      write(`thread agent did not start: ${e.message || "no reason given"}`, "meta");
+      settle(null);
+    };
+  }))).then((ports) => ports.filter(Boolean));
+}
+const agentPorts = await startThreadAgents(Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+worker.postMessage({ module, args, display: drawing, agents: agentPorts }, agentPorts);
 </script>

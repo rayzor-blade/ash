@@ -31,13 +31,28 @@ for (const [name, kind] of [["log", "out"], ["error", "err"]]) {
 // waiting. What is left when a thread arrives is instantiating the module.
 const ready = init().then(() => post({ kind: "agent", state: "ready" }));
 
-self.onmessage = async (event) => {
-  const { tid, startArg, module, memory, args, environ } = event.data;
+// Where thread requests arrive and where this agent says it is idle again:
+// the port the page hands over when the page made this agent, or this
+// Worker's own channel when worker.js did. Output always goes to whoever
+// created the agent.
+let channel = self;
+
+self.onmessage = (event) => {
+  if (event.data.port) {
+    channel = event.data.port;
+    channel.onmessage = (e) => runThread(e.data);
+    return;
+  }
+  runThread(event.data);
+};
+
+async function runThread(request) {
+  const { tid, startArg, module, memory, args, environ } = request;
   const started = performance.now();
   try {
     await ready;
     post({ kind: "meta", text: `thread ${tid}: agent entering` });
-    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, event.data.control);
+    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, request.control);
     post({
       kind: "meta",
       text: `thread ${tid}: returned after ${Math.round(performance.now() - started)}ms`,
@@ -47,6 +62,6 @@ self.onmessage = async (event) => {
   } finally {
     // Idle again, and reusable: a program with more threads than agents runs
     // them as agents come free, which is what a thread pool is.
-    post({ kind: "agent", state: "idle" });
+    channel.postMessage({ kind: "agent", state: "idle" });
   }
-};
+}

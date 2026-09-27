@@ -41,30 +41,47 @@ for (const [name, kind] of [["log", "out"], ["error", "err"]]) {
 // the bound is how many agents the page warmed, not anything the runtime
 // asked for. The runtime asks for one agent per thread and takes what it gets
 // -- a thread with no agent free runs on the main scheduler.
+//
+// The page normally makes them and passes one end of a MessageChannel per
+// agent: some browsers (Chrome on Android) cannot start a Worker from inside a
+// Worker at all. Without ports, this worker makes its own.
 const idle = [];
 const agents = [];
 
-function warmAgents(count) {
+function adoptAgents(ports) {
+  for (const port of ports) {
+    port.onmessage = ({ data }) => {
+      if (data.kind === "agent" && data.state === "idle") idle.push(port);
+    };
+    idle.push(port);
+  }
+  return ports.length;
+}
+
+async function warmAgents(count) {
   const ready = [];
   for (let i = 0; i < count; i++) {
     const worker = new Worker(new URL("./thread.js", import.meta.url), { type: "module" });
-    let announce;
-    ready.push(new Promise((resolve) => (announce = resolve)));
+    let settle;
+    ready.push(new Promise((resolve) => (settle = resolve)));
     worker.onmessage = ({ data }) => {
       if (data.kind !== "agent") {
         self.postMessage(data);
         return;
       }
-      if (data.state === "ready") announce();
+      if (data.state === "ready") settle(true);
       idle.push(worker);
     };
-    // A Worker that fails to load reports no message; the likeliest cause is
+    // Settled, not left pending: an agent that never starts must not keep the
+    // program from starting. Its error has no message; the likeliest cause is
     // a browser that cannot start a module Worker from inside a Worker.
-    worker.onerror = (e) =>
-      post("err", `agent: ${e.message || "thread.js did not start (module Workers inside a Worker unsupported?)"}`);
+    worker.onerror = (e) => {
+      post("meta", `agent: ${e.message || "thread.js did not start (module Workers inside a Worker unsupported?)"}`);
+      settle(false);
+    };
     agents.push(worker);
   }
-  return Promise.all(ready);
+  return (await Promise.all(ready)).filter(Boolean).length;
 }
 
 // What the host calls to ask for one. It hands over everything the agent
@@ -132,14 +149,15 @@ self.ashAgent = ({ name, memory, address }) => {
 };
 
 self.onmessage = async (event) => {
-  const { module, args, environ, display: wanted } = event.data;
+  const { module, args, environ, display: wanted, agents: ports } = event.data;
   display = !!wanted;
   try {
     await init();
     // Before the program runs, and before it can ask for a thread.
-    const wanted = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
-    await warmAgents(wanted);
-    post("meta", `${wanted} agents ready`);
+    const ready = Array.isArray(ports)
+      ? adoptAgents(ports)
+      : await warmAgents(Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+    post("meta", `${ready} agents ready`);
     const response = await fetch(module);
     if (!response.ok) throw new Error(`fetching ${module}: ${response.status}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -158,6 +176,7 @@ self.onmessage = async (event) => {
   } finally {
     // The run owns every agent, even one still executing after a sibling's
     // fatal exit. No guest context may outlive its program.
+    // Agents the page made are the page's to stop, once it sees "done".
     for (const worker of agents) worker.terminate();
     agents.length = 0;
     idle.length = 0;

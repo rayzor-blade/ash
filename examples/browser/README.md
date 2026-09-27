@@ -53,17 +53,22 @@ second instance of the same module over one shared memory, entered through
 about what the thread does was decided by the guest's own `pthread_create`
 before it asked for one.
 
-Who does what: `worker.js` gives `run` a `spawn` function; the host hands that
-function the compiled module, the shared memory, a thread id, the guest's
-`startArg`, and a shared `control` buffer; `thread.js` receives them and calls
-`run_thread`. The crate never names a URL, for the same reason it does not
-fetch the module.
+Who does what: the page starts the `thread.js` agents and gives each one end
+of a `MessageChannel`, passing the other ends to `worker.js`. Some browsers
+(Chrome on Android) cannot start a Worker from inside a Worker, so
+`worker.js` makes its own only when the page passes no ports; an agent that
+fails to start is left out either way. `worker.js` gives `run` a `spawn`
+function; the host hands that function the compiled module, the shared
+memory, a thread id, the guest's `startArg`, and a shared `control` buffer,
+which `spawn` posts over an idle agent's port; `thread.js` receives them and
+calls `run_thread`. The crate never names a URL, for the same reason it does
+not fetch the module.
 
 Pass the request's `control` as the final argument to
 `run_thread(module, memory, tid, startArg, args, environ, spawn, control)`.
 It propagates fatal exits and traps even while the parent is blocked in an
-atomic wait. The owner must terminate its agents when `run` finishes, as
-`worker.js` does. A pure wasm compute loop with no host calls cannot be
+atomic wait. The owner must terminate its agents when `run` finishes, as the
+page does when `worker.js` reports it is done. A pure wasm compute loop with no host calls cannot be
 interrupted by shared state alone; stopping that Worker is its owner's job.
 
 **The agents are started before the program is, and that is the one thing

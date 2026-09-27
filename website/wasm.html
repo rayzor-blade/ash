@@ -207,8 +207,8 @@ td:first-child{white-space:nowrap}
 <tbody>
 <tr><td><code>main.wasm</code></td><td></td><td>The program.</td></tr>
 <tr><td><code>index.html</code></td><td>the page's main thread</td><td>Starts <code>worker.js</code> and displays its output. The program runs in a Worker so a blocking Haxe main loop does not freeze the tab. Ash overwrites this file on each build if its first comment marks it as generated. Remove that comment to keep a custom page.</td></tr>
-<tr><td><code>worker.js</code></td><td>a module Worker</td><td>Starts the thread Workers, fetches the module, and calls <code>run</code>. Terminates the Workers when the program exits.</td></tr>
-<tr><td><code>thread.js</code></td><td>one Worker per thread</td><td>Instantiates the module with shared memory and enters at <code>wasi_thread_start</code>.</td></tr>
+<tr><td><code>worker.js</code></td><td>a module Worker</td><td>Fetches the module and calls <code>run</code>, handing each thread to an agent over the port the page gave it.</td></tr>
+<tr><td><code>thread.js</code></td><td>one Worker per thread, started by the page</td><td>Instantiates the module with shared memory and enters at <code>wasi_thread_start</code>. The page starts these, not <code>worker.js</code>, because some browsers (Chrome on Android) cannot start a Worker inside a Worker; one that fails to start is left out and its threads run on the main scheduler.</td></tr>
 <tr><td><code>display.js</code></td><td>a Worker that owns the canvas</td><td>Starts when the program presents its first frame. Drawing runs in a separate Worker because the program's main loop can block its Worker's event loop.</td></tr>
 <tr><td><code>ash_browser.js</code>, <code>ash_browser_bg.wasm</code></td><td></td><td>The host: WASI from the browser (output to <code>console</code>, clocks from <code>performance.now</code>, randomness from <code>crypto</code>, no filesystem) and Workers for threads.</td></tr>
 </tbody>

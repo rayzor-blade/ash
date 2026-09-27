@@ -199,6 +199,9 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
             .unwrap_or_else(|| crate::rt::out_of_memory("an object"));
 
         let o = ptr.as_ptr() as *mut hl::vobj;
+        // The bindings below allocate closures, and nothing but this frame
+        // reaches the new object yet.
+        crate::gc::keep_scanned(&o);
         if (*t).kind != hl::hl_type_kind_HSTRUCT {
             (*o).t = t;
         }
@@ -1476,6 +1479,7 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
                 if f.is_null() {
                     let rt = (*obj).rt;
                     if (*rt).getFieldFun.is_some() {
+                        let _callout = crate::gc::Callout::enter();
                         return (*rt).getFieldFun.unwrap()(d, hfield);
                     }
                     return get_field_via_stub(d, hfield);
@@ -2278,6 +2282,7 @@ unsafe fn vcall_fn_or_stub(fun: *mut c_void, this: *mut vdynamic) -> *mut vdynam
         }
         let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
             std::mem::transmute(fun);
+        let _callout = crate::gc::Callout::enter();
         method_fn(this)
     }
 }

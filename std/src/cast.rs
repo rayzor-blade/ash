@@ -485,7 +485,10 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                         );
                         std::io::Write::flush(&mut std::io::stderr()).ok();
                     }
-                    let v = cast_fn(obj_val, to);
+                    let v = {
+                        let _callout = crate::gc::Callout::enter();
+                        cast_fn(obj_val, to)
+                    };
                     if !v.is_null() {
                         return v as *mut c_void;
                     }
@@ -526,7 +529,10 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                         );
                         std::io::Write::flush(&mut std::io::stderr()).ok();
                     }
-                    let v = cast_fn(obj_val, to);
+                    let v = {
+                        let _callout = crate::gc::Callout::enter();
+                        cast_fn(obj_val, to)
+                    };
                     if !v.is_null() {
                         return v as *mut c_void;
                     }
@@ -799,6 +805,7 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                         let rt = (*obj).rt;
                         if !rt.is_null() {
                             if let Some(compare_fn) = (*rt).compareFun {
+                                let _callout = crate::gc::Callout::enter();
                                 return compare_fn(a, b);
                             }
                             // Ash represents Haxe String values as String objects

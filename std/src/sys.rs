@@ -439,6 +439,7 @@ pub unsafe extern "C" fn hlp_sys_profile_event(code: i32, data: *mut vbyte, data
             return;
         }
         let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, *mut vbyte, i32)>(f);
+        let _callout = crate::gc::Callout::enter();
         f(code, data, data_len);
     }
 }

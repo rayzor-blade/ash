@@ -1178,6 +1178,9 @@ unsafe extern "C-unwind" fn run_closure_body(ctx: *mut c_void) {
         }
         let c = ctx as *mut vclosure;
         let _unroot = Unroot(c);
+        // This frame and the runner below the body hold only `c`, which is
+        // rooted, so a poll in the body may collect.
+        let _outermost = crate::gc::Callout::outermost();
         run_closure(c);
     }
 }
@@ -1566,6 +1569,9 @@ pub(crate) unsafe fn schedule_step() -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_fiber_poll() {
     unsafe {
+        // Compiled code is the only caller of this export, which is what makes
+        // it a place a deferred collection may run.
+        crate::rt::gc_compiled_poll();
         crate::rt::fiber_poll();
     }
 }

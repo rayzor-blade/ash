@@ -1665,6 +1665,9 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
     let refill = REFILLS.fetch_add(1, Ordering::Relaxed) + 1;
     if forced_refills().contains(refill) {
         gc.collect_garbage();
+    } else if DEFER_TO_POLLS {
+        // Inside an allocation, so not a safepoint here: see DEFER_TO_POLLS.
+        gc.maybe_collect();
     } else {
         gc.maybe_collect_at_safepoint();
     }
@@ -1902,7 +1905,7 @@ fn quarantine_freed() -> bool {
 /// caller immediately before the call, printed by the per-collection trace
 /// lines. Single mutator + GC lock make a plain static sound here.
 static COLLECT_ORIGIN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-const ORIGIN_NAMES: [&str; 7] = [
+const ORIGIN_NAMES: [&str; 8] = [
     "?",
     "snapshot-done",    // scan_roots_done honoring a deferred trigger
     "tlab-safepoint",   // tlab_refill_then_alloc's maybe_collect_at_safepoint
@@ -1910,6 +1913,7 @@ const ORIGIN_NAMES: [&str; 7] = [
     "exhaustion",       // allocate's no-free-block backstop
     "large-exhaustion", // allocate_large fallback
     "explicit",         // Gc.major / hlp_gc_major
+    "compiled-poll",    // collect_at_compiled_poll honoring a deferred trigger
 ];
 fn set_collect_origin(o: u8) {
     COLLECT_ORIGIN.store(o, Ordering::Relaxed);
@@ -1982,6 +1986,90 @@ fn gc_stats_enabled() -> bool {
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false)
     })
+}
+
+/// Keep `value` where the conservative scan finds it while it is in scope.
+///
+/// On wasm a local lives in the engine's frame, which the collector cannot
+/// read: only the shadow stack in linear memory is scanned. Letting the
+/// local's address escape keeps it on the shadow stack, as compiled bodies do
+/// for their registers. Needed for a GC pointer that runtime code holds
+/// across an allocation when nothing in the heap reaches it any more.
+/// Natively the frame is scanned anyway.
+#[inline(always)]
+pub(crate) fn keep_scanned<T>(value: &T) {
+    std::hint::black_box(value as *const T);
+}
+
+/// On wasm a collection runs only at a compiled poll, never inside an
+/// allocation. A runtime function keeps its pointers in wasm locals, which no
+/// scan reads, and it is below every allocation it makes; below a poll are
+/// compiled frames, whose registers live on the shadow stack. An allocation
+/// that finds a collection due marks it pending and asks compiled code to
+/// poll; only the hard-pressure backstop still collects in place.
+const DEFER_TO_POLLS: bool = cfg!(target_family = "wasm");
+
+thread_local! {
+    /// Runtime calls into compiled code in progress on this thread. A poll in
+    /// that compiled code has the calling runtime frame below it, so it must
+    /// not collect. Signed: a thread body starts at -1 so the call that runs
+    /// it leaves it at 0 (see [`Callout::outermost`]).
+    static CALLOUT_DEPTH: Cell<i32> = const { Cell::new(0) };
+}
+
+/// Held around a runtime call into compiled code. A no-op off wasm.
+pub(crate) struct Callout(i32);
+
+impl Callout {
+    #[inline(always)]
+    pub(crate) fn enter() -> Self {
+        Self::shift(1)
+    }
+
+    /// For a frame that holds nothing but rooted pointers while the compiled
+    /// code it calls runs, so that code counts as outermost: a thread body,
+    /// whose closure `thread_create` roots.
+    #[inline(always)]
+    pub(crate) fn outermost() -> Self {
+        Self::shift(-1)
+    }
+
+    #[inline(always)]
+    fn shift(by: i32) -> Self {
+        if DEFER_TO_POLLS {
+            CALLOUT_DEPTH.with(|d| d.set(d.get() + by));
+        }
+        Callout(by)
+    }
+}
+
+impl Drop for Callout {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if DEFER_TO_POLLS {
+            CALLOUT_DEPTH.with(|d| d.set(d.get() - self.0));
+        }
+    }
+}
+
+/// Runtime calls into compiled code in progress on this thread; a host heap
+/// that defers collections to polls reads it the way this one does.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_runtime_callout_depth() -> i32 {
+    CALLOUT_DEPTH.with(|d| d.get())
+}
+
+/// A compiled poll: where a collection an allocation deferred runs, unless
+/// runtime code below called into the compiled code polling.
+pub(crate) unsafe extern "C" fn collect_at_compiled_poll() {
+    if !DEFER_TO_POLLS || CALLOUT_DEPTH.with(|d| d.get()) > 0 {
+        return;
+    }
+    let mut gc = gc_locked();
+    if gc.heap.collect_pending {
+        set_collect_origin(7);
+        gc.maybe_collect_at_safepoint();
+    }
 }
 
 /// ASH_GC_STRESS: collect at every Nth allocation (1 = every allocation).
@@ -3616,7 +3704,7 @@ impl ImmixAllocator {
         if !triggered_collection_allowed(pressure) {
             return;
         }
-        if self.heap.safepoint_mode {
+        if self.heap.safepoint_mode || DEFER_TO_POLLS {
             let hard = self
                 .heap
                 .trigger_threshold
@@ -3625,6 +3713,12 @@ impl ImmixAllocator {
                 .min(max_deferred_pressure());
             if pressure < hard {
                 self.heap.collect_pending = true;
+                if DEFER_TO_POLLS {
+                    // Every time, not once: a function reads the poll epoch
+                    // when it starts, so a request made before a loop began
+                    // is one that loop never sees.
+                    crate::rt::request_fiber_poll();
+                }
                 return;
             }
         }
@@ -6871,7 +6965,7 @@ mod tests {
         let held = gc.allocate(16).unwrap();
         let unrelated = gc.allocate(16).unwrap();
         // Data outside the heap, like an AOT program's constants blob.
-        let data = vec![0usize, held.as_ptr() as usize, 0];
+        let data = [0usize, held.as_ptr() as usize, 0];
         gc.add_static_range(data.as_ptr().cast(), data.len() * WORD);
         assert!(
             !gc.heap.safepoint_mode,

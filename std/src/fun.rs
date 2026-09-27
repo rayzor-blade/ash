@@ -78,7 +78,10 @@ pub unsafe extern "C" fn ash_static_call(
         let key = signature_key(ret_kind, &arg_kinds[..nargs]);
 
         match call_trampoline(key) {
-            Some(tramp) => tramp(fun, args, out),
+            Some(tramp) => {
+                let _callout = crate::gc::Callout::enter();
+                tramp(fun, args, out)
+            }
             // Every signature the program contains has one, so a miss means the
             // call is for a shape the compiler never saw -- a closure built by a
             // native library, say. Better to say so than to guess.
@@ -854,6 +857,7 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
             }
             if (*cl).fun == fun_var_args as *mut libc::c_void {
                 let cl = (*cl).value as *mut vclosure;
+                let _callout = crate::gc::Callout::enter();
                 return if (*cl).hasValue != 0 {
                     let func: unsafe extern "C" fn(*mut vdynamic, *mut varray) -> *mut vdynamic =
                         mem::transmute((*cl).fun);

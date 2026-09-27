@@ -369,8 +369,10 @@ pub static H_PRIMES: [u32; 28] = [
 
 unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
     unsafe {
-        // save
+        // save. The old arrays are reached only from here once `m` points at
+        // the new ones, and the allocations below can collect.
         let mut old = ptr::read(m);
+        crate::gc::keep_scanned(&old);
         let resize_trace = env_flag!("ASH_MAP_RESIZE_TRACE");
 
         if (*m).nentries != (*m).maxentries {

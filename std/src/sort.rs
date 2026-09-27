@@ -83,9 +83,11 @@ impl<'a, T: Sortable> MSort<'a, T> {
             } else if cmp.hasValue != 0 {
                 let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 =
                     mem::transmute(fun);
+                let _callout = crate::gc::Callout::enter();
                 fun(cmp.value, self.arr[a].clone(), self.arr[b].clone())
             } else {
                 let fun: unsafe extern "C" fn(T, T) -> i32 = mem::transmute(fun);
+                let _callout = crate::gc::Callout::enter();
                 fun(self.arr[a].clone(), self.arr[b].clone())
             };
             result.cmp(&0)

@@ -175,6 +175,7 @@ unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const u
             return runner(&mut cl, ptr::null_mut(), 0) as *const uchar;
         }
         let g: unsafe extern "C" fn(*mut vdynamic) -> *const uchar = std::mem::transmute(f);
+        let _callout = crate::gc::Callout::enter();
         g(this)
     }
 }
@@ -194,6 +195,7 @@ unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
             };
             return runner(c, ptr::null_mut(), 0) as *const uchar;
         }
+        let _callout = crate::gc::Callout::enter();
         if (*c).hasValue != 0 {
             let f: unsafe extern "C" fn(*mut c_void) -> *const uchar =
                 std::mem::transmute((*c).fun);

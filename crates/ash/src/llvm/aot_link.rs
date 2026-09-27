@@ -508,6 +508,7 @@ fn link_wasm_module(
     triple: &str,
     kind: Runtime,
     runtime: Option<&Path>,
+    fibers: bool,
     quiet: bool,
 ) -> Result<()> {
     // A program that names an HDLL is not refused. A library shipped as a
@@ -587,7 +588,7 @@ fn link_wasm_module(
     hdll_imports.sort();
     hdll_imports.dedup();
     let opts = ash_wasm_link::LinkOptions {
-        fibers: fiber_transform_requested(),
+        fibers: fibers || fiber_transform_requested(),
         // What the threads target is for: every thread instantiates this same
         // module, so the memory has to be one the host makes and they all
         // share, and the data has to be written into it once rather than once
@@ -599,8 +600,8 @@ fn link_wasm_module(
     };
     if opts.fibers && !quiet {
         crate::progress::note(
-            "[ash] ASH_WASM_FIBERS is set: instrumenting so a fiber can suspend inside \
-             this module. It gets bigger and every call in the suspend set pays a check.",
+            "[ash] fibers are on: instrumenting so a fiber can suspend inside this \
+             module. It gets bigger and every call in the suspend set pays a check.",
         );
     }
     let module = ash_wasm_link::link(inputs, &opts)?;
@@ -623,6 +624,7 @@ fn link_wasm_module(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn link_executable(
     objects: &[PathBuf],
     out: &Path,
@@ -630,13 +632,14 @@ pub fn link_executable(
     kind: Runtime,
     runtime: Option<&Path>,
     abi: u32,
+    wasm_fibers: bool,
     quiet: bool,
 ) -> Result<()> {
     if objects.is_empty() {
         bail!("nothing to link");
     }
     if is_wasm_triple(triple) {
-        return link_wasm_module(objects, out, triple, kind, runtime, quiet);
+        return link_wasm_module(objects, out, triple, kind, runtime, wasm_fibers, quiet);
     }
     let runtime = match (runtime, kind) {
         (Some(p), _) if p.is_file() => p.to_path_buf(),

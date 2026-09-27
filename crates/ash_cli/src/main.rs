@@ -1328,6 +1328,7 @@ fn run() -> Result<()> {
             quiet: cli.quiet,
             links: Default::default(),
             objects: Default::default(),
+            wasm_fibers: false,
         })?;
         if let Some(module) = wasm_page {
             web::write_page(&module, cli.quiet)?;

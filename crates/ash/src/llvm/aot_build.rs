@@ -30,6 +30,10 @@ pub struct AotRequest<'a> {
     /// Relocatable objects emitted by other language frontends. They join the
     /// final executable through Ash's linker and remain owned by the caller.
     pub objects: Vec<PathBuf>,
+    /// Instrument a wasm build so a fiber can suspend inside it, as
+    /// `ASH_WASM_FIBERS=1` does; either one turns it on. Ignored for other
+    /// targets.
+    pub wasm_fibers: bool,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -52,6 +56,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         quiet,
         links,
         objects: language_objects,
+        wasm_fibers,
     } = request;
     // A process may build several programs. These caches are keyed by
     // findex or caller, which name different code in each, so a build
@@ -330,6 +335,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
             kind,
             runtime,
             abi_version,
+            wasm_fibers,
             quiet,
         );
         // The objects are scratch either way. Keeping them after a failure

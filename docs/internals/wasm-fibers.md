@@ -2,7 +2,8 @@
 
 With `ASH_WASM_FIBERS=1` at build time a Haxe thread can stop part-way
 through a call inside a wasm module and resume later, with no engine feature
-and no host driver. The flag sets `LinkOptions::fibers`;
+and no host driver. The flag sets `LinkOptions::fibers`, as does
+`AotRequest::wasm_fibers` for a host that calls `emit_aot` itself;
 with it off, `link` returns exactly what `emit` produced and nothing in
 `fiber.rs` runs, so the byte-identical guarantee holds structurally.
 

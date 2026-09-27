@@ -33,6 +33,7 @@ fn build(program: &Path, out: &Path) -> Vec<u8> {
         quiet: true,
         links: Default::default(),
         objects: Vec::new(),
+        wasm_fibers: false,
     })
     .unwrap_or_else(|e| panic!("emit {}: {e:#}", program.display()));
     std::fs::read(out).unwrap_or_else(|e| panic!("read {}: {e}", out.display()))

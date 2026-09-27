@@ -32,6 +32,7 @@
 //! What is still missing: loading a native library, which is the native
 //! host's loader against `WebAssembly.instantiate`.
 
+pub mod agent;
 pub mod canvas;
 pub(super) mod control;
 pub mod fibers;

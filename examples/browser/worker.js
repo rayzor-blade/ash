@@ -114,6 +114,20 @@ self.ashPresent = ({ memory, address, width, height }) => {
   return true;
 };
 
+// A service the program wants running beside it (`ash_host_agent`), started
+// by the page for the same reason display.js is: this agent never returns to
+// its event loop, so it cannot create a Worker. The host has already checked
+// the name is a plain identifier and the memory is shared.
+self.ashAgent = ({ name, memory, address }) => {
+  try {
+    self.postMessage({ kind: "spawn-agent", name, memory, address });
+    return true;
+  } catch (e) {
+    post("meta", `agent ${name}: ${e.message}`);
+    return false;
+  }
+};
+
 self.onmessage = async (event) => {
   const { module, args, environ, display: wanted } = event.data;
   display = !!wanted;

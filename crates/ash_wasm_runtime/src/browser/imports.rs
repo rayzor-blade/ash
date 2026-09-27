@@ -177,6 +177,7 @@ pub fn imports(
     // Always bound: an import nothing answers is a link error before a line
     // runs, so a program that never draws still needs this to exist.
     let _ = super::canvas::install(&env, host);
+    let _ = super::agent::install(&env, host);
     let starting = Rc::clone(threads);
     bind!(&wasi, "thread-spawn", move |start_arg: i32| -> i32 {
         starting.spawn(start_arg)

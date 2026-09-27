@@ -78,6 +78,12 @@ worker.onmessage = ({ data }) => {
     document.title = data.trapped ? "HashLink in wasm — trapped" : "HashLink in wasm — done";
     return;
   }
+  if (data.kind === "spawn-agent") {
+    const agent = new Worker(new URL(`./${data.name}_agent.mjs`, location.href), { type: "module" });
+    agent.onerror = (e) => write(`${data.name} agent: ${e.message}`, "err");
+    agent.postMessage({ memory: data.memory, address: data.address });
+    return;
+  }
   // Where the program's framebuffer is, forwarded to the agent that paints.
   // It is a description, not a frame: the memory is shared, so the pixels
   // never travel and the program is not waited on for them.

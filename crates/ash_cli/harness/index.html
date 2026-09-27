@@ -40,6 +40,14 @@ worker.onmessage = ({ data }) => {
     document.title = `${module.slice(2)} — ${data.trapped ? "trapped" : "done"}`;
     return;
   }
+  // A service the program asked for (`ash_host_agent`): its module sits
+  // beside this page as <name>_agent.mjs.
+  if (data.kind === "spawn-agent") {
+    const agent = new Worker(new URL(`./${data.name}_agent.mjs`, location.href), { type: "module" });
+    agent.onerror = (e) => write(`${data.name} agent: ${e.message}`, "err");
+    agent.postMessage({ memory: data.memory, address: data.address });
+    return;
+  }
   if (data.kind === "display") {
     if (!display) {
       display = new Worker("./display.js");

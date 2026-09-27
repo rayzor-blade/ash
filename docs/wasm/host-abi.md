@@ -82,6 +82,20 @@ under that prefix are never demanded of the program. `ash wasm module.wasm`
 prints the exact set a module needs. The native and browser hosts each
 answer what they can and refuse the rest by name at instantiation.
 
+Two of them exist for a page, and a host with no page answers 0 to both:
+
+- `ash_host_canvas_present(data, width, height) -> i32`: RGBA pixels at
+  `data` in the program's memory. A page that installed an `ashPresent` hook
+  gets `{ memory, address, width, height }` and paints on its own clock.
+- `ash_host_agent(name, name_len, address) -> i32`: start a service beside
+  the program, such as a WebGPU device serving a mailbox in shared memory.
+  The name is UTF-8 and must be a plain identifier (letters, digits, `_`,
+  `-`), and the memory must be shared. A page that installed an `ashAgent`
+  hook gets `{ name, memory, address }`; the example page starts
+  `./<name>_agent.mjs` as a module Worker and posts it `{ memory, address }`.
+  The program's own agent cannot do this itself: it is inside a call into
+  the program and never returns to the event loop a new Worker needs.
+
 ## Threads
 
 A Haxe thread that must run in parallel is another instance of the same

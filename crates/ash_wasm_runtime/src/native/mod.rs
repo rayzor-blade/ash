@@ -352,6 +352,8 @@ fn guest_slice(caller: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Option<Vec<
     Some(data.get(start..start.checked_add(len)?)?.to_vec())
 }
 
+/// The imports a browser page answers, answered by a host with no page.
+///
 /// Where a frame goes on a host with no screen: nowhere, and it says so.
 ///
 /// The import has to exist -- an import nothing supplies is a link error
@@ -360,7 +362,7 @@ fn guest_slice(caller: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Option<Vec<
 /// lent no canvas. A program that presents keeps running and counts, for
 /// itself, how many frames nobody saw -- which is what makes a drawing
 /// program testable without a display.
-fn install_canvas(linker: &mut Linker<Host>) -> Result<()> {
+fn install_page_imports(linker: &mut Linker<Host>) -> Result<()> {
     linker
         .func_wrap(
             fibers::YIELD_MODULE,
@@ -368,6 +370,15 @@ fn install_canvas(linker: &mut Linker<Host>) -> Result<()> {
             |_: Caller<'_, Host>, _data: i32, _w: i32, _h: i32| -> i32 { 0 },
         )
         .map_err(|e| anyhow!("installing the canvas present import: {e}"))?;
+    // No page to start an agent beside the program: the same answer a page
+    // that installed no `ashAgent` hook gives.
+    linker
+        .func_wrap(
+            fibers::YIELD_MODULE,
+            "ash_host_agent",
+            |_: Caller<'_, Host>, _name: i32, _len: i32, _address: i32| -> i32 { 0 },
+        )
+        .map_err(|e| anyhow!("installing the agent import: {e}"))?;
     Ok(())
 }
 
@@ -505,7 +516,7 @@ fn linker_for(
     p1::add_to_linker_async(&mut linker, |host: &mut Host| &mut host.wasi)
         .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
     fibers::install(&mut linker)?;
-    install_canvas(&mut linker)?;
+    install_page_imports(&mut linker)?;
     process::install(&mut linker)?;
     sockets::install(&mut linker)?;
     dylink::install(&mut linker)?;

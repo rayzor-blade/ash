@@ -455,13 +455,10 @@ export function start({ memory, address, canvas }) {
     canvas.style[second] = h > 0 ? `${h}px` : "";
   };
 
-  // Commands, once per frame.
-  let redraw = false;
+  // Commands, once per frame. A redraw requested since the last frame is
+  // answered in this one, after the commands are read.
   const frame = () => {
-    if (redraw) {
-      redraw = false;
-      emit(E.REDRAW);
-    }
+    let redraw = false;
     for (const { kind, d, at: p } of commands()) {
       const u = (i) => d.getUint32(p + 4 * i, true);
       const f = (offset) => d.getFloat64(p + offset, true);
@@ -489,6 +486,7 @@ export function start({ memory, address, canvas }) {
         case C.REQUEST_MONITOR: monitor(); break;
       }
     }
+    if (redraw) emit(E.REDRAW);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

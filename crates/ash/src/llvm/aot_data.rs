@@ -1778,13 +1778,37 @@ impl<'ctx> JITModule<'ctx> {
         if let Some(late) = self.module.get_function("ash_late_init") {
             self.builder.build_call(late, &[], "")?;
         }
+        // The host's start, once the heap and the module are up: what it
+        // links beside the program starts here. A nonzero status is the
+        // program's.
+        let program_start_ty = i32_type.fn_type(&[], false);
+        let program_start = self.aot_symbol("hlp_program_start", program_start_ty);
+        let started = self
+            .builder
+            .build_indirect_call(program_start_ty, program_start, &[], "started")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("hlp_program_start returned void"))?
+            .into_int_value();
+        let failed = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            started,
+            i32_type.const_zero(),
+            "start_failed",
+        )?;
+        let stop = self.context.append_basic_block(main, "start_failed");
+        let run = self.context.append_basic_block(main, "run");
+        self.builder.build_conditional_branch(failed, stop, run)?;
+        self.builder.position_at_end(stop);
+        self.builder.build_return(Some(&started))?;
+        self.builder.position_at_end(run);
         // The same outer exception boundary the JIT gives the entrypoint:
         // an uncaught exception prints HashLink's "Uncaught exception: ..."
         // report and exits 1. A bare call reached `hlp_throw` with no trap
         // on the stack, which aborts the process instead -- the two socket
         // parity programs diverged from the interpreter on exactly that.
         let safe_entry = self.build_safe_entry_wrapper(entry_fn)?;
-        self.builder.position_at_end(block);
+        self.builder.position_at_end(run);
         let status = self
             .builder
             .build_call(safe_entry, &[], "entrypoint")?

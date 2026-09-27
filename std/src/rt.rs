@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bumped whenever a slot is added, removed or changes signature.
-pub const RT_VERSION: u32 = 3;
+pub const RT_VERSION: u32 = 4;
 
 /// `timeout_ns` value meaning "no deadline" for [`RuntimeVTable::park`].
 pub const RT_NO_TIMEOUT: u64 = u64::MAX;
@@ -190,6 +190,14 @@ runtime_table! {
     mark_main_thread() = ash::mark_main_thread;
     is_main_thread() -> bool = ash::is_main_thread;
     foreign_threads_seen() -> bool = ash::foreign_threads_seen;
+
+    // ── Program ─────────────────────────────────────────────────────────
+    // Run by a compiled program's `main` after the heap is up and the
+    // module is initialised, before the entry point: a host starts what
+    // the program links beside it. A nonzero status ends the program with
+    // it. Only compiled (AOT and wasm) programs call it; `ash main.hl`
+    // never does.
+    program_start() -> i32 = ash::program_start;
 }
 
 pub use call::{
@@ -381,6 +389,13 @@ pub unsafe extern "C" fn hlp_rt_install(table: *const RuntimeVTable) -> bool {
         INSTALLED.store(true, Ordering::Release);
         true
     }
+}
+
+/// The host's start, for a compiled program's `main`: see the
+/// `program_start` slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_program_start() -> i32 {
+    unsafe { call::program_start() }
 }
 
 /// Whether a host table has been installed.
@@ -624,6 +639,10 @@ mod ash {
 
     pub unsafe extern "C" fn foreign_threads_seen() -> bool {
         crate::fiber::foreign_threads_seen()
+    }
+
+    pub unsafe extern "C" fn program_start() -> i32 {
+        0
     }
 }
 

@@ -24,25 +24,20 @@ Then open <http://127.0.0.1:8731>. It starts a worker, which fetches the
 module and runs it; there is nothing to click. `?demo=threads` and
 `?demo=entities` run the other two.
 
-Each build also puts the browser host (`ash_browser.js`,
-`ash_browser_bg.wasm`) beside the module, from the `browser` directory
-installed beside `ash`, and writes `worker.js`, `thread.js` and `display.js`,
-which ash carries as copies of the ones here. This directory's `index.html`
-has no generated-by-ash comment, so the builds leave it alone.
+Each build also writes the rest of the page beside the module: `worker.js`,
+`thread.js`, `display.js` and the browser host (`ash_browser.js`,
+`ash_browser_bg.wasm`). Their sources are `crates/ash_page/page/` and
+`crates/ash_browser`, built into `ash`. This directory's `index.html` has no
+generated-by-ash comment, so the builds leave it alone.
 
 `ash serve` rather than any static server because of the threaded demo: it
 needs a `SharedArrayBuffer`, a page only has one when it is cross-origin
 isolated, and that means two headers on every response. The single-threaded
 demo does not care and works under any server.
 
-To build the host from source rather than take the installed one:
-
-    cargo build --release -p ash_browser --target wasm32-unknown-unknown
-    wasm-bindgen --target web --out-dir target/release/browser \
-      target/wasm32-unknown-unknown/release/ash_browser.wasm
-
-A dev build of `ash` looks for it in `target/release/browser`;
-`ASH_BROWSER_HOST` names any other directory.
+A change to the host or the page scripts reaches a page through a rebuilt
+`ash`: `crates/ash_page`'s build script compiles `ash_browser` for
+`wasm32-unknown-unknown` and binds it.
 
 ## Threads
 

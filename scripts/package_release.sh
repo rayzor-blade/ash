@@ -13,9 +13,9 @@
 # Usage: scripts/package_release.sh <target-name> [wasm-assets-dir]
 #   e.g. scripts/package_release.sh macos-aarch64 wasm-assets
 #
-# The optional directory holds the wasm runtime objects and the browser host
+# The optional directory holds the wasm runtime objects
 # (release.yml's wasm-assets job); its contents go beside the binary, where
-# `ash --build x.wasm` and the page it writes look for them.
+# `ash --build x.wasm` looks for them.
 set -euo pipefail
 
 TARGET="${1:?usage: package_release.sh <target-name> [wasm-assets-dir]}"
@@ -117,7 +117,7 @@ if [[ -n "$WASM_ASSETS" ]]; then
   test -f "$WASM_ASSETS/wasm32-wasip1/ash_runtime.o" \
     || { echo "error: $WASM_ASSETS holds no wasm32-wasip1/ash_runtime.o" >&2; exit 1; }
   cp -R "$WASM_ASSETS/." "$DIST/"
-  echo "bundled wasm runtime and browser host from $WASM_ASSETS"
+  echo "bundled the wasm runtime from $WASM_ASSETS"
 fi
 
 mkdir -p dist

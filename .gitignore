@@ -32,3 +32,7 @@ examples/browser/ash_browser.d.ts
 examples/browser/ash_browser_bg.wasm
 examples/simd/dot.hl
 examples/browser/ash_browser_bg.wasm.d.ts
+# Written beside each module by `ash --build` (crates/ash_page).
+examples/browser/worker.js
+examples/browser/thread.js
+examples/browser/display.js

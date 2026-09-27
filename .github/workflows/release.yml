@@ -22,11 +22,11 @@ permissions:
   contents: write
 
 jobs:
-  # What `ash --build x.wasm` links against and what the page it writes loads.
-  # Both are wasm, so the same for every platform: built once here and packaged
-  # beside every binary, where ash looks for them.
+  # What `ash --build x.wasm` links against. It is wasm, so the same for every
+  # platform: built once here and packaged beside every binary, where ash looks
+  # for it. (The browser host the page loads is built into ash by ash_page.)
   wasm-assets:
-    name: build (wasm runtime and browser host)
+    name: build (wasm runtime)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -65,23 +65,12 @@ jobs:
           ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot
           ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot --target wasm32-wasip1-threads
 
-      # wasm-bindgen's CLI must be the version the crate locked, or the
-      # generated JS does not match the module.
-      - name: Build the browser host
-        run: |
-          cargo build --release -p ash_browser --target wasm32-unknown-unknown
-          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
-          cargo install wasm-bindgen-cli --version "$version" --locked
-          wasm-bindgen --target web --out-dir wasm-assets/browser \
-            target/wasm32-unknown-unknown/release/ash_browser.wasm
-
       - name: Stage
         run: |
           for triple in wasm32-wasip1 wasm32-wasip1-threads; do
             mkdir -p "wasm-assets/$triple"
             cp "target/release/$triple/ash_runtime.o" "wasm-assets/$triple/"
           done
-          rm -f wasm-assets/browser/*.d.ts
           find wasm-assets -type f -exec ls -la {} \;
 
       - name: Upload artifact
@@ -183,7 +172,7 @@ jobs:
           ./target/release/ash --mode interp crates/ash/test/tests/test_basic.hl
           ./target/release/ash --mode hybrid crates/ash/test/tests/test_basic.hl
 
-      - name: Fetch the wasm runtime and browser host
+      - name: Fetch the wasm runtime
         uses: actions/download-artifact@v4
         with:
           name: wasm-assets
@@ -359,7 +348,7 @@ jobs:
             throw "the env provides no $($missing -join ', ') to sit beside the binary"
           }
 
-      - name: Fetch the wasm runtime and browser host
+      - name: Fetch the wasm runtime
         uses: actions/download-artifact@v4
         with:
           name: wasm-assets
@@ -390,7 +379,7 @@ jobs:
           
           # Compress inside the dist directory
           cd dist
-          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe *.dll wasm32-wasip1 wasm32-wasip1-threads browser
+          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe *.dll wasm32-wasip1 wasm32-wasip1-threads
 
           # Generate SHA256
           sha256sum ash-${{ matrix.target }}.tar.gz > ash-${{ matrix.target }}.tar.gz.sha256

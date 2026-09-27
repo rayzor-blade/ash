@@ -5,7 +5,8 @@
 //! needs the creating agent's event loop. The page can. A library that wants a
 //! service running beside the program -- a WebGPU device serving a mailbox in
 //! shared memory, say -- names it and hands over an address, and the page
-//! starts `./<name>_agent.mjs` and posts it `{ memory, address }`.
+//! loads the library's shim `./<name>.mjs` and calls its
+//! `start({ memory, address, canvas })`.
 //!
 //! One import, `env.ash_host_agent(name, name_len, address)`: 1 when the page
 //! took it, 0 when it installed no `ashAgent` hook, the name is not a plain

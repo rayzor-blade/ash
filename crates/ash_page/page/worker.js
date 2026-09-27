@@ -135,9 +135,10 @@ self.ashPresent = ({ memory, address, width, height }) => {
 };
 
 // A service the program wants running beside it (`ash_host_agent`), started
-// by the page for the same reason display.js is: this agent never returns to
-// its event loop, so it cannot create a Worker. The host has already checked
-// the name is a plain identifier and the memory is shared.
+// by the page -- which loads the library's `<name>.mjs` shim -- for the same
+// reason display.js is: this agent never returns to its event loop, so it
+// cannot create a Worker. The host has already checked the name is a plain
+// identifier and the memory is shared.
 self.ashAgent = ({ name, memory, address }) => {
   try {
     self.postMessage({ kind: "spawn-agent", name, memory, address });

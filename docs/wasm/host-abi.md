@@ -91,12 +91,13 @@ Two of them exist for a page, and a host with no page answers 0 to both:
   the program, such as a WebGPU device serving a mailbox in shared memory.
   The name is UTF-8 and must be a plain identifier (letters, digits, `_`,
   `-`), and the memory must be shared. A page that installed an `ashAgent`
-  hook gets `{ name, memory, address }`; the example page starts
-  `./<name>_agent.mjs` as a module Worker and posts it `{ memory, address }`.
-  An agent that draws may then post `{ kind: "canvas" }` once; the page
-  answers `{ canvas }` with the page's `OffscreenCanvas` in the transfer list,
-  or `{ canvas: null }` if it already gave it away (to `display.js` or another
-  agent).
+  hook gets `{ name, memory, address }`. The page ash writes then imports the
+  library's shim, `./<name>.mjs` beside it, on the page's own thread and calls
+  its `start({ memory, address, canvas })`, where `canvas` is the page's
+  `<canvas>` element. What the shim starts is its own: a Worker it creates,
+  the canvas transferred to that Worker, listeners on the element. The page
+  knows no library by name. `display.js` takes the canvas only for a program
+  that presents a framebuffer, and only if no shim transferred it first.
   The program's own agent cannot do this itself: it is inside a call into
   the program and never returns to the event loop a new Worker needs.
 

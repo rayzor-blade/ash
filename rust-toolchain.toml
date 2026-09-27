@@ -1,2 +1,4 @@
 [toolchain]
 channel = "nightly"
+# crates/ash_page builds the browser host into ash; see its build.rs.
+targets = ["wasm32-unknown-unknown"]

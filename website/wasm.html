@@ -104,7 +104,7 @@ td:first-child{white-space:nowrap}
 <p style="font-size:clamp(16px,2vw,19px);max-width:760px;margin:0">Ash compiles HashLink bytecode to WebAssembly. Use <code>ash</code> to build the module, run it in a terminal, or serve it to a browser. Browser builds can run Haxe threads in parallel using Web Workers. For single-threaded programs under <code>ash run</code>, native libraries can be built as separate <code>.wasm</code> modules.</p>
 
 <div class="grid">
-<div class="card"><div class="step">Included tools</div><p>The Ash release includes LLVM, a wasm linker, the wasm runtime, and the browser host. You also need Haxe to compile your source to bytecode.</p></div>
+<div class="card"><div class="step">Included tools</div><p>The Ash release includes LLVM, a wasm linker, the wasm runtime, and the browser host, which is built into the binary. You also need Haxe to compile your source to bytecode.</p></div>
 <div class="card"><div class="step">Parallel threads</div><p>Haxe threads run on Web Workers with shared memory. A browser benchmark with four threads measured a 3.01× speedup over the serial version.</p></div>
 <div class="card"><div class="step">Native libraries</div><p>Build native libraries as <code>dylink.0</code> side modules. They share the program's memory and collector and use the existing <code>@:hlNative</code> and <code>DEFINE_PRIM</code> interfaces.</p></div>
 </div>
@@ -119,7 +119,7 @@ td:first-child{white-space:nowrap}
 <section id="install">
 <div class="eyebrow">01 · Install</div>
 <h2>Install Ash</h2>
-<p>Use the standard Ash installer. It places the wasm runtime directories (<code>wasm32-wasip1/</code> and <code>wasm32-wasip1-threads/</code>) and the browser host (<code>browser/</code>) beside the <code>ash</code> binary automatically.</p>
+<p>Use the standard Ash installer. It places the wasm runtime directories (<code>wasm32-wasip1/</code> and <code>wasm32-wasip1-threads/</code>) beside the <code>ash</code> binary; the browser host is built into <code>ash</code> itself.</p>
 <pre class="shell"><span class="p">$</span> curl -fsSL https://ash.rayzor.tech/install.sh | sh</pre>
 <p>On Windows, in PowerShell: <code>irm https://ash.rayzor.tech/install.ps1 | iex</code>. You also need <a href="https://haxe.org/download/">Haxe</a> to compile the program to bytecode.</p>
 <div class="note"><strong>Check the install.</strong> <code>ls ~/.ash/bin/wasm32-wasip1</code> should list <code>ash_runtime.o</code>. If it does not, the install predates wasm packaging: run the install command again.</div>

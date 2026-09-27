@@ -71,15 +71,21 @@ requestAnimationFrame(tick);
 // this thread out of the paint path and leaves the counter above measuring a
 // thread with nothing to do.
 let display = null;
-// The canvas can be given away once: to display.js, or to an agent that
-// draws on it itself (a GPU agent keeps it as its surface).
+// display.js takes the canvas for a program that presents a framebuffer. A
+// plugin's shim may have taken it first (a GPU surface transfers it to its
+// own Worker), and then there is nothing to give.
 let screenTaken = false;
 const takeScreen = () => {
   if (screenTaken) return null;
   screenTaken = true;
   const screen = document.getElementById("screen");
-  screen.hidden = false;
-  return screen.transferControlToOffscreen();
+  try {
+    const canvas = screen.transferControlToOffscreen();
+    screen.hidden = false;
+    return canvas;
+  } catch {
+    return null;
+  }
 };
 
 worker.onmessage = ({ data }) => {
@@ -89,19 +95,18 @@ worker.onmessage = ({ data }) => {
     document.title = data.trapped ? "HashLink in wasm — trapped" : "HashLink in wasm — done";
     return;
   }
+  // A library asked for something beside the program (`ash_host_agent`). Its
+  // shim, <name>.mjs beside this page, is loaded here, on the page's thread,
+  // and started with the program's memory, the address it named and the
+  // canvas element. What it starts -- a Worker, DOM listeners -- is its own.
   if (data.kind === "spawn-agent") {
-    const agent = new Worker(new URL(`./${data.name}_agent.mjs`, location.href), { type: "module" });
-    agent.onerror = (e) => write(`${data.name} agent: ${e.message}`, "err");
-    // An agent that draws asks for the canvas once, right after it starts:
-    // `{ canvas }` if it was still here to give, `{ canvas: null }` if not.
-    let answered = false;
-    agent.onmessage = ({ data: asked }) => {
-      if (asked?.kind !== "canvas" || answered) return;
-      answered = true;
-      const canvas = takeScreen();
-      agent.postMessage({ canvas }, canvas ? [canvas] : []);
-    };
-    agent.postMessage({ memory: data.memory, address: data.address });
+    import(new URL(`./${data.name}.mjs`, location.href))
+      .then((shim) => shim.start({
+        memory: data.memory,
+        address: data.address,
+        canvas: document.getElementById("screen"),
+      }))
+      .catch((e) => write(`${data.name}.mjs: ${e && e.message ? e.message : e}`, "err"));
     return;
   }
   // Where the program's framebuffer is, forwarded to the agent that paints.

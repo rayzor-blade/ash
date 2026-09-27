@@ -1,0 +1,12 @@
+[package]
+name = "ash_page"
+version = "0.1.0"
+edition = "2024"
+description = "The page that runs an ash wasm module in a browser, with the browser host built in"
+publish = false
+
+# The browser host (crates/ash_browser) is compiled for wasm32-unknown-unknown
+# and bound by wasm-bindgen in the build script; see build.rs. The pin matches
+# the wasm-bindgen the host links, or the generated JS does not fit the module.
+[build-dependencies]
+wasm-bindgen-cli-support = "=0.2.127"

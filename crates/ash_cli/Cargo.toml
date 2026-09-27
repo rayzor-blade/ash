@@ -19,6 +19,8 @@ all-targets = ["llvm", "ash_core/all-targets"]
 # `ash wasm` reads a module; `ash run` runs one under wasmtime.
 ash_wasm_runtime = { path = "../ash_wasm_runtime", default-features = false, features = ["validate", "native"] }
 tokio = { version = "1", features = ["rt"] }
+# The page `--build` writes beside a wasm module, browser host included.
+ash_page = { path = "../ash_page" }
 ash_core = { path = "../ash", default-features = false, features = ["embedded-runtime"] }
 ash_interp = { path = "../ash_interp", default-features = false }
 ash_trace = { path = "../ash_trace" }

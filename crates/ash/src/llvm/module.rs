@@ -77,6 +77,9 @@ pub struct JITModule<'ctx> {
     /// Each has a slot the startup routine fills by dlopen/dlsym,
     /// because there is no symbol to bind at emit time.
     pub(crate) aot_hdll_natives: Vec<(String, String)>,
+    /// A host's linked natives whose callee is in a side module, as
+    /// (library, symbol): each a slot the startup routine fills by symbol.
+    pub(crate) aot_link_slots: Vec<(String, String)>,
     /// Runtime helpers that would not resolve, and the ones a compile has hit.
     ///
     /// `declare_native` returns a `FunctionValue` rather than a `Result`, so a
@@ -404,6 +407,7 @@ impl<'ctx> JITModule<'ctx> {
             name_to_findex: None,
             findex_to_name: None,
             aot_hdll_natives: Vec::new(),
+            aot_link_slots: Vec::new(),
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
@@ -847,6 +851,7 @@ impl<'ctx> JITModule<'ctx> {
             name_to_findex: None,
             findex_to_name: None,
             aot_hdll_natives: Vec::new(),
+            aot_link_slots: Vec::new(),
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,

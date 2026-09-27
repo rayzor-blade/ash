@@ -437,7 +437,26 @@ impl<'ctx> JITModule<'ctx> {
             Some(w) => word(w).fn_type(&callee_params, false),
             None => self.context.void_type().fn_type(&callee_params, false),
         };
-        let callee = self.aot_runtime_fn(&link.symbol, callee_type);
+        // A callee in a side module is found by its symbol at startup, into a
+        // slot; any other is linked by it.
+        let slot = link.library.as_deref().map(|lib| {
+            let slot_name = format!("ash_link_{lib}_{}", link.symbol);
+            match self.module.get_global(&slot_name) {
+                Some(existing) => existing,
+                None => {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let g = self.module.add_global(ptr_type, None, &slot_name);
+                    g.set_initializer(&ptr_type.const_null());
+                    g.set_linkage(inkwell::module::Linkage::Internal);
+                    self.aot_link_slots
+                        .push((lib.to_owned(), link.symbol.clone()));
+                    g
+                }
+            }
+        });
+        let callee = slot
+            .is_none()
+            .then(|| self.aot_runtime_fn(&link.symbol, callee_type));
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         // The program's type of each value a cast sees, as the constant the
         // object holds for it; resolved before the body is positioned.
@@ -480,7 +499,41 @@ impl<'ctx> JITModule<'ctx> {
             };
             args.push(value.into());
         }
-        let call = self.builder.build_call(callee, &args, "call")?;
+        let call = match (callee, slot) {
+            (Some(callee), _) => self.builder.build_call(callee, &args, "call")?,
+            (None, Some(slot)) => {
+                // Unresolved, it raises as an HDLL primitive does: only a
+                // call is an error, not a reference.
+                let lib = link.library.as_deref().unwrap_or_default();
+                let target = self
+                    .builder
+                    .build_load(ptr_type, slot.as_pointer_value(), "callee")?
+                    .into_pointer_value();
+                let resolved = self.context.append_basic_block(function, "callee_resolved");
+                let missing = self.context.append_basic_block(function, "callee_missing");
+                let is_null = self.builder.build_is_null(target, "callee_missing_p")?;
+                self.builder.build_conditional_branch(is_null, missing, resolved)?;
+                self.builder.position_at_end(missing);
+                let reporter = self.aot_runtime_fn(
+                    "hlp_aot_native_missing",
+                    self.context
+                        .void_type()
+                        .fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                );
+                let lib_s = self.builder.build_global_string_ptr(lib, "link_lib")?;
+                let sym_s = self.builder.build_global_string_ptr(&link.symbol, "link_sym")?;
+                self.builder.build_call(
+                    reporter,
+                    &[lib_s.as_pointer_value().into(), sym_s.as_pointer_value().into()],
+                    "",
+                )?;
+                self.builder.build_unreachable()?;
+                self.builder.position_at_end(resolved);
+                self.builder
+                    .build_indirect_call(callee_type, target, &args, "call")?
+            }
+            (None, None) => unreachable!("a link is either linked or found in a library"),
+        };
         if let Some(after) = &link.after {
             let after_fn = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
             self.builder.build_call(after_fn, &[], "")?;

@@ -576,6 +576,9 @@ pub enum Word {
 /// just allocated, is not passed, and `init` is called with it, the
 /// callee's result and the object's `hl_type`, to bind the two; the
 /// native returns nothing, and `arg_casts` covers the passed arguments.
+/// `library`, when set, names the side module (a native library, on wasm)
+/// the callee is in: it is found there by `symbol` at startup rather than
+/// linked, and a callee that is not found raises when called.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostLink {
     pub symbol: String,
@@ -586,6 +589,7 @@ pub struct HostLink {
     pub ret_cast: Option<String>,
     pub after: Option<String>,
     pub init: Option<String>,
+    pub library: Option<String>,
 }
 
 static HOST_LINKS: OnceLock<Mutex<HashMap<String, HostLink>>> = OnceLock::new();

@@ -1704,6 +1704,33 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_store(slot.as_pointer_value(), addr)?;
                 }
             }
+
+            // Fill each linked native's slot whose callee is in a side
+            // module: the symbol itself, found in that library.
+            if !self.aot_link_slots.is_empty() {
+                let find_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let find = self.aot_symbol("hlp_aot_symbol", find_ty);
+                let slots = self.aot_link_slots.clone();
+                for (lib, symbol) in &slots {
+                    let Some(slot) = self.module.get_global(&format!("ash_link_{lib}_{symbol}")) else {
+                        continue;
+                    };
+                    let lib_s = self.builder.build_global_string_ptr(lib, "aot_link_lib")?;
+                    let sym_s = self.builder.build_global_string_ptr(symbol, "aot_link_sym")?;
+                    let addr = self
+                        .builder
+                        .build_indirect_call(
+                            find_ty,
+                            find,
+                            &[lib_s.as_pointer_value().into(), sym_s.as_pointer_value().into()],
+                            "link_addr",
+                        )?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| anyhow!("hlp_aot_symbol returned void"))?;
+                    self.builder.build_store(slot.as_pointer_value(), addr)?;
+                }
+            }
         }
 
         self.builder.build_return(None)?;

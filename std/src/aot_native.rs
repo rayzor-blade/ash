@@ -307,6 +307,30 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
     }
 }
 
+/// Address of `symbol` in the native library `lib`, or null: a host's
+/// linked native whose callee is in a side module, found by its own name
+/// rather than through a `DEFINE_PRIM` resolver.
+///
+/// # Safety
+/// `lib` and `symbol` must be valid NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_aot_symbol(lib: *const c_char, symbol: *const c_char) -> *mut c_void {
+    unsafe {
+        if lib.is_null() || symbol.is_null() {
+            return std::ptr::null_mut();
+        }
+        let (Ok(lib), Ok(symbol)) = (CStr::from_ptr(lib).to_str(), CStr::from_ptr(symbol).to_str())
+        else {
+            return std::ptr::null_mut();
+        };
+        let handle = library(lib);
+        if handle.is_null() {
+            return std::ptr::null_mut();
+        }
+        dlsym_handle(handle, symbol)
+    }
+}
+
 /// Raise the error HashLink's `disabled_primitive` raises.
 ///
 /// The emitted call site checks its slot and comes here when the primitive

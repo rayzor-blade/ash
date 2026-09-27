@@ -701,6 +701,7 @@ pub fn do_reload() -> Option<DecodedBytecode> {
     // functions_ptrs is patched, and what it is patched with is the previous
     // body recompiled.
     crate::air_pipeline::invalidate_optimized();
+    crate::llvm::air::invalidate_ceilings();
     let mut guard = match RELOAD_CTX.lock() {
         Ok(g) => g,
         Err(_) => return None,

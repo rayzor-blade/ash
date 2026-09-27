@@ -246,22 +246,31 @@ pub fn promotion_gate_enabled() -> bool {
     })
 }
 
+static CEILINGS: std::sync::Mutex<Option<std::collections::HashMap<usize, LlvmCeiling>>> =
+    std::sync::Mutex::new(None);
+
+/// Drop every memoized ceiling: they are keyed by findex, which names a
+/// different body once the bytecode changes.
+pub fn invalidate_ceilings() {
+    if let Ok(mut g) = CEILINGS.lock() {
+        *g = None;
+    }
+}
+
 /// The ceiling for one function, memoized: the AIR pipeline is not something
 /// to re-run per proposal, and a broker can propose the same findex tens of
 /// thousands of times.
 pub fn llvm_ceiling(bc: &DecodedBytecode, f: &HLFunction) -> LlvmCeiling {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static CACHE: Mutex<Option<HashMap<usize, LlvmCeiling>>> = Mutex::new(None);
     let findex = f.findex as usize;
-    if let Ok(g) = CACHE.lock() {
+    if let Ok(g) = CEILINGS.lock() {
         if let Some(hit) = g.as_ref().and_then(|m| m.get(&findex).copied()) {
             return hit;
         }
     }
     let ceiling = compute_ceiling(bc, f);
-    if let Ok(mut g) = CACHE.lock() {
-        g.get_or_insert_with(HashMap::new).insert(findex, ceiling);
+    if let Ok(mut g) = CEILINGS.lock() {
+        g.get_or_insert_with(Default::default)
+            .insert(findex, ceiling);
     }
     ceiling
 }

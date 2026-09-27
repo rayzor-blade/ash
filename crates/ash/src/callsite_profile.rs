@@ -267,6 +267,14 @@ pub fn load_profile(text: &str) -> usize {
     n
 }
 
+/// Drop the loaded profile, before a build for another program loads its own.
+pub fn clear_profile() {
+    aot_method_targets()
+        .lock()
+        .expect("callsite profile mutex poisoned")
+        .clear();
+}
+
 /// The target a loaded profile associates with this caller.
 pub fn aot_target_for(caller: &str) -> Option<String> {
     let hit = aot_method_targets()

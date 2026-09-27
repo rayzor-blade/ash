@@ -53,6 +53,12 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         links,
         objects: language_objects,
     } = request;
+    // A process may build several programs. These caches are keyed by
+    // findex or caller, which name different code in each, so a build
+    // starts with them empty.
+    crate::air_pipeline::invalidate_optimized();
+    crate::llvm::air::invalidate_ceilings();
+    crate::callsite_profile::clear_profile();
     crate::native_lib::set_host_links(&links);
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
     if let Some(pgo) = &pgo {

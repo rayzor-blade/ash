@@ -548,6 +548,12 @@ const RECORD_INT_REGS: u32 = 7;
 const RECORD_INT_REGS: u32 = 5;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 const RECORD_INT_REGS: u32 = 0;
+/// Whether `fun_record` can be called on this target. Where it cannot, it
+/// raises, and on wasm its signature matches no call site besides.
+pub const RECORD_CLOSURES: bool = cfg!(any(
+    target_arch = "aarch64",
+    all(target_arch = "x86_64", not(windows))
+));
 
 /// The one function every record closure has as its `fun`: compiled code
 /// calls it as the closure's own signature, with the bound value first.
@@ -664,7 +670,9 @@ unsafe extern "C" fn record_call(
 /// the record closure `rc`, which the host keeps alive and unmoved for as
 /// long as the closure lives. Null when the signature does not fit the
 /// argument registers, which `fun_record` keeps: more than `RECORD_ARGS`
-/// arguments, or more integers or floats than the registers hold.
+/// arguments, or more integers or floats than the registers hold. Always
+/// null where there is no `fun_record` (`RECORD_CLOSURES`); a host then
+/// makes a var-args closure, which call sites reach through `hlp_dyn_call`.
 ///
 /// # Safety
 /// `t` is a function type and `rc` describes it, `rc.full` being `t` with
@@ -674,6 +682,9 @@ pub unsafe extern "C" fn hlp_alloc_record_closure(
     t: *mut hl_type,
     rc: *mut RecordClosure,
 ) -> *mut vclosure {
+    if !RECORD_CLOSURES {
+        return ptr::null_mut();
+    }
     unsafe {
         let shape = &*rc;
         let mut pattern = shape.pattern;
@@ -1458,8 +1469,12 @@ mod record_tests {
             full,
         }));
         let closure = unsafe { hlp_alloc_record_closure(t, rc) };
-        assert_eq!(unsafe { (*closure).t }, t);
+        if !RECORD_CLOSURES {
+            assert!(closure.is_null());
+            return;
+        }
         assert!(!closure.is_null());
+        assert_eq!(unsafe { (*closure).t }, t);
         unsafe {
             let f: unsafe extern "C" fn(*mut c_void, f64, i32) -> f64 =
                 mem::transmute((*closure).fun);

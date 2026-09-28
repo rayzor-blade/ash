@@ -919,22 +919,43 @@ impl<'ctx> JITModule<'ctx> {
                     // hardcoded i64 makes the module fail validation
                     // at the call.
                     let size_type = self.target_abi.pointer_int_type(self.context);
+                    let host_drop = self.object_drops.contains(&type_index);
                     let fun = self.declare_native(
-                        "hlp_alloc_obj_sized",
+                        "hlp_alloc_obj_sized_flags",
                         &[
                             self.context.ptr_type(AddressSpace::default()).into(),
                             size_type.into(),
+                            self.context.i32_type().into(),
                         ],
                         Some(self.context.ptr_type(AddressSpace::default()).into()),
                     );
                     let slow = |this: &mut Self| {
                         Ok(this.builder.build_call(
                             fun,
-                            &[type_ptr.into(), size_type.const_int(size, false).into()],
+                            &[
+                                type_ptr.into(),
+                                size_type.const_int(size, false).into(),
+                                this.context
+                                    .i32_type()
+                                    .const_int(
+                                        if host_drop {
+                                            u64::from(ash_std::rt::RT_OBJECT_HOST_DROP)
+                                        } else {
+                                            0
+                                        },
+                                        false,
+                                    )
+                                    .into(),
+                            ],
                             "call",
                         )?)
                     };
-                    match self.emit_inline_alloc(type_index, type_ptr, size, &slow)? {
+                    let inline = if host_drop {
+                        None
+                    } else {
+                        self.emit_inline_alloc(type_index, type_ptr, size, &slow)?
+                    };
+                    match inline {
                         Some(obj) => {
                             self.builder.build_store(registers[dst.idx()], obj)?;
                             return Ok(());

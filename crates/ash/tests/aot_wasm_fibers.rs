@@ -35,6 +35,7 @@ fn build(runtime: &Path, dir: &Path, name: &str, wasm_fibers: bool) -> Vec<u8> {
         exports: Vec::new(),
         closures: Vec::new(),
         object_tails: Vec::new(),
+        object_drops: Vec::new(),
         wasm_fibers,
     })
     .unwrap_or_else(|e| panic!("build {name}: {e:#}"));

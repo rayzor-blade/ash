@@ -267,6 +267,39 @@ impl DecodedBytecode {
         Ok(out)
     }
 
+    /// The classes whose host attachment needs a drop notification, including
+    /// subclasses of every named class.
+    pub(crate) fn object_drops(
+        &self,
+        classes: &[String],
+    ) -> Result<std::collections::HashSet<usize>> {
+        let mut named = std::collections::HashSet::new();
+        for class in classes {
+            let index = self
+                .type_index_of(class)
+                .ok_or_else(|| anyhow!("object drop: the program has no class `{class}`"))?;
+            named.insert(index);
+        }
+        let mut out = std::collections::HashSet::new();
+        for (i, t) in self.types.iter().enumerate() {
+            if t.kind != hl::hl_type_kind_HOBJ {
+                continue;
+            }
+            let mut cur = Some(i);
+            while let Some(c) = cur {
+                if named.contains(&c) {
+                    out.insert(i);
+                    break;
+                }
+                cur = self.types[c]
+                    .obj
+                    .as_ref()
+                    .and_then(|o| o.super_.as_ref().map(|s| s.0));
+            }
+        }
+        Ok(out)
+    }
+
     fn add_host_export(&mut self, e: &HostExport) -> Result<ResolvedExport> {
         let (findex, receiver) = if e.kind == ExportKind::Call {
             (self.closure_caller(e)?, true)

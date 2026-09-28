@@ -44,6 +44,9 @@ pub struct AotRequest<'a> {
     /// wants this many bytes of its own after: allocated, never read,
     /// written or copied by the program.
     pub object_tails: Vec<(String, usize)>,
+    /// Classes, by bytecode name, whose host attachment needs notification
+    /// when an instance dies. Subclasses inherit the policy.
+    pub object_drops: Vec<String>,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -70,6 +73,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         exports,
         closures,
         object_tails,
+        object_drops,
     } = request;
     // A process may build several programs. These caches are keyed by
     // findex or caller, which name different code in each, so a build
@@ -120,6 +124,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         &exports,
         &closures,
         &object_tails,
+        &object_drops,
     )?;
 
     let findexes: Vec<usize> = jit

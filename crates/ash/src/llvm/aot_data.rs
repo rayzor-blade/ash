@@ -1124,6 +1124,17 @@ impl<'ctx> JITModule<'ctx> {
                 .ok_or_else(|| anyhow!("object tail: type {t} has no descriptor"))?;
             tail_types.push(self.aot_type_ptr(ptr as *mut hl_type)?);
         }
+        let mut drops: Vec<usize> = self.object_drops.iter().copied().collect();
+        drops.sort_unstable();
+        let mut drop_types = Vec::with_capacity(drops.len());
+        for &t in &drops {
+            let ptr = self
+                .type_index_to_c_ptr
+                .get(&t)
+                .copied()
+                .ok_or_else(|| anyhow!("object drop: type {t} has no descriptor"))?;
+            drop_types.push(self.aot_type_ptr(ptr as *mut hl_type)?);
+        }
 
         let init = self
             .module
@@ -1162,6 +1173,30 @@ impl<'ctx> JITModule<'ctx> {
             }
             let set = self.aot_runtime_fn(
                 "hlp_set_object_tails",
+                void_type.fn_type(&[ptr_type.into(), size_type.into()], false),
+            );
+            self.builder
+                .build_call(set, &[table.into(), count.into()], "")?;
+        }
+
+        if !drop_types.is_empty() {
+            let count = size_type.const_int(drop_types.len() as u64, false);
+            let table = self
+                .builder
+                .build_array_alloca(ptr_type, count, "object_drops")?;
+            for (i, desc) in drop_types.iter().enumerate() {
+                let at = unsafe {
+                    self.builder.build_gep(
+                        ptr_type,
+                        table,
+                        &[size_type.const_int(i as u64, false)],
+                        "object_drop",
+                    )?
+                };
+                self.builder.build_store(at, *desc)?;
+            }
+            let set = self.aot_runtime_fn(
+                "hlp_set_object_drops",
                 void_type.fn_type(&[ptr_type.into(), size_type.into()], false),
             );
             self.builder

@@ -36,6 +36,7 @@ fn build(program: &Path, out: &Path) -> Vec<u8> {
         exports: Vec::new(),
         closures: Vec::new(),
         object_tails: Vec::new(),
+        object_drops: Vec::new(),
         wasm_fibers: false,
     })
     .unwrap_or_else(|e| panic!("emit {}: {e:#}", program.display()));

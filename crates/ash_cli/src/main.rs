@@ -1332,6 +1332,7 @@ fn run() -> Result<()> {
             exports: Vec::new(),
             closures: Vec::new(),
             object_tails: Vec::new(),
+            object_drops: Vec::new(),
         })?;
         if let Some(module) = wasm_page {
             web::write_page(&module, cli.quiet)?;

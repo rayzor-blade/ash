@@ -254,6 +254,7 @@ fn build(
         objects: vec![driver],
         closures,
         object_tails: vec![("Counter".to_string(), 64)],
+        object_drops: vec!["Counter".to_string()],
         wasm_fibers: false,
         exports,
     })

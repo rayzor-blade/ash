@@ -86,6 +86,8 @@ pub struct JITModule<'ctx> {
     pub(crate) aot_closures: Vec<crate::host_export::ResolvedClosure>,
     /// Bytes the host reserves past each instance of a class, by type index.
     pub(crate) object_tails: HashMap<usize, u64>,
+    /// Classes whose instances must be allocated with a host drop hook.
+    pub(crate) object_drops: std::collections::HashSet<usize>,
     /// The trap regions of the function being lowered, on wasm.
     pub(crate) wasm_traps: Option<super::function::wasm_traps::WasmTraps<'ctx>>,
     /// Whether the function being lowered is frameless: no trace can be
@@ -344,7 +346,8 @@ fn timing_enabled() -> bool {
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
         let abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
-        Self::build(context, path, false, abi, &[], &[], &[]).expect("Failed to build JIT module")
+        Self::build(context, path, false, abi, &[], &[], &[], &[])
+            .expect("Failed to build JIT module")
     }
 
     /// The same construction, with every pointer the lowering needs expressed
@@ -355,11 +358,11 @@ impl<'ctx> JITModule<'ctx> {
     /// the switch would already have an address baked into it.
     pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::host()?;
-        Self::build(context, path, true, abi, &[], &[], &[])
+        Self::build(context, path, true, abi, &[], &[], &[], &[])
     }
 
     pub fn new_aot_for_target(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
-        Self::new_aot_with_host(context, path, triple, &[], &[], &[])
+        Self::new_aot_with_host(context, path, triple, &[], &[], &[], &[])
     }
 
     /// An AOT module that also defines `exports` and adapts `closures`, both
@@ -371,9 +374,19 @@ impl<'ctx> JITModule<'ctx> {
         exports: &[crate::host_export::HostExport],
         closures: &[crate::host_export::HostClosure],
         object_tails: &[(String, usize)],
+        object_drops: &[String],
     ) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
-        Self::build(context, path, true, abi, exports, closures, object_tails)
+        Self::build(
+            context,
+            path,
+            true,
+            abi,
+            exports,
+            closures,
+            object_tails,
+            object_drops,
+        )
     }
 
     fn build(
@@ -384,6 +397,7 @@ impl<'ctx> JITModule<'ctx> {
         exports: &[crate::host_export::HostExport],
         closures: &[crate::host_export::HostClosure],
         object_tails: &[(String, usize)],
+        object_drops: &[String],
     ) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
@@ -395,6 +409,7 @@ impl<'ctx> JITModule<'ctx> {
         let aot_exports = bytecode.add_host_exports(exports)?;
         let aot_closures = bytecode.add_host_closures(closures)?;
         let object_tails = bytecode.object_tails(object_tails)?;
+        let object_drops = bytecode.object_drops(object_drops)?;
         // Any native outside the runtime means an HDLL, which brings its own
         // copy of the runtime unless this object shares one. Known here,
         // before a single symbol is declared, because declaring them is what
@@ -441,6 +456,7 @@ impl<'ctx> JITModule<'ctx> {
             aot_exports,
             aot_closures,
             object_tails,
+            object_drops,
             wasm_traps: None,
             frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -898,6 +914,7 @@ impl<'ctx> JITModule<'ctx> {
             aot_exports: Vec::new(),
             aot_closures: Vec::new(),
             object_tails: HashMap::new(),
+            object_drops: std::collections::HashSet::new(),
             wasm_traps: None,
             frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),

@@ -178,6 +178,11 @@ unsafe fn alloc_virtual(t: *mut hl::hl_type) -> Option<ptr::NonNull<hl::vvirtual
 static OBJECT_TAILS: std::sync::OnceLock<std::collections::HashMap<usize, usize>> =
     std::sync::OnceLock::new();
 
+/// Classes whose instances carry host state that must be released when the
+/// instance dies. Keyed by type descriptor and installed before allocation.
+static OBJECT_DROPS: std::sync::OnceLock<std::collections::HashSet<usize>> =
+    std::sync::OnceLock::new();
+
 /// One class's tail, as `hlp_set_object_tails` receives it.
 #[repr(C)]
 pub struct ObjectTail {
@@ -201,6 +206,17 @@ pub unsafe extern "C" fn hlp_set_object_tails(tails: *const ObjectTail, n: usize
     let _ = OBJECT_TAILS.set(map);
 }
 
+/// Record the `n` class types whose host attachment needs a drop callback.
+/// The first call wins; the program makes it before its first allocation.
+///
+/// # Safety
+/// `types` points at `n` type descriptors.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_set_object_drops(types: *const *mut hl_type, n: usize) {
+    let set = (0..n).map(|i| unsafe { *types.add(i) as usize }).collect();
+    let _ = OBJECT_DROPS.set(set);
+}
+
 /// The tail every instance of `t` carries; 0 for most.
 #[inline]
 fn object_tail(t: *mut hl_type) -> usize {
@@ -208,6 +224,18 @@ fn object_tail(t: *mut hl_type) -> usize {
         .get()
         .and_then(|tails| tails.get(&(t as usize)).copied())
         .unwrap_or(0)
+}
+
+#[inline]
+fn object_flags(t: *mut hl_type) -> u32 {
+    if OBJECT_DROPS
+        .get()
+        .is_some_and(|types| types.contains(&(t as usize)))
+    {
+        crate::rt::RT_OBJECT_HOST_DROP
+    } else {
+        0
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -234,7 +262,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
         // Allocate memory — `allocate` returns zeroed memory (it memsets the
         // region against stale data in reused blocks), so zeroing again here
         // was one of the two memsets the profiler charged to every allocation.
-        let ptr = crate::rt::gc_alloc_object(size)
+        let ptr = crate::rt::gc_alloc_object(t, size, object_flags(t))
             .unwrap_or_else(|| crate::rt::out_of_memory("an object"));
 
         let o = ptr.as_ptr() as *mut hl::vobj;
@@ -307,6 +335,17 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
 /// re-checks it wherever a resolved `rt` is available to compare with.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *mut vdynamic {
+    unsafe { hlp_alloc_obj_sized_flags(t, size, object_flags(t)) }
+}
+
+/// [`hlp_alloc_obj_sized`] with the allocation policy already resolved by an
+/// ahead-of-time call site.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_alloc_obj_sized_flags(
+    t: *mut hl_type,
+    size: usize,
+    flags: u32,
+) -> *mut vdynamic {
     unsafe {
         debug_assert!(!t.is_null(), "hlp_alloc_obj_sized on a null type");
         #[cfg(debug_assertions)]
@@ -339,7 +378,7 @@ pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *m
             }
         }
         crate::gc::note_object_type(t);
-        let ptr = crate::rt::gc_alloc_object(size)
+        let ptr = crate::rt::gc_alloc_object(t, size, flags)
             .unwrap_or_else(|| crate::rt::out_of_memory("an object"));
         let o = ptr.as_ptr() as *mut hl::vobj;
         (*o).t = t;

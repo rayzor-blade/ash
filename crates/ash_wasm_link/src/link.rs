@@ -807,7 +807,9 @@ fn plan(
         for entry in live_code.chain(obj.data_relocs.iter()) {
             if !matches!(
                 entry.ty,
-                RelocationType::TableIndexSleb | RelocationType::TableIndexI32
+                RelocationType::TableIndexSleb
+                    | RelocationType::TableIndexI32
+                    | RelocationType::TableIndexRelSleb
             ) {
                 continue;
             }
@@ -1084,6 +1086,7 @@ fn mark_reachable(
                 entry.ty,
                 RelocationType::TableIndexSleb
                     | RelocationType::TableIndexI32
+                    | RelocationType::TableIndexRelSleb
                     | RelocationType::FunctionIndexLeb
             ) {
                 continue;
@@ -1113,6 +1116,7 @@ fn mark_reachable(
                 RelocationType::FunctionIndexLeb
                     | RelocationType::TableIndexSleb
                     | RelocationType::TableIndexI32
+                    | RelocationType::TableIndexRelSleb
             ) {
                 continue;
             }

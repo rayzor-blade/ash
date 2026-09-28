@@ -16,7 +16,7 @@ use ash_core::host_export::{ExportKind, HostExport};
 use ash_core::llvm::aot_build::{AotRequest, emit_aot};
 use ash_core::native_lib::{HostLink, Word};
 
-const ALL_CHECKS: u32 = 32767;
+const ALL_CHECKS: u32 = 524287;
 const UNIT: u64 = 7;
 
 fn export(symbol: &str, class: &str, member: &str, kind: ExportKind, args: usize) -> HostExport {
@@ -145,6 +145,45 @@ fn build(
             "Counter",
             "grow",
             ExportKind::Method,
+            2,
+        ),
+        export(
+            "exports_test_adder",
+            "Counter",
+            "adder",
+            ExportKind::Static,
+            1,
+        ),
+        export(
+            "exports_test_thrower",
+            "Counter",
+            "thrower",
+            ExportKind::Static,
+            0,
+        ),
+        export(
+            "exports_test_grow_of",
+            "Counter",
+            "growOf",
+            ExportKind::Static,
+            1,
+        ),
+        HostExport {
+            arg_casts: vec![None, Some("ash:unbox_f64".to_string())],
+            ret_cast: Some("ash:box_f64".to_string()),
+            ..export(
+                "exports_test_call_ff",
+                "Float->Float",
+                "",
+                ExportKind::Call,
+                2,
+            )
+        },
+        export(
+            "exports_test_call_ii",
+            "(Int)->Int",
+            "",
+            ExportKind::Call,
             2,
         ),
         HostExport {

@@ -13,6 +13,11 @@ u64 exports_test_fail(u64);
 u64 exports_test_half(u64);
 u64 exports_test_half_boxed(u64);
 u64 exports_test_grow(u64, u64);
+u64 exports_test_adder(u64);
+u64 exports_test_thrower(void);
+u64 exports_test_grow_of(u64);
+u64 exports_test_call_ff(u64, u64);
+u64 exports_test_call_ii(u64, u64);
 
 static int raised;
 
@@ -56,5 +61,11 @@ int exports_test_drive(void) {
     if (exports_test_bump(0, 1) == 7 && raised == 3) ok |= 4096;
     if ((int)exports_test_grow(c, 1) == 41) ok |= 8192;
     if (exports_test_grow(0, 1) == 7 && raised == 4) ok |= 16384;
+    /* Closures, called as their function type: a plain one, one that
+       throws, a null one, and a method bound to its object. */
+    if (real(exports_test_call_ff(exports_test_adder(bits(2.0)), bits(3.0))) == 5.0) ok |= 32768;
+    if (exports_test_call_ff(exports_test_thrower(), bits(1.0)) == 7 && raised == 5) ok |= 65536;
+    if (exports_test_call_ff(0, bits(1.0)) == 7 && raised == 6) ok |= 131072;
+    if ((int)exports_test_call_ii(exports_test_grow_of(c), 2) == 43) ok |= 262144;
     return ok;
 }

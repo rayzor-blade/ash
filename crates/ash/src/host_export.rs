@@ -32,6 +32,11 @@ pub enum ExportKind {
     Getter,
     /// Writes a variable, the same two ways; returns `unit`.
     Setter,
+    /// Calls the closure the first word names, as a function of the type
+    /// `class` spells the way Haxe does: `Float->Float`, `(Int, String)->Bool`,
+    /// `Void->Void`, an object type by its name (`game.Player->Void`).
+    /// `member` is unused.
+    Call,
 }
 
 /// A program member a host calls by `symbol`.
@@ -137,18 +142,23 @@ impl DecodedBytecode {
     }
 
     fn add_host_export(&mut self, e: &HostExport) -> Result<ResolvedExport> {
-        let class = self.type_index_of(&e.class).ok_or_else(|| {
-            anyhow!(
-                "export `{}`: the program has no class `{}`",
-                e.symbol,
-                e.class
-            )
-        })?;
-        let (findex, receiver) = match e.kind {
-            ExportKind::Static => (self.static_function(class, e)?, false),
-            ExportKind::Method => (self.method_caller(class, e)?, true),
-            ExportKind::Constructor => (self.constructor_caller(class, e)?, false),
-            ExportKind::Getter | ExportKind::Setter => self.variable_accessor(class, e)?,
+        let (findex, receiver) = if e.kind == ExportKind::Call {
+            (self.closure_caller(e)?, true)
+        } else {
+            let class = self.type_index_of(&e.class).ok_or_else(|| {
+                anyhow!(
+                    "export `{}`: the program has no class `{}`",
+                    e.symbol,
+                    e.class
+                )
+            })?;
+            match e.kind {
+                ExportKind::Static => (self.static_function(class, e)?, false),
+                ExportKind::Method => (self.method_caller(class, e)?, true),
+                ExportKind::Constructor => (self.constructor_caller(class, e)?, false),
+                ExportKind::Getter | ExportKind::Setter => self.variable_accessor(class, e)?,
+                ExportKind::Call => unreachable!("handled above"),
+            }
         };
         let fun = self.function_type_of(findex)?;
         if fun.args.len() != e.arg_casts.len() {
@@ -471,6 +481,76 @@ impl DecodedBytecode {
         Ok((self.push_export_function(type_, regs, ops), false))
     }
 
+    /// A function taking the closure and its arguments, calling the one with
+    /// the other, as compiled code calls a value of that function type.
+    fn closure_caller(&mut self, e: &HostExport) -> Result<usize> {
+        let spelled = Spelled::parse(&e.class)
+            .map_err(|why| anyhow!("export `{}`: `{}`: {why}", e.symbol, e.class))?;
+        let fun_type = (0..self.types.len())
+            .find(|&t| self.types[t].kind == hl::hl_type_kind_HFUN && self.spells(t, &spelled))
+            .ok_or_else(|| {
+                anyhow!(
+                    "export `{}`: the program has no function type `{}`",
+                    e.symbol,
+                    e.class
+                )
+            })?;
+        let fun = self.types[fun_type].fun.clone().expect("a function type");
+        let mut regs = vec![TypeRef(fun_type)];
+        regs.extend(fun.args.iter().cloned());
+        let dst = Reg(regs.len() as u32);
+        regs.push(fun.ret.clone());
+        let args: Vec<Reg> = (1..=fun.args.len() as u32).map(Reg).collect();
+        let ops = vec![
+            Opcode::NullCheck { reg: Reg(0) },
+            Opcode::CallClosure {
+                dst,
+                fun: Reg(0),
+                args,
+            },
+            Opcode::Ret { ret: dst },
+        ];
+        let mut params = vec![TypeRef(fun_type)];
+        params.extend(fun.args.iter().cloned());
+        let type_ = self.push_fun_type(HLTypeFun {
+            args: params,
+            ret: fun.ret.clone(),
+            ..Default::default()
+        });
+        Ok(self.push_export_function(type_, regs, ops))
+    }
+
+    /// Whether the program's type `t` is the one `spelled` names.
+    fn spells(&self, t: usize, spelled: &Spelled) -> bool {
+        let ty = &self.types[t];
+        match spelled {
+            Spelled::Fun(args, ret) => ty.fun.as_ref().is_some_and(|f| {
+                ty.kind == hl::hl_type_kind_HFUN
+                    && f.args.len() == args.len()
+                    && f.args.iter().zip(args).all(|(a, s)| self.spells(a.0, s))
+                    && self.spells(f.ret.0, ret)
+            }),
+            Spelled::Null(inner) => {
+                ty.kind == hl::hl_type_kind_HNULL
+                    && ty.tparam.as_ref().is_some_and(|p| self.spells(p.0, inner))
+            }
+            Spelled::Named(name) => match name.as_str() {
+                "Int" | "UInt" => ty.kind == hl::hl_type_kind_HI32,
+                "Float" => ty.kind == hl::hl_type_kind_HF64,
+                "Single" => ty.kind == hl::hl_type_kind_HF32,
+                "Bool" => ty.kind == hl::hl_type_kind_HBOOL,
+                "Void" => ty.kind == hl::hl_type_kind_HVOID,
+                "Dynamic" => ty.kind == hl::hl_type_kind_HDYN,
+                "haxe.Int64" | "hl.I64" => ty.kind == hl::hl_type_kind_HI64,
+                "hl.Bytes" => ty.kind == hl::hl_type_kind_HBYTES,
+                _ => {
+                    ty.obj.as_ref().is_some_and(|o| o.name == *name)
+                        || ty.tenum.as_ref().is_some_and(|en| en.name == *name)
+                }
+            },
+        }
+    }
+
     /// The program's type of a primitive kind, created if it has none.
     fn kind_type(&mut self, kind: hl::hl_type_kind) -> usize {
         match self.types.iter().position(|t| t.kind == kind) {
@@ -525,5 +605,150 @@ impl DecodedBytecode {
             field_ref: None,
         });
         findex as usize
+    }
+}
+
+/// A type as a host spells it in Haxe syntax.
+#[derive(Debug, PartialEq)]
+enum Spelled {
+    Named(String),
+    Null(Box<Spelled>),
+    Fun(Vec<Spelled>, Box<Spelled>),
+}
+
+impl Spelled {
+    fn parse(text: &str) -> std::result::Result<Spelled, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("an empty type".into());
+        }
+        let parts = split_top(text, "->");
+        if parts.len() > 1 {
+            let ret = Spelled::parse(parts[parts.len() - 1])?;
+            let heads = &parts[..parts.len() - 1];
+            let args = match heads {
+                // `(A, B)->R`, `()->R`, and `(A->B)->R`.
+                [one] if enclosed(one) => {
+                    let inner = one.trim()[1..one.trim().len() - 1].trim();
+                    if inner.is_empty() {
+                        Vec::new()
+                    } else {
+                        split_top(inner, ",")
+                            .into_iter()
+                            .map(|a| Spelled::parse(strip_arg_name(a)))
+                            .collect::<std::result::Result<_, _>>()?
+                    }
+                }
+                // `Void->R` takes nothing.
+                [one] if one.trim() == "Void" => Vec::new(),
+                _ => heads
+                    .iter()
+                    .map(|a| Spelled::parse(a))
+                    .collect::<std::result::Result<_, _>>()?,
+            };
+            return Ok(Spelled::Fun(args, Box::new(ret)));
+        }
+        if enclosed(text) {
+            return Spelled::parse(&text[1..text.len() - 1]);
+        }
+        if let Some(inner) = text.strip_prefix("Null<").and_then(|t| t.strip_suffix('>')) {
+            return Ok(Spelled::Null(Box::new(Spelled::parse(inner)?)));
+        }
+        Ok(Spelled::Named(text.to_string()))
+    }
+}
+
+/// `text` split at each `sep` outside parentheses and angle brackets.
+fn split_top<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
+    let bytes = text.as_bytes();
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut i) = (0i32, 0usize, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'<' => depth += 1,
+            b')' => depth -= 1,
+            // The `>` of `->` is not a closing bracket.
+            b'>' if i == 0 || bytes[i - 1] != b'-' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && text[i..].starts_with(sep) {
+            parts.push(&text[start..i]);
+            i += sep.len();
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+/// Whether `text` is one parenthesised group: its first `(` closes at its
+/// last character.
+fn enclosed(text: &str) -> bool {
+    let text = text.trim();
+    if !(text.starts_with('(') && text.ends_with(')')) {
+        return false;
+    }
+    let mut depth = 0i32;
+    text[..text.len() - 1].bytes().all(|b| {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        depth > 0
+    })
+}
+
+/// `x:Int` as `Int`: an argument's name in the new function-type syntax.
+fn strip_arg_name(arg: &str) -> &str {
+    match split_top(arg, ":").as_slice() {
+        [_, ty] => ty,
+        _ => arg,
+    }
+}
+
+#[cfg(test)]
+mod spelled_tests {
+    use super::Spelled::{self, Fun, Named, Null};
+
+    fn named(n: &str) -> Spelled {
+        Named(n.into())
+    }
+
+    #[test]
+    fn haxe_function_types_parse() {
+        assert_eq!(
+            Spelled::parse("Float->Float").unwrap(),
+            Fun(vec![named("Float")], Box::new(named("Float")))
+        );
+        assert_eq!(
+            Spelled::parse("Void->Void").unwrap(),
+            Fun(vec![], Box::new(named("Void")))
+        );
+        assert_eq!(
+            Spelled::parse("(Int, String)->Bool").unwrap(),
+            Fun(vec![named("Int"), named("String")], Box::new(named("Bool")))
+        );
+        assert_eq!(
+            Spelled::parse("()->Int").unwrap(),
+            Fun(vec![], Box::new(named("Int")))
+        );
+        assert_eq!(
+            Spelled::parse("(x:Int)->Null<Float>").unwrap(),
+            Fun(vec![named("Int")], Box::new(Null(Box::new(named("Float")))))
+        );
+        assert_eq!(
+            Spelled::parse("(Int->Int)->game.Player").unwrap(),
+            Fun(
+                vec![Fun(vec![named("Int")], Box::new(named("Int")))],
+                Box::new(named("game.Player"))
+            )
+        );
+        assert_eq!(
+            Spelled::parse("Int->String->Void").unwrap(),
+            Fun(vec![named("Int"), named("String")], Box::new(named("Void")))
+        );
     }
 }

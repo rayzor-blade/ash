@@ -32,6 +32,15 @@ class Counter {
 
 	public static function half(x:Float):Float
 		return x / 2;
+
+	public static function adder(k:Float):Float->Float
+		return x -> x + k;
+
+	public static function thrower():Float->Float
+		return x -> throw "closure refused";
+
+	public static function growOf(c:Counter):Int->Int
+		return c.grow;
 }
 
 @:keep

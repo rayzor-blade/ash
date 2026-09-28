@@ -38,6 +38,27 @@ static double real(u64 u) {
     return x.d;
 }
 
+/* A host function value is its factor's bits; the closure holds it in a
+   cell, which a real host would allocate on the collected heap. */
+static u64 cell;
+
+void *exports_test_hold(u64 word) {
+    cell = word;
+    return &cell;
+}
+
+u64 exports_test_held(void *bound) {
+    return *(u64 *)bound;
+}
+
+u64 exports_test_make_scaler(double k) {
+    return bits(k);
+}
+
+u64 exports_test_call_fn_1(u64 fn, u64 x) {
+    return bits(real(fn) * real(x));
+}
+
 int exports_test_drive(void) {
     int ok = 0;
     if ((int)exports_test_add(2, 3) == 5) ok |= 1;

@@ -57,9 +57,18 @@ class Twice extends Counter {
 class Exports {
 	static function main() {
 		Sys.println("drive " + drive());
+		// A function the host supplies, called typed and dynamically.
+		var f = makeScaler(3.0);
+		Sys.println("scaled " + f(2.0));
+		var d:Dynamic = f;
+		Sys.println("dynamic " + d(4.0));
 	}
 
 	@:hlNative("exports_test", "drive")
 	static function drive():Int
 		return 0;
+
+	@:hlNative("exports_test", "make_scaler")
+	static function makeScaler(k:Float):Float->Float
+		return null;
 }

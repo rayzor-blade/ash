@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use ash_core::host_export::{ExportKind, HostExport};
+use ash_core::host_export::{ExportKind, HostClosure, HostExport};
 use ash_core::llvm::aot_build::{AotRequest, emit_aot};
 use ash_core::native_lib::{HostLink, Word};
 
@@ -69,19 +69,43 @@ fn build(
         let _ = std::fs::remove_dir_all(&dir);
         return None;
     }
-    let links = HashMap::from([(
-        ("exports_test".to_string(), "drive".to_string()),
-        HostLink {
-            symbol: "exports_test_drive".to_string(),
-            params: Vec::new(),
-            ret: Some(Word::I32),
-            arg_casts: Vec::new(),
-            ret_cast: None,
-            after: None,
-            init: None,
-            library: None,
-        },
-    )]);
+    let links = HashMap::from([
+        (
+            ("exports_test".to_string(), "drive".to_string()),
+            HostLink {
+                symbol: "exports_test_drive".to_string(),
+                params: Vec::new(),
+                ret: Some(Word::I32),
+                arg_casts: Vec::new(),
+                ret_cast: None,
+                after: None,
+                init: None,
+                library: None,
+            },
+        ),
+        (
+            ("exports_test".to_string(), "make_scaler".to_string()),
+            HostLink {
+                symbol: "exports_test_make_scaler".to_string(),
+                params: vec![Word::F64],
+                ret: Some(Word::I64),
+                arg_casts: vec![None],
+                ret_cast: Some("ash:closure".to_string()),
+                after: None,
+                init: None,
+                library: None,
+            },
+        ),
+    ]);
+    let closures = vec![HostClosure {
+        fun_type: "Float->Float".to_string(),
+        callee: "exports_test_call_fn_1".to_string(),
+        hold: "exports_test_hold".to_string(),
+        held: "exports_test_held".to_string(),
+        arg_casts: vec![Some("ash:box_f64".to_string())],
+        ret_cast: Some("ash:unbox_f64".to_string()),
+        after: None,
+    }];
     let exports = vec![
         export("exports_test_add", "Counter", "add", ExportKind::Static, 2),
         export(
@@ -211,6 +235,7 @@ fn build(
         quiet: true,
         links,
         objects: vec![driver],
+        closures,
         wasm_fibers: false,
         exports,
     })
@@ -226,7 +251,10 @@ fn assert_all_checks(run: Output) {
         run.status,
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(stdout.trim(), format!("drive {ALL_CHECKS}"));
+    assert_eq!(
+        stdout.trim(),
+        format!("drive {ALL_CHECKS}\nscaled 6\ndynamic 12")
+    );
 }
 
 #[test]

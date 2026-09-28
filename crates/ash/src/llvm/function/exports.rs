@@ -325,7 +325,9 @@ impl<'ctx> JITModule<'ctx> {
             let target_ty = BasicTypeEnum::try_from(target_params[i])
                 .map_err(|_| anyhow!("export `{}`: parameter {i} has no value type", x.symbol))?;
             let value = match &x.arg_casts[i] {
-                Some(cast) => self.emit_host_cast(cast, word.into(), param_descs[i], target_ty)?,
+                Some(cast) => {
+                    self.emit_host_cast(cast, word.into(), param_descs[i], target_ty, e.params[i])?
+                }
                 None => self.word_to(word, target_ty, self.types_[e.params[i]].kind)?,
             };
             args.push(value.into());
@@ -364,7 +366,7 @@ impl<'ctx> JITModule<'ctx> {
             (_, hl::hl_type_kind_HVOID) | (None, _) => i64_type.const_int(x.unit, false),
             (Some(value), _) => match &x.ret_cast {
                 Some(cast) => self
-                    .emit_host_cast(cast, value, ret_desc, i64_type.into())?
+                    .emit_host_cast(cast, value, ret_desc, i64_type.into(), e.ret)?
                     .into_int_value(),
                 None => self.word_from(value, ret_kind)?,
             },
@@ -385,14 +387,17 @@ impl<'ctx> JITModule<'ctx> {
     /// `ash:unbox_f64` reads a word as a float, NaN when it is not a number;
     /// `ash:box_f64` writes a float as a word, a NaN as the canonical
     /// `0x7ff8_0000_0000_0000` so it cannot read as a boxed value.
+    /// `ash:closure` makes a host's word a closure of the program's function
+    /// type `ty`, through that type's `HostClosure`.
     /// Any other name is called as `cast(value, t) -> target`, `t` being
-    /// `desc`, the program's type for the value.
+    /// `desc`, the program's type `ty` of the value.
     pub(super) fn emit_host_cast(
         &mut self,
         cast: &str,
         value: BasicValueEnum<'ctx>,
         desc: BasicValueEnum<'ctx>,
         target: BasicTypeEnum<'ctx>,
+        ty: usize,
     ) -> Result<BasicValueEnum<'ctx>> {
         const BOXED: u64 = 0x7ffc_0000_0000_0000;
         const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
@@ -448,6 +453,7 @@ impl<'ctx> JITModule<'ctx> {
                     other => return Err(anyhow!("{cast} answers a word, not {other:?}")),
                 })
             }
+            "ash:closure" => self.host_closure_value(value, ty),
             _ if cast.starts_with("ash:") => Err(anyhow!("no built-in cast `{cast}`")),
             _ => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -462,6 +468,159 @@ impl<'ctx> JITModule<'ctx> {
                     .ok_or_else(|| anyhow!("{cast} returned nothing"))
             }
         }
+    }
+
+    /// The closure of the program's function type `ty` over the host's
+    /// `word`: bound to what the type's `hold` makes of it, calling the type's
+    /// adapter. Allocated as the full type, so a dynamic call works as it
+    /// does on any bound closure.
+    fn host_closure_value(
+        &mut self,
+        word: BasicValueEnum<'ctx>,
+        ty: usize,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let index = self
+            .aot_closures
+            .iter()
+            .position(|c| c.matches(&self.bytecode, ty))
+            .ok_or_else(|| anyhow!("ash:closure: no HostClosure for the program's type {ty}"))?;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        let word = match word {
+            BasicValueEnum::IntValue(v) if v.get_type() == i64_type => v,
+            BasicValueEnum::IntValue(v) => self.builder.build_int_z_extend(v, i64_type, "word")?,
+            other => {
+                return Err(anyhow!(
+                    "ash:closure takes a word, not {:?}",
+                    other.get_type()
+                ));
+            }
+        };
+        let adapter = self.host_closure_adapter(index)?;
+        let full = self.get_initialized_type(self.aot_closures[index].full)?;
+        let c = &self.aot_closures[index].closure;
+        let hold = self.aot_runtime_fn(&c.hold, ptr_type.fn_type(&[i64_type.into()], false));
+        let bound = self
+            .builder
+            .build_call(hold, &[word.into()], "held")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("{} returned nothing", c.hold))?;
+        let alloc = self.aot_runtime_fn(
+            "hlp_alloc_closure_ptr",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+        );
+        self.builder
+            .build_call(
+                alloc,
+                &[
+                    full.into(),
+                    adapter.as_global_value().as_pointer_value().into(),
+                    bound.into(),
+                ],
+                "host_closure",
+            )?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("hlp_alloc_closure_ptr returned nothing"))
+    }
+
+    /// The function every closure of host closure type `index` calls: the
+    /// signature compiled code calls a bound closure of that type with, the
+    /// bound value first.
+    fn host_closure_adapter(&mut self, index: usize) -> Result<FunctionValue<'ctx>> {
+        let name = format!("ash_host_closure_{index}");
+        if let Some(f) = self.module.get_function(&name) {
+            return Ok(f);
+        }
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let fun_ty = self.aot_closures[index].fun;
+        let fun = self.types_[fun_ty]
+            .fun
+            .clone()
+            .ok_or_else(|| anyhow!("host closure type {fun_ty} is not a function"))?;
+        let mut params: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
+        let mut arg_llvm = Vec::with_capacity(fun.args.len());
+        let mut arg_descs = Vec::with_capacity(fun.args.len());
+        for a in &fun.args {
+            let t = self.get_register_type(a.0)?;
+            params.push(t.into());
+            arg_llvm.push(t);
+            arg_descs.push(self.get_initialized_type(a.0)?);
+        }
+        let ret_kind = self.types_[fun.ret.0].kind;
+        let ret_llvm = if ret_kind == hl::hl_type_kind_HVOID {
+            None
+        } else {
+            Some(self.get_register_type(fun.ret.0)?)
+        };
+        let ret_desc = self.get_initialized_type(fun.ret.0)?;
+        let fn_type = match ret_llvm {
+            Some(t) => t.fn_type(&params, false),
+            None => self.context.void_type().fn_type(&params, false),
+        };
+        let c = self.aot_closures[index].closure.clone();
+
+        let saved_block = self.builder.get_insert_block();
+        let adapter = self
+            .module
+            .add_function(&name, fn_type, Some(Linkage::Internal));
+        self.stamp_host_cpu(adapter);
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+
+        let held = self.aot_runtime_fn(&c.held, i64_type.fn_type(&[ptr_type.into()], false));
+        let bound = adapter
+            .get_nth_param(0)
+            .ok_or_else(|| anyhow!("adapter has no bound value"))?;
+        let callee_word = self
+            .builder
+            .build_call(held, &[bound.into()], "callee")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("{} returned nothing", c.held))?;
+        let mut words: Vec<BasicMetadataValueEnum> = vec![callee_word.into()];
+        for (i, arg) in adapter.get_param_iter().skip(1).enumerate() {
+            let word = match &c.arg_casts[i] {
+                Some(cast) => {
+                    self.emit_host_cast(cast, arg, arg_descs[i], i64_type.into(), fun.args[i].0)?
+                }
+                None => self.word_from(arg, self.types_[fun.args[i].0].kind)?.into(),
+            };
+            words.push(word.into());
+        }
+        let word_params: Vec<BasicMetadataTypeEnum> = vec![i64_type.into(); words.len()];
+        let callee = self.aot_runtime_fn(&c.callee, i64_type.fn_type(&word_params, false));
+        let answer = self
+            .builder
+            .build_call(callee, &words, "answer")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("{} returned nothing", c.callee))?
+            .into_int_value();
+        if let Some(after) = &c.after {
+            let after = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
+            self.builder.build_call(after, &[], "")?;
+        }
+        match ret_llvm {
+            None => {
+                self.builder.build_return(None)?;
+            }
+            Some(t) => {
+                let value = match &c.ret_cast {
+                    Some(cast) => {
+                        self.emit_host_cast(cast, answer.into(), ret_desc, t, fun.ret.0)?
+                    }
+                    None => self.word_to(answer, t, ret_kind)?,
+                };
+                self.builder.build_return(Some(&value))?;
+            }
+        }
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(adapter)
     }
 
     /// A word as a value of `ty`: an integer narrowed, a float by its bits,

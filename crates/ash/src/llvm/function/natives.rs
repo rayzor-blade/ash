@@ -476,7 +476,9 @@ impl<'ctx> JITModule<'ctx> {
             let j = i - skip;
             let target = word(link.params[j]);
             let value = match &link.arg_casts[j] {
-                Some(cast) => self.emit_host_cast(cast, param, arg_descs[i], target)?,
+                Some(cast) => {
+                    self.emit_host_cast(cast, param, arg_descs[i], target, arg_types[i])?
+                }
                 None if param.get_type() == target => param,
                 None => self.widen_or_narrow(param, target).ok_or_else(|| {
                     anyhow!(
@@ -571,7 +573,7 @@ impl<'ctx> JITModule<'ctx> {
         match (call.try_as_basic_value().basic(), fn_type.get_return_type()) {
             (Some(value), Some(want)) => {
                 let value = match &link.ret_cast {
-                    Some(cast) => self.emit_host_cast(cast, value, ret_desc, want)?,
+                    Some(cast) => self.emit_host_cast(cast, value, ret_desc, want, ret_type)?,
                     None if value.get_type() == want => value,
                     None => self.widen_or_narrow(value, want).ok_or_else(|| {
                         anyhow!(

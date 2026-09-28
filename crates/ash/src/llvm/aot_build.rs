@@ -37,6 +37,9 @@ pub struct AotRequest<'a> {
     /// Program members to define C functions for, which the host's other
     /// objects call by symbol; see `host_export`.
     pub exports: Vec<crate::host_export::HostExport>,
+    /// Function types whose values the host supplies; see
+    /// `host_export::HostClosure`.
+    pub closures: Vec<crate::host_export::HostClosure>,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -61,6 +64,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         objects: language_objects,
         wasm_fibers,
         exports,
+        closures,
     } = request;
     // A process may build several programs. These caches are keyed by
     // findex or caller, which name different code in each, so a build
@@ -104,8 +108,9 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     crate::air_pipeline::set_shadow_frames(
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
-    let mut jit =
-        crate::llvm::module::JITModule::new_aot_with_exports(context, file, &triple, &exports)?;
+    let mut jit = crate::llvm::module::JITModule::new_aot_with_host(
+        context, file, &triple, &exports, &closures,
+    )?;
 
     let findexes: Vec<usize> = jit
         .bytecode_functions()

@@ -81,6 +81,47 @@ impl HostExport {
     }
 }
 
+/// A function type whose values a host supplies, as words of its own: Haxe
+/// calls one through an adapter Ash emits for the type, with nothing boxed.
+///
+/// `fun_type` is spelled as for [`ExportKind::Call`]. The cast `ash:closure`,
+/// named where a HostLink or HostExport hands Haxe a value of that type, turns
+/// a word into a closure: its bound value is `hold(word) -> *mut c_void`, a
+/// GC object that keeps whatever the word names alive, and its function is
+/// the adapter. Called as `f(a1, .., aN)`, the adapter answers
+/// `callee(held(bound) -> u64, a1', .., aN') -> u64`, each `ai'` through
+/// `arg_casts[i]` (a Haxe value to a word, as a HostLink casts), then runs
+/// `after` if set, then casts the result back through `ret_cast`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostClosure {
+    pub fun_type: String,
+    pub callee: String,
+    pub hold: String,
+    pub held: String,
+    pub arg_casts: Vec<Option<String>>,
+    pub ret_cast: Option<String>,
+    pub after: Option<String>,
+}
+
+/// A host closure type resolved against one program.
+#[derive(Debug)]
+pub(crate) struct ResolvedClosure {
+    pub closure: HostClosure,
+    spelled: Spelled,
+    /// The program's function type it matched.
+    pub fun: usize,
+    /// That type with the bound value first: what the closure is allocated
+    /// as, so a dynamic call finds the value's type as HashLink's does.
+    pub full: usize,
+}
+
+impl ResolvedClosure {
+    /// Whether the program's type `ty` is this closure type.
+    pub(crate) fn matches(&self, bc: &DecodedBytecode, ty: usize) -> bool {
+        bc.spells(ty, &self.spelled)
+    }
+}
+
 /// An export resolved against one program: the function its symbol calls,
 /// and that function's parameter and result types.
 #[derive(Debug, Clone)]
@@ -137,6 +178,51 @@ impl DecodedBytecode {
             }
             ops.remove(0);
             e.fast_findex = Some(self.push_export_function(type_, regs, ops));
+        }
+        Ok(resolved)
+    }
+
+    /// Resolve `closures` against the program's function types, appending
+    /// the full type each is allocated as. A type the program never uses is
+    /// left out: no value of it can reach Haxe.
+    pub(crate) fn add_host_closures(
+        &mut self,
+        closures: &[HostClosure],
+    ) -> Result<Vec<ResolvedClosure>> {
+        let mut resolved = Vec::new();
+        for c in closures {
+            let spelled = Spelled::parse(&c.fun_type)
+                .map_err(|why| anyhow!("host closure `{}`: {why}", c.fun_type))?;
+            let Some(fun) = (0..self.types.len())
+                .find(|&t| self.types[t].kind == hl::hl_type_kind_HFUN && self.spells(t, &spelled))
+            else {
+                continue;
+            };
+            let f = self.types[fun].fun.clone().expect("a function type");
+            if f.args.len() != c.arg_casts.len() {
+                bail!(
+                    "host closure `{}` takes {} arguments, and it casts {}",
+                    c.fun_type,
+                    f.args.len(),
+                    c.arg_casts.len()
+                );
+            }
+            let dynamic = self.kind_type(hl::hl_type_kind_HDYN);
+            let mut args = vec![TypeRef(dynamic)];
+            args.extend(f.args.iter().cloned());
+            let full = self
+                .push_fun_type(HLTypeFun {
+                    args,
+                    ret: f.ret.clone(),
+                    ..Default::default()
+                })
+                .0;
+            resolved.push(ResolvedClosure {
+                closure: c.clone(),
+                spelled,
+                fun,
+                full,
+            });
         }
         Ok(resolved)
     }

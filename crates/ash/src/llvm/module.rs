@@ -82,6 +82,8 @@ pub struct JITModule<'ctx> {
     pub(crate) aot_link_slots: Vec<(String, String)>,
     /// What the host's exports resolved to; see `host_export`.
     pub(crate) aot_exports: Vec<crate::host_export::ResolvedExport>,
+    /// The host's closure types; see `host_export::HostClosure`.
+    pub(crate) aot_closures: Vec<crate::host_export::ResolvedClosure>,
     /// The trap regions of the function being lowered, on wasm.
     pub(crate) wasm_traps: Option<super::function::wasm_traps::WasmTraps<'ctx>>,
     /// Whether the function being lowered is frameless: no trace can be
@@ -340,7 +342,7 @@ fn timing_enabled() -> bool {
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
         let abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
-        Self::build(context, path, false, abi, &[]).expect("Failed to build JIT module")
+        Self::build(context, path, false, abi, &[], &[]).expect("Failed to build JIT module")
     }
 
     /// The same construction, with every pointer the lowering needs expressed
@@ -351,23 +353,24 @@ impl<'ctx> JITModule<'ctx> {
     /// the switch would already have an address baked into it.
     pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::host()?;
-        Self::build(context, path, true, abi, &[])
+        Self::build(context, path, true, abi, &[], &[])
     }
 
     pub fn new_aot_for_target(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
-        Self::new_aot_with_exports(context, path, triple, &[])
+        Self::new_aot_with_host(context, path, triple, &[], &[])
     }
 
-    /// An AOT module that also defines `exports`, resolved against the
-    /// program before anything is lowered.
-    pub fn new_aot_with_exports(
+    /// An AOT module that also defines `exports` and adapts `closures`, both
+    /// resolved against the program before anything is lowered.
+    pub fn new_aot_with_host(
         context: &'ctx Context,
         path: &Path,
         triple: &str,
         exports: &[crate::host_export::HostExport],
+        closures: &[crate::host_export::HostClosure],
     ) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
-        Self::build(context, path, true, abi, exports)
+        Self::build(context, path, true, abi, exports, closures)
     }
 
     fn build(
@@ -376,6 +379,7 @@ impl<'ctx> JITModule<'ctx> {
         aot: bool,
         target_abi: crate::target_abi::TargetAbi,
         exports: &[crate::host_export::HostExport],
+        closures: &[crate::host_export::HostClosure],
     ) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
@@ -385,6 +389,7 @@ impl<'ctx> JITModule<'ctx> {
         let mut bytecode =
             BytecodeDecoder::decode_for_abi(path, &target_abi).expect("Failed to decode bytecode");
         let aot_exports = bytecode.add_host_exports(exports)?;
+        let aot_closures = bytecode.add_host_closures(closures)?;
         // Any native outside the runtime means an HDLL, which brings its own
         // copy of the runtime unless this object shares one. Known here,
         // before a single symbol is declared, because declaring them is what
@@ -429,6 +434,7 @@ impl<'ctx> JITModule<'ctx> {
             aot_hdll_natives: Vec::new(),
             aot_link_slots: Vec::new(),
             aot_exports,
+            aot_closures,
             wasm_traps: None,
             frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -884,6 +890,7 @@ impl<'ctx> JITModule<'ctx> {
             aot_hdll_natives: Vec::new(),
             aot_link_slots: Vec::new(),
             aot_exports: Vec::new(),
+            aot_closures: Vec::new(),
             wasm_traps: None,
             frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),

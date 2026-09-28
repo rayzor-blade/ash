@@ -20,18 +20,11 @@ impl<'ctx> JITModule<'ctx> {
         let guards: Vec<Guard> = exports
             .iter()
             .map(|e| {
-                let x = &e.export;
-                let casts_nothrow = x.casts_nothrow
-                    || x.arg_casts
-                        .iter()
-                        .chain(std::iter::once(&x.ret_cast))
-                        .flatten()
-                        .all(|c| c.starts_with("ash:"));
-                if !casts_nothrow {
+                if !e.export.casts_cannot_throw() {
                     Guard::Trap
                 } else if module.frameless(e.findex) {
                     Guard::None
-                } else if e.receiver && module.frameless_given_receiver(e.findex) {
+                } else if e.fast_findex.is_some_and(|fast| module.frameless(fast)) {
                     Guard::NullReceiver
                 } else {
                     Guard::Trap
@@ -41,7 +34,7 @@ impl<'ctx> JITModule<'ctx> {
         drop(module);
         for (e, guard) in exports.iter().zip(guards) {
             let symbol = e.export.symbol.as_str();
-            let body = self.export_body(e, &format!("ash_export_body_{symbol}"), None)?;
+            let body = self.export_body(e, e.findex, &format!("ash_export_body_{symbol}"), None)?;
             match guard {
                 Guard::None => self.export_unguarded(e, body)?,
                 Guard::Trap => self.export_trapped(e, body, symbol, Linkage::External)?,
@@ -54,8 +47,12 @@ impl<'ctx> JITModule<'ctx> {
                         .module
                         .get_function(&trapped)
                         .ok_or_else(|| anyhow!("export `{symbol}`: no trapped path"))?;
-                    let fast =
-                        self.export_body(e, &format!("ash_export_fast_{symbol}"), Some(trapped))?;
+                    let fast = self.export_body(
+                        e,
+                        e.fast_findex.expect("the checked export has a fast stub"),
+                        &format!("ash_export_fast_{symbol}"),
+                        Some(trapped),
+                    )?;
                     self.export_unguarded(e, fast)?;
                 }
             }
@@ -288,13 +285,14 @@ impl<'ctx> JITModule<'ctx> {
     fn export_body(
         &mut self,
         e: &ResolvedExport,
+        findex: usize,
         name: &str,
         null_exit: Option<FunctionValue<'ctx>>,
     ) -> Result<FunctionValue<'ctx>> {
         let x = &e.export;
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let (target, _) = self.get_or_create_function_value(e.findex)?;
+        let (target, _) = self.get_or_create_function_value(findex)?;
         let target_params = target.get_type().get_param_types();
         if target_params.len() != e.params.len() {
             return Err(anyhow!(

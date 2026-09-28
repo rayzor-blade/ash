@@ -64,12 +64,27 @@ pub struct HostExport {
     pub casts_nothrow: bool,
 }
 
+impl HostExport {
+    pub(crate) fn casts_cannot_throw(&self) -> bool {
+        self.casts_nothrow
+            || self
+                .arg_casts
+                .iter()
+                .chain(std::iter::once(&self.ret_cast))
+                .flatten()
+                .all(|cast| cast.starts_with("ash:"))
+    }
+}
+
 /// An export resolved against one program: the function its symbol calls,
 /// and that function's parameter and result types.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedExport {
     pub export: HostExport,
     pub findex: usize,
+    /// A copy of an instance member's export stub without its receiver null
+    /// check. Only the export's checked non-null branch may call it.
+    pub fast_findex: Option<usize>,
     pub params: Vec<usize>,
     pub ret: usize,
     /// Whether the first parameter is the receiver of an instance member.
@@ -84,7 +99,41 @@ impl DecodedBytecode {
         &mut self,
         exports: &[HostExport],
     ) -> Result<Vec<ResolvedExport>> {
-        exports.iter().map(|e| self.add_host_export(e)).collect()
+        let mut resolved: Vec<ResolvedExport> = exports
+            .iter()
+            .map(|e| self.add_host_export(e))
+            .collect::<Result<_>>()?;
+        // Every instance stub starts with NullCheck r0. If that is the only
+        // throw it can make, the public export checks r0 before calling a
+        // second, frameless copy. The original keeps its null check and frame
+        // for the trapped branch, so a null access still has its Haxe trace.
+        let module = crate::air_pipeline::AshModule::new(self);
+        let fast: Vec<bool> = resolved
+            .iter()
+            .map(|e| {
+                e.receiver
+                    && e.export.casts_cannot_throw()
+                    && module.frameless_given_receiver(e.findex)
+            })
+            .collect();
+        drop(module);
+        for (e, fast) in resolved.iter_mut().zip(fast) {
+            if !fast {
+                continue;
+            }
+            let (type_, regs, mut ops) = self
+                .functions
+                .iter()
+                .find(|f| f.findex as usize == e.findex)
+                .map(|stub| (stub.type_.clone(), stub.regs.clone(), stub.ops.clone()))
+                .expect("an instance export has a bytecode stub");
+            if !matches!(ops.first(), Some(Opcode::NullCheck { reg: Reg(0) })) {
+                continue;
+            }
+            ops.remove(0);
+            e.fast_findex = Some(self.push_export_function(type_, regs, ops));
+        }
+        Ok(resolved)
     }
 
     fn add_host_export(&mut self, e: &HostExport) -> Result<ResolvedExport> {
@@ -115,6 +164,7 @@ impl DecodedBytecode {
         Ok(ResolvedExport {
             export: e.clone(),
             findex,
+            fast_findex: None,
             params: fun.args.iter().map(|a| a.0).collect(),
             ret: fun.ret.0,
             receiver,

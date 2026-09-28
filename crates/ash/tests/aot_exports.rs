@@ -16,7 +16,7 @@ use ash_core::host_export::{ExportKind, HostClosure, HostExport};
 use ash_core::llvm::aot_build::{AotRequest, emit_aot};
 use ash_core::native_lib::{HostLink, Word};
 
-const ALL_CHECKS: u32 = 524287;
+const ALL_CHECKS: u32 = 1048575;
 const UNIT: u64 = 7;
 
 fn export(symbol: &str, class: &str, member: &str, kind: ExportKind, args: usize) -> HostExport {
@@ -253,6 +253,7 @@ fn build(
         links,
         objects: vec![driver],
         closures,
+        object_tails: vec![("Counter".to_string(), 64)],
         wasm_fibers: false,
         exports,
     })

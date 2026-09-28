@@ -1112,11 +1112,61 @@ impl<'ctx> JITModule<'ctx> {
         let void_type = self.context.void_type();
         let i8_type = self.context.i8_type();
 
+        let mut tails: Vec<(usize, u64)> =
+            self.object_tails.iter().map(|(&t, &b)| (t, b)).collect();
+        tails.sort_unstable();
+        let mut tail_types = Vec::with_capacity(tails.len());
+        for &(t, _) in &tails {
+            let ptr = self
+                .type_index_to_c_ptr
+                .get(&t)
+                .copied()
+                .ok_or_else(|| anyhow!("object tail: type {t} has no descriptor"))?;
+            tail_types.push(self.aot_type_ptr(ptr as *mut hl_type)?);
+        }
+
         let init = self
             .module
             .add_function("ash_module_init", void_type.fn_type(&[], false), None);
         let entry = self.context.append_basic_block(init, "entry");
         self.builder.position_at_end(entry);
+
+        // The classes whose instances carry a host's tail, before anything
+        // allocates one.
+        if !tails.is_empty() {
+            let entry_ty = self
+                .context
+                .struct_type(&[ptr_type.into(), size_type.into()], false);
+            let count = size_type.const_int(tails.len() as u64, false);
+            let table = self
+                .builder
+                .build_array_alloca(entry_ty, count, "object_tails")?;
+            for (i, (&(_, bytes), desc)) in tails.iter().zip(&tail_types).enumerate() {
+                let at = unsafe {
+                    self.builder.build_gep(
+                        entry_ty,
+                        table,
+                        &[size_type.const_int(i as u64, false)],
+                        "object_tail",
+                    )?
+                };
+                let t_at = self
+                    .builder
+                    .build_struct_gep(entry_ty, at, 0, "tail_type")?;
+                self.builder.build_store(t_at, *desc)?;
+                let b_at = self
+                    .builder
+                    .build_struct_gep(entry_ty, at, 1, "tail_bytes")?;
+                self.builder
+                    .build_store(b_at, size_type.const_int(bytes, false))?;
+            }
+            let set = self.aot_runtime_fn(
+                "hlp_set_object_tails",
+                void_type.fn_type(&[ptr_type.into(), size_type.into()], false),
+            );
+            self.builder
+                .build_call(set, &[table.into(), count.into()], "")?;
+        }
 
         let alloc_obj_ty = ptr_type.fn_type(&[ptr_type.into()], false);
         let register_root_ty = void_type.fn_type(&[ptr_type.into()], false);

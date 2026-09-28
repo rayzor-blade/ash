@@ -171,6 +171,45 @@ unsafe fn alloc_virtual(t: *mut hl::hl_type) -> Option<ptr::NonNull<hl::vvirtual
     }
 }
 
+/// Bytes a host reserves after every instance of a class, past the fields
+/// the runtime knows: the runtime allocates them and never reads, writes or
+/// copies them. Keyed by type descriptor, set once by an ahead-of-time
+/// program before it allocates (`hlp_set_object_tails`).
+static OBJECT_TAILS: std::sync::OnceLock<std::collections::HashMap<usize, usize>> =
+    std::sync::OnceLock::new();
+
+/// One class's tail, as `hlp_set_object_tails` receives it.
+#[repr(C)]
+pub struct ObjectTail {
+    pub t: *mut hl_type,
+    pub bytes: usize,
+}
+
+/// Record the tails of `n` classes. The first call wins; the program makes
+/// it before its first allocation.
+///
+/// # Safety
+/// `tails` points at `n` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_set_object_tails(tails: *const ObjectTail, n: usize) {
+    let map = (0..n)
+        .map(|i| unsafe {
+            let e = &*tails.add(i);
+            (e.t as usize, e.bytes)
+        })
+        .collect();
+    let _ = OBJECT_TAILS.set(map);
+}
+
+/// The tail every instance of `t` carries; 0 for most.
+#[inline]
+fn object_tail(t: *mut hl_type) -> usize {
+    OBJECT_TAILS
+        .get()
+        .and_then(|tails| tails.get(&(t as usize)).copied())
+        .unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic {
     unsafe {
@@ -188,7 +227,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
             return ptr::null_mut();
         }
 
-        let size = (*rt).size as usize;
+        let size = (*rt).size as usize + object_tail(t);
         // let has_ptr = (*rt).hasPtr;
         crate::gc::note_object_type(t);
 
@@ -277,7 +316,7 @@ pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *m
                 let rt = (*obj).rt;
                 if !rt.is_null() && !(*rt).methods.is_null() {
                     debug_assert_eq!(
-                        (*rt).size as usize,
+                        (*rt).size as usize + object_tail(t),
                         size,
                         "compile-time layout disagrees with the runtime instance size"
                     );

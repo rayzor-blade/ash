@@ -230,6 +230,43 @@ impl DecodedBytecode {
         Ok(resolved)
     }
 
+    /// The tail each class carries, by type index: `tails` names classes by
+    /// their bytecode names, and a subclass carries the tail of the nearest
+    /// named class it extends.
+    pub(crate) fn object_tails(
+        &self,
+        tails: &[(String, usize)],
+    ) -> Result<std::collections::HashMap<usize, u64>> {
+        let mut named = std::collections::HashMap::new();
+        for (class, bytes) in tails {
+            let index = self
+                .type_index_of(class)
+                .ok_or_else(|| anyhow!("object tail: the program has no class `{class}`"))?;
+            named.insert(index, *bytes as u64);
+        }
+        let mut out = std::collections::HashMap::new();
+        if named.is_empty() {
+            return Ok(out);
+        }
+        for (i, t) in self.types.iter().enumerate() {
+            if t.kind != hl::hl_type_kind_HOBJ {
+                continue;
+            }
+            let mut cur = Some(i);
+            while let Some(c) = cur {
+                if let Some(&bytes) = named.get(&c) {
+                    out.insert(i, bytes);
+                    break;
+                }
+                cur = self.types[c]
+                    .obj
+                    .as_ref()
+                    .and_then(|o| o.super_.as_ref().map(|s| s.0));
+            }
+        }
+        Ok(out)
+    }
+
     fn add_host_export(&mut self, e: &HostExport) -> Result<ResolvedExport> {
         let (findex, receiver) = if e.kind == ExportKind::Call {
             (self.closure_caller(e)?, true)

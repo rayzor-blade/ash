@@ -40,6 +40,10 @@ pub struct AotRequest<'a> {
     /// Function types whose values the host supplies; see
     /// `host_export::HostClosure`.
     pub closures: Vec<crate::host_export::HostClosure>,
+    /// Classes, by bytecode name, whose instances (subclasses' too) the host
+    /// wants this many bytes of its own after: allocated, never read,
+    /// written or copied by the program.
+    pub object_tails: Vec<(String, usize)>,
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -65,6 +69,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         wasm_fibers,
         exports,
         closures,
+        object_tails,
     } = request;
     // A process may build several programs. These caches are keyed by
     // findex or caller, which name different code in each, so a build
@@ -109,7 +114,12 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
     let mut jit = crate::llvm::module::JITModule::new_aot_with_host(
-        context, file, &triple, &exports, &closures,
+        context,
+        file,
+        &triple,
+        &exports,
+        &closures,
+        &object_tails,
     )?;
 
     let findexes: Vec<usize> = jit

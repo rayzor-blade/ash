@@ -74,6 +74,23 @@ u64 exports_test_call_fn_1(u64 fn, u64 x) {
     return bits(real(fn) * real(x));
 }
 
+/* Bytes 32..63 of an object lie in its 64-byte tail on every target, since
+   no Counter's fields reach past 16. Without the tail they would belong to
+   the objects allocated after it. */
+static void mark_tail(u64 obj) {
+    unsigned char *p = (unsigned char *)(unsigned long)obj;
+    for (int i = 32; i < 64; i++)
+        p[i] = 0xAB;
+}
+
+static int tail_intact(u64 obj) {
+    unsigned char *p = (unsigned char *)(unsigned long)obj;
+    for (int i = 32; i < 64; i++)
+        if (p[i] != 0xAB)
+            return 0;
+    return 1;
+}
+
 int exports_test_drive(void) {
     int ok = 0;
     if ((int)exports_test_add(2, 3) == 5) ok |= 1;
@@ -103,5 +120,17 @@ int exports_test_drive(void) {
     if (exports_test_call_ff(exports_test_thrower(), bits(1.0)) == 7 && raised == 5) ok |= 65536;
     if (exports_test_call_ff(0, bits(1.0)) == 7 && raised == 6) ok |= 131072;
     if ((int)exports_test_call_ii(exports_test_grow_of(c), 2) == 43) ok |= 262144;
+    /* A class with a host tail, and its subclass, keep the tail theirs. */
+    u64 first = exports_test_new_counter(1);
+    mark_tail(first);
+    u64 sub = exports_test_new_twice(2);
+    mark_tail(sub);
+    u64 later[4];
+    for (int i = 0; i < 4; i++)
+        later[i] = exports_test_new_counter(100 + i);
+    int fields = (int)exports_test_get_count(first) == 1 && (int)exports_test_get_count(sub) == 2;
+    for (int i = 0; i < 4; i++)
+        fields = fields && (int)exports_test_get_count(later[i]) == 100 + i;
+    if (fields && tail_intact(first) && tail_intact(sub)) ok |= 524288;
     return ok;
 }

@@ -905,8 +905,9 @@ impl<'ctx> JITModule<'ctx> {
                             self.target_abi.pointer_bytes() as i32,
                         )
                         .map(|l| l.size);
+                        let tail = self.object_tails.get(&type_index).copied().unwrap_or(0);
                         match (no_bindings, size) {
-                            (true, Some(size)) if size > 0 => Some(size as u64),
+                            (true, Some(size)) if size > 0 => Some(size as u64 + tail),
                             _ => None,
                         }
                     })

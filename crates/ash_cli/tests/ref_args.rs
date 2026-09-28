@@ -35,9 +35,8 @@ fn fixture() -> PathBuf {
 }
 
 /// `drive` takes seven arguments, so `--jit-max-args 6` keeps it on the
-/// interpreter while its callees promote at the first call. `ASH_AIR=0` keeps
-/// the interpreted caller's own lowering out of the result: this test is about
-/// the call boundary.
+/// interpreter while its callees promote at the first call. Its AIR also
+/// inlines a constructor reading a ref to the loop variable.
 #[test]
 fn register_refs_cross_into_compiled_callees() {
     let hl = fixture();
@@ -54,7 +53,6 @@ fn register_refs_cross_into_compiled_callees() {
                 "6",
             ])
             .arg(&hl)
-            .env("ASH_AIR", "0")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);

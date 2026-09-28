@@ -23,9 +23,11 @@
 //!
 //! - `CellGet` and `CellRef` make a cell live; `CellIncr`/`CellDecr` read
 //!   before writing, so they do too.
-//! - A call can read a cell only if it could already hold that cell's address,
-//!   so only calls reachable from a `CellRef` of that cell count. Treating
-//!   every call as reading every address-taken cell is too blunt to be useful:
+//! - A call or indirect dereference can read a cell only if its address has
+//!   already been taken, so only accesses reachable from a `CellRef` of that
+//!   cell count. Inlining can turn a call that reads a ref into `Unref`; that
+//!   read must still keep the preceding store. Treating every call as reading
+//!   every address-taken cell is too blunt to be useful:
 //!   the shape above takes the address once, after the loop, to print, and
 //!   that alone would keep every store in the loop.
 //! - At function exit every cell is dead. A cell is a frame slot, so a value
@@ -51,8 +53,8 @@ use anyhow::Result;
 
 pub struct DeadCellStoreElim;
 
-/// For each cell whose address is taken, the blocks where a callee could
-/// already hold that address: those reachable from a block that takes it.
+/// For each cell whose address is taken, the blocks where an indirect access
+/// could already hold that address: those reachable from a block that takes it.
 fn address_reachable(f: &Function) -> HashMap<u32, HashSet<usize>> {
     let mut origins: HashMap<u32, Vec<usize>> = HashMap::new();
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -84,13 +86,17 @@ fn address_reachable(f: &Function) -> HashMap<u32, HashSet<usize>> {
     out
 }
 
-fn may_call(i: &Instr) -> bool {
+fn may_access_escaped_cell(i: &Instr) -> bool {
     matches!(
         i,
         Instr::Call { .. }
             | Instr::CallMethod { .. }
             | Instr::CallClosure { .. }
             | Instr::Intrinsic { .. }
+            | Instr::Unref { .. }
+            | Instr::SetRef { .. }
+            | Instr::MemGet { .. }
+            | Instr::MemSet { .. }
     )
 }
 
@@ -133,7 +139,7 @@ fn transfer(
             | Instr::CellDecr { cell, .. } => {
                 dead.remove(&cell.0);
             }
-            other if may_call(other) => {
+            other if may_access_escaped_cell(other) => {
                 for (cell, blocks) in reach {
                     if blocks.contains(&block) {
                         dead.remove(cell);
@@ -217,7 +223,7 @@ impl Pass for DeadCellStoreElim {
                     | Instr::CellDecr { cell, .. } => {
                         dead.remove(&cell.0);
                     }
-                    other if may_call(other) => {
+                    other if may_access_escaped_cell(other) => {
                         for (cell, blocks) in &reach {
                             if blocks.contains(&b) {
                                 dead.remove(cell);

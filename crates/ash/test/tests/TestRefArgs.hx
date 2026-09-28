@@ -15,6 +15,14 @@ class Opt {
 	}
 }
 
+class LoopOpt {
+	public var i:Int;
+
+	public function new(i:Int = 0) {
+		this.i = i;
+	}
+}
+
 class TestRefArgs {
 	static function bumpF32(r:hl.Ref<Single>):Void {
 		r.set(r.get() + 1.5);
@@ -37,6 +45,10 @@ class TestRefArgs {
 	static function drive(n:Int, p1:Int, p2:Int, p3:Int, p4:Int, p5:Int, p6:Int):Int {
 		var bad = 0;
 		for (k in 0...n) {
+			if (k < 100) {
+				if (new LoopOpt(k).i != k || new LoopOpt(k & 0xffff).i != (k & 0xffff))
+					bad++;
+			}
 			var ef:Single = 0.5 * (k & 7);
 			var ed = 0.25 * k;
 			var ei = k * 3 + 1;

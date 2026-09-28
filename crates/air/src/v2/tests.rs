@@ -6767,6 +6767,77 @@ fn cellfwd_resolves_forwarding_chains() {
     );
 }
 
+/// Inlining a callee that reads a ref replaces its call with `Unref`. The
+/// store made after taking the address must still reach that dereference.
+#[test]
+fn celldse_keeps_store_read_through_inlined_ref() {
+    use super::passes::DeadCellStoreElim;
+
+    let mut f = empty_func(vec![t(0), t(1)]);
+    let cell = CellId(0);
+    f.cells.push(CellData {
+        reg: 0,
+        ty: t(0),
+        reason: PinReason::RefTaken,
+    });
+    let initial = f.new_value(t(0), 0);
+    let current = f.new_value(t(0), 0);
+    let reference = f.new_value(t(1), 1);
+    let read = f.new_value(t(0), 0);
+    f.blocks = vec![
+        Block {
+            phis: vec![],
+            instrs: vec![
+                Instr::Int {
+                    dst: initial,
+                    idx: 0,
+                },
+                Instr::CellSet { cell, src: initial },
+                Instr::CellRef {
+                    dst: reference,
+                    cell,
+                },
+            ],
+            term: Terminator::Jump { target: BlockId(1) },
+            handler: None,
+        },
+        Block {
+            phis: vec![],
+            instrs: vec![
+                Instr::Int {
+                    dst: current,
+                    idx: 1,
+                },
+                Instr::CellSet { cell, src: current },
+            ],
+            term: Terminator::Jump { target: BlockId(2) },
+            handler: None,
+        },
+        Block {
+            phis: vec![],
+            instrs: vec![Instr::Unref {
+                dst: read,
+                src: reference,
+            }],
+            term: Terminator::Ret { value: read },
+            handler: None,
+        },
+    ];
+    verify(&f).unwrap();
+    DeadCellStoreElim
+        .run(&mut f, &PassOptions::default())
+        .unwrap();
+    assert!(
+        f.blocks[1]
+            .instrs
+            .iter()
+            .any(|i| matches!(i, Instr::CellSet { cell: c, src } if *c == cell && *src == current)),
+        "the inlined dereference must see this store:\n{}",
+        f.dump()
+    );
+    verify(&f).unwrap();
+}
+
 /// An address-taken cell forwards across an instruction that can only throw:
 /// if the null check throws, the load never runs. A call between the store
 /// and the load still ends the run, since a callee may hold the address.

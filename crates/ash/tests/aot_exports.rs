@@ -79,6 +79,21 @@ fn build(
                 arg_casts: Vec::new(),
                 ret_cast: None,
                 after: None,
+                after_flag: None,
+                init: None,
+                library: None,
+            },
+        ),
+        (
+            ("exports_test".to_string(), "afters".to_string()),
+            HostLink {
+                symbol: "exports_test_afters".to_string(),
+                params: Vec::new(),
+                ret: Some(Word::I32),
+                arg_casts: Vec::new(),
+                ret_cast: None,
+                after: None,
+                after_flag: None,
                 init: None,
                 library: None,
             },
@@ -92,6 +107,7 @@ fn build(
                 arg_casts: vec![None],
                 ret_cast: Some("ash:closure".to_string()),
                 after: None,
+                after_flag: None,
                 init: None,
                 library: None,
             },
@@ -104,7 +120,8 @@ fn build(
         held: "exports_test_held".to_string(),
         arg_casts: vec![Some("ash:box_f64".to_string())],
         ret_cast: Some("ash:unbox_f64".to_string()),
-        after: None,
+        after: Some("exports_test_after".to_string()),
+        after_flag: Some("exports_test_pending".to_string()),
     }];
     let exports = vec![
         export("exports_test_add", "Counter", "add", ExportKind::Static, 2),
@@ -253,7 +270,7 @@ fn assert_all_checks(run: Output) {
     );
     assert_eq!(
         stdout.trim(),
-        format!("drive {ALL_CHECKS}\nscaled 6\ndynamic 12")
+        format!("drive {ALL_CHECKS}\nscaled 6\ndynamic 12\nafters 1")
     );
 }
 

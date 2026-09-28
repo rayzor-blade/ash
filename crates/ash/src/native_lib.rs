@@ -571,7 +571,8 @@ pub enum Word {
 /// integer or boolean words of different widths no cast is named: the
 /// value is widened or narrowed where it is passed. `after`, when set, is
 /// called with nothing once the callee returns, before the result is cast:
-/// where a host raises what its callee left pending. `init`, when set, makes
+/// where a host raises what its callee left pending; with `after_flag`, only
+/// when that word says something is. `init`, when set, makes
 /// the native an initialiser: its first argument, the object the program
 /// just allocated, is not passed, and `init` is called with it, the
 /// callee's result and the object's `hl_type`, to bind the two; the
@@ -588,6 +589,10 @@ pub struct HostLink {
     pub arg_casts: Vec<Option<String>>,
     pub ret_cast: Option<String>,
     pub after: Option<String>,
+    /// A 32-bit data word the host sets while an error is pending: `after`
+    /// is then called only when the word is not zero, tested inline. Not for
+    /// a callee in a side module, whose data a program cannot name.
+    pub after_flag: Option<String>,
     pub init: Option<String>,
     pub library: Option<String>,
 }

@@ -91,7 +91,8 @@ impl HostExport {
 /// the adapter. Called as `f(a1, .., aN)`, the adapter answers
 /// `callee(held(bound) -> u64, a1', .., aN') -> u64`, each `ai'` through
 /// `arg_casts[i]` (a Haxe value to a word, as a HostLink casts), then runs
-/// `after` if set, then casts the result back through `ret_cast`.
+/// `after` if set (when `after_flag` is set, only if that word is not zero),
+/// then casts the result back through `ret_cast`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostClosure {
     pub fun_type: String,
@@ -101,6 +102,8 @@ pub struct HostClosure {
     pub arg_casts: Vec<Option<String>>,
     pub ret_cast: Option<String>,
     pub after: Option<String>,
+    /// As on `HostLink`: `after` runs only when this data word is not zero.
+    pub after_flag: Option<String>,
 }
 
 /// A host closure type resolved against one program.

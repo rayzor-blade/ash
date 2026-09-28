@@ -55,7 +55,22 @@ u64 exports_test_make_scaler(double k) {
     return bits(k);
 }
 
+/* Set while a call has left something pending; `after` clears it. */
+int exports_test_pending;
+static int afters;
+
+void exports_test_after(void) {
+    afters++;
+    exports_test_pending = 0;
+}
+
+int exports_test_afters(void) {
+    return afters;
+}
+
 u64 exports_test_call_fn_1(u64 fn, u64 x) {
+    if (real(x) < 0)
+        exports_test_pending = 1;
     return bits(real(fn) * real(x));
 }
 

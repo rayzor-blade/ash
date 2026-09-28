@@ -62,7 +62,14 @@ class Exports {
 		Sys.println("scaled " + f(2.0));
 		var d:Dynamic = f;
 		Sys.println("dynamic " + d(4.0));
+		// Only a call that leaves something pending runs the host's `after`.
+		f(-1.0);
+		Sys.println("afters " + afters());
 	}
+
+	@:hlNative("exports_test", "afters")
+	static function afters():Int
+		return 0;
 
 	@:hlNative("exports_test", "drive")
 	static function drive():Int

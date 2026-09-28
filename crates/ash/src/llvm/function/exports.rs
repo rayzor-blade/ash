@@ -470,6 +470,42 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 
+    /// Call the host's `after`: always, or with `flag`, only when that 32-bit
+    /// data word is not zero, so a call that left nothing pending costs a
+    /// load and a test.
+    pub(super) fn emit_host_after(&mut self, after: &str, flag: Option<&str>) -> Result<()> {
+        let after_fn = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
+        let Some(flag) = flag else {
+            self.builder.build_call(after_fn, &[], "")?;
+            return Ok(());
+        };
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| anyhow!("{after}: no function to test the flag in"))?;
+        let i32_type = self.context.i32_type();
+        let word = self.aot_runtime_global(flag, i32_type);
+        let pending = self
+            .builder
+            .build_load(i32_type, word.as_pointer_value(), "pending")?
+            .into_int_value();
+        let raised = self.builder.build_int_compare(
+            IntPredicate::NE,
+            pending,
+            i32_type.const_zero(),
+            "raised",
+        )?;
+        let raise = self.context.append_basic_block(function, "after");
+        let done = self.context.append_basic_block(function, "after_done");
+        self.builder.build_conditional_branch(raised, raise, done)?;
+        self.builder.position_at_end(raise);
+        self.builder.build_call(after_fn, &[], "")?;
+        self.builder.build_unconditional_branch(done)?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
     /// The closure of the program's function type `ty` over the host's
     /// `word`: bound to what the type's `hold` makes of it, calling the type's
     /// adapter. Allocated as the full type, so a dynamic call works as it
@@ -600,8 +636,7 @@ impl<'ctx> JITModule<'ctx> {
             .ok_or_else(|| anyhow!("{} returned nothing", c.callee))?
             .into_int_value();
         if let Some(after) = &c.after {
-            let after = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
-            self.builder.build_call(after, &[], "")?;
+            self.emit_host_after(after, c.after_flag.as_deref())?;
         }
         match ret_llvm {
             None => {

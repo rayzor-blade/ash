@@ -533,8 +533,14 @@ impl<'ctx> JITModule<'ctx> {
             (None, None) => unreachable!("a link is either linked or found in a library"),
         };
         if let Some(after) = &link.after {
-            let after_fn = self.aot_runtime_fn(after, self.context.void_type().fn_type(&[], false));
-            self.builder.build_call(after_fn, &[], "")?;
+            if link.after_flag.is_some() && link.library.is_some() {
+                return Err(anyhow!(
+                    "{}: an after_flag cannot name data in the side module `{}`",
+                    link.symbol,
+                    link.library.as_deref().unwrap_or_default()
+                ));
+            }
+            self.emit_host_after(after, link.after_flag.as_deref())?;
         }
         // An initialiser binds the program's object to what the callee made.
         // The object stays live across the call: it is init's first argument,

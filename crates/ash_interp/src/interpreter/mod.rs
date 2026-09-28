@@ -4375,7 +4375,7 @@ impl HLInterpreter {
                 .is_some_and(|tiered| tiered.config.compiled_only);
             if compiled_only {
                 let entry = self.compiled_only_entry(bytecode, findex, func_idx)?;
-                let result = self.call_compiled_function(findex, &entry, args);
+                let result = self.call_compiled_function(bytecode, func_idx, findex, &entry, args);
                 if result.is_ok()
                     && let Some(tiered) = self.tiered_runtime.as_mut()
                 {
@@ -4415,7 +4415,8 @@ impl HLInterpreter {
                     // divergence is the whole story. Only sound for functions
                     // free of side effects — it executes them twice.
                     if Self::shadow_findex(findex) {
-                        let compiled = self.call_compiled_function(findex, &entry, args);
+                        let compiled =
+                            self.call_compiled_function(bytecode, func_idx, findex, &entry, args);
                         let interp =
                             self.execute_hl_function(bytecode, native_resolver, func_idx, args);
                         match (&compiled, &interp) {
@@ -4439,7 +4440,7 @@ impl HLInterpreter {
                         }
                         return interp;
                     }
-                    match self.call_compiled_function(findex, &entry, args) {
+                    match self.call_compiled_function(bytecode, func_idx, findex, &entry, args) {
                         Ok(v) => {
                             if let Some(tiered) = self.tiered_runtime.as_mut() {
                                 tiered.stats.compiled_calls += 1;
@@ -5034,7 +5035,99 @@ impl HLInterpreter {
         anyhow!(fallback)
     }
 
+    /// Call `findex`'s compiled entry from the interpreter.
+    ///
+    /// A `Ref` made by the interpreter points at a register slot, which holds
+    /// a `NanBoxedValue` rather than HL's own layout for the pointee (an f32
+    /// is boxed as f64 there). Compiled code dereferences a ref at the
+    /// pointee's native width, so each such argument is staged in a word of
+    /// that layout for the call and copied back into its slot afterwards.
     fn call_compiled_function(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func_idx: usize,
+        findex: usize,
+        entry: &CompiledFunctionEntry,
+        args: &[NanBoxedValue],
+    ) -> Result<NanBoxedValue> {
+        let arg_kinds = entry.args();
+        if !arg_kinds.contains(&hl::hl_type_kind_HREF) {
+            return self.call_compiled_entry(findex, entry, args);
+        }
+        let Some(tf) = bytecode
+            .functions
+            .get(func_idx)
+            .and_then(|f| bytecode.types[f.type_.0].fun.as_ref())
+        else {
+            return self.call_compiled_entry(findex, entry, args);
+        };
+
+        const MAX_STAGED: usize = 8;
+        // On the native stack, which the GC scans, like `marshaled_args`: a
+        // pointer the callee stores through a ref stays reachable until it is
+        // copied back into the register slot.
+        let mut scratch = [0u64; MAX_STAGED];
+        let mut staged: [(usize, hl::hl_type_kind); MAX_STAGED] =
+            [(0, hl::hl_type_kind_HVOID); MAX_STAGED];
+        let mut nstaged = 0;
+        let mut inline_args = [NanBoxedValue::null(); 8];
+        let mut wide_args = Vec::new();
+        let rewritten: &mut [NanBoxedValue] = if args.len() <= inline_args.len() {
+            inline_args[..args.len()].copy_from_slice(args);
+            &mut inline_args[..args.len()]
+        } else {
+            wide_args.extend_from_slice(args);
+            &mut wide_args[..]
+        };
+
+        for (i, &kind) in arg_kinds.iter().enumerate().take(args.len()) {
+            if kind != hl::hl_type_kind_HREF {
+                continue;
+            }
+            let slot = args[i].as_ptr();
+            if slot == 0 || !self.ref_targets_register(slot) {
+                continue;
+            }
+            if nstaged == MAX_STAGED {
+                return Err(anyhow::Error::new(CompiledEntryRefused(format!(
+                    "Compiled call {findex} passes more than {MAX_STAGED} register refs"
+                ))));
+            }
+            let pointee = tf
+                .args
+                .get(i)
+                .map(|t| ref_target_kind(bytecode, &bytecode.types[t.0]))
+                .unwrap_or(hl::hl_type_kind_HVOID);
+            let mut value = unsafe { *(slot as *const NanBoxedValue) };
+            if matches!(
+                pointee,
+                hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
+            ) {
+                value = self.box_for_compiled_dynamic_value(value);
+            }
+            let word = &mut scratch[nstaged] as *mut u64 as *mut u8;
+            unsafe { write_raw_kind(word, pointee, value) };
+            rewritten[i] = NanBoxedValue::from_ptr(word as usize);
+            staged[nstaged] = (slot, pointee);
+            nstaged += 1;
+        }
+
+        if nstaged == 0 {
+            return self.call_compiled_entry(findex, entry, args);
+        }
+
+        let result = self.call_compiled_entry(findex, entry, rewritten);
+
+        // Also after a throw: the callee may have written through the ref first.
+        for (n, &(slot, pointee)) in staged[..nstaged].iter().enumerate() {
+            let word = &scratch[n] as *const u64 as *const u8;
+            let value = unsafe { read_raw_kind(word, pointee) };
+            unsafe { *(slot as *mut NanBoxedValue) = value };
+        }
+        result
+    }
+
+    fn call_compiled_entry(
         &mut self,
         findex: usize,
         entry: &CompiledFunctionEntry,

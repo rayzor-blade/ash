@@ -5,8 +5,9 @@ package ash.simd;
 
 	Each operation returns a fresh vector. On stock HashLink that is an
 	allocation per result, so a hot loop is better written against
-	`ash.simd.Vec` and scratch slots; on ash the compiled tiers replace these
-	calls with vector instructions and keep the value in a register.
+	`ash.simd.Vec` and scratch slots. Ash's compiled tiers inline these helpers
+	and can keep local vector chains in registers. A value stored in an object
+	field still allocates.
 
 	Comparisons return an `Int32x4` mask, a lane of all ones where the
 	comparison holds; `select` chooses lanes by such a mask.

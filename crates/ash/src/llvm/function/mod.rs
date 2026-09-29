@@ -651,9 +651,11 @@ impl<'ctx> JITModule<'ctx> {
             // stack arithmetic (`__skipStack`, the `sub(1)` in callStack)
             // counts one frame per Haxe function, and an inlined callee has
             // none, so only a callee no trace can see inside may lose it.
-            let callees = if self.lazy_compilation {
-                crate::air_pipeline::CalleeView::None
-            } else if self.shadow_frames() {
+            // AIR inlining copies the callee into this body before LLVM sees
+            // it. Lazy compilation's private module therefore needs no
+            // separately compiled callee to inline small helpers; calls
+            // left after AIR still dispatch through the live function table.
+            let callees = if self.shadow_frames() {
                 crate::air_pipeline::CalleeView::Frameless
             } else {
                 crate::air_pipeline::CalleeView::All

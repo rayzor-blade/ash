@@ -12,9 +12,15 @@ On stock HashLink the primitives are `simd.hdll`, built from
 `crates/ash_hdll_simd` in the ash repository (`cargo build --release -p
 ash_hdll_simd`, then rename the cdylib to `simd.hdll`), and every value-type
 operator allocates its 16-byte result. On ash they are part of the runtime:
-nothing is shipped beside the program, the compiled tiers turn the calls
-into vector instructions, and a value that stays inside one function lives
-in a register with no allocation at all.
+nothing is shipped beside the program. The compiled tiers inline the value
+helpers and can keep local vectors in registers. A result stored in an object
+field still allocates; use `Vec` with reusable slots when a hot loop must
+update shared vectors without allocating.
 
 Build with `-lib ash-simd`, or `-cp` pointing at this directory. The API and
 the lane semantics are documented in `docs/simd.md` of the ash repository.
+
+For a scalar, value-vector, and reusable-slot comparison, compile
+`crates/ash/test/tests/BenchSimdVsScalar.hx` from the ash repository with
+`-cp haxelib/ash-simd`. Run one mode per process to measure its elapsed time
+and GC bytes separately.

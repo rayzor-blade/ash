@@ -5,7 +5,7 @@ Build with `-lib ash-simd` or `-cp haxelib/ash-simd`.
 
 The library is one set of primitives with two runtimes behind it. On stock
 HashLink the primitives are `simd.hdll`; on ash they are part of the
-runtime and the compiled tiers emit them as vector instructions. Both are
+runtime and compiled code can emit them as vector instructions. Both are
 built from the same Rust source, and CI runs the same fixture on `hl` and on
 every ash engine, so the lane semantics below hold on both.
 
@@ -47,12 +47,21 @@ maxLane`, `toFloat32x4`, and the same `make splat load store get set x y z w`.
 It is also the mask type every four-lane comparison returns.
 
 **On stock HashLink** every operator allocates its 16-byte result; a hot loop
-should use the slot form below. **On ash** a value that does not leave the
-function costs nothing: the optimiser removes the allocation and keeps the
-vector in a register, including across loop iterations. A value stored into a
-field or array, passed to a non-inlined function, or returned is written to
-memory at that point. `ASH_SROA_WHY=1` prints the reason for any vector that
-stayed in memory.
+should use the slot form below. **On ash's compiled tiers at the default O3
+level** the optimiser can inline these helpers and keep local vector chains
+in registers, including across loop iterations. A value stored into a field
+or array, passed to a non-inlined function, or returned is written to memory
+at that point. Use the slot form to update shared vectors without allocating.
+`ASH_SROA_WHY=1` prints the reason for any vector that stayed in memory after
+inlining.
+
+`BenchSimdVsScalar.hx` in `crates/ash/test/tests` compares four scalar `Single`
+lanes, value vectors, and reusable slots. It reports elapsed time and the
+change in `hl.Gc.stats().totalAllocated` for one mode per process. Compile it
+with `-cp haxelib/ash-simd` and run with `--mode jit --jit-tier cranelift`,
+`--jit-tier llvm`, or `--build` to compare the different code paths.
+Set `ASH_GC_TLAB=0` when checking exact allocation bytes; it changes the
+allocator cost, so leave it unset for timing runs.
 
 ## Slot form: `ash.simd.Vec`
 

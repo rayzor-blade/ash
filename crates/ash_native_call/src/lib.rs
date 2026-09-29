@@ -19,9 +19,8 @@ include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 mod tests {
     #[test]
     fn the_table_covers_what_it_claims() {
-        // Uniform-float signatures at every arity, plus mixed ones up to six
-        // arguments; times three ways to return.
-        assert_eq!(super::SIGNATURES, 5577);
+        // Uniform-float signatures at every arity, plus bounded mixed ones.
+        assert_eq!(super::SIGNATURES, 7509);
     }
 
     #[test]
@@ -52,6 +51,36 @@ mod tests {
         let f64s = [0f64, 0.0, 1.5, 2.5, 3.5, 0.0];
         let out = unsafe { super::dispatch(mix as *mut _, &ints, &f32s, &f64s, &kinds, 0) };
         assert_eq!(out, Some(87));
+    }
+
+    #[test]
+    fn eight_argument_mixed_float_signature_is_available() {
+        unsafe extern "C" fn mix(
+            a: i64,
+            b: i64,
+            c: f64,
+            d: f64,
+            e: f32,
+            f: i64,
+            g: i64,
+            h: i64,
+        ) -> i64 {
+            a + b + f + g + h + ((c + d + e as f64) * 10.0) as i64
+        }
+        let kinds = [0u8, 0, 2, 2, 1, 0, 0, 0];
+        let words = [
+            3u64,
+            4,
+            1.5f64.to_bits(),
+            2.5f64.to_bits(),
+            0.5f32.to_bits() as u64,
+            5,
+            6,
+            7,
+        ];
+        let pattern = super::pattern_of(&kinds);
+        let out = unsafe { super::dispatch_by_pattern(mix as *mut _, &words, 0, pattern) };
+        assert_eq!(out, Some(70));
     }
 
     #[test]

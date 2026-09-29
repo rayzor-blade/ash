@@ -7,12 +7,10 @@ use std::{env, fs, path::PathBuf};
 /// primitive in the tree comes close.
 const MAX_ARGS: u32 = 8;
 
-/// Above this many arguments, only signatures whose floats are all the same
-/// type are generated.
-///
-/// Mixed `f32` and `f64` patterns are omitted past six arguments to keep the
-/// generated dispatch table bounded.
+/// Above this many arguments, mixed float signatures are limited to three
+/// floating-point arguments to keep the generated dispatch table bounded.
 const MAX_MIXED_ARGS: u32 = 6;
+const MAX_LARGE_MIXED_FLOATS: usize = 3;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -48,9 +46,9 @@ fn main() {
                 args.push(kinds[at % 3]);
                 at /= 3;
             }
-            // Past MAX_MIXED_ARGS only uniform float signatures are emitted.
             let mixed = args.contains(&Kind::F32) && args.contains(&Kind::F64);
-            if arity > MAX_MIXED_ARGS && mixed {
+            let float_count = args.iter().filter(|&&kind| kind != Kind::Int).count();
+            if arity > MAX_MIXED_ARGS && mixed && float_count > MAX_LARGE_MIXED_FLOATS {
                 continue;
             }
             for (ret_code, ret) in kinds.iter().enumerate() {

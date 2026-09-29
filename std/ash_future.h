@@ -18,7 +18,9 @@ bool hlp_future_resolve(ash_future *future, void *value);
 bool hlp_future_reject(ash_future *future, void *error);
 /* 0 pending, 1 resolved, 2 rejected. */
 int32_t hlp_future_state(ash_future *future);
-/* Parks an Ash fiber while pending; raises a Haxe exception on rejection. */
+/* Waits for completion. Ash raises on rejection; stock HashLink returns the
+ * stored error, and callers should check hlp_future_state() == 2. The Haxe
+ * Future.await() method raises the error on both runtimes. */
 void *hlp_future_await(ash_future *future);
 
 #ifdef __cplusplus

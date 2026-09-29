@@ -1,0 +1,24 @@
+{
+	"linux-x86_64": {
+		"releaseAsset": "ash_future-linux-x86_64.hdll",
+		"packagePath": "native/linux-x86_64/ash_future.hdll"
+	},
+	"linux-aarch64": {
+		"releaseAsset": "ash_future-linux-aarch64.hdll",
+		"packagePath": "native/linux-aarch64/ash_future.hdll"
+	},
+	"macos-aarch64": {
+		"releaseAsset": "ash_future-macos-aarch64.hdll",
+		"packagePath": "native/macos-aarch64/ash_future.hdll"
+	},
+	"macos-x86_64": {
+		"releaseAsset": "ash_future-macos-x86_64.hdll",
+		"packagePath": "native/macos-x86_64/ash_future.hdll"
+	},
+	"windows-x86_64": {
+		"releaseAsset": "ash_future-windows-x86_64.hdll",
+		"packagePath": "native/windows-x86_64/ash_future.hdll",
+		"importAsset": "ash_future-windows-x86_64.lib",
+		"importPath": "native/windows-x86_64/ash_future.lib"
+	}
+}

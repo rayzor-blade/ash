@@ -168,6 +168,7 @@ jobs:
           cargo build --release -p ash_std
           cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           cargo build --release -p ash_hdll_simd
+          cargo build --release -p ash_hdll_future
 
       - name: Smoke test
         run: |
@@ -181,7 +182,15 @@ jobs:
           path: wasm-assets
 
       - name: Package
-        run: ./scripts/package_release.sh "${{ matrix.target }}" wasm-assets
+        run: |
+          ./scripts/package_release.sh "${{ matrix.target }}" wasm-assets
+          if [[ "$(uname -s)" == "Darwin" ]]; then
+            cp target/release/libash_hdll_future.dylib "dist/ash_future-${{ matrix.target }}.hdll"
+            install_name_tool -id "@loader_path/ash_future.hdll" "dist/ash_future-${{ matrix.target }}.hdll"
+            codesign --force -s - "dist/ash_future-${{ matrix.target }}.hdll"
+          else
+            cp target/release/libash_hdll_future.so "dist/ash_future-${{ matrix.target }}.hdll"
+          fi
 
       - name: Smoke test the packaged binary
         run: |
@@ -213,6 +222,7 @@ jobs:
           path: |
             dist/ash-${{ matrix.target }}.tar.gz
             dist/simd-${{ matrix.target }}.hdll
+            dist/ash_future-${{ matrix.target }}.hdll
           if-no-files-found: error
 
   # Its own job rather than a matrix leg: the runner has no LLVM development
@@ -326,6 +336,7 @@ jobs:
           cargo build --release -p ash_std
           cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           cargo build --release -p ash_hdll_simd
+          cargo build --release -p ash_hdll_future
 
       # LLVM pulls zlib, zstd and libxml2 in through IMPORT libraries, so those
       # DLLs have to sit beside the exe: Windows searches the executable's own
@@ -372,6 +383,7 @@ jobs:
           # Copy the Conda/LLVM runtime DLLs bundled in the previous step
           cp target/release/*.dll dist/
           rm -f dist/ash_hdll_simd.dll
+          rm -f dist/ash_hdll_future.dll
           
           # crates/ash_cli/build.rs stages ash_std.dll under the names an
           # hdll's import table asks for, so the `*.dll` copy above already
@@ -390,6 +402,8 @@ jobs:
           cd dist
           tar -czf ash-${{ matrix.target }}.tar.gz ash.exe simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads
           cp simd.hdll simd-${{ matrix.target }}.hdll
+          cp ../target/release/ash_hdll_future.dll ash_future-${{ matrix.target }}.hdll
+          lib.exe /def:../crates/ash_hdll_future/ash_future.def /machine:x64 /out:ash_future-${{ matrix.target }}.lib
 
           # Generate SHA256
           sha256sum ash-${{ matrix.target }}.tar.gz > ash-${{ matrix.target }}.tar.gz.sha256
@@ -402,6 +416,8 @@ jobs:
           path: |
             dist/ash-${{ matrix.target }}.tar.gz
             dist/simd-${{ matrix.target }}.hdll
+            dist/ash_future-${{ matrix.target }}.hdll
+            dist/ash_future-${{ matrix.target }}.lib
           if-no-files-found: error        
 
   publish:
@@ -435,6 +451,14 @@ jobs:
             echo "::warning::incomplete platform build; no ash-simd haxelib ZIP"
           fi
 
+      - name: Package ash-future for Haxelib
+        run: |
+          if python3 scripts/package_ash_future_haxelib.py dist --check; then
+            python3 scripts/package_ash_future_haxelib.py dist
+          else
+            echo "::warning::incomplete platform build; no ash-future haxelib ZIP"
+          fi
+
       - name: Require at least one tarball
         run: |
           ls -la dist/ || true
@@ -453,6 +477,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.hdll
+            dist/*.lib
             dist/*.zip
           make_latest: true
 
@@ -464,11 +489,12 @@ jobs:
           name: nightly
           body: >
             Rolling build of main. Prebuilt `ash` binaries for the
-            install.sh path and native `simd.hdll` files for stock HashLink;
+            install.sh path and native SIMD and Future HDLLs for stock HashLink;
             superseded by the next versioned release.
           files: |
             dist/*.tar.gz
             dist/*.hdll
+            dist/*.lib
             dist/*.zip
           prerelease: false
           make_latest: true

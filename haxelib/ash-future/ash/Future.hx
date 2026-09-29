@@ -7,8 +7,14 @@ abstract Future<T>(hl.Abstract<"ash_future">) {
 		this = create();
 
 	/** Park the current Ash fiber until the value or rejection is available. */
-	public function await():T
-		return cast wait(this);
+	public function await():T {
+		var value = wait(this);
+		#if ash_future_stock
+		// HashLink raises with longjmp, which cannot cross Rust frames.
+		if (state(this) == 2) throw value;
+		#end
+		return cast value;
+	}
 
 	public function isReady():Bool
 		return state(this) != 0;
@@ -42,18 +48,38 @@ abstract Future<T>(hl.Abstract<"ash_future">) {
 	public function reject(error:Dynamic):Bool
 		return fail(this, error);
 
+	#if ash_future_stock
+	@:hlNative("ash_future", "create")
+	#else
 	@:hlNative("std", "future_create")
+	#end
 	static function create():hl.Abstract<"ash_future"> return null;
 
+	#if ash_future_stock
+	@:hlNative("ash_future", "resolve")
+	#else
 	@:hlNative("std", "future_resolve")
+	#end
 	static function complete(f:hl.Abstract<"ash_future">, value:Dynamic):Bool return false;
 
+	#if ash_future_stock
+	@:hlNative("ash_future", "reject")
+	#else
 	@:hlNative("std", "future_reject")
+	#end
 	static function fail(f:hl.Abstract<"ash_future">, error:Dynamic):Bool return false;
 
+	#if ash_future_stock
+	@:hlNative("ash_future", "state")
+	#else
 	@:hlNative("std", "future_state")
+	#end
 	static function state(f:hl.Abstract<"ash_future">):Int return 0;
 
+	#if ash_future_stock
+	@:hlNative("ash_future", "await")
+	#else
 	@:hlNative("std", "future_await")
+	#end
 	static function wait(f:hl.Abstract<"ash_future">):Dynamic return null;
 }

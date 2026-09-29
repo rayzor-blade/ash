@@ -21,7 +21,8 @@ unsafe extern "C" {
     pub fn hlp_future_reject(future: *mut AshFuture, error: *mut vdynamic) -> bool;
     /// 0 pending, 1 resolved, 2 rejected.
     pub fn hlp_future_state(future: *mut AshFuture) -> i32;
-    /// Park an Ash fiber until completion. Raises the stored Haxe exception
-    /// on rejection, so callers should use the Haxe `Future.await()` surface.
+    /// Wait for completion. Ash raises on rejection; stock HashLink returns
+    /// the stored error and reports rejection through `hlp_future_state`.
+    /// Use the Haxe `Future.await()` surface for consistent throwing behavior.
     pub fn hlp_future_await(future: *mut AshFuture) -> *mut vdynamic;
 }

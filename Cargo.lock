@@ -212,6 +212,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_hdll_future"
+version = "0.1.0"
+dependencies = [
+ "hl_abi",
+]
+
+[[package]]
 name = "ash_hdll_simd"
 version = "0.1.0"
 dependencies = [

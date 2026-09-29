@@ -1,0 +1,17 @@
+[package]
+name = "ash_hdll_future"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "ash_future.hdll: the Future carrier for stock HashLink"
+publish = false
+build = "build.rs"
+
+[dependencies]
+hl_abi = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+stock-test-prims = []

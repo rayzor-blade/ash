@@ -1,0 +1,7 @@
+LIBRARY ash_future.hdll
+EXPORTS
+  hlp_future_create
+  hlp_future_resolve
+  hlp_future_reject
+  hlp_future_state
+  hlp_future_await

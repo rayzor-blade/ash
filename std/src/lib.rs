@@ -35,6 +35,7 @@ pub mod fiber;
 pub mod file;
 pub mod fmt;
 pub mod fun;
+pub mod future;
 pub mod gc;
 pub mod hl;
 pub mod hl_compat;

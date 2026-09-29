@@ -159,6 +159,7 @@ dependencies = [
  "inkwell",
  "libc",
  "rustc-demangle",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "windows-sys 0.59.0",
@@ -201,6 +202,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "ash_future_abi"
+version = "0.1.0"
+dependencies = [
+ "hl_abi",
 ]
 
 [[package]]

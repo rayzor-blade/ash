@@ -1,0 +1,9 @@
+[package]
+name = "ash_future_abi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Ash Future C ABI imports for hl_abi native libraries"
+
+[dependencies]
+hl_abi = { workspace = true }

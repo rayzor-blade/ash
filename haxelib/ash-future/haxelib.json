@@ -1,0 +1,9 @@
+{
+  "name": "ash-future",
+  "url": "https://github.com/darmie/ash",
+  "license": "MIT",
+  "tags": ["hashlink", "async"],
+  "description": "Ash Future<T> for asynchronous native operations",
+  "version": "0.1.0",
+  "releasenote": "Initial native future carrier"
+}

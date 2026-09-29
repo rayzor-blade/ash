@@ -33,6 +33,8 @@ same `@:hlNative` HDLLs. It differs in how the code executes.
   host and a native host for testing. Exceptions, threads and sockets work.
 - **SIMD.** The `ash-simd` haxelib exposes 128-bit vector types that compile
   to vector instructions on ASH and run through an HDLL on stock HashLink.
+- **Native futures.** The `ash-future` haxelib lets Haxe await a value that a
+  native library or wasm side module completes later through a C ABI.
 
 ASH passes the executable part of the Haxe 4.3.6 test suite under the
 interpreter, as a native executable and as a wasm module. The badges are live
@@ -177,6 +179,7 @@ issue via git-bug ([CONTRIBUTING.md](CONTRIBUTING.md#issues)).
 | [docs/aot.md](docs/aot.md) | native and wasm builds |
 | [docs/debugging.md](docs/debugging.md) | tier tuning, profiling, bisecting a wrong answer |
 | [docs/simd.md](docs/simd.md) | ash-simd |
+| [haxelib/ash-future/README.md](haxelib/ash-future/README.md) | ash-future and its native ABI |
 | [docs/hdll.md](docs/hdll.md) | writing an HDLL |
 | [docs/wasm/](docs/wasm/README.md) | hosting a wasm build |
 | [docs/mbhaxe.md](docs/mbhaxe.md) | MarbleGame workflow |

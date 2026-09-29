@@ -11,7 +11,11 @@ use std::sync::{Condvar, Mutex};
 const MEM_KIND_FINALIZER: i32 = 3;
 
 unsafe extern "C" {
+    #[cfg(not(windows))]
     static mut hlt_abstract: hl_type;
+    #[cfg(windows)]
+    #[link_name = "__imp_hlt_abstract"]
+    static mut hlt_abstract_import: *mut hl_type;
     fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32) -> *mut c_void;
     fn hl_add_root(slot: *mut c_void);
     fn hl_remove_root(slot: *mut c_void);
@@ -19,6 +23,17 @@ unsafe extern "C" {
     fn hl_get_thread() -> *mut c_void;
     fn hl_register_thread(stack_top: *mut c_void);
     fn hl_unregister_thread();
+}
+
+unsafe fn abstract_type() -> *mut hl_type {
+    #[cfg(windows)]
+    unsafe {
+        hlt_abstract_import
+    }
+    #[cfg(not(windows))]
+    {
+        ptr::addr_of_mut!(hlt_abstract)
+    }
 }
 
 /// A foreign callback thread has to join HashLink's GC before changing roots.
@@ -86,7 +101,7 @@ unsafe extern "C" fn finalize_future(block: *mut c_void) {
 pub unsafe extern "C" fn hlp_future_create() -> *mut c_void {
     unsafe {
         let future = hl_gc_alloc_gen(
-            ptr::addr_of_mut!(hlt_abstract),
+            abstract_type(),
             std::mem::size_of::<FutureHandle>() as i32,
             MEM_KIND_FINALIZER,
         ) as *mut FutureHandle;

@@ -4,6 +4,6 @@
   "license": "MIT",
   "tags": ["hashlink", "async"],
   "description": "Ash Future<T> for asynchronous native operations",
-  "version": "0.1.0",
-  "releasenote": "Initial native future carrier"
+  "version": "0.1.1",
+  "releasenote": "Stock HashLink native HDLL binaries for supported platforms"
 }

@@ -403,7 +403,7 @@ jobs:
           tar -czf ash-${{ matrix.target }}.tar.gz ash.exe simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads
           cp simd.hdll simd-${{ matrix.target }}.hdll
           cp ../target/release/ash_hdll_future.dll ash_future-${{ matrix.target }}.hdll
-          lib.exe /def:../crates/ash_hdll_future/ash_future.def /machine:x64 /out:ash_future-${{ matrix.target }}.lib
+          ../llvmenv/Library/bin/llvm-lib.exe /def:../crates/ash_hdll_future/ash_future.def /machine:x64 /out:ash_future-${{ matrix.target }}.lib
 
           # Generate SHA256
           sha256sum ash-${{ matrix.target }}.tar.gz > ash-${{ matrix.target }}.tar.gz.sha256

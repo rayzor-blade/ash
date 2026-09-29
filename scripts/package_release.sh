@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Package the release `ash` binary into dist/ash-<target>.tar.gz.
+# Package the release `ash` binary and stock-HashLink `simd.hdll` into
+# dist/ash-<target>.tar.gz, and publish the HDLL separately by platform.
 #
 # The binary embeds ash_std and links LLVM statically, but on macOS a few
 # Homebrew dylibs (zstd, libxml2, ...) remain dynamic and live at paths only
@@ -28,6 +29,22 @@ rm -rf "$DIST"
 mkdir -p "$DIST"
 cp "$BIN" "$DIST/ash"
 cp LICENSE "$DIST/" 2>/dev/null || true
+
+# Stock HashLink loads the ash-simd primitives from simd.hdll. Rename the
+# host cdylib in the same archive as ash so each platform release supplies
+# the matching native implementation.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  SIMD_LIB="libash_hdll_simd.dylib"
+else
+  SIMD_LIB="libash_hdll_simd.so"
+fi
+SIMD_SRC="target/release/$SIMD_LIB"
+test -s "$SIMD_SRC" || { echo "error: $SIMD_SRC not built" >&2; exit 1; }
+cp "$SIMD_SRC" "$DIST/simd.hdll"
+chmod u+w "$DIST/simd.hdll"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  install_name_tool -id "@loader_path/simd.hdll" "$DIST/simd.hdll"
+fi
 
 # Ship the runtime beside the binary, for the diagnostic path only.
 #
@@ -76,7 +93,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   # walked too: it is a separate Mach-O with its own dependency list, and
   # rewriting only the executable's would leave it pointing at Homebrew paths
   # that exist on no user's machine.
-  for macho in "$DIST/ash" ${STD_SRC:+"$DIST/$STD_LIB"} ${STD_SRC:+"$DIST/libhl.dylib"}; do
+  for macho in "$DIST/ash" "$DIST/simd.hdll" ${STD_SRC:+"$DIST/$STD_LIB"} ${STD_SRC:+"$DIST/libhl.dylib"}; do
   otool -L "$macho" | awk 'NR>1 {print $1}' | while read -r dep; do
     case "$dep" in
       /usr/lib/*|/System/*|@*) continue ;;
@@ -105,6 +122,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     codesign --force -s - "$DIST/$STD_LIB"
     codesign --force -s - "$DIST/libhl.dylib"
   fi
+  codesign --force -s - "$DIST/simd.hdll"
   codesign --force -s - "$DIST/ash"
   echo "bundled dylibs:"
   otool -L "$DIST/ash" | sed -n '2,20p'
@@ -123,3 +141,5 @@ fi
 mkdir -p dist
 tar czf "dist/ash-${TARGET}.tar.gz" -C "$DIST" .
 echo "wrote dist/ash-${TARGET}.tar.gz"
+cp "$DIST/simd.hdll" "dist/simd-${TARGET}.hdll"
+echo "wrote dist/simd-${TARGET}.hdll"

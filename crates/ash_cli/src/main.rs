@@ -337,7 +337,7 @@ fn provide_versioned_runtime(program: &std::path::Path, abi: u32) {
     let has_hdll = std::fs::read_dir(dir).is_ok_and(|entries| {
         entries
             .filter_map(Result::ok)
-            .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("hdll"))
+            .any(|e| ash_core::native_lib::is_external_hdll(&e.path()))
     });
     if !has_hdll {
         return;

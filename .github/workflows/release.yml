@@ -5,8 +5,9 @@ name: release
 # the rolling `nightly` release (kept marked latest so
 # `releases/latest/download/...` always resolves).
 # One self-contained tarball per platform: the binary embeds ash_std and
-# links LLVM statically; on macOS the few remaining Homebrew dylibs are
-# bundled beside it (see scripts/package_release.sh).
+# links LLVM statically, and simd.hdll serves stock HashLink programs. On
+# macOS the few remaining Homebrew dylibs are bundled beside them (see
+# scripts/package_release.sh).
 
 on:
   push:
@@ -166,6 +167,7 @@ jobs:
         run: |
           cargo build --release -p ash_std
           cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+          cargo build --release -p ash_hdll_simd
 
       - name: Smoke test
         run: |
@@ -184,6 +186,7 @@ jobs:
       - name: Smoke test the packaged binary
         run: |
           tar xzf "dist/ash-${{ matrix.target }}.tar.gz" -C "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/simd.hdll"
           "$RUNNER_TEMP/ash" --mode interp crates/ash/test/tests/test_basic.hl
           "$RUNNER_TEMP/ash" --version
           # The installed layout, end to end: build a module from the
@@ -207,7 +210,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ash-${{ matrix.target }}
-          path: dist/ash-${{ matrix.target }}.tar.gz
+          path: |
+            dist/ash-${{ matrix.target }}.tar.gz
+            dist/simd-${{ matrix.target }}.hdll
           if-no-files-found: error
 
   # Its own job rather than a matrix leg: the runner has no LLVM development
@@ -320,6 +325,7 @@ jobs:
         run: |
           cargo build --release -p ash_std
           cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+          cargo build --release -p ash_hdll_simd
 
       # LLVM pulls zlib, zstd and libxml2 in through IMPORT libraries, so those
       # DLLs have to sit beside the exe: Windows searches the executable's own
@@ -360,9 +366,12 @@ jobs:
           mkdir -p dist
           cp target/release/ash.exe dist/
           cp -R wasm-assets/. dist/
+          test -s target/release/ash_hdll_simd.dll
+          cp target/release/ash_hdll_simd.dll dist/simd.hdll
           
           # Copy the Conda/LLVM runtime DLLs bundled in the previous step
           cp target/release/*.dll dist/
+          rm -f dist/ash_hdll_simd.dll
           
           # crates/ash_cli/build.rs stages ash_std.dll under the names an
           # hdll's import table asks for, so the `*.dll` copy above already
@@ -379,7 +388,8 @@ jobs:
           
           # Compress inside the dist directory
           cd dist
-          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe *.dll wasm32-wasip1 wasm32-wasip1-threads
+          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads
+          cp simd.hdll simd-${{ matrix.target }}.hdll
 
           # Generate SHA256
           sha256sum ash-${{ matrix.target }}.tar.gz > ash-${{ matrix.target }}.tar.gz.sha256
@@ -389,8 +399,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ash-${{ matrix.target }}
-          # Path must point to the newly created tarball inside dist/
-          path: dist/ash-${{ matrix.target }}.tar.gz
+          path: |
+            dist/ash-${{ matrix.target }}.tar.gz
+            dist/simd-${{ matrix.target }}.hdll
           if-no-files-found: error        
 
   publish:
@@ -404,12 +415,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: ash-*
           path: dist
           merge-multiple: true
+
+      # haxelib.json has no install hook. Put every native HDLL in the ZIP so
+      # `haxelib install` extracts them with the Haxe sources; extraParams.hxml
+      # stages the host copy beside generated HashLink bytecode.
+      - name: Package ash-simd for Haxelib
+        run: |
+          if python3 scripts/package_ash_simd_haxelib.py dist --check; then
+            python3 scripts/package_ash_simd_haxelib.py dist
+          else
+            echo "::warning::incomplete platform build; no ash-simd haxelib ZIP"
+          fi
 
       - name: Require at least one tarball
         run: |
@@ -426,7 +450,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.hdll
+            dist/*.zip
           make_latest: true
 
       - name: Publish rolling nightly
@@ -437,7 +464,11 @@ jobs:
           name: nightly
           body: >
             Rolling build of main. Prebuilt `ash` binaries for the
-            install.sh path; superseded by the next versioned release.
-          files: dist/*.tar.gz
+            install.sh path and native `simd.hdll` files for stock HashLink;
+            superseded by the next versioned release.
+          files: |
+            dist/*.tar.gz
+            dist/*.hdll
+            dist/*.zip
           prerelease: false
           make_latest: true

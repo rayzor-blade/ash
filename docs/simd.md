@@ -114,8 +114,22 @@ Fixed by the fixture, identical on `hl` and every ash engine:
 
 ## Stock HashLink
 
-Build the HDLL from the ash repository and place it where `hl` finds HDLLs
-(beside `hl`, or in its library directory):
+The release includes `ash-simd-<version>.zip` with the HDLLs for every native
+platform. Install that ZIP with `haxelib install ash-simd-<version>.zip`, then
+compile with `-lib ash-simd`. Haxelib adds `extraParams.hxml`, which copies the
+HDLL for the host OS and CPU beside the generated `.hl` file. Ash uses its
+built-in SIMD primitives and ignores this HDLL.
+
+Stock HashLink must also be able to find that directory when it loads native
+libraries. On Linux, for example, run `LD_LIBRARY_PATH=build hl build/main.hl`
+when the output is `build/main.hl`; or install `simd.hdll` in HashLink's native
+library directory. Haxelib cannot change the process loader path at install
+time.
+
+For manual installation, download `simd-<platform>.hdll` from the release and
+rename it to `simd.hdll`, or extract `simd.hdll` from the matching platform
+archive. Place it beside the `.hl` file or where `hl` finds HDLLs. To build it
+locally from the ash repository:
 
 ```sh
 cargo build --release -p ash_hdll_simd

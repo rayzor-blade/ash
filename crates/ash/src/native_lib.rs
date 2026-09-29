@@ -90,7 +90,7 @@ pub fn choose_std_linkage(program: &Path) -> bool {
     let has_hdll = std::fs::read_dir(program_directory(program)).is_ok_and(|entries| {
         entries
             .filter_map(Result::ok)
-            .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll"))
+            .any(|entry| is_external_hdll(&entry.path()))
     });
     #[cfg(not(any(target_os = "macos", windows)))]
     let has_hdll = false;
@@ -105,6 +105,17 @@ pub fn choose_std_linkage(program: &Path) -> bool {
 /// (the ash-simd primitives, `std/src/simd.rs`).
 pub fn is_runtime_lib(lib: &str) -> bool {
     matches!(lib.strip_prefix('?').unwrap_or(lib), "std" | "simd")
+}
+
+/// A built-in library's HDLL may be staged for stock HashLink beside the
+/// bytecode, but ash resolves its primitives from ash_std and need not switch
+/// to the shared runtime just because that file exists.
+pub fn is_external_hdll(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("hdll")
+        && !path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(is_runtime_lib)
 }
 
 /// A `std@` native's address, from whichever copy of ash_std is in use.
@@ -1131,6 +1142,14 @@ mod tests {
 mod hdll_format_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn packaged_simd_does_not_require_an_external_runtime() {
+        assert!(!is_external_hdll(Path::new("simd.hdll")));
+        assert!(!is_external_hdll(Path::new("std.hdll")));
+        assert!(is_external_hdll(Path::new("sdl.hdll")));
+        assert!(!is_external_hdll(Path::new("simd.dll")));
+    }
 
     fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(name);

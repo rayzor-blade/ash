@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh -s -- --dev
 #
-# Drops the `ash` binary (and, on macOS, its bundled dylibs) into ~/.ash/bin
+# Drops `ash` and `simd.hdll` (plus bundled dylibs on macOS) into ~/.ash/bin
 # and adds that directory to your PATH. Ash requires a 64-bit target.
 #
 # --dev (or ASH_DEV=1) takes the -dev build: every LLVM backend, for

@@ -1,0 +1,22 @@
+{
+	"linux-x86_64": {
+		"releaseAsset": "simd-linux-x86_64.hdll",
+		"packagePath": "native/linux-x86_64/simd.hdll"
+	},
+	"linux-aarch64": {
+		"releaseAsset": "simd-linux-aarch64.hdll",
+		"packagePath": "native/linux-aarch64/simd.hdll"
+	},
+	"macos-aarch64": {
+		"releaseAsset": "simd-macos-aarch64.hdll",
+		"packagePath": "native/macos-aarch64/simd.hdll"
+	},
+	"macos-x86_64": {
+		"releaseAsset": "simd-macos-x86_64.hdll",
+		"packagePath": "native/macos-x86_64/simd.hdll"
+	},
+	"windows-x86_64": {
+		"releaseAsset": "simd-windows-x86_64.hdll",
+		"packagePath": "native/windows-x86_64/simd.hdll"
+	}
+}

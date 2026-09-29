@@ -8,10 +8,10 @@
 //! around, and each gap was a clean error rather than a wrong answer, but a
 //! wall all the same.
 //!
-//! `build.rs` writes them all instead. It is its own crate for two reasons:
-//! the table is large enough that recompiling it on every interpreter edit
-//! would be felt, and it is built unoptimised, which the profile in the
-//! workspace manifest arranges.
+//! `build.rs` writes them all instead. It splits the table into bounded
+//! dispatch functions so the compiler never handles one enormous match. This
+//! is its own crate because recompiling the table on every interpreter edit
+//! would be felt; the workspace builds it unoptimised.
 
 include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 
@@ -19,8 +19,9 @@ include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 mod tests {
     #[test]
     fn the_table_covers_what_it_claims() {
-        // Uniform-float signatures at every arity, plus bounded mixed ones.
-        assert_eq!(super::SIGNATURES, 7509);
+        // Every integer/f32/f64 argument pattern through eight arguments,
+        // with each of the three return kinds.
+        assert_eq!(super::SIGNATURES, 29523);
     }
 
     #[test]
@@ -81,6 +82,103 @@ mod tests {
         let pattern = super::pattern_of(&kinds);
         let out = unsafe { super::dispatch_by_pattern(mix as *mut _, &words, 0, pattern) };
         assert_eq!(out, Some(70));
+    }
+
+    #[test]
+    fn eight_argument_mixed_float_signature_with_f32_return_is_available() {
+        unsafe extern "C" fn mix(
+            a: i64,
+            b: f32,
+            c: f64,
+            d: f32,
+            e: f64,
+            f: f32,
+            g: i64,
+            h: f64,
+        ) -> f32 {
+            (a + g) as f32 + b + c as f32 + d + e as f32 + f + h as f32
+        }
+        let kinds = [0u8, 1, 2, 1, 2, 1, 0, 2];
+        let words = [
+            3u64,
+            0.5f32.to_bits() as u64,
+            1.5f64.to_bits(),
+            2.5f32.to_bits() as u64,
+            3.5f64.to_bits(),
+            4.5f32.to_bits() as u64,
+            5,
+            6.5f64.to_bits(),
+        ];
+        let pattern = super::pattern_of(&kinds);
+        let out = unsafe { super::dispatch_by_pattern(mix as *mut _, &words, 1, pattern) };
+        assert_eq!(out.map(|bits| f64::from_bits(bits as u64)), Some(27.0));
+        let ints = [3i64, 0, 0, 0, 0, 0, 5, 0];
+        let f32s = [0.0f32, 0.5, 0.0, 2.5, 0.0, 4.5, 0.0, 0.0];
+        let f64s = [0.0f64, 0.0, 1.5, 0.0, 3.5, 0.0, 0.0, 6.5];
+        let same = unsafe { super::dispatch(mix as *mut _, &ints, &f32s, &f64s, &kinds, 1) };
+        assert_eq!(same, out);
+    }
+
+    #[test]
+    fn eight_floating_arguments_use_distinct_fp_registers() {
+        unsafe extern "C" fn mix(
+            a: f64,
+            b: f32,
+            c: f64,
+            d: f32,
+            e: f64,
+            f: f32,
+            g: f64,
+            h: f32,
+        ) -> f64 {
+            a + b as f64 + c + d as f64 + e + f as f64 + g + h as f64
+        }
+        let kinds = [2u8, 1, 2, 1, 2, 1, 2, 1];
+        let words = [
+            1.0f64.to_bits(),
+            0.25f32.to_bits() as u64,
+            2.0f64.to_bits(),
+            0.5f32.to_bits() as u64,
+            3.0f64.to_bits(),
+            0.75f32.to_bits() as u64,
+            4.0f64.to_bits(),
+            1.0f32.to_bits() as u64,
+        ];
+        let out = unsafe {
+            super::dispatch_by_pattern(mix as *mut _, &words, 2, super::pattern_of(&kinds))
+        };
+        assert_eq!(out.map(|bits| f64::from_bits(bits as u64)), Some(12.5));
+    }
+
+    #[test]
+    fn final_eight_argument_pattern_is_available() {
+        unsafe extern "C" fn sum(
+            a: f64,
+            b: f64,
+            c: f64,
+            d: f64,
+            e: f64,
+            f: f64,
+            g: f64,
+            h: f64,
+        ) -> f64 {
+            a + b + c + d + e + f + g + h
+        }
+        let kinds = [2u8; 8];
+        let words = [
+            1.0f64.to_bits(),
+            2.0f64.to_bits(),
+            3.0f64.to_bits(),
+            4.0f64.to_bits(),
+            5.0f64.to_bits(),
+            6.0f64.to_bits(),
+            7.0f64.to_bits(),
+            8.0f64.to_bits(),
+        ];
+        let out = unsafe {
+            super::dispatch_by_pattern(sum as *mut _, &words, 2, super::pattern_of(&kinds))
+        };
+        assert_eq!(out.map(|bits| f64::from_bits(bits as u64)), Some(36.0));
     }
 
     #[test]

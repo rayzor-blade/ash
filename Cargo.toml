@@ -25,8 +25,8 @@ byteorder = "1.5.0"
 clap = { version = "4", features = ["derive"] }
 
 
-# One large generated match, and optimising it costs far more than running it
-# ever saves: the calls it makes are into native code either way.
+# Generated native-call dispatch functions call native code directly.
+# Optimising them costs far more than running them ever saves.
 [profile.dev.package.ash_native_call]
 opt-level = 0
 

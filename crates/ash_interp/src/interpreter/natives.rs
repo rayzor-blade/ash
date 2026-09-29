@@ -1139,7 +1139,7 @@ impl HLInterpreter {
     /// Returns the raw i64 result (float results are returned as their bit representation).
     /// Call a native whose signature has a float in it, or returns one.
     ///
-    /// Every signature is generated (see `build.rs`), so this only has to say
+    /// Every signature through eight arguments is generated (see `build.rs`), so this only has to say
     /// what each argument is and hand over its bits. Floats arrive as `f64`
     /// from the interpreter and are narrowed here when the callee wants
     /// `f32`, which is the one conversion the ABI will not do for us.
@@ -1164,25 +1164,24 @@ impl HLInterpreter {
         };
         // The context, when there is one, is an integer word ahead of them.
         let lead = usize::from(context != 0);
-        let mut kinds: Vec<u8> = Vec::with_capacity(lead + args.len());
-        kinds.resize(lead, 0);
-        kinds.extend(arg_kinds[..args.len()].iter().map(|&k| code(k)));
-
-        // Each argument is read from the one of these its kind names; the
-        // others are filled so the slices stay the same length.
-        let mut ints = vec![0i64; kinds.len()];
-        let mut f32s = vec![0f32; kinds.len()];
-        let mut f64s = vec![0f64; kinds.len()];
-        if lead == 1 {
-            ints[0] = context as i64;
+        let len = lead + args.len();
+        if len > ash_native_call::MAX_ARGS || args.len() > arg_kinds.len() {
+            return Err(anyhow!("Native dispatch: unsupported argument count {len}"));
         }
-        for (i, &kind) in kinds.iter().enumerate().skip(lead) {
-            let a = i - lead;
-            match kind {
-                1 => f32s[i] = args[a].as_f64() as f32,
-                2 => f64s[i] = args[a].as_f64(),
-                _ => ints[i] = self.value_to_i64(args[a], arg_kinds[a]),
-            }
+        let mut kinds = [0u8; ash_native_call::MAX_ARGS];
+        let mut words = [0u64; ash_native_call::MAX_ARGS];
+        if lead == 1 {
+            words[0] = context as u64;
+        }
+        for (a, &arg) in args.iter().enumerate() {
+            let i = a + lead;
+            let kind = code(arg_kinds[a]);
+            kinds[i] = kind;
+            words[i] = match kind {
+                1 => (arg.as_f64() as f32).to_bits() as u64,
+                2 => arg.as_f64().to_bits(),
+                _ => self.value_to_i64(arg, arg_kinds[a]) as u64,
+            };
         }
 
         let ret_kind = if ret_is_f32 {
@@ -1193,13 +1192,14 @@ impl HLInterpreter {
             0
         };
 
-        unsafe { ash_native_call::dispatch(func_ptr, &ints, &f32s, &f64s, &kinds, ret_kind) }
+        let pattern = ash_native_call::pattern_of(&kinds[..len]);
+        unsafe { ash_native_call::dispatch_by_pattern(func_ptr, &words[..len], ret_kind, pattern) }
             .ok_or_else(|| {
                 anyhow!(
                     "Native dispatch: no signature for {} arguments with kinds {:?} \
                      returning kind {ret_kind}",
                     args.len(),
-                    kinds
+                    &kinds[..len]
                 )
             })
     }

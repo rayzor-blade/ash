@@ -112,11 +112,14 @@ impl Pass for ScalarReplacement<'_> {
 
     fn run(&self, f: &mut Function, _opts: &PassOptions) -> Result<PassStats> {
         let mut stats = PassStats::default();
-        let slots = self.info.and_then(|info| slot_allocs(f, info));
         // Each successful plan removes at least one allocation, so the total
         // instruction count bounds the loop.
         let bound: usize = f.blocks.iter().map(|b| b.instrs.len()).sum();
         for _ in 0..bound {
+            // `apply` compacts value IDs after each replacement. The slot
+            // lookup holds IDs for the size and offset constants, so it must
+            // describe the current function on every round.
+            let slots = self.info.and_then(|info| slot_allocs(f, info));
             let Some(plan) = first_candidate(f, slots.as_ref()) else {
                 break;
             };

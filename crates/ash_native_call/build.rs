@@ -10,12 +10,9 @@ const MAX_ARGS: u32 = 8;
 /// Above this many arguments, only signatures whose floats are all the same
 /// type are generated.
 ///
-/// Three states per argument all the way to eight is 29,523 signatures, which
-/// killed rustc for out of memory on a machine with sixteen gigabytes. Mixing
-/// `f32` and `f64` in one call is the part that is dropped, and only past five
-/// arguments: HL has both types but a function's floats are almost always one
-/// or the other.
-const MAX_MIXED_ARGS: u32 = 5;
+/// Mixed `f32` and `f64` patterns are omitted past six arguments to keep the
+/// generated dispatch table bounded.
+const MAX_MIXED_ARGS: u32 = 6;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {

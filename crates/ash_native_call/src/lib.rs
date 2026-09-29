@@ -19,9 +19,9 @@ include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 mod tests {
     #[test]
     fn the_table_covers_what_it_claims() {
-        // Uniform-float signatures at every arity, plus mixed ones up to five
+        // Uniform-float signatures at every arity, plus mixed ones up to six
         // arguments; times three ways to return.
-        assert_eq!(super::SIGNATURES, 3771);
+        assert_eq!(super::SIGNATURES, 5577);
     }
 
     #[test]
@@ -39,6 +39,19 @@ mod tests {
         let f64s = [0f64, 1.5, 0.0];
         let same = unsafe { super::dispatch(mix as *mut _, &ints, &f32s, &f64s, &kinds, 2) };
         assert_eq!(same, out);
+    }
+
+    #[test]
+    fn six_argument_mixed_float_signature_is_available() {
+        unsafe extern "C" fn mix(a: i64, b: i64, c: f64, d: f64, e: f64, f: f32) -> i64 {
+            a + b + ((c + d + e + f as f64) * 10.0) as i64
+        }
+        let kinds = [0u8, 0, 2, 2, 2, 1];
+        let ints = [3i64, 4, 0, 0, 0, 0];
+        let f32s = [0f32, 0.0, 0.0, 0.0, 0.0, 0.5];
+        let f64s = [0f64, 0.0, 1.5, 2.5, 3.5, 0.0];
+        let out = unsafe { super::dispatch(mix as *mut _, &ints, &f32s, &f64s, &kinds, 0) };
+        assert_eq!(out, Some(87));
     }
 
     #[test]

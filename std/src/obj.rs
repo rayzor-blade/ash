@@ -4,7 +4,10 @@
 // spelling. The trio cannot all be satisfied at once.
 #![allow(clippy::deref_addrof, dangerous_implicit_autorefs)]
 use std::alloc::alloc;
-use std::sync::RwLock;
+use std::sync::{
+    RwLock,
+    atomic::{AtomicPtr, Ordering},
+};
 use std::{
     alloc::Layout,
     ffi::{c_int, c_void},
@@ -179,9 +182,10 @@ static OBJECT_TAILS: std::sync::OnceLock<std::collections::HashMap<usize, usize>
     std::sync::OnceLock::new();
 
 /// Classes whose instances carry host state that must be released when the
-/// instance dies. Keyed by type descriptor and installed before allocation.
-static OBJECT_DROPS: std::sync::OnceLock<std::collections::HashSet<usize>> =
-    std::sync::OnceLock::new();
+/// instance dies. A hosted process may load more than one program, so writers
+/// publish an append-only snapshot while allocation reads without a lock.
+static OBJECT_DROPS: AtomicPtr<std::collections::HashSet<usize>> = AtomicPtr::new(ptr::null_mut());
+static OBJECT_DROPS_WRITE: Mutex<()> = Mutex::new(());
 
 /// One class's tail, as `hlp_set_object_tails` receives it.
 #[repr(C)]
@@ -206,15 +210,23 @@ pub unsafe extern "C" fn hlp_set_object_tails(tails: *const ObjectTail, n: usize
     let _ = OBJECT_TAILS.set(map);
 }
 
-/// Record the `n` class types whose host attachment needs a drop callback.
-/// The first call wins; the program makes it before its first allocation.
+/// Record another `n` class types whose host attachment needs a drop callback.
+/// Published snapshots are deliberately retained: an older program can keep
+/// allocating while a later hosted program adds its own descriptors.
 ///
 /// # Safety
 /// `types` points at `n` type descriptors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_object_drops(types: *const *mut hl_type, n: usize) {
-    let set = (0..n).map(|i| unsafe { *types.add(i) as usize }).collect();
-    let _ = OBJECT_DROPS.set(set);
+    let _write = OBJECT_DROPS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let current = OBJECT_DROPS.load(Ordering::Acquire);
+    let mut set = if current.is_null() {
+        std::collections::HashSet::new()
+    } else {
+        unsafe { (&*current).clone() }
+    };
+    set.extend((0..n).map(|i| unsafe { *types.add(i) as usize }));
+    OBJECT_DROPS.store(Box::into_raw(Box::new(set)), Ordering::Release);
 }
 
 /// The tail every instance of `t` carries; 0 for most.
@@ -228,10 +240,8 @@ fn object_tail(t: *mut hl_type) -> usize {
 
 #[inline]
 fn object_flags(t: *mut hl_type) -> u32 {
-    if OBJECT_DROPS
-        .get()
-        .is_some_and(|types| types.contains(&(t as usize)))
-    {
+    let types = OBJECT_DROPS.load(Ordering::Acquire);
+    if !types.is_null() && unsafe { &*types }.contains(&(t as usize)) {
         crate::rt::RT_OBJECT_HOST_DROP
     } else {
         0

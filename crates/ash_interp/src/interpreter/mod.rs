@@ -3037,6 +3037,17 @@ impl HLInterpreter {
                 let set_mode: unsafe extern "C" fn(bool) = std::mem::transmute(set_worker_mode);
                 set_mode(worker_compilation);
             }
+            let set_llvm_stack_mode = native_resolver
+                .resolve_function("std", "hlp_set_llvm_fiber_stack_mode")
+                .unwrap_or(std::ptr::null_mut());
+            if !set_llvm_stack_mode.is_null() {
+                let set_mode: unsafe extern "C" fn(bool) = std::mem::transmute(set_llvm_stack_mode);
+                let llvm_can_compile_in_fiber = cfg!(feature = "llvm")
+                    && self.tiered_runtime.as_ref().is_some_and(|tiered| {
+                        matches!(tiered.config.tier_mode, TierMode::Auto | TierMode::Llvm)
+                    });
+                set_mode(llvm_can_compile_in_fiber);
+            }
             let set_stub_resolver = native_resolver
                 .resolve_function("std", "hlp_set_stub_resolver")
                 .unwrap_or(std::ptr::null_mut());

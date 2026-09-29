@@ -72,6 +72,7 @@ static NEXT_SCHEDULER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_TOKEN: AtomicU64 = AtomicU64::new(1);
 static LOGICAL_THREADS: AtomicUsize = AtomicUsize::new(0);
 static COMPILED_WORKERS_ENABLED: AtomicBool = AtomicBool::new(false);
+static LLVM_FIBER_STACK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Generation observed by compiled AIR V2 loop safe points.
 ///
 /// A generation changes only when the runtime actually needs attention: a
@@ -238,6 +239,13 @@ pub(crate) unsafe fn switch_hook() -> Option<FiberSwitchHook> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_compiled_worker_mode(enabled: bool) {
     COMPILED_WORKERS_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// LLVM codegen can run inside any Haxe fiber when a cold stub is resolved,
+/// including on the main scheduler when no worker lanes are configured.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_set_llvm_fiber_stack_mode(enabled: bool) {
+    LLVM_FIBER_STACK_ENABLED.store(enabled, Ordering::Release);
 }
 
 /// Register the compiled-only sentinel resolver with native std helpers.
@@ -776,6 +784,21 @@ fn assign(worker: &SchedulerEndpoint, id: u32, index: usize, body: FiberBody, ct
 /// wren_lift-proven default; 64 KB tripped on real workloads there.
 const FIBER_STACK_SIZE: usize = 256 * 1024;
 
+/// A Haxe fiber may resolve a cold JIT stub on either a worker lane or the
+/// main scheduler. LLVM's nested SelectionDAG passes overflowed the ordinary
+/// 256 KB fiber stack on macOS arm64. Reserve room for codegen on native
+/// fibers in LLVM-capable runs; Cranelift and wasm keep the usual size.
+#[cfg(not(target_family = "wasm"))]
+const LLVM_FIBER_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+fn installed_fiber_stack_size() -> usize {
+    #[cfg(not(target_family = "wasm"))]
+    if LLVM_FIBER_STACK_ENABLED.load(Ordering::Acquire) {
+        return LLVM_FIBER_STACK_SIZE;
+    }
+    FIBER_STACK_SIZE
+}
+
 pub(crate) unsafe fn fibers_active() -> bool {
     ACTIVE_FIBER.with(|active| active.get().is_some())
         || SCHEDULER.with(|scheduler| !scheduler.borrow().fibers.is_empty())
@@ -1266,9 +1289,12 @@ unsafe fn install_fiber(id: u32, body: FiberBody, ctx: *mut c_void) {
             SCHEDULER.with(|scheduler| scheduler.borrow().id),
         );
         let ctx_usize = ctx as usize;
-        let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
-            body(ctx_usize as *mut c_void);
-        }));
+        let fiber = Box::new(Fiber::with_stack_size(
+            installed_fiber_stack_size(),
+            move || {
+                body(ctx_usize as *mut c_void);
+            },
+        ));
         // Both backends put a suspended fiber's live values somewhere the
         // collector has to look: a switched-out stack natively, and the side
         // stack the link-time transform writes locals into on wasm. Either way

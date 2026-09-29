@@ -3056,6 +3056,14 @@ impl HLInterpreter {
                     std::mem::transmute(set_stub_resolver);
                 set_resolver(jit_stub_resolver);
             }
+            let set_thread_root_resolver = native_resolver
+                .resolve_function("std", "hlp_set_thread_root_resolver")
+                .unwrap_or(std::ptr::null_mut());
+            if !set_thread_root_resolver.is_null() {
+                let set_resolver: unsafe extern "C" fn(unsafe extern "C" fn(i32) -> *mut ()) =
+                    std::mem::transmute(set_thread_root_resolver);
+                set_resolver(jit_thread_root_resolver);
+            }
             let setup_exception = native_resolver
                 .resolve_function("std", "hlp_setup_exception")
                 .unwrap_or(std::ptr::null_mut());
@@ -3106,6 +3114,21 @@ impl HLInterpreter {
                     return std::ptr::null_mut();
                 }
                 resolve_worker_stub(shared, findex as usize, is_worker)
+            }
+        }
+
+        unsafe extern "C" fn jit_thread_root_resolver(findex: i32) -> *mut () {
+            unsafe {
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                    return std::ptr::null_mut();
+                };
+                let Some(shared) = ctx.compiled_stub_ctx.as_ref() else {
+                    return std::ptr::null_mut();
+                };
+                let Ok(findex) = usize::try_from(findex) else {
+                    return std::ptr::null_mut();
+                };
+                resolve_worker_stub(shared, findex, true)
             }
         }
 

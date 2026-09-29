@@ -67,6 +67,7 @@ pub type StubResolver = unsafe extern "C" fn(i32) -> *mut c_void;
 static CLOSURE_RUNNER: AtomicUsize = AtomicUsize::new(0);
 static FIBER_SWITCH_HOOK: AtomicUsize = AtomicUsize::new(0);
 static STUB_RESOLVER: AtomicUsize = AtomicUsize::new(0);
+static THREAD_ROOT_RESOLVER: AtomicUsize = AtomicUsize::new(0);
 static NEXT_FIBER_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_SCHEDULER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -257,6 +258,14 @@ pub unsafe extern "C" fn hlp_set_stub_resolver(resolver: StubResolver) {
     STUB_RESOLVER.store(resolver as usize, Ordering::Release);
 }
 
+/// A thread root cannot fall back to the main interpreter after dispatch, so
+/// resolve it before choosing a worker lane. Ordinary cold calls continue to
+/// use `STUB_RESOLVER` and the hybrid promotion ladder.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_set_thread_root_resolver(resolver: StubResolver) {
+    THREAD_ROOT_RESOLVER.store(resolver as usize, Ordering::Release);
+}
+
 /// Whether `address` is a `findex + 1` sentinel rather than a real function
 /// pointer.
 ///
@@ -284,11 +293,19 @@ pub(crate) fn is_stub_sentinel(address: usize) -> bool {
 }
 
 pub(crate) unsafe fn resolve_stub_sentinel(address: usize) -> *mut c_void {
+    unsafe { resolve_sentinel_with(address, &STUB_RESOLVER) }
+}
+
+unsafe fn resolve_thread_root_sentinel(address: usize) -> *mut c_void {
+    unsafe { resolve_sentinel_with(address, &THREAD_ROOT_RESOLVER) }
+}
+
+unsafe fn resolve_sentinel_with(address: usize, slot: &AtomicUsize) -> *mut c_void {
     unsafe {
         if !is_stub_sentinel(address) {
             return address as *mut c_void;
         }
-        let resolver = STUB_RESOLVER.load(Ordering::Acquire);
+        let resolver = slot.load(Ordering::Acquire);
         if resolver == 0 {
             return ptr::null_mut();
         }
@@ -990,7 +1007,23 @@ unsafe fn scheduler_idle(deadline: Option<Instant>) {
             .min(std::time::Duration::from_millis(1))
     });
     if !own_wait.is_zero() {
+        #[cfg(target_family = "wasm")]
         std::thread::sleep(own_wait);
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            // A worker's Lock.release queues a Wake on this endpoint. Sleeping for
+            // the full millisecond here delays every short frame barrier even when
+            // the worker finished immediately. Wait on the same condition variable
+            // the pusher notifies, retaining the timeout for GC and timer polls.
+            let endpoint = SCHEDULER.with(|scheduler| Arc::clone(&scheduler.borrow().endpoint));
+            crate::rt::gc_set_blocking(true);
+            let commands = endpoint.commands.lock().unwrap();
+            if commands.is_empty() {
+                let _ = endpoint.changed.wait_timeout(commands, own_wait).unwrap();
+            }
+            crate::rt::gc_set_blocking(false);
+        }
     }
 }
 
@@ -1389,7 +1422,7 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
             // they are all compiled by construction.
             let fun = (*c).fun as usize;
             if is_stub_sentinel(fun) {
-                let resolved = resolve_stub_sentinel(fun);
+                let resolved = resolve_thread_root_sentinel(fun);
                 if !resolved.is_null() {
                     (*c).fun = resolved;
                 } else {

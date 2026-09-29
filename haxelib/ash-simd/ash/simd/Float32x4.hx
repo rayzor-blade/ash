@@ -5,9 +5,10 @@ package ash.simd;
 
 	Each operation returns a fresh vector. On stock HashLink that is an
 	allocation per result, so a hot loop is better written against
-	`ash.simd.Vec` and scratch slots. Ash's compiled tiers inline these helpers
-	and can keep local vector chains in registers. A value stored in an object
-	field still allocates.
+	`ash.simd.Vec` and scratch slots. Load, store, add, multiply, greater than,
+	and select are Haxe-inline so Ash can scalarize their temporary buffers
+	even when the caller is large. A value stored in an object field still
+	allocates.
 
 	Comparisons return an `Int32x4` mask, a lane of all ones where the
 	comparison holds; `select` chooses lanes by such a mask.
@@ -19,9 +20,11 @@ abstract Float32x4(hl.Bytes) {
 	static inline function raw(v:Float32x4):hl.Bytes
 		return cast v;
 
-	static function alloc():Float32x4
+	static inline function alloc():Float32x4
 		return new Float32x4(new hl.Bytes(16));
 
+	// Keep this out of Haxe's inliner: wrapped integration loops otherwise
+	// retain a 16-byte allocation for a loop-invariant splat on each call.
 	public static function splat(x:Single):Float32x4 {
 		var r = alloc();
 		Vec.f32x4Splat(raw(r), 0, x);
@@ -38,14 +41,14 @@ abstract Float32x4(hl.Bytes) {
 	}
 
 	/** The 16 bytes at `offset` of `b`, copied. **/
-	public static function load(b:hl.Bytes, offset:Int):Float32x4 {
+	public static inline function load(b:hl.Bytes, offset:Int):Float32x4 {
 		var r = alloc();
 		Vec.v128Copy(raw(r), 0, b, offset);
 		return r;
 	}
 
 	/** Copies the lanes into the 16 bytes at `offset` of `b`. **/
-	public function store(b:hl.Bytes, offset:Int):Void
+	public inline function store(b:hl.Bytes, offset:Int):Void
 		Vec.v128Copy(b, offset, this, 0);
 
 	public function get(i:Int):Single
@@ -71,7 +74,7 @@ abstract Float32x4(hl.Bytes) {
 	function get_w():Single
 		return this.getF32(12);
 
-	@:op(A + B) public function add(b:Float32x4):Float32x4 {
+	@:op(A + B) public inline function add(b:Float32x4):Float32x4 {
 		var r = alloc();
 		Vec.f32x4Add(raw(r), 0, this, 0, raw(b), 0);
 		return r;
@@ -83,7 +86,7 @@ abstract Float32x4(hl.Bytes) {
 		return r;
 	}
 
-	@:op(A * B) public function mul(b:Float32x4):Float32x4 {
+	@:op(A * B) public inline function mul(b:Float32x4):Float32x4 {
 		var r = alloc();
 		Vec.f32x4Mul(raw(r), 0, this, 0, raw(b), 0);
 		return r;
@@ -156,7 +159,7 @@ abstract Float32x4(hl.Bytes) {
 		return cast r;
 	}
 
-	public function gt(b:Float32x4):Int32x4 {
+	public inline function gt(b:Float32x4):Int32x4 {
 		var r = new hl.Bytes(16);
 		Vec.f32x4Gt(r, 0, this, 0, raw(b), 0);
 		return cast r;
@@ -169,7 +172,7 @@ abstract Float32x4(hl.Bytes) {
 	}
 
 	/** Lanes of `a` where `mask` is set, of `b` elsewhere. **/
-	public static function select(mask:Int32x4, a:Float32x4, b:Float32x4):Float32x4 {
+	public static inline function select(mask:Int32x4, a:Float32x4, b:Float32x4):Float32x4 {
 		var r = alloc();
 		Vec.v128Select(raw(r), 0, cast mask, 0, raw(a), 0, raw(b), 0);
 		return r;

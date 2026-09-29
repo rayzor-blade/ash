@@ -49,7 +49,7 @@ fn run_bytes(fixture: PathBuf, args: &[&str]) -> usize {
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{}\n{stderr}", out.status);
+    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
     stdout
         .split_whitespace()
         .find_map(|field| field.strip_prefix("gc_bytes="))
@@ -71,10 +71,22 @@ fn llvm_jit_keeps_local_simd_values_in_registers() {
 fn llvm_jit_elides_multiple_vector_temporaries() {
     let bytes = run_bytes(
         fixture("SimdMultiBufferAlloc", "simd_multi_buffer_alloc.hl"),
-        &[],
+        &["wrapped", "100"],
     );
     assert!(
         bytes < 4096,
         "multi-buffer SIMD updates allocated {bytes} bytes"
+    );
+}
+
+#[test]
+fn llvm_jit_elides_haxe_inlined_vector_temporaries() {
+    let bytes = run_bytes(
+        fixture("SimdMultiBufferAlloc", "simd_multi_buffer_alloc.hl"),
+        &["integration", "100"],
+    );
+    assert!(
+        bytes < 4096,
+        "Haxe-inlined multi-buffer SIMD updates allocated {bytes} bytes"
     );
 }

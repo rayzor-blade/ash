@@ -409,18 +409,17 @@ impl HLInterpreter {
                 self.stack.last_mut().unwrap().registers.set($v.0, val)
             }};
         }
-        /// Narrow an integer result to its destination's declared width.
+        /// Narrow a result to its destination's declared width.
         ///
-        /// `HUI8` and `HUI16` are a byte and a half-word in every compiled
-        /// tier, and HashLink's `store` copies `r->size` bytes. A walker
-        /// register is a NaN box with no width, so without this `255 + 1` in a
-        /// `hl.UI8` reads 256 where compiled code reads 0. Applied at the
-        /// arithmetic results only, not inside `set!`: every store would then
-        /// pay a type-table lookup, and only arithmetic can leave the range.
+        /// Float32 results round at their register boundary; narrow integers
+        /// wrap there too. Keep the type lookup on operations that can widen a
+        /// value rather than on every `set!`.
         macro_rules! narrow {
             ($v:expr, $val:expr) => {{
                 let val = $val;
-                if val.is_i32() {
+                if val.is_f64() && kind!($v) == hl::hl_type_kind_HF32 {
+                    NanBoxedValue::from_f64((val.as_f64() as f32) as f64)
+                } else if val.is_i32() {
                     match kind!($v) {
                         hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(val.as_i32() & 0xFF),
                         hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(val.as_i32() & 0xFFFF),
@@ -550,7 +549,9 @@ impl HLInterpreter {
                     set!(dst, NanBoxedValue::from_i32(v))
                 }
             }
-            I::Float { dst, idx } => set!(dst, NanBoxedValue::from_f64(bc.floats[*idx])),
+            I::Float { dst, idx } => {
+                set!(dst, narrow!(dst, NanBoxedValue::from_f64(bc.floats[*idx])))
+            }
             I::Bool { dst, value } => set!(dst, NanBoxedValue::from_bool(*value)),
             I::Bytes { dst, idx } => {
                 let pos = bc.bytes_pos[*idx];
@@ -649,8 +650,17 @@ impl HLInterpreter {
                 // multiply-add produces; the peephole decided this pair
                 // fuses for every engine. `--no-fma` leaves no `Fma` to
                 // execute and every operation rounds on its own.
-                let r = get!(a).as_f64().mul_add(get!(b).as_f64(), get!(c).as_f64());
-                set!(dst, NanBoxedValue::from_f64(r));
+                let r = if kind!(dst) == hl::hl_type_kind_HF32 {
+                    let a = get!(a).as_f64() as f32;
+                    let b = get!(b).as_f64() as f32;
+                    let c = get!(c).as_f64() as f32;
+                    NanBoxedValue::from_f64(a.mul_add(b, c) as f64)
+                } else {
+                    NanBoxedValue::from_f64(
+                        get!(a).as_f64().mul_add(get!(b).as_f64(), get!(c).as_f64()),
+                    )
+                };
+                set!(dst, r);
             }
             I::UnOp { op, dst, src } => {
                 let v = get!(src);
@@ -968,7 +978,7 @@ impl HLInterpreter {
                         } else {
                             v.as_f64()
                         };
-                        set!(dst, NanBoxedValue::from_f64(f));
+                        set!(dst, narrow!(dst, NanBoxedValue::from_f64(f)));
                     }
                     K::ToUFloat => {
                         let v = get!(src);
@@ -979,7 +989,7 @@ impl HLInterpreter {
                         } else {
                             v.as_f64()
                         };
-                        set!(dst, NanBoxedValue::from_f64(f));
+                        set!(dst, narrow!(dst, NanBoxedValue::from_f64(f)));
                     }
                     K::ToInt => {
                         // Same dst-width rule as the opcode dispatcher: the

@@ -234,9 +234,10 @@ const DEMAND_UNDER_LOOP: u8 = 2;
 /// `self.stack` across the lookup. Taking the table alone keeps the borrow
 /// field-disjoint, which is what the two HashMap fields gave for free.
 #[inline(always)]
-/// Narrow an integer result to the destination register's declared width.
+/// Narrow a result to the destination register's declared width.
 ///
-/// `HUI8` and `HUI16` registers are a byte and a half-word everywhere else: the
+/// `HF32` registers round after each operation, just as compiled f32 instructions
+/// do. `HUI8` and `HUI16` registers are a byte and a half-word everywhere else: the
 /// compiled tiers load and store them at that width, and HashLink's `store`
 /// copies `r->size` bytes. An interpreter register is a NaN box with no width,
 /// so without this `255 + 1` in a `hl.UI8` reads 256 where compiled code reads
@@ -247,13 +248,20 @@ fn narrow_to_reg(
     reg: u32,
     v: NanBoxedValue,
 ) -> NanBoxedValue {
-    if !v.is_i32() {
+    if !v.is_i32() && !v.is_f64() {
         return v;
     }
     let Some(t) = func.regs.get(reg as usize) else {
         return v;
     };
-    match bytecode.types[t.0].kind {
+    let kind = bytecode.types[t.0].kind;
+    if v.is_f64() && kind == hl::hl_type_kind_HF32 {
+        return NanBoxedValue::from_f64((v.as_f64() as f32) as f64);
+    }
+    if !v.is_i32() {
+        return v;
+    }
+    match kind {
         hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(v.as_i32() & 0xFF),
         hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(v.as_i32() & 0xFFFF),
         // A Bool register holds a truth value; anything nonzero is true,
@@ -5945,7 +5953,10 @@ impl HLInterpreter {
             }
             Opcode::Float { dst, ptr } => {
                 let val = bytecode.floats[ptr.0];
-                frame.registers.set(dst.0, NanBoxedValue::from_f64(val));
+                frame.registers.set(
+                    dst.0,
+                    narrow_to_reg(bytecode, func, dst.0, NanBoxedValue::from_f64(val)),
+                );
             }
             Opcode::Bool { dst, value } => {
                 frame.registers.set(dst.0, NanBoxedValue::from_bool(*value));
@@ -6753,7 +6764,10 @@ impl HLInterpreter {
                 } else {
                     val.as_f64()
                 };
-                frame.registers.set(dst.0, NanBoxedValue::from_f64(f));
+                frame.registers.set(
+                    dst.0,
+                    narrow_to_reg(bytecode, func, dst.0, NanBoxedValue::from_f64(f)),
+                );
             }
             Opcode::ToUFloat { dst, src } => {
                 let val = frame.registers.get(src.0);
@@ -6764,7 +6778,10 @@ impl HLInterpreter {
                 } else {
                     val.as_f64()
                 };
-                frame.registers.set(dst.0, NanBoxedValue::from_f64(f));
+                frame.registers.set(
+                    dst.0,
+                    narrow_to_reg(bytecode, func, dst.0, NanBoxedValue::from_f64(f)),
+                );
             }
             Opcode::ToInt { dst, src } => {
                 // OToInt converts to the DESTINATION register's int width.

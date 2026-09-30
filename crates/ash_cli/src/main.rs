@@ -191,10 +191,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     jit_log: bool,
 
-    /// Max argument count for promoted calls. Wider signatures are reached
-    /// through a backend-emitted uniform entry, which is not yet proven on
-    /// real signatures — raise this to exercise it.
-    #[arg(long, default_value_t = 8)]
+    /// Max argument count for promoted calls. Signatures beyond eight
+    /// arguments use a backend-emitted uniform entry.
+    #[arg(long, default_value_t = 32)]
     jit_max_args: usize,
 
     /// Optional static opcode-size gate before promotion (0 disables, call-count only)

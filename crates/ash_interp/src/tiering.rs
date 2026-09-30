@@ -96,12 +96,9 @@ pub struct TieredConfig {
     pub opt_threshold: u64,
     /// Cap on how wide a signature may be to promote.
     ///
-    /// The marshaling path itself no longer needs one: anything past the
-    /// inline eight goes through the backend's uniform entry. But letting
-    /// Cranelift compile those signatures for the first time produced a frame
-    /// sized for one function running another's opcodes in a large program, and the
-    /// default is not the place to carry an unproven path. Raise it explicitly
-    /// to exercise the uniform entry.
+    /// Calls beyond the inline eight use the backend's uniform entry. Keep a
+    /// configurable cap for diagnosing wide-call failures without leaving hot
+    /// functions on the interpreter under the default policy.
     pub max_jit_args: usize,
     pub min_ops_for_promotion: usize,
     pub log_promotions: bool,
@@ -117,7 +114,7 @@ impl Default for TieredConfig {
             compiled_only: false,
             jit_threshold: 100,
             opt_threshold: 250,
-            max_jit_args: 8,
+            max_jit_args: 32,
             // 0 disables the static opcode-size gate; promotion hotness is call-count based.
             min_ops_for_promotion: 0,
             log_promotions: false,

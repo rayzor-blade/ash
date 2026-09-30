@@ -11,7 +11,7 @@ can be seen. Everyday options are in [cli.md](cli.md).
 | `--jit-threshold` | integer | calls before Cranelift promotion (default 100) |
 | `--opt-threshold` | integer | interpreted calls before LLVM promotion (default 1000) |
 | `--jit-min-ops` | integer | minimum opcode count before a function is promoted (0 disables) |
-| `--jit-max-args` | integer | widest signature that is promoted (default 8) |
+| `--jit-max-args` | integer | widest signature that is promoted (default 32) |
 | `--jit-log` | flag | log every promotion, decline and tier transfer |
 | `--hot-reload` | flag | route direct calls through indirect dispatch so code can be swapped |
 

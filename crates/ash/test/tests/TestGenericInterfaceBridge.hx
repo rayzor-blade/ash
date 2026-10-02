@@ -4,7 +4,9 @@
 //
 // `single`: an f32 returned through `IGet<Single>` must keep its value.
 // `throw`: an exception from a method reached through `IFail<Int>` must reach
-// the caller's `try`. The program is aborted if it does not, so each section
+// the caller's `try`.
+// `dynamic`: a method called through a Dynamic closure or Reflect.callMethod
+// must box its primitive result by its own type, and take an f32 argument. The program is aborted if it does not, so each section
 // runs as its own process, selected by the first argument.
 
 interface IGet<T> {
@@ -48,6 +50,22 @@ class Fails implements IFail<Int> implements IFailInt {
 	}
 }
 
+class Methods {
+	public function new() {}
+
+	public function single():Single
+		return 200.5;
+
+	public function float():Float
+		return 200.5;
+
+	public function int():Int
+		return 7;
+
+	public function twice(x:Single):Single
+		return x * 2;
+}
+
 class TestGenericInterfaceBridge {
 	static function main() {
 		switch Sys.args()[0] {
@@ -81,6 +99,18 @@ class TestGenericInterfaceBridge {
 					Sys.println("IFail<Int>: caught " + e);
 				}
 				Sys.println("returned");
+
+			case "dynamic":
+				var m = new Methods();
+				var single:Dynamic = m.single;
+				Sys.println("Dynamic Single = " + single());
+				var float:Dynamic = m.float;
+				Sys.println("Dynamic Float = " + float());
+				var int:Dynamic = m.int;
+				Sys.println("Dynamic Int = " + int());
+				var twice:Dynamic = m.twice;
+				Sys.println("Dynamic Single arg = " + twice(21.25));
+				Sys.println("callMethod Single = " + Reflect.callMethod(m, Reflect.field(m, "single"), []));
 
 			case other:
 				Sys.println("unknown section: " + other);

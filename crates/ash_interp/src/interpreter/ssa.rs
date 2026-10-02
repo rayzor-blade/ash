@@ -1476,7 +1476,7 @@ impl HLInterpreter {
         match call_result {
             Ok(ret) => {
                 let dst_kind = bc.types[func.regs[dst as usize].0].kind;
-                let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
+                let coerced = self.call_result_for(bc, findex, ret, dst_kind);
                 self.stack.last_mut().unwrap().registers.set(dst, coerced);
                 self.apply_pending_reload(native_resolver);
                 Ok(None)

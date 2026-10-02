@@ -24,6 +24,22 @@ pub type HlcStaticCallType = unsafe extern "C" fn(
     _out: *mut vdynamic,
 ) -> *mut c_void;
 
+/// An `f32` argument as the C ABI passes it: its bits in the low half of a
+/// float register, which is the `f64` these trampolines load each one as.
+#[allow(dead_code)]
+#[inline]
+fn f32_in_float_reg(v: f32) -> f64 {
+    f64::from_bits(v.to_bits() as u64)
+}
+
+/// An `f32` result from the float return register the trampolines read as
+/// an `f64`: the low half holds the value's bits.
+#[allow(dead_code)]
+#[inline]
+fn f32_from_float_reg(v: f64) -> f32 {
+    f32::from_bits(v.to_bits() as u32)
+}
+
 pub unsafe extern "C" fn empty_fun_wrapper(_t: *mut hl_type) -> *mut c_void {
     ptr::null_mut()
 }
@@ -187,7 +203,7 @@ pub unsafe extern "C" fn ash_static_call(
             let p = *args.add(i);
             match kind {
                 hl_type_kind_HF32 => {
-                    fvals[freg] = *(p as *const f32) as f64;
+                    fvals[freg] = f32_in_float_reg(*(p as *const f32));
                     freg += 1;
                 }
                 hl_type_kind_HF64 => {
@@ -243,7 +259,7 @@ pub unsafe extern "C" fn ash_static_call(
         match ret_kind {
             hl_type_kind_HVOID => ptr::null_mut(),
             hl_type_kind_HF32 => {
-                (*out).v.f = fresult as f32;
+                (*out).v.f = f32_from_float_reg(fresult);
                 ptr::null_mut()
             }
             hl_type_kind_HF64 => {
@@ -298,7 +314,7 @@ pub unsafe extern "C" fn ash_static_call(
             match kind {
                 hl_type_kind_HF32 => {
                     if freg < 8 {
-                        fvals[freg] = *(p as *const f32) as f64;
+                        fvals[freg] = f32_in_float_reg(*(p as *const f32));
                         freg += 1;
                     }
                 }
@@ -360,7 +376,7 @@ pub unsafe extern "C" fn ash_static_call(
         match ret_kind {
             hl_type_kind_HVOID => ptr::null_mut(),
             hl_type_kind_HF32 => {
-                (*out).v.f = fresult as f32;
+                (*out).v.f = f32_from_float_reg(fresult);
                 ptr::null_mut()
             }
             hl_type_kind_HF64 => {
@@ -417,7 +433,7 @@ pub unsafe extern "C" fn ash_static_call(
         let kind = (*arg_t).kind;
         let p = *args.add(i);
         match kind {
-            hl_type_kind_HF32 => fvals[i] = *(p as *const f32) as f64,
+            hl_type_kind_HF32 => fvals[i] = f32_in_float_reg(*(p as *const f32)),
             hl_type_kind_HF64 => fvals[i] = *(p as *const f64),
             hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
                 let val = (*(p as *const f64)) as i32;
@@ -458,7 +474,7 @@ pub unsafe extern "C" fn ash_static_call(
     match ret_kind {
         hl_type_kind_HVOID => ptr::null_mut(),
         hl_type_kind_HF32 => {
-            (*out).v.f = fresult as f32;
+            (*out).v.f = f32_from_float_reg(fresult);
             ptr::null_mut()
         }
         hl_type_kind_HF64 => {
@@ -966,11 +982,13 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
                         ) as f64);
                         p = tmp[i].as_mut_ptr() as *mut libc::c_void;
                     }
+                    // An `f32` slot holds an `f32`, as every reader of the
+                    // slots takes it.
                     hl_type_kind_HF32 => {
-                        tmp[i] = mem::MaybeUninit::new(hlp_dyn_castf(
-                            (vargs.add(i) as *mut vdynamic) as *mut c_void,
-                            _hlt_dyn,
-                        ) as f64);
+                        let v =
+                            hlp_dyn_castf((vargs.add(i) as *mut vdynamic) as *mut c_void, _hlt_dyn);
+                        tmp[i] = mem::MaybeUninit::new(0.0);
+                        *(tmp[i].as_mut_ptr() as *mut f32) = v;
                         p = tmp[i].as_mut_ptr() as *mut libc::c_void;
                     }
                     hl_type_kind_HF64 => {

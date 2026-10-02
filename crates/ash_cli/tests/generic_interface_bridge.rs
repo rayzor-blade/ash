@@ -85,3 +85,15 @@ fn exception_through_generic_interface_reaches_callers_try() {
          returned\n",
     );
 }
+
+#[test]
+fn dynamic_calls_box_primitive_results_by_the_callees_type() {
+    run_section(
+        "dynamic",
+        "Dynamic Single = 200.500000000\n\
+         Dynamic Float = 200.5\n\
+         Dynamic Int = 7\n\
+         Dynamic Single arg = 42.500000000\n\
+         callMethod Single = 200.500000000\n",
+    );
+}

@@ -2035,7 +2035,9 @@ impl HLInterpreter {
                 val.as_i32() as i64
             }
             hl::hl_type_kind_HI64 => val.as_i64_lossy(),
-            hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => val.as_f64().to_bits() as i64,
+            // hlp_make_dyn reads the slot at the type's width.
+            hl::hl_type_kind_HF32 => (val.as_f64() as f32).to_bits() as i64,
+            hl::hl_type_kind_HF64 => val.as_f64().to_bits() as i64,
             hl::hl_type_kind_HBOOL => {
                 if val.as_bool() {
                     1
@@ -2058,6 +2060,31 @@ impl HLInterpreter {
     }
 
     #[inline]
+    /// `findex`'s result as a register of `dst_kind` holds it. A call through
+    /// a Dynamic closure lands the callee's primitive result in a Dynamic
+    /// register, so it is boxed by the callee's return type, as HashLink's
+    /// dynamic call does; anything else is coerced to the register's kind.
+    pub(super) fn call_result_for(
+        &self,
+        bytecode: &DecodedBytecode,
+        findex: usize,
+        ret: NanBoxedValue,
+        dst_kind: hl::hl_type_kind,
+    ) -> NanBoxedValue {
+        let ret = if matches!(dst_kind, hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL) {
+            match func_of(&self.targets, findex)
+                .and_then(|i| bytecode.functions.get(i))
+                .and_then(|f| bytecode.types[f.type_.0].fun.as_ref())
+            {
+                Some(callee) => self.box_for_dynamic(bytecode, ret, callee.ret.0),
+                None => ret,
+            }
+        } else {
+            ret
+        };
+        Self::coerce_value_for_static_kind(ret, dst_kind)
+    }
+
     fn coerce_value_for_static_kind(
         val: NanBoxedValue,
         dst_kind: hl::hl_type_kind,
@@ -2878,7 +2905,13 @@ impl HLInterpreter {
                         } else {
                             // Primitive: box via hlp_make_dyn with the callee's
                             // declared return type.
-                            let mut raw = interp.value_to_i64(v, kind);
+                            // hlp_make_dyn reads the bytes its type names: an
+                            // HF32 box takes an f32, not the f64 a value holds.
+                            let mut raw = if kind == hl::hl_type_kind_HF32 {
+                                (v.as_f64() as f32).to_bits() as i64
+                            } else {
+                                interp.value_to_i64(v, kind)
+                            };
                             let c_t = interp.c_type_factory.get(ret_idx) as *mut c_void;
                             if interp.fn_make_dyn.is_null() || c_t.is_null() {
                                 std::ptr::null_mut()
@@ -5722,7 +5755,7 @@ impl HLInterpreter {
                     match call_result {
                         Ok(ret) => {
                             let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
-                            let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
+                            let coerced = self.call_result_for(bytecode, findex, ret, dst_kind);
                             self.stack.last_mut().unwrap().registers.set(dst, coerced);
                             self.stack.last_mut().unwrap().pc += 1;
 

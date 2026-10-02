@@ -871,31 +871,19 @@ impl HLInterpreter {
         Ok(StepResult::Continue)
     }
 
-    /// Box a value into a vdynamic for native consumption.
-    ///
-    /// Extracted from `execute_opcode` so the SSA dispatcher in
-    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
-    /// register operands are plain indices into the active frame, which is
-    /// the SSA value frame there and the HL register file here.
-    #[allow(clippy::too_many_arguments, unused_variables)]
-    pub(super) fn op_to_dyn(
-        &mut self,
+    /// `val`, held in a register of the program's type `type_index`, as a
+    /// Dynamic: a primitive (or an abstract, which is a pointer but not a
+    /// dynamic kind) boxed by `hlp_make_dyn` with that type, anything else
+    /// as it is.
+    pub(super) fn box_for_dynamic(
+        &self,
         bytecode: &DecodedBytecode,
-        func: &HLFunction,
-        func_idx: usize,
-        dst: u32,
-        src: u32,
-    ) -> Result<StepResult> {
-        let frame = self.stack.last_mut().unwrap();
-        // Box a value into a vdynamic* for native code consumption.
-        // Pointer types (HOBJ, HDYN, etc.) already have a vdynamic header - pass through.
-        // Primitive types (HI32, HF64, HBOOL, HBYTES) need hlp_make_dyn wrapping.
-        let src_type_ref = &func.regs[src as usize];
-        let src_kind = bytecode.types[src_type_ref.0].kind;
-        let val = frame.registers.get(src);
-
+        val: NanBoxedValue,
+        type_index: usize,
+    ) -> NanBoxedValue {
+        let kind = bytecode.types[type_index].kind;
         let needs_boxing = matches!(
-            src_kind,
+            kind,
             hl::hl_type_kind_HI32
                 | hl::hl_type_kind_HI64
                 | hl::hl_type_kind_HF32
@@ -911,42 +899,56 @@ impl HLInterpreter {
                 // non-dynamic kind for exactly this reason.
                 | hl::hl_type_kind_HABSTRACT
         );
-
-        if needs_boxing && !self.fn_make_dyn.is_null() {
-            let c_type_ptr = self.c_type_factory.get(src_type_ref.0);
-            // Create a stack slot holding the raw value for hlp_make_dyn
-            // The runtime reads the slot at the SOURCE kind's width: an F32
-            // register holds an f64 box, so it gets the f32 bits.
-            let mut data: i64 = if val.is_i32() {
-                val.as_i32() as i64
-            } else if val.is_i64() {
-                val.as_i64_lossy()
-            } else if val.is_f64() && src_kind == hl::hl_type_kind_HF32 {
-                (val.as_f64() as f32).to_bits() as i64
-            } else if val.is_f64() {
-                val.as_f64().to_bits() as i64
-            } else if val.is_bool() {
-                val.as_bool() as i64
-            } else {
-                // Pointer-like (HBYTES, etc.)
-                val.as_ptr() as i64
-            };
-            let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
-                unsafe { std::mem::transmute(self.fn_make_dyn) };
-            let dyn_ptr = unsafe {
-                make_dyn(
-                    &mut data as *mut i64 as *mut c_void,
-                    c_type_ptr as *mut c_void,
-                )
-            };
-            frame
-                .registers
-                .set(dst, NanBoxedValue::from_ptr(dyn_ptr as usize));
-        } else {
-            // Already a pointer type with vdynamic header, or no make_dyn available
-            frame.registers.set(dst, val);
+        if !needs_boxing || self.fn_make_dyn.is_null() {
+            return val;
         }
+        let c_type_ptr = self.c_type_factory.get(type_index);
+        // The runtime reads the slot at the type's width: an F32 register
+        // holds an f64 box, so it gets the f32 bits.
+        let mut data: i64 = if val.is_i32() {
+            val.as_i32() as i64
+        } else if val.is_i64() {
+            val.as_i64_lossy()
+        } else if val.is_f64() && kind == hl::hl_type_kind_HF32 {
+            (val.as_f64() as f32).to_bits() as i64
+        } else if val.is_f64() {
+            val.as_f64().to_bits() as i64
+        } else if val.is_bool() {
+            val.as_bool() as i64
+        } else {
+            // Pointer-like (HBYTES, HABSTRACT)
+            val.as_ptr() as i64
+        };
+        let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            unsafe { std::mem::transmute(self.fn_make_dyn) };
+        let dyn_ptr = unsafe {
+            make_dyn(
+                &mut data as *mut i64 as *mut c_void,
+                c_type_ptr as *mut c_void,
+            )
+        };
+        NanBoxedValue::from_ptr(dyn_ptr as usize)
+    }
 
+    /// Box a value into a vdynamic for native consumption.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    pub(super) fn op_to_dyn(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        src: u32,
+    ) -> Result<StepResult> {
+        let src_type = func.regs[src as usize].0;
+        let val = self.stack.last().unwrap().registers.get(src);
+        let boxed = self.box_for_dynamic(bytecode, val, src_type);
+        self.stack.last_mut().unwrap().registers.set(dst, boxed);
         Ok(StepResult::Continue)
     }
 
@@ -2166,13 +2168,28 @@ impl HLInterpreter {
                     )
                         -> *mut hl::vdynamic;
                     let vcall: FnVCallDyn = unsafe { std::mem::transmute(self.fn_vcall_dyn) };
-                    let result = unsafe {
-                        vcall(
-                            receiver.as_ptr() as *mut hl::vdynamic,
-                            hfield,
-                            packed.as_ptr() as *mut hl::varray,
-                        )
-                    };
+                    // Through the trap boundary, as the view dispatch below:
+                    // the method can throw, and its exception comes back as a
+                    // longjmp that must land here rather than abort.
+                    let stack_depth = self.stack.len();
+                    let mut result: *mut hl::vdynamic = std::ptr::null_mut();
+                    let jumped =
+                        run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+                            result = unsafe {
+                                vcall(
+                                    receiver.as_ptr() as *mut hl::vdynamic,
+                                    hfield,
+                                    packed.as_ptr() as *mut hl::varray,
+                                )
+                            };
+                        });
+                    if jumped != 0 {
+                        return Err(self.longjmp_error(
+                            Some(bytecode),
+                            stack_depth,
+                            format!("exception in virtual dispatch (field={field})"),
+                        ));
+                    }
                     let value = if result.is_null() {
                         Self::coerce_value_for_static_kind(NanBoxedValue::null(), dst_kind)
                     } else if Self::is_unboxable_primitive_kind(dst_kind) {

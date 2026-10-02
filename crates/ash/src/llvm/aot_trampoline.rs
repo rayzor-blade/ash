@@ -18,14 +18,11 @@
 //!
 //! # The argument convention is copied, not designed
 //!
-//! Each `args[i]` is read exactly as the aarch64 implementation in
-//! `std/src/fun.rs` reads it, including where that is odd: an integer slot
+//! Each `args[i]` is read exactly as the native implementations in
+//! `std/src/fun.rs` read it, including where that is odd: an integer slot
 //! holds its value as an `f64` and is converted, while a 64-bit integer slot
-//! holds an `i64` and a 32-bit float slot holds an `f32`. Two callers built
-//! those slots differently long before this file existed, and matching the
-//! native reader exactly means wasm behaves as the other targets do --
-//! including when they are wrong, which is the property worth having until
-//! someone fixes both.
+//! holds an `i64` and a 32-bit float slot holds an `f32`. Matching the native
+//! reader exactly means wasm behaves as the other targets do.
 
 use std::collections::BTreeMap;
 

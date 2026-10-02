@@ -1355,7 +1355,7 @@ pub extern "C" fn hlp_setup_reload_check(path_utf16: *const u16) {
 ///
 /// Called per-frame by user code via `hl.Api.checkReload()`.
 /// If `debug_alt_file` is non-null, uses that path instead of the registered one.
-/// Returns `true` if the file changed (caller should trigger reload).
+/// Returns `true` if the file changed and the runtime accepted it.
 #[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
     let mut guard = match RELOAD_STATE.lock() {
@@ -1396,7 +1396,9 @@ pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
             let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
             utf16.push(0);
             drop(cb_guard); // release callback lock before invoking
-            unsafe { cb(utf16.as_ptr()) };
+            // Whether the program will reload, as upstream answers: a change
+            // the runtime refuses is not a reload.
+            return unsafe { cb(utf16.as_ptr()) };
         }
         true
     } else {

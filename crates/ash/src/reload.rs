@@ -145,19 +145,8 @@ pub fn perform_reload(
     // Step 2: Diff
     let diff = diff_bytecode(old_bytecode, &new_bytecode);
 
-    if !diff.is_safe() {
-        if diff.type_layout_changed {
-            return Err(anyhow::anyhow!(
-                "Hot reload aborted: type field layout changed (existing heap objects would be corrupted)"
-            ));
-        }
-        if diff.globals_count_changed {
-            return Err(anyhow::anyhow!(
-                "Hot reload aborted: global count changed ({} -> {})",
-                old_bytecode.globals.len(),
-                new_bytecode.globals.len()
-            ));
-        }
+    if let Some(why) = refusal(old_bytecode, &new_bytecode, &diff) {
+        return Err(anyhow::anyhow!("Hot reload aborted: {why}"));
     }
 
     if !diff.has_changes() {
@@ -674,11 +663,18 @@ fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
 static RELOAD_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Callback invoked by the stdlib when a bytecode file change is detected.
-/// Sets the pending flag — actual recompilation is deferred to the interpreter
-/// loop to avoid doing heavy work inside a native call stack.
+/// Checks and stages the new program; recompilation is deferred to the
+/// interpreter loop to avoid doing heavy work inside a native call stack.
+/// `false` when nothing will reload: the program is unchanged, unreadable,
+/// or refused.
 pub unsafe extern "C" fn reload_callback(_path_utf16: *const u16) -> bool {
-    RELOAD_PENDING.store(true, std::sync::atomic::Ordering::Release);
-    true
+    match stage_reload() {
+        Ok(diff) => diff.has_changes(),
+        Err(why) => {
+            eprintln!("[hot-reload] reload refused: {why}");
+            false
+        }
+    }
 }
 
 /// Check and clear the pending reload flag. Called by the interpreter after

@@ -1,6 +1,6 @@
 {
   "name": "ash-future",
-  "url": "https://github.com/darmie/ash",
+  "url": "https://github.com/rayzor-blade/ash",
   "license": "MIT",
   "tags": ["hashlink", "async"],
   "description": "Ash Future<T> for asynchronous native operations",

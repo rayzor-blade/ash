@@ -149,6 +149,33 @@ self.ashAgent = ({ name, memory, address }) => {
   }
 };
 
+// The native libraries beside the program, wasm side modules `ash --build`
+// listed in `libraries.json`, fetched before the program runs: a guest that
+// asks for a library is inside a synchronous call and cannot wait for one.
+// No manifest is a program without libraries.
+async function fetchLibraries(module) {
+  const base = new URL(module, self.location.href);
+  let names = [];
+  try {
+    const listed = await fetch(new URL("libraries.json", base));
+    if (listed.ok) names = await listed.json();
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(names) || names.length === 0) return undefined;
+  const libraries = {};
+  for (const name of names) {
+    const response = await fetch(new URL(`${name}.wasm`, base));
+    if (!response.ok) {
+      post("err", `fetching library ${name}: ${response.status}`);
+      continue;
+    }
+    libraries[name] = new Uint8Array(await response.arrayBuffer());
+    post("meta", `loaded library ${name}, ${libraries[name].length.toLocaleString()} bytes`);
+  }
+  return libraries;
+}
+
 self.onmessage = async (event) => {
   const { module, args, environ, display: wanted, agents: ports } = event.data;
   display = !!wanted;
@@ -163,9 +190,10 @@ self.onmessage = async (event) => {
     if (!response.ok) throw new Error(`fetching ${module}: ${response.status}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     post("meta", `loaded ${module}, ${bytes.length.toLocaleString()} bytes`);
+    const libraries = await fetchLibraries(module);
 
     const started = performance.now();
-    const outcome = await run(bytes, args ?? [module], environ ?? [], spawn);
+    const outcome = await run(bytes, args ?? [module], environ ?? [], spawn, libraries);
     const took = Math.round(performance.now() - started);
 
     if (outcome.trapped) post("err", `trapped: ${outcome.trapped}`);

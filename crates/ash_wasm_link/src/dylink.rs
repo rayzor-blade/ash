@@ -26,6 +26,9 @@ pub struct SideModule {
     /// `GOT.func`. Not the ones it defines itself, nor the host's -- WASI,
     /// and anything named `ash_host_*`.
     pub functions: Vec<String>,
+    /// The `ash_host_*` functions it imports. The host supplies these, except
+    /// one the runtime defines itself, which the program exports instead.
+    pub host_functions: Vec<String>,
     /// Data symbols it expects to find outside itself, imported as
     /// `GOT.mem.<name>` -- globals holding an address. `errno` is the one
     /// every C library wants. A name it defines itself resolves against its
@@ -96,6 +99,12 @@ pub fn read_side_module(bytes: &[u8]) -> Result<Option<SideModule>> {
                     {
                         out.functions.push(import.name.to_string());
                     }
+                    if import.module == "env"
+                        && matches!(import.ty, wasmparser::TypeRef::Func(_))
+                        && import.name.starts_with("ash_host_")
+                    {
+                        out.host_functions.push(import.name.to_string());
+                    }
                     if import.module == "GOT.mem" {
                         out.data.push(import.name.to_string());
                     }
@@ -115,6 +124,8 @@ pub fn read_side_module(bytes: &[u8]) -> Result<Option<SideModule>> {
     out.functions.extend(addressed);
     out.functions.sort();
     out.functions.dedup();
+    out.host_functions.sort();
+    out.host_functions.dedup();
     Ok(is_side_module.then_some(out))
 }
 
@@ -177,6 +188,32 @@ mod tests {
     fn a_plain_module_is_not_a_side_module() {
         let empty = b"\0asm\x01\0\0\0";
         assert_eq!(read_side_module(empty).unwrap(), None);
+    }
+
+    /// The host's `ash_host_*` imports are kept apart from the program's.
+    #[test]
+    fn host_functions_are_listed_apart_from_the_programs() {
+        use wasm_encoder::{
+            CustomSection, EntityType, FunctionSection, ImportSection, Module, TypeSection,
+        };
+        let mut module = Module::new();
+        module.section(&CustomSection {
+            name: "dylink.0".into(),
+            data: [WASM_DYLINK_MEM_INFO, 4, 16, 2, 1, 0][..].into(),
+        });
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut imports = ImportSection::new();
+        for name in ["hlp_alloc_bytes", "ash_host_watch", "ash_host_agent"] {
+            imports.import("env", name, EntityType::Function(0));
+        }
+        module.section(&imports);
+        module.section(&FunctionSection::new());
+        let side = read_side_module(&module.finish()).unwrap().unwrap();
+        assert_eq!(side.functions, ["hlp_alloc_bytes"]);
+        assert_eq!(side.host_functions, ["ash_host_agent", "ash_host_watch"]);
+        assert_eq!((side.memory_size, side.memory_align, side.table_size), (16, 2, 1));
     }
 
     /// The reference the rest of this is checked against: a side module built

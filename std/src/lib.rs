@@ -15,6 +15,11 @@
 // still build, and stable_features quiets newer ones.
 #![allow(stable_features)]
 #![feature(c_variadic)]
+// The scheduler's idle wait on the threads target; see `fiber::scheduler_idle`.
+#![cfg_attr(
+    all(target_family = "wasm", target_feature = "atomics"),
+    feature(stdarch_wasm_atomic_wait)
+)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]

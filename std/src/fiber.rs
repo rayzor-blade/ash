@@ -996,6 +996,77 @@ unsafe fn wake_due_timers() {
     SCHEDULER.with(|scheduler| scheduler.borrow_mut().wake_due_timers());
 }
 
+/// A word an agent outside the runtime bumps when work it did for the
+/// program completes, and what to run on the program's thread when it has.
+struct Watch {
+    word: *const std::sync::atomic::AtomicU32,
+    seen: u32,
+    handler: unsafe extern "C" fn(*mut c_void),
+    context: *mut c_void,
+}
+
+// The words and contexts are the registering library's, valid for the
+// program's lifetime by `ash_host_watch`'s contract.
+unsafe impl Send for Watch {}
+
+static WATCHES: std::sync::Mutex<Vec<Watch>> = std::sync::Mutex::new(Vec::new());
+
+/// What an agent adds one to and notifies once a watched word has changed,
+/// so the program's thread stops waiting at once instead of at its next poll.
+static WAKE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Run `handler(context)` on the program's thread whenever the 32-bit `word`
+/// changes, and answer the word the changer should then add one to and
+/// notify. A page's agents settle a library's futures this way: the agent
+/// writes the completion word, and the handler, run by the scheduler while
+/// the program waits, wakes the fiber awaiting it.
+///
+/// # Safety
+/// `word` and `context` must stay valid for the program's lifetime, and
+/// `handler` must be callable with `context` on the program's thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ash_host_watch(
+    word: *const u32,
+    handler: unsafe extern "C" fn(*mut c_void),
+    context: *mut c_void,
+) -> *const u32 {
+    use std::sync::atomic::Ordering;
+    let word = word as *const std::sync::atomic::AtomicU32;
+    if word.is_null() {
+        return ptr::null();
+    }
+    let seen = unsafe { (*word).load(Ordering::Acquire) };
+    WATCHES.lock().unwrap_or_else(|e| e.into_inner()).push(Watch {
+        word,
+        seen,
+        handler,
+        context,
+    });
+    WAKE.as_ptr() as *const u32
+}
+
+/// Run the handler of every watched word that changed since it was last
+/// seen. Handlers run outside the lock: one may register another watch.
+unsafe fn poll_watches() {
+    use std::sync::atomic::Ordering;
+    let due: Vec<(unsafe extern "C" fn(*mut c_void), *mut c_void)> = {
+        let mut watches = WATCHES.lock().unwrap_or_else(|e| e.into_inner());
+        watches
+            .iter_mut()
+            .filter_map(|w| {
+                let now = unsafe { (*w.word).load(Ordering::Acquire) };
+                (now != w.seen).then(|| {
+                    w.seen = now;
+                    (w.handler, w.context)
+                })
+            })
+            .collect()
+    };
+    for (handler, context) in due {
+        unsafe { handler(context) };
+    }
+}
+
 unsafe fn scheduler_idle(deadline: Option<Instant>) {
     // The main scheduler can spend an arbitrary amount of time waiting for a
     // logical thread. It is still a registered GC mutator, so rendezvous with
@@ -1007,7 +1078,18 @@ unsafe fn scheduler_idle(deadline: Option<Instant>) {
             .min(std::time::Duration::from_millis(1))
     });
     if !own_wait.is_zero() {
-        #[cfg(target_family = "wasm")]
+        // On the threads target an agent can wake this wait through `WAKE`;
+        // see `ash_host_watch`.
+        #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+        unsafe {
+            let current = WAKE.load(std::sync::atomic::Ordering::Acquire) as i32;
+            core::arch::wasm32::memory_atomic_wait32(
+                WAKE.as_ptr() as *mut i32,
+                current,
+                own_wait.as_nanos() as i64,
+            );
+        }
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
         std::thread::sleep(own_wait);
 
         #[cfg(not(target_family = "wasm"))]
@@ -1068,6 +1150,7 @@ pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
             worker_trace("park-main", waiter.token, deadline.is_some() as u64);
             loop {
                 crate::rt::gc_safepoint();
+                poll_watches();
                 match wait_status(waiter.token) {
                     Some(WaitStatus::Notified) => {
                         finish_wait(waiter.token);

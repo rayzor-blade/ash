@@ -29,12 +29,13 @@
 //! three globals ash's link-time transform adds, driven from here exactly as
 //! the native host drives them.
 //!
-//! What is still missing: loading a native library, which is the native
-//! host's loader against `WebAssembly.instantiate`.
+//! [`dylink`] loads a native library shipped as a wasm side module beside the
+//! program: the native host's loader against `WebAssembly.Instance`.
 
 pub mod agent;
 pub mod canvas;
 pub(super) mod control;
+pub mod dylink;
 pub mod fibers;
 pub mod imports;
 pub mod memory;

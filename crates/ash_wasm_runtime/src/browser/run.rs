@@ -62,13 +62,16 @@ impl Outcome {
 /// Run a module, and answer how it ended.
 ///
 /// `args` is `Sys.args()`, argv[0] included; `environ` is
-/// `Sys.environment()`, each entry already `NAME=value`.
+/// `Sys.environment()`, each entry already `NAME=value`. `libraries`, when
+/// given, maps each native library's name to its side module's bytes; they
+/// are loaded before the program runs (see [`super::dylink`]).
 #[wasm_bindgen]
 pub async fn run(
     module: Uint8Array,
     args: Vec<String>,
     environ: Vec<String>,
     spawn: Option<Function>,
+    libraries: Option<Object>,
 ) -> Result<Outcome, JsValue> {
     let bytes = ash_wasm_link::waits::instrument(&module.to_vec())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -88,8 +91,8 @@ pub async fn run(
     }
     let threads = Rc::new(Threads::with_control(spawn, args, environ, control.clone()));
 
-    let (compiled, instance) =
-        instantiate(&bytes, &imports(&host, shared.as_ref(), &threads)).await?;
+    let import_object = imports(&host, shared.as_ref(), &threads);
+    let (compiled, instance) = instantiate(&bytes, &import_object).await?;
     let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
 
     // The host functions need the memory, and the instance is the first thing
@@ -104,6 +107,18 @@ pub async fn run(
     // And the transform's globals, if this module was built with fibers.
     // Absent is the ordinary case and not an error.
     host.attach_fibers(Fibers::from_exports(&exports));
+
+    // Before the entrypoint, because that is when the program resolves its
+    // primitives, and because a guest cannot wait for a library to load.
+    if let Some(libraries) = &libraries {
+        let loaded = super::dylink::load(libraries, &exports, &import_object)?;
+        if !loaded.is_empty() {
+            web_sys::console::log_1(
+                &format!("[ash] loaded native libraries: {}", loaded.names().join(", ")).into(),
+            );
+        }
+        *host.libraries.borrow_mut() = loaded;
+    }
 
     // `ash_module_init` is NOT called here, though the module exports it:
     // the emitted `main` calls it itself, and calling it first reaches the

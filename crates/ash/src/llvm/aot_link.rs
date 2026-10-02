@@ -574,6 +574,12 @@ fn link_wasm_module(
         .collect();
     hdll_data.sort();
     hdll_data.dedup();
+    let mut hdll_host_imports: Vec<String> = hdlls
+        .iter()
+        .flat_map(|(_, side)| side.host_functions.clone())
+        .collect();
+    hdll_host_imports.sort();
+    hdll_host_imports.dedup();
     let mut hdll_imports: Vec<String> = hdlls
         .into_iter()
         .flat_map(|(_, side)| side.functions)
@@ -596,6 +602,7 @@ fn link_wasm_module(
         shared_memory: triple.ends_with("-threads"),
         hdll_imports,
         hdll_data,
+        hdll_host_imports,
         ..Default::default()
     };
     if opts.fibers && !quiet {

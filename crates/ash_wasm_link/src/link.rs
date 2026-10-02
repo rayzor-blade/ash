@@ -94,6 +94,10 @@ pub struct LinkOptions {
     /// library wants. Each name here becomes an exported global holding where
     /// the linker put it.
     pub hdll_data: Vec<String>,
+    /// `ash_host_*` functions a native library imports. Each one the runtime
+    /// defines is exported like an [`Self::hdll_imports`] name; the rest are
+    /// the host's to supply.
+    pub hdll_host_imports: Vec<String>,
     /// Emit a module several threads can instantiate against one memory.
     ///
     /// A thread on wasm is another instance of the same module, and what
@@ -138,6 +142,7 @@ impl Default for LinkOptions {
             shared_memory: false,
             hdll_imports: Vec::new(),
             hdll_data: Vec::new(),
+            hdll_host_imports: Vec::new(),
         }
     }
 }
@@ -383,6 +388,7 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
 
     let defs = resolve_definitions(&objects)?;
     check_hdll_imports(&defs, opts)?;
+    let opts = &with_runtime_host_functions(opts, &defs);
     let layout = plan(&objects, &defs, opts)?;
     report_unresolved(&objects, &defs, &layout)?;
     // Patching mutates each object's kept payloads in place.
@@ -502,6 +508,21 @@ fn check_hdll_imports(
         missing.len(),
         shown.join(", ")
     );
+}
+
+/// `opts` with each `ash_host_*` function a library imports and the runtime
+/// defines moved into `hdll_imports`, so that the program exports it.
+fn with_runtime_host_functions(
+    opts: &LinkOptions,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
+) -> LinkOptions {
+    let mut out = opts.clone();
+    for name in &opts.hdll_host_imports {
+        if defs.contains_key(&(Kind::Function, name.clone())) && !out.hdll_imports.contains(name) {
+            out.hdll_imports.push(name.clone());
+        }
+    }
+    out
 }
 
 /// Name to the object and symbol that defines it.
@@ -2537,5 +2558,24 @@ mod host_import_tests {
         assert!(host_can_supply("env", "__c_longjmp"));
         assert!(host_can_supply("wasi", "thread-spawn"));
         assert!(host_can_supply("env", "memory"));
+    }
+}
+
+#[cfg(test)]
+mod runtime_host_function_tests {
+    use super::{Kind, LinkOptions, with_runtime_host_functions};
+    use std::collections::HashMap;
+
+    #[test]
+    fn a_host_function_the_runtime_defines_is_exported_and_the_rest_left_to_the_host() {
+        let mut defs = HashMap::new();
+        defs.insert((Kind::Function, "ash_host_watch".to_string()), (0, 0));
+        let opts = LinkOptions {
+            hdll_imports: vec!["malloc".to_string()],
+            hdll_host_imports: vec!["ash_host_agent".to_string(), "ash_host_watch".to_string()],
+            ..Default::default()
+        };
+        let out = with_runtime_host_functions(&opts, &defs);
+        assert_eq!(out.hdll_imports, ["malloc", "ash_host_watch"]);
     }
 }

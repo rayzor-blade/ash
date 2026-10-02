@@ -7,7 +7,9 @@
 //! the machine it is written on.
 //!
 //! [`write_page`] puts the files beside a module; [`files`] hands them over for
-//! a server that keeps them in memory.
+//! a server that keeps them in memory. `write_page` also lists the native
+//! libraries beside the module, wasm side modules, in `libraries.json`, which
+//! `worker.js` fetches with the program.
 
 use std::borrow::Cow;
 use std::io;
@@ -75,10 +77,81 @@ pub struct Written {
     pub index_kept: bool,
 }
 
+/// Whether `bytes` begin a wasm side module: a module whose first section is
+/// the custom section `dylink.0`.
+pub fn is_side_module(bytes: &[u8]) -> bool {
+    const HEADER: &[u8] = b"\0asm\x01\0\0\0";
+    let Some(rest) = bytes.strip_prefix(HEADER) else {
+        return false;
+    };
+    let mut at = 0usize;
+    let mut leb = |at: &mut usize| -> Option<u32> {
+        let mut value = 0u32;
+        for shift in (0..35).step_by(7) {
+            let byte = *rest.get(*at)?;
+            *at += 1;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    };
+    if rest.first() != Some(&0) {
+        return false;
+    }
+    at += 1;
+    if leb(&mut at).is_none() {
+        return false;
+    }
+    let Some(len) = leb(&mut at) else {
+        return false;
+    };
+    rest.get(at..at + len as usize) == Some(b"dylink.0".as_slice())
+}
+
+/// The native libraries beside `module`: the stem of every other `.wasm`
+/// file there that is a side module, sorted.
+pub fn libraries_beside(module: &Path) -> Vec<String> {
+    use std::io::Read;
+    let dir = module
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name() != module.file_name() && p.extension().is_some_and(|e| e == "wasm")
+        })
+        .filter(|p| {
+            let mut head = [0u8; 32];
+            std::fs::File::open(p)
+                .and_then(|mut f| f.read(&mut head))
+                .is_ok_and(|n| is_side_module(&head[..n]))
+        })
+        .filter_map(|p| p.file_stem()?.to_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names
+}
+
+/// `names` as the JSON array `libraries.json` holds.
+fn libraries_json(names: &[String]) -> String {
+    let quoted: Vec<String> = names
+        .iter()
+        .map(|n| format!("\"{}\"", n.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!("[{}]\n", quoted.join(", "))
+}
+
 /// Write the page for `module` beside it.
 ///
 /// An `index.html` the user wrote is kept; one ash wrote is rewritten so it
-/// names this module.
+/// names this module. `libraries.json` is always rewritten.
 pub fn write_page(module: &Path) -> io::Result<Written> {
     let name = module
         .file_name()
@@ -99,6 +172,10 @@ pub fn write_page(module: &Path) -> io::Result<Written> {
         }
         std::fs::write(dir.join(file), contents)?;
     }
+    std::fs::write(
+        dir.join("libraries.json"),
+        libraries_json(&libraries_beside(module)),
+    )?;
     Ok(Written { index_kept })
 }
 
@@ -112,6 +189,30 @@ mod tests {
         assert!(page.contains("<title>a\"&lt;/script&gt;&lt;b&gt;.wasm</title>"));
         assert!(page.contains("\"./\" + \"a\\\"\\u003c/script>\\u003cb>.wasm\""));
         assert!(!page.contains("__ASH_MODULE"));
+    }
+
+    #[test]
+    fn a_side_module_is_known_by_its_first_section() {
+        let mut side = b"\0asm\x01\0\0\0\0\x0f\x08dylink.0".to_vec();
+        side.extend([0u8; 6]);
+        assert!(is_side_module(&side));
+        let program = b"\0asm\x01\0\0\0\x01\x04\x01\x60\0\0";
+        assert!(!is_side_module(program));
+        assert!(!is_side_module(b"\0asm"));
+    }
+
+    #[test]
+    fn the_libraries_beside_a_module_are_listed() {
+        let dir = std::env::temp_dir().join(format!("ash-page-libs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("xwindow.wasm"), b"\0asm\x01\0\0\0\0\x0f\x08dylink.0").unwrap();
+        std::fs::write(dir.join("other.wasm"), b"\0asm\x01\0\0\0\x01\x01\0").unwrap();
+        let module = dir.join("app.wasm");
+        std::fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+        write_page(&module).unwrap();
+        let listed = std::fs::read_to_string(dir.join("libraries.json")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(listed, "[\"xwindow\"]\n");
     }
 
     #[test]

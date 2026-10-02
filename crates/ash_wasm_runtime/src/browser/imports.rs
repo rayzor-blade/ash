@@ -49,6 +49,8 @@ pub struct Host {
     pub fibers: RefCell<Fibers>,
     /// Where a frame goes, if the page gave this Worker somewhere to put one.
     pub canvas: super::canvas::Canvas,
+    /// Native libraries loaded beside the program. See [`super::dylink`].
+    pub libraries: RefCell<super::dylink::Libraries>,
 }
 
 impl Host {
@@ -68,6 +70,7 @@ impl Host {
             guest: RefCell::new(None),
             fibers: RefCell::new(Fibers::default()),
             canvas: super::canvas::Canvas::default(),
+            libraries: RefCell::new(super::dylink::Libraries::default()),
         })
     }
 
@@ -585,11 +588,36 @@ fn install_env(env: &Object, host: &Rc<Host>) {
         move |_n: u32, _nl: i32, _v: u32, _vl: i32| {}
     );
 
-    // Loading a native library in a page is the same steps against
-    // `WebAssembly.instantiate`, and is not written yet: see
-    // `docs/wasm/hdlls.md`. Answering zero is "no such library", which the
-    // guest reports only if a primitive is actually reached.
-    for name in ["ash_host_dlopen", "ash_host_dlsym"] {
-        install(env, name, constant(0).into());
-    }
+    // A native library is loaded before the program runs (see `dylink`), so
+    // `dlopen` is a lookup and `dlsym` answers a table index. Zero is "not
+    // here", which the guest reports only if a primitive is actually reached.
+    let h = host.clone();
+    bind!(env, "ash_host_dlopen", move |name: u32, len: u32| -> i32 {
+        let lib = h.guest.borrow().as_ref().and_then(|g| g.read(name, len));
+        match lib.and_then(|b| String::from_utf8(b).ok()) {
+            Some(lib) => h.libraries.borrow().contains(&lib) as i32,
+            None => 0,
+        }
+    });
+    let h = host.clone();
+    bind!(
+        env,
+        "ash_host_dlsym",
+        move |lib: u32, lib_len: u32, sym: u32, sym_len: u32| -> i32 {
+            let (lib, sym) = {
+                let guest = h.guest.borrow();
+                let Some(guest) = guest.as_ref() else {
+                    return 0;
+                };
+                (guest.read(lib, lib_len), guest.read(sym, sym_len))
+            };
+            match (
+                lib.and_then(|b| String::from_utf8(b).ok()),
+                sym.and_then(|b| String::from_utf8(b).ok()),
+            ) {
+                (Some(lib), Some(sym)) => h.libraries.borrow_mut().resolve(&lib, &sym),
+                _ => 0,
+            }
+        }
+    );
 }

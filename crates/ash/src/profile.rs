@@ -546,49 +546,48 @@ mod sampler {
                 let target = target;
                 let interval =
                     std::time::Duration::from_nanos(1_000_000_000 / HZ.load(Ordering::Relaxed));
-                // Resolved rather than linked: the collector lives in the
-                // runtime dylib, which is loaded by the time sampling starts.
+                // Resolved rather than linked, and on the refresh ticks rather
+                // than here: the collector is whichever copy of ash_std the
+                // program runs on, and that is chosen after sampling starts.
+                // Until then only the starting thread is sampled.
                 type ThreadList = unsafe extern "C" fn(*mut u64, usize) -> usize;
-                let list: Option<ThreadList> = if all_threads {
-                    let name = c"hlp_gc_registered_threads";
-                    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
-                    if sym.is_null() {
-                        eprintln!(
-                            "[profile] ASH_PROFILE_THREADS=all: the runtime exports no \
-                             thread list; sampling the starting thread only"
-                        );
-                        None
-                    } else {
-                        Some(unsafe { std::mem::transmute::<*mut libc::c_void, ThreadList>(sym) })
-                    }
-                } else {
-                    None
-                };
+                let mut list: Option<ThreadList> = None;
+                let mut lookups_left = if all_threads { 8 } else { 0 };
                 let mut threads = [0u64; 64];
                 let mut count = 0usize;
                 let mut ticks: u32 = 0;
                 while !STOP.load(Ordering::Relaxed) {
                     std::thread::sleep(interval);
-                    match list {
-                        None => unsafe {
-                            libc::pthread_kill(target.0, libc::SIGPROF);
-                        },
-                        Some(list) => {
-                            // Threads come and go; refresh occasionally rather
-                            // than every tick, which would take the world lock
-                            // at the sample rate.
-                            if ticks % 64 == 0 {
-                                count = unsafe { list(threads.as_mut_ptr(), threads.len()) };
+                    // Threads come and go; refresh occasionally rather than
+                    // every tick, which would take the world lock at the
+                    // sample rate.
+                    if ticks % 64 == 0 {
+                        if list.is_none() && lookups_left > 0 {
+                            lookups_left -= 1;
+                            list = crate::native_lib::std_symbol_addr("hlp_gc_registered_threads")
+                                .map(|a| unsafe {
+                                    std::mem::transmute::<*mut libc::c_void, ThreadList>(
+                                        a as *mut libc::c_void,
+                                    )
+                                });
+                            if list.is_none() && lookups_left == 0 {
+                                eprintln!(
+                                    "[profile] ASH_PROFILE_THREADS=all: the runtime exports no \
+                                     thread list; sampling the starting thread only"
+                                );
                             }
-                            ticks = ticks.wrapping_add(1);
-                            if count == 0 {
-                                unsafe { libc::pthread_kill(target.0, libc::SIGPROF) };
-                            }
-                            for &t in threads.iter().take(count) {
-                                unsafe {
-                                    libc::pthread_kill(t as libc::pthread_t, libc::SIGPROF);
-                                }
-                            }
+                        }
+                        if let Some(list) = list {
+                            count = unsafe { list(threads.as_mut_ptr(), threads.len()) };
+                        }
+                    }
+                    ticks = ticks.wrapping_add(1);
+                    if count == 0 {
+                        unsafe { libc::pthread_kill(target.0, libc::SIGPROF) };
+                    }
+                    for &t in threads.iter().take(count) {
+                        unsafe {
+                            libc::pthread_kill(t as libc::pthread_t, libc::SIGPROF);
                         }
                     }
                 }

@@ -14,6 +14,10 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=hl_*");
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=hlt_*");
+        // ash's own entry points too: a native that looks one up in the
+        // process (`dlsym(dlopen(NULL))`) must find the runtime the program
+        // runs on, and on ELF that is this copy.
+        println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=hlp_*");
         // Keep `.text.startup` and friends as their own output sections, so
         // the static constructors of the statically linked LLVM sit together
         // instead of spread across the code; running them at startup then
@@ -33,6 +37,17 @@ fn main() {
                 order.display()
             );
             println!("cargo:rustc-link-arg=-Wl,--no-warn-symbol-ordering");
+        }
+    }
+
+    // On Mach-O the runtime a program with HDLLs runs on is the libhl.dylib
+    // ash loads, and this executable's linked-in copy is never started. A
+    // native that looks a runtime symbol up in the process searches the
+    // executable first, so the copy here must not answer: unexported, the
+    // lookup reaches libhl.dylib. ash itself resolves these by address.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        for pattern in ["_hl_*", "_hlp_*", "_hlt_*"] {
+            println!("cargo:rustc-link-arg=-Wl,-unexported_symbol,{pattern}");
         }
     }
 

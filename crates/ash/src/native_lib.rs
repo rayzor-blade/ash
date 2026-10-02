@@ -134,6 +134,26 @@ pub fn std_symbol_addr(name: &str) -> Option<usize> {
     }
 }
 
+/// `lib@name` from ash_std's own copy of a library HashLink ships as an HDLL
+/// (`fmt`'s digests and zlib streams), or `None`. `name` may carry its
+/// `hlp_` prefix. Asked only when no such HDLL was found.
+fn builtin_primitive(lib: &str, name: &str) -> Option<usize> {
+    type Lookup =
+        unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char) -> *mut c_void;
+    let lookup = std_symbol_addr("hlp_builtin_primitive")?;
+    let lookup: Lookup = unsafe { std::mem::transmute(lookup) };
+    let lib = std::ffi::CString::new(lib).ok()?;
+    let name = std::ffi::CString::new(name.strip_prefix("hlp_").unwrap_or(name)).ok()?;
+    let addr = unsafe { lookup(lib.as_ptr(), name.as_ptr()) };
+    (!addr.is_null()).then_some(addr as usize)
+}
+
+/// Libraries no HDLL was found for, answered from ash_std's own copy.
+fn builtin_libraries() -> &'static Mutex<HashSet<String>> {
+    static LIBS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    LIBS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 static STD_INIT: Once = Once::new();
 pub static STD_LIBRARY: std::sync::OnceLock<Library> = std::sync::OnceLock::new();
 
@@ -982,6 +1002,31 @@ impl NativeFunctionResolver {
                     break;
                 }
             }
+            if !found
+                && natives.iter().any(|n| {
+                    n.lib.strip_prefix('?').unwrap_or(&n.lib) == lib_name
+                        && builtin_primitive(lib_name, &n.name).is_some()
+                })
+            {
+                let first = builtin_libraries()
+                    .lock()
+                    .expect("built-in library set poisoned")
+                    .insert(lib_name.clone());
+                if first && !quiet() {
+                    // A bare `game.hl` has "" for its directory: the cwd.
+                    let dir = if search_dir.as_os_str().is_empty() {
+                        std::env::current_dir().unwrap_or_default()
+                    } else {
+                        std::path::absolute(search_dir).unwrap_or_else(|_| search_dir.to_path_buf())
+                    };
+                    eprintln!(
+                        "[ash] no {lib_name}.hdll in {}; using ash's built-in {lib_name}, \
+                         and any primitive it lacks raises when reached",
+                        dir.display()
+                    );
+                }
+                found = true;
+            }
             if !found {
                 // Check if library was optional (had ? prefix)
                 let is_optional = natives.iter().any(|n| {
@@ -1107,8 +1152,23 @@ impl NativeFunctionResolver {
                 .ok_or_else(|| anyhow!("{} native '{}' not found", clean_lib, function_name));
         }
 
-        let library = NativeLibraryManager::get_registered(clean_lib)
-            .ok_or_else(|| anyhow!("Library '{}' not found", library_name))?;
+        let Some(library) = NativeLibraryManager::get_registered(clean_lib) else {
+            if let Some(addr) = builtin_primitive(clean_lib, function_name) {
+                return Ok(addr as *mut c_void);
+            }
+            let builtin = builtin_libraries()
+                .lock()
+                .expect("built-in library set poisoned")
+                .contains(clean_lib);
+            return Err(if builtin {
+                anyhow!(
+                    "{clean_lib}@{function_name} needs {clean_lib}.hdll: ash's built-in \
+                     {clean_lib} does not have it"
+                )
+            } else {
+                anyhow!("Library '{}' not found", library_name)
+            });
+        };
 
         unsafe {
             let symbol: Symbol<*mut c_void> = library.get(function_name.as_bytes())?;

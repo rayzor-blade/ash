@@ -282,7 +282,8 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
         }
         let handle = library(lib);
         if handle.is_null() {
-            return std::ptr::null_mut();
+            // No such library: this runtime's own copy of it, if it has one.
+            return crate::fmt::builtin_primitive(lib, name);
         }
         // The DEFINE_PRIM protocol, in full. `hlp_<name>` is NOT the primitive: the
         // macro expands to

@@ -426,7 +426,44 @@ pub unsafe extern "C" fn fmt_deflate_buffer(
     }
 }
 
-/// The primitives above, by their `fmt` names, for the sandbox's resolver.
+/// A primitive of a library this runtime carries itself, or null: `lib` is
+/// the library name and `name` the primitive's, without `hlp_`.
+///
+/// A target that loads libraries asks this only when the HDLL is not found,
+/// because a real `fmt.hdll` also decodes images and audio. ash_core reaches
+/// it by this name, through whichever copy of ash_std is in use.
+///
+/// # Safety
+/// `lib` and `name` must be valid NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_builtin_primitive(
+    lib: *const std::ffi::c_char,
+    name: *const std::ffi::c_char,
+) -> *mut c_void {
+    if lib.is_null() || name.is_null() {
+        return std::ptr::null_mut();
+    }
+    let (lib, name) = unsafe {
+        (
+            std::ffi::CStr::from_ptr(lib),
+            std::ffi::CStr::from_ptr(name),
+        )
+    };
+    match (lib.to_str(), name.to_str()) {
+        (Ok(lib), Ok(name)) => builtin_primitive(lib, name),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// [`hlp_builtin_primitive`] for Rust callers.
+pub fn builtin_primitive(lib: &str, name: &str) -> *mut c_void {
+    match lib {
+        "fmt" => primitive(name),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// The primitives above, by their `fmt` names.
 pub fn primitive(name: &str) -> *mut c_void {
     match name {
         "digest" => fmt_digest as *mut c_void,

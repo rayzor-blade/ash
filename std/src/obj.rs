@@ -174,17 +174,52 @@ unsafe fn alloc_virtual(t: *mut hl::hl_type) -> Option<ptr::NonNull<hl::vvirtual
     }
 }
 
+/// Hashes a type descriptor's address for the tables every allocation
+/// reads: a multiply and a fold, not the default hasher's SipHash.
+#[derive(Default, Clone, Copy)]
+struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u8(b);
+        }
+    }
+
+    fn write_u8(&mut self, b: u8) {
+        self.write_u64(self.0 ^ u64::from(b));
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        // The low bits pick the bucket, and an address's are zero, so the
+        // product's high half is folded down onto them.
+        let x = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = x ^ (x >> 29);
+    }
+}
+
+type ByAddress = std::hash::BuildHasherDefault<AddressHasher>;
+
 /// Bytes a host reserves after every instance of a class, past the fields
 /// the runtime knows: the runtime allocates them and never reads, writes or
 /// copies them. Keyed by type descriptor, set once by an ahead-of-time
 /// program before it allocates (`hlp_set_object_tails`).
-static OBJECT_TAILS: std::sync::OnceLock<std::collections::HashMap<usize, usize>> =
+static OBJECT_TAILS: std::sync::OnceLock<std::collections::HashMap<usize, usize, ByAddress>> =
     std::sync::OnceLock::new();
 
 /// Classes whose instances carry host state that must be released when the
 /// instance dies. A hosted process may load more than one program, so writers
 /// publish an append-only snapshot while allocation reads without a lock.
-static OBJECT_DROPS: AtomicPtr<std::collections::HashSet<usize>> = AtomicPtr::new(ptr::null_mut());
+static OBJECT_DROPS: AtomicPtr<std::collections::HashSet<usize, ByAddress>> =
+    AtomicPtr::new(ptr::null_mut());
 static OBJECT_DROPS_WRITE: Mutex<()> = Mutex::new(());
 
 /// One class's tail, as `hlp_set_object_tails` receives it.
@@ -221,7 +256,7 @@ pub unsafe extern "C" fn hlp_set_object_drops(types: *const *mut hl_type, n: usi
     let _write = OBJECT_DROPS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let current = OBJECT_DROPS.load(Ordering::Acquire);
     let mut set = if current.is_null() {
-        std::collections::HashSet::new()
+        std::collections::HashSet::default()
     } else {
         unsafe { (&*current).clone() }
     };

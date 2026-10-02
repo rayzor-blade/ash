@@ -19,6 +19,21 @@ fn main() {
         // instead of spread across the code; running them at startup then
         // faults in a few pages rather than one page cluster per constructor.
         println!("cargo:rustc-link-arg=-Wl,-z,keep-text-section-prefix");
+        // And lay out the functions startup and the first compiles run, in
+        // the order they run, so they share pages too. lld only: Rust links
+        // x86_64 Linux with it and other Linux targets with the system
+        // linker. A name the build no longer has is skipped. Regenerate with
+        // scripts/startup_order.py.
+        if env::var("TARGET").as_deref() == Ok("x86_64-unknown-linux-gnu") {
+            let order = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+                .join("startup-order.txt");
+            println!("cargo:rerun-if-changed={}", order.display());
+            println!(
+                "cargo:rustc-link-arg=-Wl,--symbol-ordering-file={}",
+                order.display()
+            );
+            println!("cargo:rustc-link-arg=-Wl,--no-warn-symbol-ordering");
+        }
     }
 
     // PE HDLLs import the HashLink ABI from a DLL named libhl.dll -- the name

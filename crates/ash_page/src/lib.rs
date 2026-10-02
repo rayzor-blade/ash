@@ -85,7 +85,7 @@ pub fn is_side_module(bytes: &[u8]) -> bool {
         return false;
     };
     let mut at = 0usize;
-    let mut leb = |at: &mut usize| -> Option<u32> {
+    let leb = |at: &mut usize| -> Option<u32> {
         let mut value = 0u32;
         for shift in (0..35).step_by(7) {
             let byte = *rest.get(*at)?;

@@ -14,6 +14,11 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=hl_*");
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=hlt_*");
+        // Keep `.text.startup` and friends as their own output sections, so
+        // the static constructors of the statically linked LLVM sit together
+        // instead of spread across the code; running them at startup then
+        // faults in a few pages rather than one page cluster per constructor.
+        println!("cargo:rustc-link-arg=-Wl,-z,keep-text-section-prefix");
     }
 
     // PE HDLLs import the HashLink ABI from a DLL named libhl.dll -- the name

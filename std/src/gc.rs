@@ -60,6 +60,12 @@ pub(crate) unsafe fn alloc_with_finalizer(size: usize, finalize: Option<Finalize
     unsafe {
         debug_assert!(size >= mem::size_of::<usize>());
         let mut gc = gc_locked_init();
+        // `None` is an HDLL's `hl_gc_alloc_gen`, which HashLink lets collect,
+        // so a collection the trigger deferred runs here. Without it a loop
+        // making native handles never reaches a safepoint that would.
+        if finalize.is_none() {
+            gc.maybe_collect_at_safepoint();
+        }
         let Some(ptr) = gc.allocate(size) else {
             return ptr::null_mut();
         };
@@ -193,6 +199,10 @@ const HEAP_MAX_SHARE: usize = 4;
 /// First collection fires after this many bytes allocated (wren_lift
 /// gc_marksweep INITIAL_THRESHOLD pattern).
 const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
+/// Trigger pressure charged per `MEM_KIND_FINALIZER` block. Such a block is
+/// usually a handle to native memory the trigger cannot see, so a run of
+/// small handles still reaches a collection and their finalizers run.
+const FINALIZER_CHARGE: usize = 4096;
 /// Adaptive threshold bounds: live*growth clamped to [floor, ceiling].
 const DEFAULT_TRIGGER_FLOOR: usize = 8 * 1024 * 1024;
 /// Bounds on the machine-derived ceiling (see `trigger_ceiling_bytes`).
@@ -4087,6 +4097,7 @@ impl ImmixAllocator {
         let addr = ptr as usize;
         if addr >= heap_start && addr < heap_start + self.heap.memory.len {
             self.finalizables.insert(addr - heap_start);
+            self.track_external(FINALIZER_CHARGE);
         }
     }
 

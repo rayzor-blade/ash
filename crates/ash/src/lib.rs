@@ -35,6 +35,8 @@ pub mod jit_memory;
 pub mod layout;
 #[cfg(feature = "llvm")]
 pub mod llvm;
+#[cfg(feature = "llvm")]
+pub mod llvm_init;
 pub mod native_lib;
 pub mod opcodes;
 pub mod osr;

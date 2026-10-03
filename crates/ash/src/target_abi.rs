@@ -81,6 +81,7 @@ pub struct TargetAbi {
 impl TargetAbi {
     #[cfg(feature = "llvm")]
     pub fn host() -> Result<Self> {
+        crate::llvm_init::ensure();
         let triple = TargetMachine::get_default_triple()
             .as_str()
             .to_string_lossy()
@@ -376,6 +377,7 @@ fn default_features(triple: &str) -> String {
 /// that every triple ash claims is inside the default set.
 #[cfg(feature = "llvm")]
 pub(crate) fn initialize_targets() {
+    crate::llvm_init::ensure();
     let config = InitializationConfig::default();
     #[cfg(feature = "all-targets")]
     Target::initialize_all(&config);

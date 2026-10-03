@@ -2,8 +2,6 @@ use anyhow::{Context as _, Result, anyhow};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-#[cfg(feature = "llvm")]
-use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -13,14 +11,10 @@ use beadie::{HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::c_types::CTypeFactory;
 use ash_core::hl_bindings::{self as hl, _vclosure, hl_runtime_obj, hl_type};
-#[cfg(feature = "llvm")]
-use ash_core::llvm::module::JITModule;
 use ash_core::native_lib::NativeFunctionResolver;
 use ash_core::opcodes::Opcode;
 use ash_core::runtime_handles::SharedRuntimeHandles;
 use ash_core::types::HLFunction;
-#[cfg(feature = "llvm")]
-use inkwell::context::Context;
 
 use crate::air::Cache as AirCache;
 use crate::frame::InterpreterFrame;
@@ -1231,19 +1225,17 @@ impl HLInterpreter {
         ) {
             eprintln!("[tiered] process-global setup failed: {e}; tier promotion disabled");
         }
-        let prewarm_start = std::time::Instant::now();
-        let _ = prewarm_start;
-        // Built on a BACKGROUND thread. A developer's first measure of a VM is
-        // how fast it starts, and this put 4-7ms of LLVM setup ahead of every
-        // run on a fresh binary -- paid even by a program that promotes
-        // nothing.
+        // The LLVM module is built on a BACKGROUND thread: a developer's first
+        // measure of a VM is how fast it starts, and this was 4-7ms of LLVM
+        // setup ahead of every run on a fresh binary.
         //
-        // Not lazy-on-first-promotion, which was measured and is a loss:
-        // without a module ready nothing promotes promptly, and closure_call
-        // went 137-144ms to 265-268ms, trading 3.5ms of cold start for 125ms
-        // of execution. Concurrent construction gets both -- off the startup
-        // path, and finished before the first promotion, which the broker
-        // guarantees by joining.
+        // When it starts depends on the ladder. With Cranelift below it, the
+        // first promotion request starts it and the first LLVM compile joins
+        // it, so a program that promotes nothing never initialises LLVM, and
+        // one that does has the module long before its first LLVM compile.
+        // When the first promotion IS an LLVM compile -- compiled-only mode,
+        // or an LLVM-only ladder -- it starts now: building it only when that
+        // compile arrived left nothing promoting promptly.
         //
         // Safe now that `prepare_process_globals` has run: what remains is
         // LLVM engine creation, native DECLARATIONS and findex tables, none of
@@ -1251,37 +1243,19 @@ impl HLInterpreter {
         // Doing it concurrently BEFORE that split raced the global runtime
         // init and truncated programs with no crash to point at.
         #[cfg(feature = "llvm")]
-        let hl_path_bg = hl_path.clone();
-        #[cfg(feature = "llvm")]
-        let bytecode_bg = bytecode.clone();
-        #[cfg(feature = "llvm")]
-        let shared_bg = shared.clone();
-        #[cfg(feature = "llvm")]
-        let compiled_only = config.compiled_only;
-        #[cfg(feature = "llvm")]
-        let building = std::thread::Builder::new()
-            .name("ash-jit-prewarm".to_string())
-            .spawn(move || {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let context: &'static Context = Box::leak(Box::new(Context::create()));
-                    let mut jit = JITModule::new_with_shared_runtime(
-                        context,
-                        &hl_path_bg,
-                        &bytecode_bg,
-                        shared_bg,
-                    );
-                    jit.set_hot_reload(hot_reload);
-                    jit.set_lazy_compilation(compiled_only);
-                    Box::into_raw(Box::new(ManuallyDrop::new(jit)))
-                })) {
-                    Ok(ptr) => Some(PrewarmedJit(ptr)),
-                    Err(_) => {
-                        eprintln!("[tiered] pre-warm panicked; tier promotion disabled");
-                        None
-                    }
-                }
-            })
-            .ok();
+        let llvm_state = {
+            let seed = crate::tiering::LlvmSeed {
+                path: hl_path.clone(),
+                shared: shared.clone(),
+                hot_reload,
+                compiled_only: config.compiled_only,
+            };
+            if config.compiled_only || config.tier_mode == TierMode::Llvm {
+                crate::tiering::build_llvm_module(&seed, Arc::clone(bytecode), "ash-jit-prewarm")
+            } else {
+                LlvmState::Deferred(seed)
+            }
+        };
 
         // Beadie owns the per-tier hotness policies and one broker thread per
         // tier. Queue-ahead submits the tier-0 compile job slightly before the
@@ -1364,9 +1338,8 @@ impl HLInterpreter {
             compiled_only: config.compiled_only,
             llvm: Mutex::new({
                 #[cfg(feature = "llvm")]
-                match building {
-                    Some(h) => LlvmState::Building(h),
-                    None => LlvmState::Unavailable,
+                {
+                    llvm_state
                 }
                 #[cfg(not(feature = "llvm"))]
                 LlvmState::Unavailable
@@ -1390,6 +1363,7 @@ impl HLInterpreter {
             llvm_seed: hot_reload.then(|| crate::tiering::LlvmSeed {
                 path: hl_path.clone(),
                 shared: shared.clone(),
+                hot_reload: true,
                 compiled_only: config.compiled_only,
             }),
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),

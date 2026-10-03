@@ -23,6 +23,15 @@ fn main() {
         // instead of spread across the code; running them at startup then
         // faults in a few pages rather than one page cluster per constructor.
         println!("cargo:rustc-link-arg=-Wl,-z,keep-text-section-prefix");
+        // Move LLVM's static constructors out of `.init_array`; ash runs them
+        // the first time it needs LLVM (ash_core::llvm_init), so a run that
+        // never compiles with LLVM never pays for them.
+        if env::var_os("CARGO_FEATURE_LLVM").is_some() {
+            let script = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+                .join("llvm-init.ld");
+            println!("cargo:rerun-if-changed={}", script.display());
+            println!("cargo:rustc-link-arg=-Wl,-T,{}", script.display());
+        }
         // And lay out the functions startup and the first compiles run, in
         // the order they run, so they share pages too. lld only: Rust links
         // x86_64 Linux with it and other Linux targets with the system

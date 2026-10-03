@@ -376,6 +376,11 @@ fn provide_versioned_runtime(program: &std::path::Path, abi: u32) {
 }
 
 fn main() {
+    // Before anything can reach LLVM: its constructors are not in
+    // `.init_array` on this build (llvm-init.ld).
+    #[cfg(all(target_os = "linux", feature = "llvm"))]
+    ash_core::llvm_init::set_deferred(run_llvm_constructors);
+
     // The crash-reporting complex below is unix signal machinery
     // (sigaction/SA_SIGINFO, siginfo_t, a signal-context register walk), so
     // it installs as one unit on unix only. Windows runs without a crash
@@ -437,6 +442,29 @@ fn main() {
         0
     };
     exit_without_atexit(code);
+}
+
+/// Run the LLVM static constructors the link moved out of `.init_array`
+/// (llvm-init.ld), in link order, as the loader would have.
+#[cfg(all(target_os = "linux", feature = "llvm"))]
+unsafe extern "C" fn run_llvm_constructors() {
+    type Ctor = unsafe extern "C" fn();
+    unsafe extern "C" {
+        static __ash_llvm_init_start: usize;
+        static __ash_llvm_init_end: usize;
+    }
+    unsafe {
+        let mut entry = &raw const __ash_llvm_init_start;
+        let end = &raw const __ash_llvm_init_end;
+        while entry < end {
+            // `.ctors` lists may carry 0 and -1 as terminators.
+            let f = *entry;
+            if f != 0 && f != usize::MAX {
+                std::mem::transmute::<usize, Ctor>(f)();
+            }
+            entry = entry.add(1);
+        }
+    }
 }
 
 /// Leave without running the process's `atexit` handlers.
@@ -998,6 +1026,19 @@ fn refuse_llvm_flags(cli: &Cli) -> Result<()> {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // Only a program run on the interpreter or the hybrid ladder leaves
+    // LLVM's constructors until a compile needs them (see
+    // `ash_core::llvm_init`). Everything else may reach LLVM from any thread
+    // at any point, so it runs them now, before there are other threads.
+    #[cfg(feature = "llvm")]
+    if cli.command.is_some()
+        || cli.build.is_some()
+        || cli.emit_aot.is_some()
+        || cli.hot_reload
+        || matches!(cli.mode, Mode::Jit)
+    {
+        ash_core::llvm_init::ensure();
+    }
 
     if let Some(Command::Wasm {
         module,

@@ -341,6 +341,10 @@ unsafe impl Send for LlvmModule {}
 #[allow(clippy::large_enum_variant)]
 #[cfg(feature = "llvm")]
 pub(crate) enum LlvmState {
+    /// Not started. The first promotion request starts it, so a program
+    /// that promotes nothing never initialises LLVM; its first LLVM compile
+    /// comes two orders of magnitude of calls later, by when it is built.
+    Deferred(LlvmSeed),
     /// Under construction on a background thread, not yet joined.
     ///
     /// Module construction is off the startup path because a developer's
@@ -702,7 +706,62 @@ pub(crate) enum WorkerClosureDepsState {
 pub(crate) struct LlvmSeed {
     pub(crate) path: std::path::PathBuf,
     pub(crate) shared: ash_core::runtime_handles::SharedRuntimeHandles,
+    pub(crate) hot_reload: bool,
     pub(crate) compiled_only: bool,
+}
+
+/// Build the LLVM module `seed` describes, from `bytecode`, on a thread named
+/// `name`. The first promotion to the top tier joins it.
+#[cfg(feature = "llvm")]
+pub(crate) fn build_llvm_module(
+    seed: &LlvmSeed,
+    bytecode: Arc<DecodedBytecode>,
+    name: &str,
+) -> LlvmState {
+    let (path, shared, hot_reload, compiled_only) = (
+        seed.path.clone(),
+        seed.shared.clone(),
+        seed.hot_reload,
+        seed.compiled_only,
+    );
+    let building = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ash_core::llvm_init::ensure();
+                let context: &'static inkwell::context::Context =
+                    Box::leak(Box::new(inkwell::context::Context::create()));
+                let mut jit = JITModule::new_with_shared_runtime(context, &path, &bytecode, shared);
+                jit.set_hot_reload(hot_reload);
+                jit.set_lazy_compilation(compiled_only);
+                PrewarmedJit(Box::into_raw(Box::new(ManuallyDrop::new(jit))))
+            })) {
+                Ok(pw) => Some(pw),
+                Err(_) => {
+                    eprintln!("[tiered] building the LLVM module panicked; the LLVM tier is off");
+                    None
+                }
+            }
+        });
+    match building {
+        Ok(h) => LlvmState::Building(h),
+        Err(_) => LlvmState::Unavailable,
+    }
+}
+
+/// Start a deferred LLVM build, without waiting for it. Skipped when the
+/// lock is held: whoever holds it is a compile, which starts the build itself.
+#[cfg(feature = "llvm")]
+fn start_deferred_llvm(ctx: &TieredSharedCtx) {
+    if let Ok(mut guard) = ctx.llvm.try_lock()
+        && matches!(&*guard, LlvmState::Deferred(_))
+    {
+        let LlvmState::Deferred(seed) = std::mem::replace(&mut *guard, LlvmState::Unavailable)
+        else {
+            unreachable!()
+        };
+        *guard = build_llvm_module(&seed, ctx.bytecode(), "ash-jit-llvm");
+    }
 }
 
 impl TieredSharedCtx {
@@ -755,31 +814,14 @@ impl TieredSharedCtx {
                 LlvmState::Building(handle) => {
                     let _ = handle.join();
                 }
-                LlvmState::Pending(_) | LlvmState::Ready(_) | LlvmState::Unavailable => {}
+                LlvmState::Deferred(_)
+                | LlvmState::Pending(_)
+                | LlvmState::Ready(_)
+                | LlvmState::Unavailable => {}
             }
-            // Built off this thread, as at startup: the first promotion to
-            // the top tier joins it, and the reload does not wait for it.
-            let (path, shared, compiled_only) =
-                (seed.path.clone(), seed.shared.clone(), seed.compiled_only);
-            let bytecode = Arc::clone(&new_bytecode);
-            let building = std::thread::Builder::new()
-                .name("ash-jit-reload".to_string())
-                .spawn(move || {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let context: &'static inkwell::context::Context =
-                            Box::leak(Box::new(inkwell::context::Context::create()));
-                        let mut jit =
-                            JITModule::new_with_shared_runtime(context, &path, &bytecode, shared);
-                        jit.set_hot_reload(true);
-                        jit.set_lazy_compilation(compiled_only);
-                        PrewarmedJit(Box::into_raw(Box::new(ManuallyDrop::new(jit))))
-                    }))
-                    .ok()
-                });
-            *llvm = match building {
-                Ok(h) => LlvmState::Building(h),
-                Err(_) => LlvmState::Unavailable,
-            };
+            // Built off this thread: the first promotion to the top tier
+            // joins it, and the reload does not wait for it.
+            *llvm = build_llvm_module(seed, Arc::clone(&new_bytecode), "ash-jit-reload");
         }
         for set in [&self.llvm_done, &self.llvm_failed] {
             set.lock().expect("tier memo poisoned").clear();
@@ -1159,6 +1201,8 @@ fn tiered_compile_tier_inner(
     calls: u32,
 ) -> *mut () {
     use std::sync::atomic::Ordering;
+    #[cfg(feature = "llvm")]
+    start_deferred_llvm(ctx);
     // Whoever compiled it first publishes through `functions_ptrs`, and that
     // slot is the one piece of state both compile paths can see. The beads
     // cannot see each other: the interpreter ticks the bead in
@@ -2218,6 +2262,15 @@ pub(crate) fn compile_with_llvm(
     } else {
         None
     };
+    // Not started, when no promotion request has come through the broker
+    // yet: start it here, and join it below.
+    if matches!(&*guard, LlvmState::Deferred(_)) {
+        let LlvmState::Deferred(seed) = std::mem::replace(&mut *guard, LlvmState::Unavailable)
+        else {
+            unreachable!()
+        };
+        *guard = build_llvm_module(&seed, ctx.bytecode(), "ash-jit-llvm");
+    }
     // Still building? Join it. The first promotion is the first moment the
     // module is needed, and by then it has usually finished.
     if matches!(&*guard, LlvmState::Building(_)) {

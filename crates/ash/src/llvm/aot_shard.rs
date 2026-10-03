@@ -655,6 +655,7 @@ fn emit_shard(
     quiet: bool,
 ) -> Result<()> {
     let began = std::time::Instant::now();
+    crate::llvm_init::ensure();
     let context = Context::create();
     // Borrowed, not copied: nine shards copying a 61 MB stream is half a
     // gigabyte of nothing. The parse reads the buffer to completion and the

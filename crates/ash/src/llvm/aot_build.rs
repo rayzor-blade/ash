@@ -109,6 +109,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
 
     // Leaked on purpose: the module borrows the context for as long as it
     // exists, and this one lives until the process ends.
+    crate::llvm_init::ensure();
     let context: &'static inkwell::context::Context =
         Box::leak(Box::new(inkwell::context::Context::create()));
     // Decided before anything is lowered: a function's AIR is built once,

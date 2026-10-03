@@ -111,6 +111,11 @@ pub(crate) fn format_g(d: f64, p: i32) -> String {
         }
         s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
+    if !d.is_finite() {
+        // glibc's spelling, which prints the sign of a NaN as well.
+        let sign = if d.is_sign_negative() { "-" } else { "" };
+        return format!("{sign}{}", if d.is_nan() { "nan" } else { "inf" });
+    }
     if d == 0.0 {
         // C prints the sign of a negative zero.
         return if d.is_sign_negative() {
@@ -657,5 +662,14 @@ mod format_g_tests {
     fn exponent_is_two_digits_with_a_sign() {
         assert_eq!(format_g(1e5, 3), "1e+05");
         assert_eq!(format_g(1e-300, 15), "1e-300");
+    }
+
+    /// Non-finite values have no exponent; they print as glibc's `%g` does.
+    #[test]
+    fn non_finite() {
+        assert_eq!(format_g(f64::NAN, 17), "nan");
+        assert_eq!(format_g(-f64::NAN, 17), "-nan");
+        assert_eq!(format_g(f64::INFINITY, 17), "inf");
+        assert_eq!(format_g(f64::NEG_INFINITY, 17), "-inf");
     }
 }

@@ -60,6 +60,9 @@ const PROGRAMS: &[&str] = &[
     // both engines must round them once, or the checksum differs. LLVM's
     // own contraction on top of that once made this lane a seventh number.
     "test_mandelbrot_small.hl",
+    // hl.Bytes in a Dynamic slot (an Array<hl.Bytes>): the emitter stored the
+    // raw buffer unboxed, so reading it back took its first word as a type.
+    "test_dyn_bytes.hl",
 ];
 
 fn repo_root() -> PathBuf {

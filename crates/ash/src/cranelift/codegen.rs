@@ -2808,7 +2808,7 @@ impl AirCodegen<'_, '_> {
         let raw = self.get(value)?;
         let ty = self.f.value_ty(value);
         let kind = self.ctx.type_kind(ty.0 as usize)?;
-        if is_dynamically_self_describing(kind) {
+        if crate::types::kind_is_dynamic(kind) {
             return self.coerce(raw, types::I64, Widen::Signed);
         }
 
@@ -4719,19 +4719,6 @@ fn dyn_value_ty(shape: DynShape) -> Type {
 /// Mirror HashLink's `hl_is_dynamic`: these values carry an `hl_type*` in
 /// their first machine word and can therefore be passed as `vdynamic*`
 /// without allocating a wrapper.
-fn is_dynamically_self_describing(kind: hl::hl_type_kind) -> bool {
-    matches!(
-        kind,
-        hl::hl_type_kind_HDYN
-            | hl::hl_type_kind_HFUN
-            | hl::hl_type_kind_HOBJ
-            | hl::hl_type_kind_HARRAY
-            | hl::hl_type_kind_HVIRTUAL
-            | hl::hl_type_kind_HDYNOBJ
-            | hl::hl_type_kind_HENUM
-            | hl::hl_type_kind_HNULL
-    )
-}
 
 /// A lowered branch condition.
 enum Cond {

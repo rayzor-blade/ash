@@ -8,6 +8,24 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
+/// Whether a value of this kind is its own Dynamic: a pointer to memory whose
+/// first word is its `hl_type`. Every other kind is boxed by `hl_make_dyn` on
+/// the way into a Dynamic -- primitives, and pointers without that header
+/// such as bytes and abstracts. The runtime's `hl_is_dynamic` table.
+pub fn kind_is_dynamic(kind: hl::hl_type_kind) -> bool {
+    matches!(
+        kind,
+        hl::hl_type_kind_HDYN
+            | hl::hl_type_kind_HFUN
+            | hl::hl_type_kind_HOBJ
+            | hl::hl_type_kind_HARRAY
+            | hl::hl_type_kind_HVIRTUAL
+            | hl::hl_type_kind_HDYNOBJ
+            | hl::hl_type_kind_HENUM
+            | hl::hl_type_kind_HNULL
+    )
+}
+
 pub type Str = flexstr::SharedStr;
 
 #[derive(Debug, Default, Clone, Copy, IntoPrimitive, TryFromPrimitive, PartialEq)]

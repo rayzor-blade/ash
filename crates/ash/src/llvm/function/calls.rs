@@ -620,11 +620,12 @@ impl<'ctx> JITModule<'ctx> {
                         registers[arg.idx()],
                         "vcall_arg",
                     )?;
-                    // Same boxing rule as ToDyn: pointers are already
-                    // dyn-compatible (except HABSTRACT), primitives go
-                    // through hlp_make_dyn with their static type.
-                    let src_is_abstract = self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
-                    let boxed: BasicValueEnum = if loaded.is_pointer_value() && !src_is_abstract {
+                    // Same boxing rule as ToDyn: a self-describing pointer
+                    // is its own Dynamic, anything else goes through
+                    // hlp_make_dyn with its static type.
+                    let boxed: BasicValueEnum = if loaded.is_pointer_value()
+                        && crate::types::kind_is_dynamic(self.types_[src_type_idx].kind)
+                    {
                         loaded
                     } else {
                         let temp = self.entry_alloca(loaded.get_type(), "vcall_box_slot")?;

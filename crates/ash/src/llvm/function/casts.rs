@@ -115,12 +115,13 @@ impl<'ctx> JITModule<'ctx> {
         let src_val =
             self.builder
                 .build_load(reg_types[src.idx()], registers[src.idx()], "todyn_src")?;
-        // For pointer types (objects, strings, etc.), just copy the pointer.
-        // HABSTRACT is excepted: it is a pointer whose target has no
-        // hl_type header, so a Dynamic holding it raw makes the
-        // hl_dyn_castp on the way back out read the payload as a type.
-        let src_is_abstract = self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
-        if src_val.is_pointer_value() && !src_is_abstract {
+        // A self-describing pointer is its own Dynamic; anything else --
+        // primitives, and pointers with no hl_type header such as bytes and
+        // abstracts -- is boxed, or the hl_dyn_castp on the way back out
+        // reads the payload's first word as a type.
+        if src_val.is_pointer_value()
+            && crate::types::kind_is_dynamic(self.types_[src_type_idx].kind)
+        {
             self.builder.build_store(registers[dst.idx()], src_val)?;
         } else {
             // Primitives: alloca temp, store value, call hlp_make_dyn(&temp, type_ptr)

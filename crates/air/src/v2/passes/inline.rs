@@ -67,7 +67,9 @@ use std::collections::{HashMap, HashSet};
 ///   [`GROWTH_LIMIT`] bounds it *relative to its own original size* — the
 ///   invariant that optimized output does not dwarf its input, enforced
 ///   rather than hoped for. The relative bound is the one that holds across
-///   manager rounds; the depth vector starts over each round.
+///   manager rounds; the depth vector starts over each round. A callee of at
+///   most [`TINY_CALLEE`] instructions is exempt from the size bounds, up to
+///   [`TINY_OVER_CAP_SITES`] times per function.
 pub struct Inlining<'m> {
     info: &'m dyn ModuleInfo,
     /// Lowered callee bodies, so a callee inlined at several sites is lowered
@@ -83,6 +85,8 @@ pub struct Inlining<'m> {
     original_size: Cell<Option<usize>>,
     /// Direct self-call expansions performed so far, across every round.
     self_expanded: Cell<usize>,
+    /// Tiny callees inlined past the size cap so far, across every round.
+    tiny_over_cap: Cell<usize>,
 }
 
 impl<'m> Inlining<'m> {
@@ -93,6 +97,7 @@ impl<'m> Inlining<'m> {
             stack_sensitive: RefCell::new(HashMap::new()),
             original_size: Cell::new(None),
             self_expanded: Cell::new(0),
+            tiny_over_cap: Cell::new(0),
         }
     }
 
@@ -162,6 +167,17 @@ const SELF_INLINE_MAX_BODY: usize = 96;
 /// buys, which is why this lives in a [`Cell`] on the pass rather than in the
 /// per-run depth vector.
 const SELF_INLINE_MAX_SITES: usize = 4;
+
+/// A callee this small is about the size of the call it replaces, so it is
+/// inlined even when the caller is already at its size cap: a splat, a field
+/// accessor, an allocation wrapper. Left as calls, their allocations escape
+/// and SROA cannot remove them.
+const TINY_CALLEE: usize = 6;
+
+/// Tiny inlines allowed past the size cap per function per pipeline, which
+/// bounds what the exemption adds to `TINY_CALLEE` times this and keeps the
+/// inlining-versus-DCE rounds terminating.
+const TINY_OVER_CAP_SITES: usize = 32;
 
 /// Ceiling on the function's size as a multiple of what it started the
 /// pipeline at. `inline_max_function` (400) alone let an 11-instruction
@@ -268,7 +284,12 @@ impl Inlining<'_> {
                     .map(|o| growth_cap(o, opts))
                     .unwrap_or(opts.inline_max_function)
                     .min(opts.inline_max_function);
-                if let Some(why) = fits_reason(f, &g, *dst, args, opts, caller_size, cap) {
+                let size = instr_count(&g);
+                let tiny = !self_call
+                    && size <= TINY_CALLEE
+                    && self.tiny_over_cap.get() < TINY_OVER_CAP_SITES;
+                let site_cap = if tiny { usize::MAX } else { cap };
+                if let Some(why) = fits_reason(f, &g, *dst, args, opts, caller_size, site_cap) {
                     if std::env::var("ASH_INLINE_WHY").is_ok() {
                         eprintln!(
                             "[inline-why] caller={:?} callee={fun} refused: {why}",
@@ -279,6 +300,9 @@ impl Inlining<'_> {
                 }
                 if self_call {
                     self.self_expanded.set(self.self_expanded.get() + 1);
+                }
+                if tiny && caller_size + size > cap {
+                    self.tiny_over_cap.set(self.tiny_over_cap.get() + 1);
                 }
                 return Some((BlockId(b as u32), k, g));
             }

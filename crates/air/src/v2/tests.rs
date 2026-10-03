@@ -5095,6 +5095,49 @@ fn fix_callee_poly() -> (Vec<Opcode>, Vec<TypeRef>) {
     )
 }
 
+/// `((a + b) * a - b)` repeated: a straight-line callee too big to count as
+/// tiny, so it is subject to the caller's size cap.
+fn fix_callee_long() -> (Vec<Opcode>, Vec<TypeRef>) {
+    let mut ops = Vec::new();
+    for _ in 0..3 {
+        ops.push(Opcode::Add {
+            dst: Reg(2),
+            a: Reg(0),
+            b: Reg(1),
+        });
+        ops.push(Opcode::Mul {
+            dst: Reg(2),
+            a: Reg(2),
+            b: Reg(0),
+        });
+        ops.push(Opcode::Sub {
+            dst: Reg(0),
+            a: Reg(2),
+            b: Reg(1),
+        });
+    }
+    ops.push(Opcode::Ret { ret: Reg(0) });
+    (ops, vec![t(0); 3])
+}
+
+/// `caller(a)` calling `f7(a, 1)` `n` times in a chain.
+fn fix_caller_calls(n: usize) -> (Vec<Opcode>, Vec<TypeRef>) {
+    let mut ops = vec![Opcode::Int {
+        dst: Reg(1),
+        ptr: RefInt(0),
+    }];
+    for _ in 0..n {
+        ops.push(Opcode::Call2 {
+            dst: Reg(0),
+            fun: RefFun(7),
+            arg0: Reg(0),
+            arg1: Reg(1),
+        });
+    }
+    ops.push(Opcode::Ret { ret: Reg(0) });
+    (ops, vec![t(0); 2])
+}
+
 /// `max(a, b)` — two `Ret`s, so the continuation needs a phi.
 fn fix_callee_max() -> (Vec<Opcode>, Vec<TypeRef>) {
     (
@@ -5542,7 +5585,7 @@ fn inline_refuses_a_callee_past_the_budget() {
 #[test]
 fn inline_refuses_to_grow_the_caller_past_its_ceiling() {
     let (ops, tys) = fix_caller_call2();
-    let info = bodies(&[(7, fix_callee_poly())]);
+    let info = bodies(&[(7, fix_callee_long())]);
     let mut f = lower(&ops, &tys).expect("lower");
     let stats = run_pass(
         &mut f,
@@ -5554,6 +5597,42 @@ fn inline_refuses_to_grow_the_caller_past_its_ceiling() {
     );
     assert_eq!(stats.inlined, 0, "{}", f.dump());
     assert_eq!(any_call(&f), 1);
+}
+
+#[test]
+fn inline_takes_a_tiny_callee_past_the_ceiling() {
+    let (ops, tys) = fix_caller_call2();
+    let info = bodies(&[(7, fix_callee_poly())]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(
+        &mut f,
+        &Inlining::new(&info),
+        PassOptions {
+            inline_max_function: 2,
+            ..PassOptions::default()
+        },
+    );
+    assert_eq!(stats.inlined, 1, "{}", f.dump());
+    assert_eq!(any_call(&f), 0);
+}
+
+#[test]
+fn inline_bounds_tiny_callees_past_the_ceiling() {
+    let (ops, tys) = fix_caller_calls(40);
+    let info = bodies(&[(7, fix_callee_poly())]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let pass = Inlining::new(&info);
+    let opts = PassOptions {
+        inline_max_function: 2,
+        ..PassOptions::default()
+    };
+    // Rounds as the manager runs them: the bound is per pipeline, not per run.
+    let mut inlined = 0;
+    for _ in 0..4 {
+        inlined += run_pass(&mut f, &pass, opts).inlined;
+    }
+    assert_eq!(inlined, 32, "{}", f.dump());
+    assert_eq!(any_call(&f), 8);
 }
 
 #[test]

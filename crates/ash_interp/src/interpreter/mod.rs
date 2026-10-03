@@ -5255,6 +5255,13 @@ impl HLInterpreter {
                 hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
             ) {
                 self.box_for_compiled_dynamic_value(arg)
+            } else if (arg.is_ptr() || arg.is_null()) && Self::is_unboxable_primitive_kind(kind) {
+                // A dynamic call site (an interface slot typed by an erased
+                // `T`) can pass a boxed primitive to a parameter the callee
+                // declares as Int/Float/Bool. Unbox it, as an interpreted
+                // body's entry does; the compiled body would read the box's
+                // address instead.
+                Self::coerce_value_for_static_kind(arg, kind)
             } else {
                 arg
             };

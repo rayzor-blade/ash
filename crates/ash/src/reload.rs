@@ -235,6 +235,9 @@ fn function_names(bc: &DecodedBytecode) -> HashMap<usize, String> {
 /// another function now, which happens when a method is added or
 /// removed; the diff sees every function after it as changed, and the
 /// vtables built from the old table would call the wrong bodies.
+/// Each global must also hold what it held: its slot keeps the running
+/// program's value, a static or a class's descriptor, and a reload
+/// writes every constant again into the slot the new program names.
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
     if diff.type_layout_changed {
         return Some(
@@ -247,6 +250,9 @@ fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> O
             old.globals.len(),
             new.globals.len()
         ));
+    }
+    if let Some(why) = moved_global(old, new) {
+        return Some(why);
     }
     if !diff.added.is_empty() || !diff.removed.is_empty() {
         return Some(format!(
@@ -266,6 +272,39 @@ fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> O
         ));
     }
     None
+}
+
+/// The first global that holds something else in `new`: another type,
+/// or a constant where the running program keeps a value, or the reverse.
+/// Adding or removing a string literal or a static shifts every global
+/// after it.
+fn moved_global(old: &DecodedBytecode, new: &DecodedBytecode) -> Option<String> {
+    let constants =
+        |bc: &DecodedBytecode| -> HashSet<u32> { bc.constants.iter().map(|c| c.global).collect() };
+    let (old_constants, new_constants) = (constants(old), constants(new));
+    let describe = |bc: &DecodedBytecode, constants: &HashSet<u32>, g: usize| {
+        let t = &bc.types[bc.globals[g].0];
+        let name = t
+            .obj
+            .as_ref()
+            .map_or_else(|| format!("kind {}", t.kind), |o| o.name.clone());
+        if constants.contains(&(g as u32)) {
+            format!("a {name} constant")
+        } else {
+            name
+        }
+    };
+    (0..old.globals.len().min(new.globals.len())).find_map(|g| {
+        let same_constness = old_constants.contains(&(g as u32)) == new_constants.contains(&(g as u32));
+        if old.globals[g].0 == new.globals[g].0 && same_constness {
+            return None;
+        }
+        Some(format!(
+            "globals moved: global {g} held {} and holds {}; a string literal or a static was added or removed",
+            describe(old, &old_constants, g),
+            describe(new, &new_constants, g)
+        ))
+    })
 }
 
 /// Read the program at the registered path again and check it against

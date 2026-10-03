@@ -80,6 +80,14 @@ if [[ -n "$STD_SRC" ]]; then
     # dyld load two independent GC states.
     ln -s libhl.dylib "$DIST/libhl.1.dylib"
   fi
+  # Local symbols only: the exported hl_*/hlp_* names HDLLs and dlsym resolve
+  # stay. Costs internal function names in crash traces and profiles of the
+  # shipped runtime. Before signing, which must come last.
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    strip -x "$DIST/$STD_LIB" "$DIST/libhl.dylib"
+  else
+    strip --strip-unneeded "$DIST/$STD_LIB"
+  fi
   echo "bundled runtime: $STD_SRC"
 else
   # Not fatal — the binary still has the embedded copy and will fall back to

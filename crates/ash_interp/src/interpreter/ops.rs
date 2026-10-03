@@ -474,6 +474,34 @@ impl HLInterpreter {
         }
     }
 
+    /// `hlp_dyn_castp` of `value` from `from` to `to`, inside the setjmp
+    /// boundary a native call has: a failed cast raises from inside it.
+    pub(super) fn dyn_castp_trapped(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        value: *mut c_void,
+        from: *mut c_void,
+        to: *mut c_void,
+    ) -> Result<*mut c_void> {
+        type FnCastp = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
+        let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+        let mut data = value;
+        let mut result = std::ptr::null_mut();
+        let jumped =
+            super::run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+                result = unsafe { castp(&mut data as *mut _ as *mut c_void, from, to) };
+            });
+        if jumped != 0 {
+            let depth = self.stack.len();
+            return Err(self.longjmp_error(
+                Some(bytecode),
+                depth,
+                "hlp_dyn_castp longjmp without exception value".to_string(),
+            ));
+        }
+        Ok(result)
+    }
+
     /// Checked cast, unboxing nullables and validating object hierarchies.
     ///
     /// Extracted from `execute_opcode` so the SSA dispatcher in
@@ -609,30 +637,12 @@ impl HLInterpreter {
                     // HDYN/HNULL → concrete type: use hlp_dyn_castp
                     let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
                     let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                    type FnCastp =
-                        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
-                    let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
-                    let mut data = val.as_ptr() as *mut c_void;
-                    // A failed cast raises from inside hlp_dyn_castp, so it
-                    // needs the same setjmp boundary a native call has.
-                    let mut result_ptr = std::ptr::null_mut();
-                    let jumped = super::run_with_hl_trap(
-                        self.fn_setup_trap_jit,
-                        self.fn_remove_trap_jit,
-                        || {
-                            result_ptr = unsafe {
-                                castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
-                            };
-                        },
-                    );
-                    if jumped != 0 {
-                        let depth = self.stack.len();
-                        return Err(self.longjmp_error(
-                            Some(bytecode),
-                            depth,
-                            "hlp_dyn_castp longjmp without exception value".to_string(),
-                        ));
-                    }
+                    let result_ptr = self.dyn_castp_trapped(
+                        bytecode,
+                        val.as_ptr() as *mut c_void,
+                        src_c_type,
+                        dst_c_type,
+                    )?;
                     if result_ptr.is_null() {
                         NanBoxedValue::null()
                     } else {
@@ -705,11 +715,10 @@ impl HLInterpreter {
                                 }
                             }
                         }
-                        // For HOBJ→HOBJ SafeCast: check if source has __cast proto.
-                        // In the interpreter, castFun can't be called (it's a stub
-                        // pointer), so we call the __cast bytecode function directly.
+                        // HOBJ→HOBJ: an upcast is the value itself; otherwise the
+                        // object's class must have a `__cast`, run by hlp_dyn_castp.
                         if src_kind == hl::hl_type_kind_HOBJ && dst_kind == hl::hl_type_kind_HOBJ {
-                            // Look up __cast proto findex from the object's runtime type
+                            // Walk the object's runtime type for an upcast or a `__cast`.
                             let obj_ptr = val.as_ptr() as *const hl::vdynamic;
                             let header_t = unsafe { (*obj_ptr).t };
                             let (cast_findex, upcast) = if !header_t.is_null()
@@ -786,17 +795,20 @@ impl HLInterpreter {
                                 (None, false)
                             };
 
-                            if let Some(findex) = cast_findex {
-                                // Call __cast(obj, dst_type) via StepResult::Call
-                                let dst_c_type = self.c_type_factory.get(dst_type_idx);
-                                let type_val = NanBoxedValue::from_ptr(dst_c_type as usize);
-                                // Store args in registers and dispatch as a call
-                                self.stack.last_mut().unwrap().registers.set(dst, val);
-                                return Ok(StepResult::Call {
-                                    findex,
-                                    args: vec![val, type_val],
-                                    dst,
-                                });
+                            if cast_findex.is_some() {
+                                // `__cast` converts, and a null answer is a
+                                // failed cast. hlp_dyn_castp does both, from
+                                // the object's own type so the most-derived
+                                // `__cast` runs.
+                                let dst_c_type =
+                                    self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                                let cast = self.dyn_castp_trapped(
+                                    bytecode,
+                                    val.as_ptr() as *mut c_void,
+                                    header_t as *mut c_void,
+                                    dst_c_type,
+                                )?;
+                                NanBoxedValue::from_ptr(cast as usize)
                             } else if upcast {
                                 val
                             } else {

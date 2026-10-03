@@ -946,21 +946,8 @@ impl HLInterpreter {
                         self.op_to_dyn(bc, func, func_idx, dst.0, src.0)?;
                     }
                     K::SafeCast => {
-                        // A converting cast (HOBJ -> unrelated HOBJ) is not a
-                        // value the opcode can produce on its own: it has to run
-                        // the class's `__cast`, which op_safe_cast hands back as
-                        // a staged `StepResult::Call`. Dropping that staged call
-                        // leaves `dst` holding the scratch value op_safe_cast
-                        // parked there — the *source* pointer — so the cast
-                        // silently degrades to the reinterpret this opcode
-                        // exists to avoid, and the next field read dereferences
-                        // an integer. Dispatch it the way CallMethod and
-                        // CallClosure dispatch theirs.
                         let staged = self.op_safe_cast(bc, func, func_idx, dst.0, src.0)?;
                         match staged {
-                            StepResult::Call { .. } => {
-                                return self.ssa_staged_call(bc, native_resolver, func, staged);
-                            }
                             // SSA trap entries store handler block IDs in the
                             // same tuple where the opcode interpreter stores
                             // absolute PCs. invalid_cast_step has already put

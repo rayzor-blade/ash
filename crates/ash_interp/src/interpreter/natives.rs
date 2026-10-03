@@ -895,37 +895,12 @@ impl HLInterpreter {
                         // wrapper unboxing for those non-object sources.
                         self.dynamic_to_value_for_kind(dyn_arg, expected_kind)
                     } else {
-                        type FnCastp = unsafe extern "C" fn(
-                            *mut c_void,
-                            *mut c_void,
-                            *mut c_void,
-                        ) -> *mut c_void;
-                        let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
-                        let mut data = dyn_arg as *mut c_void;
-                        // A mismatched argument raises from inside
-                        // hlp_dyn_castp, which needs a setjmp boundary.
-                        let mut casted = std::ptr::null_mut();
-                        let jumped = run_with_hl_trap(
-                            self.fn_setup_trap_jit,
-                            self.fn_remove_trap_jit,
-                            || {
-                                casted = unsafe {
-                                    castp(
-                                        &mut data as *mut _ as *mut c_void,
-                                        source_type.cast(),
-                                        target_type.cast(),
-                                    )
-                                };
-                            },
-                        );
-                        if jumped != 0 {
-                            let depth = self.stack.len();
-                            return Err(self.longjmp_error(
-                                Some(bytecode),
-                                depth,
-                                "hlp_dyn_castp longjmp without exception value".to_string(),
-                            ));
-                        }
+                        let casted = self.dyn_castp_trapped(
+                            bytecode,
+                            dyn_arg as *mut c_void,
+                            source_type.cast(),
+                            target_type.cast(),
+                        )?;
                         if casted.is_null() {
                             NanBoxedValue::null()
                         } else {

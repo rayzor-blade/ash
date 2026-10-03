@@ -72,3 +72,11 @@ fn failed_safe_cast_reaches_catch() {
 fn failed_call_method_argument_cast_reaches_catch() {
     run_section("callmethod", "caught: Can't cast Other to Box\nafter\n");
 }
+
+#[test]
+fn array_cast_rejected_by_cast_reaches_catch() {
+    run_section(
+        "variance",
+        "caught: Can't cast hl.types.ArrayBytes_Float to hl.types.ArrayObj\nafter\n",
+    );
+}

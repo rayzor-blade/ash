@@ -38,6 +38,14 @@ fn main() {
             );
             println!("cargo:rustc-link-arg=-Wl,--no-warn-symbol-ordering");
         }
+        // Pack the relative relocations (DT_RELR): the loader reads every
+        // entry of the unpacked table at startup, megabytes of it with LLVM
+        // linked in. Needs glibc 2.36 to run, so only when this machine's
+        // glibc has it -- a binary built here needs this glibc's symbol
+        // versions anyway -- and never when cross-compiling.
+        if env::var("TARGET") == env::var("HOST") && host_glibc_at_least(2, 36) {
+            println!("cargo:rustc-link-arg=-Wl,-z,pack-relative-relocs");
+        }
     }
 
     // On Mach-O the runtime a program with HDLLs runs on is the libhl.dylib
@@ -146,4 +154,22 @@ fn main() {
             });
         }
     }
+}
+
+/// Whether this machine's glibc is at least `major.minor`, from
+/// `getconf GNU_LIBC_VERSION` ("glibc 2.39"). False without glibc.
+fn host_glibc_at_least(major: u32, minor: u32) -> bool {
+    let Ok(out) = std::process::Command::new("getconf")
+        .arg("GNU_LIBC_VERSION")
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(version) = text.trim().strip_prefix("glibc ") else {
+        return false;
+    };
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let found = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    found >= (major, minor)
 }

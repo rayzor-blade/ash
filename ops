@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1791029289,"nonce":"7odeSJlbsOMI4CCz0wmGtEjg7pk=","message":"Fixed in dd89ec1233888d61002e0b4c13b1cd2fd86525c3: hl_get_obj_proto and hlp_get_obj_rt take the GC lock before HL_GLOBAL_LOCK. Verified with pb-wt (0 hangs in 60 runs, ~50% before) and the gates listed on 9fac9a5.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1791029289,"nonce":"SRdwTYzIkp7EdKHoJ6sQWL3aquo=","status":2}]}

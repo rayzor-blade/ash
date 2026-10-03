@@ -342,6 +342,10 @@ fn stage_runtime(runtime: &Path, beside: &Path, abi: u32, quiet: bool) -> Result
         if dest == source {
             continue;
         }
+        // Replaced, not rewritten in place: macOS caches a signature by
+        // inode, so overwriting a staged dylib a process has mapped gets the
+        // next one killed for an invalid page.
+        let _ = std::fs::remove_file(&dest);
         std::fs::copy(&source, &dest)
             .map_err(|e| anyhow!("stage {} beside the binary: {e}", dest.display()))?;
     }

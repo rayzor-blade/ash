@@ -119,6 +119,10 @@ fn main() {
         if let Some(runtime) = candidates.iter().find(|path| path.is_file()) {
             let runtime_dir = runtime.parent().unwrap();
             let compat = runtime_dir.join("libhl.dylib");
+            // A new file, never an overwrite: macOS caches a binary's code
+            // signature by inode, and a signed dylib rewritten in place gets
+            // the next process that maps it killed for an invalid page.
+            let _ = fs::remove_file(&compat);
             fs::copy(runtime, &compat).unwrap_or_else(|err| {
                 panic!(
                     "could not stage {} as {}: {err}",

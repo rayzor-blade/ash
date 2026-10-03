@@ -870,6 +870,11 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             p = hl_get_obj_proto((*o).super_);
         }
 
+        // The GC lock before HL_GLOBAL_LOCK, held across the whole build. A
+        // caller can already hold the GC lock when it gets here (hlp_dyn_castp
+        // runs a class's __cast under it), so this is the only order in which
+        // two threads building types cannot each hold the lock the other wants.
+        let _gc = crate::gc::gc_guard();
         let _lock = HL_GLOBAL_LOCK
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
@@ -878,9 +883,6 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         if !(*ot).vobj_proto.is_null() {
             return t;
         }
-
-        // Held across the whole build, as it always was.
-        let _gc = crate::gc::gc_guard();
 
         if (*t).nproto != 0 {
             let fptr = crate::rt::alloc_immortal(
@@ -1235,6 +1237,11 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             p = hlp_get_obj_rt((*o).super_);
         }
 
+        // The GC lock before HL_GLOBAL_LOCK, held across the whole build. A
+        // caller can already hold the GC lock when it gets here (hlp_dyn_castp
+        // runs a class's __cast under it), so this is the only order in which
+        // two threads building types cannot each hold the lock the other wants.
+        let _gc = crate::gc::gc_guard();
         let _lock = HL_GLOBAL_LOCK
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
@@ -1243,9 +1250,6 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
         if !(*o).rt.is_null() {
             return (*o).rt;
         }
-
-        // Held across the whole build, as it always was.
-        let _gc = crate::gc::gc_guard();
         // Runtime type structures are immortal and referenced only from type
         // memory the GC never scans — alloc_immortal pins them (and, via
         // conservative trace, everything they point to) as persistent roots.

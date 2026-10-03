@@ -757,17 +757,29 @@ impl TieredSharedCtx {
                 }
                 LlvmState::Pending(_) | LlvmState::Ready(_) | LlvmState::Unavailable => {}
             }
-            let context: &'static inkwell::context::Context =
-                Box::leak(Box::new(inkwell::context::Context::create()));
-            let mut jit = JITModule::new_with_shared_runtime(
-                context,
-                &seed.path,
-                &new_bytecode,
-                seed.shared.clone(),
-            );
-            jit.set_hot_reload(true);
-            jit.set_lazy_compilation(seed.compiled_only);
-            *llvm = LlvmState::Ready(LlvmModule(ManuallyDrop::new(jit)));
+            // Built off this thread, as at startup: the first promotion to
+            // the top tier joins it, and the reload does not wait for it.
+            let (path, shared, compiled_only) =
+                (seed.path.clone(), seed.shared.clone(), seed.compiled_only);
+            let bytecode = Arc::clone(&new_bytecode);
+            let building = std::thread::Builder::new()
+                .name("ash-jit-reload".to_string())
+                .spawn(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let context: &'static inkwell::context::Context =
+                            Box::leak(Box::new(inkwell::context::Context::create()));
+                        let mut jit =
+                            JITModule::new_with_shared_runtime(context, &path, &bytecode, shared);
+                        jit.set_hot_reload(true);
+                        jit.set_lazy_compilation(compiled_only);
+                        PrewarmedJit(Box::into_raw(Box::new(ManuallyDrop::new(jit))))
+                    }))
+                    .ok()
+                });
+            *llvm = match building {
+                Ok(h) => LlvmState::Building(h),
+                Err(_) => LlvmState::Unavailable,
+            };
         }
         for set in [&self.llvm_done, &self.llvm_failed] {
             set.lock().expect("tier memo poisoned").clear();
@@ -1102,6 +1114,22 @@ pub(crate) fn tiered_compile_tier(
     if !code.is_null() && ctx.reload_generation() != generation {
         if ctx.tier_log {
             eprintln!("[tier] discard findex={findex} tier={tier} reason=reloaded");
+        }
+        // A compile the reload's lock did not order, which published the
+        // old body after the reload put the slot back on the interpreter,
+        // puts it back again.
+        if ctx.arrays.functions_ptrs != 0 && findex < ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
+            let slot = unsafe {
+                &*(ctx.arrays.functions_ptrs as *const std::sync::atomic::AtomicPtr<c_void>)
+                    .add(findex)
+            };
+            let sentinel = (findex + 1) as *mut c_void;
+            if slot
+                .compare_exchange(code.cast(), sentinel, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+                .is_ok()
+            {
+                patch_vtable_slots(ctx, findex, sentinel);
+            }
         }
         code = std::ptr::null_mut();
     }

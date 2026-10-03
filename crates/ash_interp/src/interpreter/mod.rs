@@ -1182,16 +1182,10 @@ impl HLInterpreter {
             self.tiered_runtime = None;
             return Ok(());
         }
-        // Hot-reload swaps bytecode bodies underneath the interpreter; the
-        // Cranelift tier lowers from a bytecode snapshot it pins for the run,
-        // so it would keep executing stale code. The LLVM tier calls bytecode
-        // functions through their functions_ptrs slots under hot reload, so a
-        // recompiled callee is picked up by every compiled caller.
-        #[cfg(feature = "llvm")]
-        if config.hot_reload && config.tier_mode != TierMode::Llvm {
-            eprintln!("[tiered] hot-reload active: forcing --jit-tier=llvm");
-            config.tier_mode = TierMode::Llvm;
-        }
+        // Under hot reload every tier runs as usual: both call bytecode
+        // functions through their functions_ptrs slots, a reload puts a
+        // changed function's slot back on the interpreter, and the tiers
+        // are pointed at the new program to promote it again.
         if config.hot_reload {
             self.enable_reload(hl_path, _native_resolver)?;
         }
@@ -4716,12 +4710,12 @@ impl HLInterpreter {
         {
             return Some(*entry);
         }
-        // Under hot reload the only tier is LLVM, and it publishes a body to
-        // `functions_ptrs` before beadie installs it in the bead. A body the
-        // bead offers that the table no longer holds was compiled from the
-        // program before a reload, and the reload's own recompile has since
-        // taken the slot: the bead is put back on the interpreter and the
-        // ladder promotes it again from the new program.
+        // Under hot reload a tier publishes a body to `functions_ptrs`
+        // before beadie installs it in the bead. A body the bead offers that
+        // the table no longer holds was compiled from the program before a
+        // reload, which has since taken the slot back: the bead is put back
+        // on the interpreter and the ladder promotes it again from the new
+        // program.
         if tiered.config.hot_reload && tiered.shared_ctx.arrays.functions_ptrs != 0 {
             let published =
                 unsafe { *(tiered.shared_ctx.arrays.functions_ptrs as *const usize).add(findex) };

@@ -120,99 +120,6 @@ pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
     bytecode.natives.iter().map(|n| n.findex as usize).collect()
 }
 
-/// Perform a full hot-reload cycle.
-///
-/// 1. Re-decode bytecode from `path`
-/// 2. Diff against `old_bytecode`
-/// 3. Compile changed functions in a new LLVM context
-/// 4. Patch `functions_ptrs` and flush affected vtable protos
-///
-/// Returns the diff (for logging) or an error if the reload is unsafe.
-#[cfg(feature = "llvm")]
-pub fn perform_reload(
-    path: &std::path::Path,
-    old_bytecode: &DecodedBytecode,
-    functions_ptrs: &mut Vec<*mut std::ffi::c_void>,
-    shared_runtime: &SharedRuntimeHandles,
-) -> anyhow::Result<ReloadDiff> {
-    use crate::bytecode::BytecodeDecoder;
-    use crate::llvm::module::JITModule;
-    use inkwell::context::Context;
-
-    // Step 1: Re-decode
-    let new_bytecode = decode_as(path, old_bytecode)?;
-
-    // Step 2: Diff
-    let diff = diff_bytecode(old_bytecode, &new_bytecode);
-
-    if let Some(why) = refusal(old_bytecode, &new_bytecode, &diff) {
-        return Err(anyhow::anyhow!("Hot reload aborted: {why}"));
-    }
-
-    if !diff.has_changes() {
-        return Ok(diff);
-    }
-
-    // Step 3: Compile each changed function in a module of its own. MCJIT
-    // generates code for a module once, so a second body handed to the same
-    // module after the first was looked up is never compiled. The context
-    // and every module are leaked: old code may still be on a call stack.
-    let context = Box::leak(Box::new(Context::create()));
-    let decoded = decode_as(path, old_bytecode)?;
-
-    // Compiled callers load `module_ctx.functions_ptrs[findex]` at each call
-    // under hot reload, so the new body goes into that table; `functions_ptrs`
-    // is this context's own mirror of it.
-    let live_ptrs = unsafe {
-        if shared_runtime.module_ctx.is_null() {
-            std::ptr::null_mut()
-        } else {
-            (*shared_runtime.module_ctx).functions_ptrs
-        }
-    };
-    for &findex in &diff.changed {
-        let mut jit =
-            JITModule::new_with_shared_runtime(context, path, &decoded, shared_runtime.clone());
-        // A body compiled here calls other bytecode through its slot, like
-        // every body the tiers compile under hot reload, so the next reload
-        // reaches it; and it compiles whatever the cost gate says.
-        jit.set_hot_reload(true);
-        jit.set_reload_recompile(true);
-        match jit.promote_function_strict(findex) {
-            Ok(meta) => {
-                let addr = meta.fn_addr as *mut std::ffi::c_void;
-                if findex < functions_ptrs.len() {
-                    functions_ptrs[findex] = addr;
-                    if !live_ptrs.is_null() {
-                        unsafe { *live_ptrs.add(findex) = addr };
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[reload] failed to compile findex {}: {}", findex, e);
-            }
-        }
-        std::mem::forget(jit);
-    }
-
-    // Step 4: Flush vtable protos for types that have changed proto entries
-    flush_affected_protos(shared_runtime, &diff.changed);
-
-    // Step 5: Propagate changed field defaults to existing heap objects.
-    // Compare-and-swap: only updates fields that still hold the V1 default,
-    // preserving runtime modifications.
-    let patches = compute_field_patches(old_bytecode, &new_bytecode, shared_runtime);
-    if !patches.is_empty() {
-        eprintln!(
-            "[hot-reload] propagating {} field patch(es) to live heap objects",
-            patches.len()
-        );
-        apply_field_patches(&patches);
-    }
-
-    Ok(diff)
-}
-
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
 fn flush_affected_protos(shared: &SharedRuntimeHandles, _changed_findexes: &[usize]) {
     // Resolve hlp_flush_proto dynamically from the std library
@@ -242,235 +149,7 @@ fn flush_affected_protos(shared: &SharedRuntimeHandles, _changed_findexes: &[usi
 }
 
 // ---------------------------------------------------------------------------
-// Heap object property propagation
-// ---------------------------------------------------------------------------
-
-/// A single field update: for objects of a given type, if field at `offset`
-/// still holds `old_value`, overwrite with `new_value`.
-#[derive(Debug)]
-struct FieldPatch {
-    /// C-level hl_type pointer identifying which objects to patch
-    type_ptr: *mut hl::hl_type,
-    /// Byte offset of the field within the object
-    offset: usize,
-    /// Size of the field in bytes (4 for i32, 8 for pointer/f64, etc.)
-    size: usize,
-    /// Old default value bytes (from V1 constants)
-    old_bytes: Vec<u8>,
-    /// New default value bytes (from V2 constants)
-    new_bytes: Vec<u8>,
-}
-
-unsafe impl Send for FieldPatch {}
-
-/// Compute field patches by diffing V1 and V2 constant tables.
-///
-/// For each constant (global slot with pre-initialized HOBJ/HSTRUCT fields),
-/// compare field values between V1 and V2. Fields that differ become patches.
-pub fn compute_field_patches(
-    old_bc: &DecodedBytecode,
-    new_bc: &DecodedBytecode,
-    shared: &SharedRuntimeHandles,
-) -> Vec<FieldPatch> {
-    use crate::types::HLConstant;
-
-    let mut patches = Vec::new();
-    let resolver = crate::native_lib::NativeFunctionResolver::new();
-
-    // Resolve hlp_get_obj_rt for field offset lookup
-    let get_rt_fn = match resolver.resolve_function("std", "hlp_get_obj_rt") {
-        Ok(f) => f,
-        Err(_) => return patches,
-    };
-    type FnGetRt = unsafe extern "C" fn(*mut std::ffi::c_void) -> *const hl::hl_runtime_obj;
-
-    let min_constants = old_bc.constants.len().min(new_bc.constants.len());
-
-    for ci in 0..min_constants {
-        let old_c = &old_bc.constants[ci];
-        let new_c = &new_bc.constants[ci];
-
-        let global_idx = old_c.global as usize;
-        if global_idx >= old_bc.globals.len() || global_idx >= new_bc.globals.len() {
-            continue;
-        }
-
-        let type_idx = old_bc.globals[global_idx].0;
-        if type_idx >= shared.c_types.len() {
-            continue;
-        }
-        let c_type = shared.c_types[type_idx];
-        if c_type.is_null() {
-            continue;
-        }
-        let kind = unsafe { (*c_type).kind };
-        if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
-            continue;
-        }
-
-        // Get runtime object for field offsets
-        let rt = unsafe { std::mem::transmute::<_, FnGetRt>(get_rt_fn)(c_type as *mut _) };
-        if rt.is_null() {
-            continue;
-        }
-
-        let obj_data = match old_bc.types[type_idx].obj.as_ref() {
-            Some(o) => o,
-            None => continue,
-        };
-
-        let min_fields = old_c.fields.len().min(new_c.fields.len());
-        let start = unsafe { (*rt).nfields as usize - obj_data.fields.len() };
-
-        for fi in 0..min_fields {
-            if old_c.fields[fi] == new_c.fields[fi] {
-                continue; // Field value unchanged
-            }
-
-            let field_type_idx = obj_data.fields[fi].type_.0;
-            let field_kind = old_bc.types[field_type_idx].kind;
-            let field_offset = unsafe { *(*rt).fields_indexes.add(fi + start) } as usize;
-            let field_size = field_byte_size(field_kind);
-
-            if field_size == 0 {
-                continue; // Unknown/unsupported field type
-            }
-
-            // Encode old and new values as raw bytes
-            let old_val = encode_constant_value(old_c.fields[fi], field_kind, old_bc);
-            let new_val = encode_constant_value(new_c.fields[fi], field_kind, new_bc);
-
-            if old_val == new_val {
-                continue;
-            }
-
-            patches.push(FieldPatch {
-                type_ptr: c_type,
-                offset: field_offset,
-                size: field_size,
-                old_bytes: old_val,
-                new_bytes: new_val,
-            });
-        }
-    }
-
-    patches
-}
-
-fn field_byte_size(kind: hl::hl_type_kind) -> usize {
-    match kind {
-        hl::hl_type_kind_HBOOL | hl::hl_type_kind_HUI8 => 1,
-        hl::hl_type_kind_HUI16 => 2,
-        hl::hl_type_kind_HI32 => 4,
-        hl::hl_type_kind_HF32 => 4,
-        hl::hl_type_kind_HF64 | hl::hl_type_kind_HI64 => 8,
-        _ => 8, // Pointer types
-    }
-}
-
-fn encode_constant_value(
-    field_value: i32,
-    kind: hl::hl_type_kind,
-    bc: &DecodedBytecode,
-) -> Vec<u8> {
-    match kind {
-        hl::hl_type_kind_HI32
-        | hl::hl_type_kind_HBOOL
-        | hl::hl_type_kind_HUI8
-        | hl::hl_type_kind_HUI16 => {
-            // field_value is index into ints table
-            let val = bc
-                .ints
-                .get(field_value as usize)
-                .copied()
-                .unwrap_or(field_value);
-            val.to_le_bytes().to_vec()
-        }
-        hl::hl_type_kind_HF64 => {
-            let val = bc.floats.get(field_value as usize).copied().unwrap_or(0.0);
-            val.to_le_bytes().to_vec()
-        }
-        hl::hl_type_kind_HBYTES => {
-            // field_value is string index — encode the string content as an identifier
-            let s = bc
-                .strings
-                .get(field_value as usize)
-                .cloned()
-                .unwrap_or_default();
-            s.as_bytes().to_vec()
-        }
-        _ => {
-            // For pointer types, encode the raw field_value (global index or findex)
-            (field_value as u64).to_le_bytes().to_vec()
-        }
-    }
-}
-
-/// Apply field patches to all live heap objects.
-///
-/// For each patch, walks the GC heap and updates fields of matching objects
-/// using compare-and-swap semantics: only update if the field still holds
-/// the old default value (preserving runtime modifications).
-pub fn apply_field_patches(patches: &[FieldPatch]) {
-    if patches.is_empty() {
-        return;
-    }
-
-    let resolver = crate::native_lib::NativeFunctionResolver::new();
-    let walk_fn = match resolver.resolve_function("std", "hlp_gc_walk_heap") {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    type FnWalk = unsafe extern "C" fn(
-        unsafe extern "C" fn(*mut hl::vdynamic, *mut hl::hl_type, *mut std::ffi::c_void),
-        *mut std::ffi::c_void,
-    );
-
-    let walk: FnWalk = unsafe { std::mem::transmute(walk_fn) };
-
-    // Pack (ptr, len) into a struct so we can recover the slice in the visitor
-    struct PatchCtx {
-        ptr: *const FieldPatch,
-        len: usize,
-    }
-    let pctx = PatchCtx {
-        ptr: patches.as_ptr(),
-        len: patches.len(),
-    };
-    let ctx = &pctx as *const PatchCtx as *mut std::ffi::c_void;
-    unsafe { walk(heap_patch_visitor, ctx) };
-}
-
-/// Visitor callback for hlp_gc_walk_heap. Applies matching patches to each object.
-unsafe extern "C" fn heap_patch_visitor(
-    obj: *mut hl::vdynamic,
-    t: *mut hl::hl_type,
-    ctx: *mut std::ffi::c_void,
-) {
-    struct PatchCtx {
-        ptr: *const FieldPatch,
-        len: usize,
-    }
-    let pctx = &*(ctx as *const PatchCtx);
-    let patches = std::slice::from_raw_parts(pctx.ptr, pctx.len);
-
-    for patch in patches {
-        if patch.type_ptr != t {
-            continue;
-        }
-
-        let field_ptr = (obj as *mut u8).add(patch.offset);
-        let current = std::slice::from_raw_parts(field_ptr, patch.size);
-
-        // Compare-and-swap: only update if field still holds old default
-        if current == patch.old_bytes.as_slice() {
-            std::ptr::copy_nonoverlapping(patch.new_bytes.as_ptr(), field_ptr, patch.size);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Global reload context — bridges the stdlib callback to perform_reload
+// Global reload context — bridges the stdlib callback to do_reload
 // ---------------------------------------------------------------------------
 
 struct ReloadContext {
@@ -686,90 +365,18 @@ pub fn take_reload_pending() -> bool {
         && RELOAD_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
-/// Execute the deferred reload and return the new bytecode (for interpreter update).
-/// Called by the interpreter when `take_reload_pending` returns true.
-/// This runs on the interpreter's thread, outside any native call stack.
-#[cfg(feature = "llvm")]
-pub fn do_reload() -> Option<DecodedBytecode> {
-    // The optimized-AIR cache is keyed by findex, and a reload gives the same
-    // findex a different body. Without this the cache serves the old one and
-    // the reload silently does nothing -- the diff reports changed functions,
-    // functions_ptrs is patched, and what it is patched with is the previous
-    // body recompiled.
-    crate::air_pipeline::invalidate_optimized();
-    crate::llvm::air::invalidate_ceilings();
-    let mut guard = match RELOAD_CTX.lock() {
-        Ok(g) => g,
-        Err(_) => return None,
-    };
-    let ctx = match guard.as_mut() {
-        Some(c) => c,
-        None => return None,
-    };
-
-    // A staged program was read and checked already; the file is read
-    // again only for the compile below, which reads from the path.
-    ctx.staged = None;
-    match perform_reload(
-        &ctx.bytecode_path,
-        &ctx.old_bytecode,
-        &mut ctx.functions_ptrs,
-        &ctx.shared_runtime,
-    ) {
-        Ok(diff) => {
-            if diff.has_changes() {
-                // A body that bound a changed callee, compiled by a tier
-                // that saw the callee, goes back to the interpreter: its
-                // slot holds the stub sentinel, and the tiers promote it
-                // again from the new program.
-                let stale = inline_dependents(&diff.changed);
-                let live_ptrs = unsafe {
-                    if ctx.shared_runtime.module_ctx.is_null() {
-                        std::ptr::null_mut()
-                    } else {
-                        (*ctx.shared_runtime.module_ctx).functions_ptrs
-                    }
-                };
-                for &findex in &stale {
-                    let sentinel = (findex + 1) as *mut std::ffi::c_void;
-                    if findex < ctx.functions_ptrs.len() {
-                        ctx.functions_ptrs[findex] = sentinel;
-                        if !live_ptrs.is_null() {
-                            unsafe { *live_ptrs.add(findex) = sentinel };
-                        }
-                    }
-                }
-                if !stale.is_empty() {
-                    flush_affected_protos(&ctx.shared_runtime, &stale);
-                }
-                eprintln!(
-                    "[hot-reload] reloaded {} changed function(s)",
-                    diff.changed.len()
-                );
-                // Re-decode for both the stored state and the caller
-                if let Ok(new_bc) = decode_as(&ctx.bytecode_path, &ctx.old_bytecode) {
-                    let ret = new_bc.clone();
-                    ctx.old_bytecode = new_bc;
-                    return Some(ret);
-                }
-            }
-            None
-        }
-        Err(e) => {
-            eprintln!("[hot-reload] reload failed: {}", e);
-            None
-        }
-    }
-}
-
-/// Without the LLVM tier, a changed body goes back to the interpreter:
+/// Apply the staged program and return it for the interpreter to take.
+/// Runs on the interpreter's thread, outside any native call stack.
+///
+/// Nothing is compiled here. A changed body goes back to the interpreter:
 /// its slot holds the stub sentinel again, so a compiled caller's guarded
 /// call re-enters the interpreter, which runs the new body once it has
 /// taken the program returned here; the tiers promote it again from the
-/// new program. A compiled body that inlined a changed one goes back the
-/// same way. Other compiled bodies stay, and the vtables are flushed so
-/// they read the slots again.
-#[cfg(not(feature = "llvm"))]
+/// new program by the usual hotness rules. A compiled body that inlined a
+/// changed one goes back the same way. Other compiled bodies stay, and the
+/// vtables are flushed so they read the slots again. Constants are not
+/// patched in place: the interpreter allocates them again from the new
+/// program and stores them in their globals.
 pub fn do_reload() -> Option<DecodedBytecode> {
     let mut guard = RELOAD_CTX.lock().ok()?;
     let ctx = guard.as_mut()?;
@@ -790,7 +397,11 @@ pub fn do_reload() -> Option<DecodedBytecode> {
     }
     let mut stale = inline_dependents(&diff.changed);
     stale.extend_from_slice(&diff.changed);
+    // The optimized-AIR cache and the LLVM gate's ceilings are keyed by
+    // findex, and the same findex has a different body now.
     crate::air_pipeline::invalidate_optimized();
+    #[cfg(feature = "llvm")]
+    crate::llvm::air::invalidate_ceilings();
     let live_ptrs = unsafe {
         if ctx.shared_runtime.module_ctx.is_null() {
             std::ptr::null_mut()
@@ -808,6 +419,10 @@ pub fn do_reload() -> Option<DecodedBytecode> {
         }
     }
     flush_affected_protos(&ctx.shared_runtime, &stale);
+    eprintln!(
+        "[hot-reload] reloaded {} changed function(s)",
+        diff.changed.len()
+    );
     ctx.old_bytecode = new_bytecode.clone();
     Some(new_bytecode)
 }

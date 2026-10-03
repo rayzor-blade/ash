@@ -886,8 +886,20 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
         let deque = &*(d as *const HlDeque);
         loop {
             let popped;
+            let mut waiter = None;
             if let Ok(mut state) = deque.state.lock() {
                 popped = if state.queue.is_empty() {
+                    // Empty: a blocking pop waits cooperatively while fibers
+                    // exist; otherwise it returns null (single-threaded,
+                    // nothing can ever push). The waiter is registered under
+                    // the lock that found the queue empty, so an add can never
+                    // land between the check and the registration with no
+                    // waiter to wake.
+                    if block && crate::rt::fibers_active() {
+                        let w = crate::rt::new_waiter();
+                        state.waiters.push_back(w);
+                        waiter = Some(w);
+                    }
                     None
                 } else {
                     let m = state.queue.pop_front().unwrap() as *mut vdynamic;
@@ -904,18 +916,9 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
                 }
                 return m;
             }
-            // Empty: blocking pop waits cooperatively while fibers exist;
-            // otherwise keep the non-blocking null return (single-threaded,
-            // nothing can ever push).
-            if !block || !crate::rt::fibers_active() {
+            let Some(waiter) = waiter else {
                 return ptr::null_mut();
-            }
-            let waiter = crate::rt::new_waiter();
-            if let Ok(mut state) = deque.state.lock() {
-                state.waiters.push_back(waiter);
-            } else {
-                return ptr::null_mut();
-            }
+            };
             let _ = crate::rt::park(waiter, None);
             if let Ok(mut state) = deque.state.lock() {
                 remove_waiter(&mut state.waiters, waiter);

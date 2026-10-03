@@ -462,7 +462,7 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
                             idx: ops.len(),
                             entry: et,
                         });
-                        ops.push(cond_opcode(*cond, rg(*a), (*rhs).map(&rg))?);
+                        ops.push(cond_opcode(*cond, rg(*a), (*rhs).map(rg))?);
                         let ef = resolve_jump(*b, if_false.idx());
                         if ef != next {
                             sites.push(Site::Simple {

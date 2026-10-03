@@ -947,13 +947,12 @@ impl HLInterpreter {
                     }
                     K::SafeCast => {
                         let staged = self.op_safe_cast(bc, func, func_idx, dst.0, src.0)?;
-                        match staged {
-                            // SSA trap entries store handler block IDs in the
-                            // same tuple where the opcode interpreter stores
-                            // absolute PCs. invalid_cast_step has already put
-                            // the exception value in the trap cell.
-                            StepResult::JumpAbs(handler) => return Ok(Some(handler)),
-                            _ => {}
+                        // SSA trap entries store handler block IDs in the same
+                        // tuple where the opcode interpreter stores absolute
+                        // PCs. invalid_cast_step has already put the exception
+                        // value in the trap cell.
+                        if let StepResult::JumpAbs(handler) = staged {
+                            return Ok(Some(handler));
                         }
                     }
                     K::ToSFloat => {

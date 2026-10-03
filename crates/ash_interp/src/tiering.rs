@@ -579,6 +579,11 @@ pub(crate) struct TieredSharedCtx {
     /// What a reload rebuilds the top tier's module from.
     #[cfg(feature = "llvm")]
     pub(crate) llvm_seed: Option<LlvmSeed>,
+    /// Set by a reload that found the top tier's lock held: the module was
+    /// built from the program before it, and the lock's next holder puts it
+    /// back to `Deferred` (`take_reloaded_module`).
+    #[cfg(feature = "llvm")]
+    pub(crate) llvm_stale: std::sync::atomic::AtomicBool,
     /// `max(findex) + 1`, matching the length of `functions_ptrs`.
     pub(crate) max_findex: std::sync::atomic::AtomicUsize,
     /// Findexes whose installed code already came from LLVM — a tier-1
@@ -703,6 +708,7 @@ pub(crate) enum WorkerClosureDepsState {
 /// The inputs `enable_tiered` built the LLVM module from, kept so a reload
 /// can build another the same way.
 #[cfg(feature = "llvm")]
+#[derive(Clone)]
 pub(crate) struct LlvmSeed {
     pub(crate) path: std::path::PathBuf,
     pub(crate) shared: ash_core::runtime_handles::SharedRuntimeHandles,
@@ -753,15 +759,34 @@ pub(crate) fn build_llvm_module(
 /// lock is held: whoever holds it is a compile, which starts the build itself.
 #[cfg(feature = "llvm")]
 fn start_deferred_llvm(ctx: &TieredSharedCtx) {
-    if let Ok(mut guard) = ctx.llvm.try_lock()
-        && matches!(&*guard, LlvmState::Deferred(_))
-    {
+    let Ok(mut guard) = ctx.llvm.try_lock() else {
+        return;
+    };
+    take_reloaded_module(ctx, &mut guard);
+    if matches!(&*guard, LlvmState::Deferred(_)) {
         let LlvmState::Deferred(seed) = std::mem::replace(&mut *guard, LlvmState::Unavailable)
         else {
             unreachable!()
         };
         *guard = build_llvm_module(&seed, ctx.bytecode(), "ash-jit-llvm");
     }
+}
+
+/// Put a module built from the program before a reload back to `Deferred`,
+/// so it is built again from the current one. Every holder of the top
+/// tier's lock calls this first: a reload does not wait for the lock.
+#[cfg(feature = "llvm")]
+pub(crate) fn take_reloaded_module(ctx: &TieredSharedCtx, state: &mut LlvmState) {
+    if !ctx
+        .llvm_stale
+        .swap(false, std::sync::atomic::Ordering::AcqRel)
+    {
+        return;
+    }
+    let Some(seed) = &ctx.llvm_seed else { return };
+    // A build still running is left to finish on its own thread and its
+    // module is leaked, like a replaced one: old code may be on a stack.
+    *state = LlvmState::Deferred(seed.clone());
 }
 
 impl TieredSharedCtx {
@@ -787,7 +812,7 @@ impl TieredSharedCtx {
     /// stack. Every memo keyed by findex is dropped, because a findex may
     /// name a different function now.
     #[cfg_attr(not(feature = "llvm"), allow(unused_variables))]
-    pub(crate) fn reload(&self, llvm: &mut LlvmState, new_bytecode: Arc<DecodedBytecode>) {
+    pub(crate) fn reload(&self, llvm: Option<&mut LlvmState>, new_bytecode: Arc<DecodedBytecode>) {
         let old_bytecode = std::mem::replace(
             &mut *self.bytecode.lock().expect("bytecode mutex poisoned"),
             Arc::clone(&new_bytecode),
@@ -806,22 +831,17 @@ impl TieredSharedCtx {
         }
         self.reload_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // The module is rebuilt from the new program, by whoever next holds
+        // the lock; now, when this caller holds it. A compile holding it
+        // finishes on the old module, and `tiered_compile_tier` discards
+        // what it built.
         #[cfg(feature = "llvm")]
-        if let Some(seed) = &self.llvm_seed {
-            // A raw module pointer is leaked by being dropped; a claimed
-            // module is `ManuallyDrop` already.
-            match std::mem::replace(llvm, LlvmState::Unavailable) {
-                LlvmState::Building(handle) => {
-                    let _ = handle.join();
-                }
-                LlvmState::Deferred(_)
-                | LlvmState::Pending(_)
-                | LlvmState::Ready(_)
-                | LlvmState::Unavailable => {}
+        {
+            self.llvm_stale
+                .store(true, std::sync::atomic::Ordering::Release);
+            if let Some(state) = llvm {
+                take_reloaded_module(self, state);
             }
-            // Built off this thread: the first promotion to the top tier
-            // joins it, and the reload does not wait for it.
-            *llvm = build_llvm_module(seed, Arc::clone(&new_bytecode), "ash-jit-reload");
         }
         for set in [&self.llvm_done, &self.llvm_failed] {
             set.lock().expect("tier memo poisoned").clear();
@@ -1160,14 +1180,21 @@ pub(crate) fn tiered_compile_tier(
         // A compile the reload's lock did not order, which published the
         // old body after the reload put the slot back on the interpreter,
         // puts it back again.
-        if ctx.arrays.functions_ptrs != 0 && findex < ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
+        if ctx.arrays.functions_ptrs != 0
+            && findex < ctx.max_findex.load(std::sync::atomic::Ordering::Acquire)
+        {
             let slot = unsafe {
                 &*(ctx.arrays.functions_ptrs as *const std::sync::atomic::AtomicPtr<c_void>)
                     .add(findex)
             };
             let sentinel = (findex + 1) as *mut c_void;
             if slot
-                .compare_exchange(code.cast(), sentinel, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+                .compare_exchange(
+                    code.cast(),
+                    sentinel,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
                 .is_ok()
             {
                 patch_vtable_slots(ctx, findex, sentinel);
@@ -2134,11 +2161,13 @@ fn publish_retier_entries(
 
 #[cfg(feature = "llvm")]
 pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
+    let generation = ctx.reload_generation();
     let Some((sites, optimized, cfg)) = osr_plan_for(ctx, findex) else {
         return;
     };
 
     let mut guard = ctx.llvm.lock().expect("tiered llvm mutex poisoned");
+    take_reloaded_module(ctx, &mut guard);
     let LlvmState::Ready(module) = &mut *guard else {
         return;
     };
@@ -2156,6 +2185,10 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
                 }
             }
         }
+    }
+    // Entries for a body a reload has since replaced are not published.
+    if ctx.reload_generation() != generation {
+        return;
     }
     let _ = publish_retier_entries(ctx, &mut module.0, findex);
     drop(guard);
@@ -2221,6 +2254,7 @@ pub(crate) fn compile_with_llvm(
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         }
     };
+    take_reloaded_module(ctx, &mut guard);
     // Every promotion serialises on this one mutex and holds it for the whole
     // compile — ~500ms on this machine. Checking the abandon flag only before
     // the lock is useless: by the time the program ends, the chases are

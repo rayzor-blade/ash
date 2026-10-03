@@ -1366,6 +1366,8 @@ impl HLInterpreter {
                 hot_reload: true,
                 compiled_only: config.compiled_only,
             }),
+            #[cfg(feature = "llvm")]
+            llvm_stale: std::sync::atomic::AtomicBool::new(false),
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
             llvm_done: Mutex::new(HashSet::new()),
             llvm_failed: Mutex::new(HashSet::new()),
@@ -3958,6 +3960,7 @@ impl HLInterpreter {
                     self.hot_loops.remove(&(findex, header_pc));
                     return;
                 };
+                crate::tiering::take_reloaded_module(&ctx, &mut guard);
                 let LlvmState::Ready(module) = &mut *guard else {
                     return;
                 };
@@ -5846,20 +5849,18 @@ impl HLInterpreter {
     #[cold]
     #[inline(never)]
     fn apply_reload(&mut self, native_resolver: &NativeFunctionResolver) {
-        // The top tier's lock is held from before the function table is
-        // patched until the brokers have been pointed at the new program. A
-        // compile in flight finishes first and installs a body the patch then
-        // overwrites; a compile that starts afterwards lowers the new one.
+        // The reload does not wait for a compile in flight: one that began
+        // before it is discarded when it returns, and the slot it published
+        // goes back to the interpreter (`tiered_compile_tier`). The top
+        // tier's lock is taken only if it is free.
         let ctx = self
             .tiered_runtime
             .as_ref()
             .map(|t| Arc::clone(&t.shared_ctx));
-        let mut llvm = ctx
-            .as_ref()
-            .map(|c| c.llvm.lock().expect("tiered llvm mutex poisoned"));
+        let mut llvm = ctx.as_ref().and_then(|c| c.llvm.try_lock().ok());
         if let Some(new_bc) = ash_core::reload::do_reload() {
-            if let (Some(ctx), Some(llvm)) = (ctx.as_ref(), llvm.as_mut()) {
-                ctx.reload(llvm, Arc::new(new_bc.clone()));
+            if let Some(ctx) = ctx.as_ref() {
+                ctx.reload(llvm.as_deref_mut(), Arc::new(new_bc.clone()));
             }
             // Leak the old utf16_strings cache — live NanBoxed registers
             // in the current (old) frame hold raw pointers into those

@@ -613,9 +613,26 @@ impl HLInterpreter {
                         unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
                     let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
                     let mut data = val.as_ptr() as *mut c_void;
-                    let result_ptr = unsafe {
-                        castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
-                    };
+                    // A failed cast raises from inside hlp_dyn_castp, so it
+                    // needs the same setjmp boundary a native call has.
+                    let mut result_ptr = std::ptr::null_mut();
+                    let jumped = super::run_with_hl_trap(
+                        self.fn_setup_trap_jit,
+                        self.fn_remove_trap_jit,
+                        || {
+                            result_ptr = unsafe {
+                                castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
+                            };
+                        },
+                    );
+                    if jumped != 0 {
+                        let depth = self.stack.len();
+                        return Err(self.longjmp_error(
+                            Some(bytecode),
+                            depth,
+                            "hlp_dyn_castp longjmp without exception value".to_string(),
+                        ));
+                    }
                     if result_ptr.is_null() {
                         NanBoxedValue::null()
                     } else {

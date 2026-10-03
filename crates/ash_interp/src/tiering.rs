@@ -889,6 +889,21 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
         .contains(&findex)
 }
 
+/// Whether `findex` has been seen called from a loop or beneath a frame of
+/// its own: a function that will be entered again, whatever `calls` says.
+#[cfg(feature = "llvm")]
+fn entered_again(ctx: &TieredSharedCtx, findex: usize) -> bool {
+    ctx.live_frame
+        .lock()
+        .expect("live_frame mutex poisoned")
+        .contains(&findex)
+        || ctx
+            .called_from_loop
+            .lock()
+            .expect("called_from_loop mutex poisoned")
+            .contains(&findex)
+}
+
 /// Findexes the AIR ceiling turned down, so the decision is made once.
 ///
 /// Deliberately separate from `llvm_failed`: that set means "a compile was
@@ -2240,8 +2255,15 @@ pub(crate) fn compile_with_llvm(
         // a core with. A function that has been called more than once is
         // promoted as before: its next call may come from compiled code,
         // which ticks nothing, so a postponed promote could never be asked
-        // for again.
-        if published > 0 && tier == 1 && !ctx.compiled_only && calls <= 1 {
+        // for again. So is one entered once so far but seen called from a
+        // loop or beneath its own frame: `calls` counts interpreted entries,
+        // and its later calls come from callers that are compiled by now.
+        if published > 0
+            && tier == 1
+            && !ctx.compiled_only
+            && calls <= 1
+            && !entered_again(ctx, findex)
+        {
             return Ok(None);
         }
         if let Some((sites, optimized, cfg)) = osr_plan.as_ref() {

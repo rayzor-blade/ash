@@ -15,6 +15,71 @@ struct RegexpState {
     finalize: Option<crate::rt::Finalizer>,
     regex: Regex,
     last_groups: Option<Vec<Option<(i32, i32)>>>,
+    /// The last subject, converted, so EReg's replace, split and map, which
+    /// match one string at advancing positions, convert it once.
+    subject: Option<Subject>,
+}
+
+/// A UTF-16 subject as fancy_regex needs it: UTF-8, with a table from each
+/// UTF-16 unit index to its UTF-8 byte offset.
+///
+/// Recognised by its address and then by its contents, compared in one
+/// pass: an address alone is not the same string once the buffer is freed
+/// and reused. That compare is the only per-call cost the cache leaves.
+struct Subject {
+    source: *const u16,
+    units: Vec<u16>,
+    text: String,
+    /// `units.len() + 1` entries. A unit inside a surrogate pair maps to the
+    /// byte after the pair.
+    to_byte: Vec<u32>,
+}
+
+impl Subject {
+    fn new(source: *const u16, units: &[u16]) -> Self {
+        let mut text = String::with_capacity(units.len());
+        let mut to_byte = Vec::with_capacity(units.len() + 1);
+        let mut i = 0;
+        for decoded in char::decode_utf16(units.iter().copied()) {
+            let (ch, width) = match decoded {
+                Ok(ch) => (ch, ch.len_utf16()),
+                Err(_) => (char::REPLACEMENT_CHARACTER, 1),
+            };
+            to_byte.push(text.len() as u32);
+            text.push(ch);
+            for _ in 1..width {
+                to_byte.push(text.len() as u32);
+            }
+            i += width;
+        }
+        debug_assert_eq!(i, units.len());
+        to_byte.push(text.len() as u32);
+        Subject {
+            source,
+            units: units.to_vec(),
+            text,
+            to_byte,
+        }
+    }
+
+    fn byte_of(&self, unit: usize) -> usize {
+        self.to_byte[unit.min(self.units.len())] as usize
+    }
+
+    /// The UTF-16 units before `byte`, a char boundary.
+    fn unit_of(&self, byte: usize) -> i32 {
+        (self.to_byte.partition_point(|&b| b as usize <= byte) - 1) as i32
+    }
+
+    /// Whether the NUL-terminated string at `source` is this one: the same
+    /// address, the same units, and its terminator where this one ends.
+    unsafe fn is(&self, source: *const u16) -> bool {
+        unsafe {
+            source == self.source
+                && std::slice::from_raw_parts(source, self.units.len()) == self.units.as_slice()
+                && *source.add(self.units.len()) == 0
+        }
+    }
 }
 
 // The collector reads the callback out of word zero, so `finalize` has to BE
@@ -35,6 +100,7 @@ unsafe extern "C" fn regexp_finalize(block: *mut c_void) {
         }
         std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).regex));
         std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).last_groups));
+        std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).subject));
     }
 }
 
@@ -52,26 +118,16 @@ unsafe fn read_utf16z(bytes: *const vbyte) -> Vec<u16> {
     }
 }
 
-fn utf8_byte_to_utf16_units(s: &str, byte_idx: usize) -> i32 {
-    let mut units = 0i32;
-    for (idx, ch) in s.char_indices() {
-        if idx >= byte_idx {
-            break;
+/// The units of the NUL-terminated string at `bytes`, without copying them.
+unsafe fn utf16z<'a>(bytes: *const vbyte) -> &'a [u16] {
+    unsafe {
+        let ptr = bytes as *const u16;
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
         }
-        units += ch.len_utf16() as i32;
+        std::slice::from_raw_parts(ptr, len)
     }
-    units
-}
-
-fn utf16_units_to_utf8_byte(s: &str, unit_idx: usize) -> usize {
-    let mut units = 0usize;
-    for (byte, ch) in s.char_indices() {
-        if units >= unit_idx {
-            return byte;
-        }
-        units += ch.len_utf16();
-    }
-    s.len()
 }
 
 fn build_regex(pattern: &str, options: &str) -> Option<Regex> {
@@ -117,6 +173,7 @@ pub unsafe extern "C" fn hlp_regexp_new_options(
         // would drop whatever the previous occupant's bytes look like.
         std::ptr::addr_of_mut!((*state).regex).write(regex);
         std::ptr::addr_of_mut!((*state).last_groups).write(None);
+        std::ptr::addr_of_mut!((*state).subject).write(None);
         state as *mut c_void
     }
 }
@@ -133,8 +190,12 @@ pub unsafe extern "C" fn hlp_regexp_match(
             return 0;
         }
         let state = &mut *(r as *mut RegexpState);
-        let full_units = read_utf16z(str_bytes);
-        let total_len = full_units.len() as i32;
+        let source = str_bytes as *const u16;
+        if !state.subject.as_ref().is_some_and(|s| s.is(source)) {
+            state.subject = Some(Subject::new(source, utf16z(str_bytes)));
+        }
+        let subject = state.subject.as_ref().unwrap();
+        let total_len = subject.units.len() as i32;
         let start = pos.clamp(0, total_len) as usize;
         let avail = total_len - start as i32;
         let run_len = if size < 0 {
@@ -142,10 +203,9 @@ pub unsafe extern "C" fn hlp_regexp_match(
         } else {
             size.min(avail).max(0)
         } as usize;
-        let subject = String::from_utf16_lossy(&full_units);
-        let start_byte = utf16_units_to_utf8_byte(&subject, start);
-        let end_byte = utf16_units_to_utf8_byte(&subject, start + run_len);
-        let visible_subject = &subject[..end_byte];
+        let start_byte = subject.byte_of(start);
+        let end_byte = subject.byte_of(start + run_len);
+        let visible_subject = &subject.text[..end_byte];
 
         // Search the original subject at an offset instead of slicing it at
         // `pos`.  Anchors are relative to the subject in PCRE2: slicing made `^`
@@ -155,8 +215,8 @@ pub unsafe extern "C" fn hlp_regexp_match(
             let mut groups = Vec::with_capacity(caps.len());
             for i in 0..caps.len() {
                 if let Some(m) = caps.get(i) {
-                    let s = utf8_byte_to_utf16_units(&subject, m.start());
-                    let e = utf8_byte_to_utf16_units(&subject, m.end());
+                    let s = subject.unit_of(m.start());
+                    let e = subject.unit_of(m.end());
                     groups.push(Some((s, e - s)));
                 } else {
                     groups.push(None);
@@ -348,6 +408,74 @@ mod regexp_matched_num_tests {
         let f: unsafe extern "C" fn(*mut c_void) -> i32 = hlp_regexp_matched_num;
         unsafe {
             assert_eq!(f(std::ptr::null_mut()), -1);
+        }
+    }
+
+    unsafe fn pos_of(r: *mut c_void, n: i32) -> (i32, i32) {
+        unsafe {
+            let mut len = 0;
+            let pos = hlp_regexp_matched_pos(r, n, &mut len);
+            (pos, len)
+        }
+    }
+
+    /// Positions are UTF-16 units: a surrogate pair before the match counts
+    /// two, and a match starting after it reports the unit, not the byte.
+    #[test]
+    fn positions_count_utf16_units_across_a_surrogate_pair() {
+        unsafe {
+            let r = new_regexp("b+");
+            assert_eq!(run_match(r, "a\u{1F600}bb c"), 1);
+            assert_eq!(pos_of(r, 0), (3, 2));
+            // A start inside the pair lands after it.
+            let s = u16z("a\u{1F600}bb");
+            assert_eq!(hlp_regexp_match(r, s.as_ptr() as *const vbyte, 2, -1), 1);
+            assert_eq!(pos_of(r, 0), (3, 2));
+        }
+    }
+
+    /// An unpaired surrogate is one unit, as upstream's UTF-16 matcher sees it.
+    #[test]
+    fn an_unpaired_surrogate_is_one_unit() {
+        unsafe {
+            let r = new_regexp("x");
+            let s = [0x61u16, 0xD800, 0x78, 0];
+            assert_eq!(hlp_regexp_match(r, s.as_ptr() as *const vbyte, 0, -1), 1);
+            assert_eq!(pos_of(r, 0), (2, 1));
+        }
+    }
+
+    /// A different string is converted afresh, not matched against the one
+    /// cached before it.
+    #[test]
+    fn another_subject_is_not_matched_against_the_cached_one() {
+        unsafe {
+            let r = new_regexp("[0-9]+");
+            let a = u16z("ab12cd");
+            let b = u16z("7xyz");
+            assert_eq!(hlp_regexp_match(r, a.as_ptr() as *const vbyte, 0, -1), 1);
+            assert_eq!(pos_of(r, 0), (2, 2));
+            assert_eq!(hlp_regexp_match(r, b.as_ptr() as *const vbyte, 0, -1), 1);
+            assert_eq!(pos_of(r, 0), (0, 1));
+            assert_eq!(hlp_regexp_match(r, a.as_ptr() as *const vbyte, 0, -1), 1);
+            assert_eq!(pos_of(r, 0), (2, 2));
+        }
+    }
+
+    /// The loop EReg.replace and split run: one subject, advancing positions.
+    #[test]
+    fn successive_matches_on_one_subject_advance() {
+        unsafe {
+            let r = new_regexp("[0-9]+");
+            let s = u16z("a1 b22 c333");
+            let mut found = Vec::new();
+            let mut pos = 0;
+            while hlp_regexp_match(r, s.as_ptr() as *const vbyte, pos, -1) == 1 {
+                let (p, l) = pos_of(r, 0);
+                found.push((p, l));
+                pos = p + l;
+            }
+            assert_eq!(found, vec![(1, 1), (4, 2), (8, 3)]);
         }
     }
 }

@@ -61,3 +61,37 @@ fn default_hybrid_promotes_wide_calls() {
         "wide function stayed interpreted or has no callable entry:\n{stderr}"
     );
 }
+
+/// A function wider than --jit-max-args stays on the interpreter for the whole
+/// run, and says so once, by name.
+#[test]
+fn a_function_over_the_arity_cap_is_named_once() {
+    let out = Command::new(ash_cli_bin())
+        .args([
+            "--mode",
+            "hybrid",
+            "--jit-threshold",
+            "1",
+            "--jit-max-args",
+            "8",
+        ])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{}\n{stderr}", out.status);
+    assert!(
+        stdout.lines().any(|line| line == "wide-hybrid bad=0"),
+        "{stdout}\n{stderr}"
+    );
+    let notices: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("stays interpreted; raise --jit-max-args"))
+        .collect();
+    assert_eq!(notices.len(), 1, "{stderr}");
+    assert!(
+        notices[0].starts_with("[ash] TestWideHybrid.wide takes more than 8 arguments"),
+        "{stderr}"
+    );
+}

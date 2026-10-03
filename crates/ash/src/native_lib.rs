@@ -21,7 +21,8 @@ pub fn set_quiet(on: bool) {
     QUIET.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn quiet() -> bool {
+/// Whether `--quiet` silenced the startup diagnostics.
+pub fn quiet() -> bool {
     QUIET.load(std::sync::atomic::Ordering::Relaxed)
 }
 

@@ -4669,6 +4669,25 @@ impl HLInterpreter {
                     Err(reason) => {
                         if tiered.config.log_promotions {
                             eprintln!("[tiered] skip findex={} reason={}", findex, reason);
+                        } else if reason.starts_with("arg_count_over_limit")
+                            && !ash_core::native_lib::quiet()
+                        {
+                            // Said once: such a function stays on the
+                            // interpreter for the whole run, and nothing else
+                            // would tell anyone why it is slow.
+                            static SAID: std::sync::Once = std::sync::Once::new();
+                            SAID.call_once(|| {
+                                // `$` marks HashLink's class of statics.
+                                let name = ash_core::types::function_names(&bytecode.types)
+                                    .remove(&(findex as u32))
+                                    .map(|n| n.trim_start_matches('$').to_string())
+                                    .unwrap_or_else(|| bytecode.functions[func_idx].name());
+                                eprintln!(
+                                    "[ash] {name} takes more than {} arguments and stays \
+                                     interpreted; raise --jit-max-args to compile it",
+                                    tiered.config.max_jit_args
+                                );
+                            });
                         }
                         return None;
                     }

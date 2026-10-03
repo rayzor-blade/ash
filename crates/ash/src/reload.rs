@@ -234,10 +234,8 @@ fn function_names(bc: &DecodedBytecode) -> HashMap<usize, String> {
 /// A function table of a different shape is one where a findex names
 /// another function now, which happens when a method is added or
 /// removed; the diff sees every function after it as changed, and the
-/// vtables built from the old table would call the wrong bodies.
-/// Each global must also hold what it held: its slot keeps the running
-/// program's value, a static or a class's descriptor, and a reload
-/// writes every constant again into the slot the new program names.
+/// vtables built from the old table would call the wrong bodies. The
+/// globals are already on the running program's slots, by `remap_globals`.
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
     if diff.type_layout_changed {
         return Some(
@@ -250,9 +248,6 @@ fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> O
             old.globals.len(),
             new.globals.len()
         ));
-    }
-    if let Some(why) = moved_global(old, new) {
-        return Some(why);
     }
     if !diff.added.is_empty() || !diff.removed.is_empty() {
         return Some(format!(
@@ -274,37 +269,259 @@ fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> O
     None
 }
 
-/// The first global that holds something else in `new`: another type,
-/// or a constant where the running program keeps a value, or the reverse.
-/// Adding or removing a string literal or a static shifts every global
-/// after it.
-fn moved_global(old: &DecodedBytecode, new: &DecodedBytecode) -> Option<String> {
-    let constants =
-        |bc: &DecodedBytecode| -> HashSet<u32> { bc.constants.iter().map(|c| c.global).collect() };
-    let (old_constants, new_constants) = (constants(old), constants(new));
-    let describe = |bc: &DecodedBytecode, constants: &HashSet<u32>, g: usize| {
-        let t = &bc.types[bc.globals[g].0];
-        let name = t
+/// What a global is, wherever a program put it. Adding or removing a
+/// string literal or a static shifts every global after it, so a global
+/// is matched across a reload by this rather than by its index.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum GlobalKey {
+    /// A class's or an enum's descriptor, by its type.
+    Descriptor(String),
+    /// A constant, by its type and contents; the last field tells apart
+    /// constants that are otherwise the same.
+    Constant(String, Vec<String>, usize),
+    /// Anything else, by its type and its order among those of that type.
+    Other(String, usize),
+}
+
+/// A type's name across two programs, whose type tables may differ.
+fn type_key(bc: &DecodedBytecode, t: usize) -> String {
+    let ty = &bc.types[t];
+    let name = ty
+        .obj
+        .as_ref()
+        .map(|o| o.name.clone())
+        .or_else(|| ty.tenum.as_ref().map(|e| e.name.clone()))
+        .or_else(|| ty.abs_name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("#{t}"));
+    format!("{}:{name}", ty.kind)
+}
+
+/// Whether a constant's field of this kind holds a global's index, as
+/// `init_constants` reads it; `nullable` fields hold 0 for null.
+fn field_names_global(kind: hl::hl_type_kind) -> Option<bool> {
+    match kind {
+        hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => Some(false),
+        hl::hl_type_kind_HFUN
+        | hl::hl_type_kind_HMETHOD
+        | hl::hl_type_kind_HBYTES
+        | hl::hl_type_kind_HTYPE
+        | hl::hl_type_kind_HI32
+        | hl::hl_type_kind_HBOOL
+        | hl::hl_type_kind_HUI8
+        | hl::hl_type_kind_HUI16
+        | hl::hl_type_kind_HI64
+        | hl::hl_type_kind_HF64
+        | hl::hl_type_kind_HF32 => None,
+        _ => Some(true),
+    }
+}
+
+/// The fields of the constant `c` with what each field's value means:
+/// a string's text, a number, a type, or another global's index.
+fn constant_fields<'a>(
+    bc: &'a DecodedBytecode,
+    c: &'a crate::types::HLConstant,
+) -> impl Iterator<Item = (usize, hl::hl_type_kind)> + 'a {
+    let fields = bc.types[bc.globals[c.global as usize].0]
+        .obj
+        .as_ref()
+        .map(|o| o.fields.as_slice())
+        .unwrap_or_default();
+    (0..c.fields.len().min(fields.len())).map(move |j| (j, bc.types[fields[j].type_.0].kind))
+}
+
+/// Every global's key, by index.
+fn global_keys(bc: &DecodedBytecode) -> Vec<GlobalKey> {
+    let mut keys: Vec<Option<GlobalKey>> = vec![None; bc.globals.len()];
+    for (t, ty) in bc.types.iter().enumerate() {
+        let gv = ty
             .obj
             .as_ref()
-            .map_or_else(|| format!("kind {}", t.kind), |o| o.name.clone());
-        if constants.contains(&(g as u32)) {
-            format!("a {name} constant")
-        } else {
-            name
+            .map(|o| o.global_value)
+            .or_else(|| ty.tenum.as_ref().map(|e| e.global_value))
+            .unwrap_or(0) as usize;
+        if gv > 0 && gv <= keys.len() {
+            keys[gv - 1] = Some(GlobalKey::Descriptor(type_key(bc, t)));
+        }
+    }
+    // A constant's field that names another global names it by that
+    // global's type: its index is what moves.
+    let mut seen: HashMap<(String, Vec<String>), usize> = HashMap::new();
+    for c in &bc.constants {
+        let g = c.global as usize;
+        if g >= keys.len() || keys[g].is_some() {
+            continue;
+        }
+        let contents: Vec<String> = constant_fields(bc, c)
+            .map(|(j, kind)| {
+                let v = c.fields[j];
+                match (kind, field_names_global(kind)) {
+                    (_, Some(nullable)) if !(nullable && v == 0) => bc
+                        .globals
+                        .get(v as usize)
+                        .map_or_else(|| format!("g?{v}"), |t| format!("g:{}", type_key(bc, t.0))),
+                    (hl::hl_type_kind_HBYTES, _) => {
+                        format!(
+                            "s:{}",
+                            bc.strings.get(v as usize).map_or("", |s| s.as_str())
+                        )
+                    }
+                    (hl::hl_type_kind_HF64 | hl::hl_type_kind_HF32, _) => {
+                        format!("f:{}", bc.floats.get(v as usize).map_or(0, |f| f.to_bits()))
+                    }
+                    (hl::hl_type_kind_HTYPE, _) => format!("t:{}", type_key(bc, v as usize)),
+                    (hl::hl_type_kind_HFUN | hl::hl_type_kind_HMETHOD, _) => format!("fn:{v}"),
+                    _ => format!("i:{}", bc.ints.get(v as usize).copied().unwrap_or(v)),
+                }
+            })
+            .collect();
+        let ty = type_key(bc, bc.globals[g].0);
+        let n = seen.entry((ty.clone(), contents.clone())).or_default();
+        keys[g] = Some(GlobalKey::Constant(ty, contents, *n));
+        *n += 1;
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    keys.into_iter()
+        .enumerate()
+        .map(|(g, k)| {
+            k.unwrap_or_else(|| {
+                let ty = type_key(bc, bc.globals[g].0);
+                let n = seen.entry(ty.clone()).or_default();
+                *n += 1;
+                GlobalKey::Other(ty, *n - 1)
+            })
+        })
+        .collect()
+}
+
+/// Renumber `new`'s globals onto the slots of the running program `old`.
+///
+/// A global keeps the slot that holds the same thing in `old`, so the
+/// value the running program keeps there (a class's descriptor and its
+/// statics) is the one the new code reads. A constant `old` does not have
+/// takes the slot of one of the same type that `new` dropped; the reload
+/// writes every constant into its slot again, so a frame still running the
+/// old body reads the new constant there until it returns. Anything else
+/// `old` does not have cannot be placed, and `Err` says which.
+fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(), String> {
+    let (old_keys, new_keys) = (global_keys(old), global_keys(new));
+    if old_keys == new_keys {
+        return Ok(());
+    }
+    let slot_of: HashMap<&GlobalKey, usize> =
+        old_keys.iter().enumerate().map(|(g, k)| (k, g)).collect();
+    let mut taken = vec![false; old_keys.len()];
+    let mut map: Vec<Option<usize>> = new_keys.iter().map(|k| slot_of.get(k).copied()).collect();
+    for &slot in map.iter().flatten() {
+        taken[slot] = true;
+    }
+    for g in 0..map.len() {
+        if map[g].is_some() {
+            continue;
+        }
+        let GlobalKey::Constant(ty, ..) = &new_keys[g] else {
+            let what = match &new_keys[g] {
+                GlobalKey::Descriptor(t) => format!("the descriptor of {t}"),
+                GlobalKey::Other(t, n) => format!("a {t} global (#{n} of its type)"),
+                GlobalKey::Constant(..) => unreachable!(),
+            };
+            return Err(format!(
+                "the new program has {what}, which the running one does not; a class or a static was added"
+            ));
+        };
+        let free = (0..old_keys.len())
+            .find(|&s| !taken[s] && matches!(&old_keys[s], GlobalKey::Constant(t, ..) if t == ty));
+        let Some(slot) = free else {
+            return Err(format!(
+                "the new program has more {ty} constants than the running one has slots for"
+            ));
+        };
+        taken[slot] = true;
+        map[g] = Some(slot);
+    }
+    let map: Vec<usize> = map
+        .into_iter()
+        .map(|s| s.expect("every global placed"))
+        .collect();
+
+    let mut globals = old.globals.clone();
+    for (g, &slot) in map.iter().enumerate() {
+        globals[slot] = new.globals[g].clone();
+    }
+    let at = |g: usize| map.get(g).copied().unwrap_or(g);
+    // A constant's nullable field reads 0 as null, so no global it names
+    // may land on slot 0.
+    let mut constants = std::mem::take(&mut new.constants);
+    for c in &mut constants {
+        let kinds: Vec<(usize, hl::hl_type_kind)> = constant_fields(new, c).collect();
+        for (j, kind) in kinds {
+            let Some(nullable) = field_names_global(kind) else {
+                continue;
+            };
+            let v = c.fields[j];
+            if nullable && v == 0 {
+                continue;
+            }
+            let slot = at(v as usize);
+            if nullable && slot == 0 {
+                return Err("a constant would name global 0, which reads as null".into());
+            }
+            c.fields[j] = slot as i32;
+        }
+        c.global = at(c.global as usize) as u32;
+    }
+    new.constants = constants;
+    let rebase = |gv: &mut u32| {
+        if *gv > 0 {
+            *gv = at(*gv as usize - 1) as u32 + 1;
         }
     };
-    (0..old.globals.len().min(new.globals.len())).find_map(|g| {
-        let same_constness = old_constants.contains(&(g as u32)) == new_constants.contains(&(g as u32));
-        if old.globals[g].0 == new.globals[g].0 && same_constness {
-            return None;
+    for ty in &mut new.types {
+        if let Some(o) = ty.obj.as_mut() {
+            rebase(&mut o.global_value);
         }
-        Some(format!(
-            "globals moved: global {g} held {} and holds {}; a string literal or a static was added or removed",
-            describe(old, &old_constants, g),
-            describe(new, &new_constants, g)
-        ))
-    })
+        if let Some(e) = ty.tenum.as_mut() {
+            rebase(&mut e.global_value);
+        }
+    }
+    fn rewrite(
+        f: &mut crate::types::HLFunction,
+        at: &dyn Fn(usize) -> usize,
+        rebase: &dyn Fn(&mut u32),
+    ) {
+        for op in &mut f.ops {
+            match op {
+                crate::opcodes::Opcode::GetGlobal { global, .. }
+                | crate::opcodes::Opcode::SetGlobal { global, .. } => global.0 = at(global.0),
+                _ => {}
+            }
+        }
+        if let Some(o) = f.obj.as_mut() {
+            rebase(&mut o.global_value);
+        }
+        if let Some(r) = f.field_ref.as_mut() {
+            rewrite(r, at, rebase);
+        }
+    }
+    for f in &mut new.functions {
+        rewrite(f, &at, &rebase);
+    }
+    new.globals = globals;
+    Ok(())
+}
+
+/// The program at `path`, read as the next version of `running`: with
+/// the host registrations `running` took and its globals on `running`'s
+/// slots. `Err` says why it cannot be, or that it did not read.
+fn decode_next(
+    path: &std::path::Path,
+    running: &DecodedBytecode,
+) -> Result<DecodedBytecode, String> {
+    let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
+    remap_globals(running, &mut bc)
+        .map_err(|why| format!("the program cannot reload in place: {why}"))?;
+    Ok(bc)
 }
 
 /// Read the program at the registered path again and check it against
@@ -320,8 +537,7 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
-    let new_bytecode = decode_as(&ctx.bytecode_path, &ctx.old_bytecode)
-        .map_err(|e| format!("{}: {e}", ctx.bytecode_path.display()))?;
+    let new_bytecode = decode_next(&ctx.bytecode_path, &ctx.old_bytecode)?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
     if let Some(why) = refusal(&ctx.old_bytecode, &new_bytecode, &diff) {
         return Err(format!("the program cannot reload in place: {why}"));
@@ -372,7 +588,7 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
     match ctx.staged.take() {
         Some(bc) => Ok(bc),
-        None => decode_as(&ctx.bytecode_path, &ctx.old_bytecode),
+        None => decode_next(&ctx.bytecode_path, &ctx.old_bytecode).map_err(anyhow::Error::msg),
     }
 }
 
@@ -464,4 +680,140 @@ pub fn do_reload() -> Option<DecodedBytecode> {
     );
     ctx.old_bytecode = new_bytecode.clone();
     Some(new_bytecode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opcodes::{Opcode, RefGlobal, Reg};
+    use crate::types::{HLConstant, HLFunction, HLObjField, HLType, HLTypeObj, TypeRef};
+
+    const I32: usize = 0;
+    const BYTES: usize = 1;
+    const STRING: usize = 2;
+    const MAIN: usize = 3;
+    const MAIN_STATICS: usize = 4;
+
+    fn obj(name: &str, fields: &[(&str, usize)], global_value: u32) -> HLType {
+        HLType {
+            kind: hl::hl_type_kind_HOBJ,
+            obj: Some(HLTypeObj {
+                name: name.into(),
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| HLObjField {
+                        name: (*n).into(),
+                        type_: TypeRef(*t),
+                        hashed_name: 0,
+                    })
+                    .collect(),
+                global_value,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A program whose globals are its string literals, in order, around
+    /// `Main`'s descriptor at `main_at`, and one function reading `Main`'s
+    /// descriptor and then each literal.
+    fn program(literals: &[&str], main_at: usize) -> DecodedBytecode {
+        let mut bc = DecodedBytecode {
+            strings: literals.iter().map(|s| s.to_string()).collect(),
+            ints: literals.iter().map(|s| s.len() as i32).collect(),
+            ..Default::default()
+        };
+        bc.types = vec![
+            HLType {
+                kind: hl::hl_type_kind_HI32,
+                ..Default::default()
+            },
+            HLType {
+                kind: hl::hl_type_kind_HBYTES,
+                ..Default::default()
+            },
+            obj("String", &[("bytes", BYTES), ("length", I32)], 0),
+            obj("Main", &[], main_at as u32 + 1),
+            obj("$Main", &[("counter", I32)], 0),
+        ];
+        let mut ops = vec![Opcode::GetGlobal {
+            dst: Reg(0),
+            global: RefGlobal(main_at),
+        }];
+        let mut next = 0;
+        for g in 0..=literals.len() {
+            if g == main_at {
+                bc.globals.push(TypeRef(MAIN_STATICS));
+                continue;
+            }
+            bc.globals.push(TypeRef(STRING));
+            bc.constants.push(HLConstant {
+                global: g as u32,
+                fields: vec![next, next],
+            });
+            ops.push(Opcode::GetGlobal {
+                dst: Reg(0),
+                global: RefGlobal(g),
+            });
+            next += 1;
+        }
+        bc.functions = vec![HLFunction {
+            ops,
+            ..Default::default()
+        }];
+        bc
+    }
+
+    fn literal_at(bc: &DecodedBytecode, g: usize) -> Option<&str> {
+        let c = bc.constants.iter().find(|c| c.global as usize == g)?;
+        Some(bc.strings[c.fields[0] as usize].as_str())
+    }
+
+    fn reads(bc: &DecodedBytecode) -> Vec<usize> {
+        bc.functions[0]
+            .ops
+            .iter()
+            .map(|op| match op {
+                Opcode::GetGlobal { global, .. } => global.0,
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    /// A new literal ahead of the descriptor shifts it; every global goes
+    /// back to the slot that held it, and the new literal takes the slot
+    /// of the one dropped.
+    #[test]
+    fn shifted_globals_go_back_to_their_slots() {
+        let old = program(&["same", "gone", "end"], 2);
+        let mut new = program(&["fresh", "same", "gone"], 3);
+        remap_globals(&old, &mut new).expect("remaps");
+
+        assert_eq!(new.globals.len(), old.globals.len());
+        assert_eq!(new.types[MAIN].obj.as_ref().unwrap().global_value, 3);
+        assert_eq!(new.globals[2].0, MAIN_STATICS);
+        assert_eq!(literal_at(&new, 0), Some("same"));
+        assert_eq!(literal_at(&new, 1), Some("gone"));
+        assert_eq!(literal_at(&new, 3), Some("fresh"));
+        // Main's descriptor, then "fresh", "same", "gone" as the new code
+        // reads them.
+        assert_eq!(reads(&new), vec![2, 3, 0, 1]);
+    }
+
+    #[test]
+    fn unchanged_globals_stay() {
+        let old = program(&["a", "b"], 1);
+        let mut new = program(&["a", "b"], 1);
+        remap_globals(&old, &mut new).expect("remaps");
+        assert_eq!(reads(&new), reads(&old));
+    }
+
+    /// A literal with no dropped one to replace has no slot.
+    #[test]
+    fn a_literal_too_many_is_refused() {
+        let old = program(&["a"], 1);
+        let mut new = program(&["a", "b"], 2);
+        let why = remap_globals(&old, &mut new).unwrap_err();
+        assert!(why.contains("String constants"), "{why}");
+    }
 }

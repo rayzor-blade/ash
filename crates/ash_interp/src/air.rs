@@ -216,49 +216,6 @@ pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
     debug
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use air::opcodes::{RefFun, Reg};
-
-    #[test]
-    fn stack_event_debug_survives_block_reordering() {
-        let raw = HLFunction {
-            ops: vec![
-                Opcode::Call0 {
-                    dst: Reg(0),
-                    fun: RefFun(10),
-                },
-                Opcode::Throw { exc: Reg(0) },
-                Opcode::Throw { exc: Reg(0) },
-                Opcode::Call0 {
-                    dst: Reg(0),
-                    fun: RefFun(11),
-                },
-            ],
-            debug: vec![1, 10, 1, 20, 1, 21, 1, 30],
-            ..HLFunction::default()
-        };
-        let optimized = vec![
-            Opcode::Throw { exc: Reg(0) },
-            Opcode::Throw { exc: Reg(0) },
-            Opcode::Call0 {
-                dst: Reg(0),
-                fun: RefFun(10),
-            },
-            Opcode::Call0 {
-                dst: Reg(0),
-                fun: RefFun(11),
-            },
-        ];
-
-        assert_eq!(
-            optimized_debug(&raw, &optimized),
-            vec![1, 20, 1, 21, 1, 10, 1, 30]
-        );
-    }
-}
-
 /// Where each serialized pc of an optimized body came from: its marker
 /// position and the inline site it sits in, so a frame stopped in inlined
 /// code can name the callee's frames as well as its own.
@@ -571,5 +528,48 @@ impl Cache {
     /// `(optimized, refused)` function counts, for a run summary.
     pub fn counts(&self) -> (usize, usize) {
         (self.optimized, self.refused)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use air::opcodes::{RefFun, Reg};
+
+    #[test]
+    fn stack_event_debug_survives_block_reordering() {
+        let raw = HLFunction {
+            ops: vec![
+                Opcode::Call0 {
+                    dst: Reg(0),
+                    fun: RefFun(10),
+                },
+                Opcode::Throw { exc: Reg(0) },
+                Opcode::Throw { exc: Reg(0) },
+                Opcode::Call0 {
+                    dst: Reg(0),
+                    fun: RefFun(11),
+                },
+            ],
+            debug: vec![1, 10, 1, 20, 1, 21, 1, 30],
+            ..HLFunction::default()
+        };
+        let optimized = vec![
+            Opcode::Throw { exc: Reg(0) },
+            Opcode::Throw { exc: Reg(0) },
+            Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(10),
+            },
+            Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(11),
+            },
+        ];
+
+        assert_eq!(
+            optimized_debug(&raw, &optimized),
+            vec![1, 20, 1, 21, 1, 10, 1, 30]
+        );
     }
 }

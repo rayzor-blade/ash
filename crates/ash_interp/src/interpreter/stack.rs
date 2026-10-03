@@ -473,6 +473,12 @@ impl HLInterpreter {
     pub(super) fn compiled_stack_functions(&self, _frame_hint: *const usize) -> Vec<CompiledSite> {
         const MAX_FRAMES: usize = 256;
         let mut functions: Vec<CompiledSite> = Vec::new();
+        // Every frame this reports is compiled code, so with none compiled
+        // the native walk can only come back empty, at a full unwind per
+        // throw.
+        if !ash_core::jit_map::any() {
+            return functions;
+        }
         let debug = std::env::var_os("ASH_TRACE_WALK").is_some();
 
         #[cfg(unix)]

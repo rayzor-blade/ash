@@ -80,12 +80,22 @@ fn map() -> &'static Mutex<Vec<CodeRange>> {
     M.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// Set by the first [`register`]; never cleared.
+static ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether any compiled code has been registered. Lock-free, so a stack walk
+/// can skip the native frames entirely in a process that never compiled.
+pub fn any() -> bool {
+    ANY.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Record a range. Idempotent for an identical start.
 pub fn register(findex: u32, tier: Tier, kind: CodeKind, start: usize, size: usize) {
     if start == 0 {
         return;
     }
     let mut m = map().lock().unwrap();
+    ANY.store(true, std::sync::atomic::Ordering::Release);
     let at = m.partition_point(|r| r.start < start);
     if let Some(r) = m.get_mut(at) {
         if r.start == start {

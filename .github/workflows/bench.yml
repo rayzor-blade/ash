@@ -342,18 +342,41 @@ jobs:
 
       # The Haxe compiler refuses the HL/C target without the hashlink
       # haxelib, even though the generated code only needs HashLink's C
-      # headers (rayzor's CI learned this the same way).
-      - name: Install hashlink haxelib
+      # headers (rayzor's CI learned this the same way). `--jvm` writes JVM
+      # bytecode but is still the Java target, so it needs hxjava. Without it
+      # haxe fails the BUILD, which would surface as a per-bench FAIL rather
+      # than an honest UNAVAILABLE lane -- hl_bench checks for it.
+      #
+      # Both come from lib.haxe.org, and a sweep that ran while its database
+      # was down published without either row. So the installed libraries are
+      # cached, and each falls back to its git repository.
+      - name: Locate the haxelib repository
+        id: haxelib
         continue-on-error: true
-        run: haxelib install hashlink --always
+        run: |
+          repo=$(haxelib config)
+          echo "dir=${repo%/}" >> "$GITHUB_OUTPUT"
 
-      # `--jvm` writes JVM bytecode but is still the Java target, so it needs
-      # that target's support library. Without it haxe fails the BUILD, which
-      # would surface as a per-bench FAIL rather than an honest UNAVAILABLE
-      # lane -- hl_bench checks for it, and this is what makes the check pass.
-      - name: Install hxjava haxelib
+      - name: Cache haxelibs
+        if: steps.haxelib.outputs.dir != ''
         continue-on-error: true
-        run: haxelib install hxjava --always
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.haxelib.outputs.dir }}/hashlink
+            ${{ steps.haxelib.outputs.dir }}/hxjava
+          key: haxelibs-hashlink-hxjava-haxe-4.3.4-v1
+
+      - name: Install hashlink and hxjava haxelibs
+        continue-on-error: true
+        run: |
+          have() { haxelib path "$1" > /dev/null 2>&1; }
+          have hashlink || haxelib install hashlink --always \
+            || haxelib git hashlink https://github.com/HaxeFoundation/hashlink master other/haxelib --always
+          have hxjava || haxelib install hxjava --always \
+            || haxelib git hxjava https://github.com/HaxeFoundation/hxjava --always
+          have hashlink || echo "::warning::no hashlink haxelib; the HL/C row will be missing"
+          have hxjava || echo "::warning::no hxjava haxelib; the JVM row will be missing"
 
       # Pinned rather than left to whatever the image ships: the JVM row is
       # only comparable across runs if it is the same JVM. Best-effort like

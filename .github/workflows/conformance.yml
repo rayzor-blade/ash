@@ -131,9 +131,12 @@ jobs:
           haxe-version: ${{ env.HAXE_VERSION }}
 
       # The suite pulls utest; the harness installs it too, but doing it here
-      # keeps a haxelib outage out of the middle of a run.
+      # keeps a haxelib outage out of the middle of a run. lib.haxe.org has
+      # been down, so the git repository is the fallback.
       - name: Install utest
-        run: haxelib install utest --always
+        run: |
+          haxelib install utest --always \
+            || haxelib git utest https://github.com/haxe-utest/utest --always
 
       # HDLLs are needed to *load* several suites at all — they declare
       # natives from ssl and fmt even in tests that never call them, and a

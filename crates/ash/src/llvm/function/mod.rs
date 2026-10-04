@@ -1043,6 +1043,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         register_batch(found, "own");
         super::lines::attach_loaded();
+        self.release_module_ir(&promo_module);
         Ok(addr)
     }
 
@@ -1625,7 +1626,18 @@ impl<'ctx> JITModule<'ctx> {
             addr as usize,
             0,
         );
+        self.release_module_ir(&osr_module);
         return Ok(addr as u64);
+    }
+
+    /// Hand a module whose code is loaded back from the engine, so its IR is
+    /// freed when the caller drops it. Only for a module nothing will compile
+    /// into or name again: the engine keeps the loaded object, so its code
+    /// and symbols stay where they are.
+    fn release_module_ir(&self, module: &inkwell::module::Module<'ctx>) {
+        if self.execution_engine.remove_module(module).is_err() {
+            crate::profile::count("llvm modules kept (remove refused)", 1);
+        }
     }
 
     /// Register every compiled body the shared module holds that has not

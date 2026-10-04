@@ -601,6 +601,73 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// Lower queued bodies, at most `budget` of them new, and return what is
+    /// still queued. `strict` stops at the first body that fails to lower or
+    /// verify; otherwise a failed body is left to the tier below.
+    fn lower_pending_up_to(&mut self, mut budget: usize, strict: bool) -> Result<Vec<usize>> {
+        while let Some(index) = self.pending_compilations.pop() {
+            let lowered_already = self
+                .func_cache
+                .get(&index)
+                .is_some_and(|f| f.count_basic_blocks() > 0);
+            if !lowered_already {
+                if budget == 0 {
+                    self.pending_compilations.push(index);
+                    break;
+                }
+                budget -= 1;
+            }
+            let compiled = self.compile_function(index);
+            if !strict {
+                continue;
+            }
+            compiled?;
+            let f = self.func_cache.get(&index).ok_or_else(|| {
+                anyhow!("Pending function {index} missing from cache after compile")
+            })?;
+            if !f.verify(true) {
+                return Err(anyhow!(
+                    "Strict promotion failed: function {index} did not verify (diagnostic above)"
+                ));
+            }
+        }
+        Ok(std::mem::take(&mut self.pending_compilations))
+    }
+
+    /// The shared promotion's lowering: everything queued, or `budget` new
+    /// bodies of it when a cap is set. What is left is called through its
+    /// `functions_ptrs` slot (`define_trampoline`) and promoted on its own
+    /// when it is hot.
+    fn compile_pending_within(&mut self, root: usize, budget: Option<usize>) -> Result<()> {
+        let Some(budget) = budget else {
+            return self.compile_pending_functions_strict();
+        };
+        let rest = self.lower_pending_up_to(budget, true)?;
+        if rest.is_empty() {
+            return Ok(());
+        }
+        if std::env::var_os("ASH_TIER_LOG").is_some() {
+            eprintln!(
+                "[tier] findex={root} shared module full: {} queued bodies called through their slots",
+                rest.len()
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for findex in rest {
+            if !seen.insert(findex) {
+                continue;
+            }
+            if let Some(&f) = self.func_cache.get(&findex)
+                && f.count_basic_blocks() == 0
+                && matches!(self.findexes.get(&findex), Some(FuncPtr::Fun(_)))
+            {
+                self.define_trampoline(findex, f)?;
+            }
+        }
+        self.builder.clear_insertion_position();
+        Ok(())
+    }
+
     fn compile_pending_functions_strict(&mut self) -> Result<()> {
         while let Some(index) = self.pending_compilations.pop() {
             self.compile_function(index)?;
@@ -1074,10 +1141,15 @@ impl<'ctx> JITModule<'ctx> {
             self.add_pending_compilation(findex);
         }
 
+        // The root first, then what is queued, up to the room the cap leaves
+        // and no more than `CALLEE_BODIES_PER_COMPILE`.
+        let budget = Self::promote_module_cap().map(|cap| {
+            cap.saturating_sub(self.shared_module_bodies())
+                .min(CALLEE_BODIES_PER_COMPILE)
+        });
         let lowered = self
-            .compile_pending_functions_strict()
-            .and_then(|()| self.compile_function(findex))
-            .and_then(|()| self.compile_pending_functions_strict());
+            .compile_function(findex)
+            .and_then(|()| self.compile_pending_within(findex, budget));
         if let Err(error) = lowered {
             // A refused body is not an absent one. The emitter stops where it
             // failed and leaves behind blocks with no terminator, which are
@@ -1749,7 +1821,17 @@ impl<'ctx> JITModule<'ctx> {
                     super::air::promotion_wants_full_module(&self.bytecode, raw, self.hot_reload)
                 });
         if wants_callees {
-            self.compile_pending_functions()?;
+            // Bounded as a promotion is: what is left stays a declaration,
+            // which the trampolines below and the binding after the middle
+            // end turn into slot calls or calls to installed code.
+            let rest = self.lower_pending_up_to(CALLEE_BODIES_PER_COMPILE, false)?;
+            if !rest.is_empty() && std::env::var_os("ASH_OSR_LOG").is_some() {
+                eprintln!(
+                    "[osr] findex={} pc={header_pc}: {} queued bodies called through their slots",
+                    source.findex,
+                    rest.len()
+                );
+            }
         } else {
             self.clear_pending_compilations();
         }
@@ -3467,28 +3549,36 @@ impl<'ctx> JITModule<'ctx> {
             })
             .map(|(fi, f)| (*fi, *f))
             .collect();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
         for (findex, f) in pending {
-            f.as_global_value()
-                .set_name(&format!("Fun_{findex}$via_table"));
-            f.set_linkage(inkwell::module::Linkage::Private);
-            let entry = self.context.append_basic_block(f, "entry");
-            self.builder.position_at_end(entry);
-            let slot = self.function_slot_ptr(findex)?;
-            let target = self
-                .builder
-                .build_load(ptr_type, slot, "callee")?
-                .into_pointer_value();
-            let args: Vec<BasicMetadataValueEnum<'ctx>> =
-                f.get_param_iter().map(|p| p.into()).collect();
-            match self.build_stub_guarded_indirect_call(f.get_type(), target, &args, "tramp")? {
-                Some(v) => self.builder.build_return(Some(&v))?,
-                None => self.builder.build_return(None)?,
-            };
-            self.func_cache.remove(&findex);
-            crate::profile::count("table trampolines", 1);
+            self.define_trampoline(findex, f)?;
         }
         self.builder.clear_insertion_position();
+        Ok(())
+    }
+
+    /// Give the declaration `f` of `findex` a private body that calls
+    /// through its `functions_ptrs` slot, stub-guarded, and take it out of
+    /// `func_cache`; see `define_table_trampolines`.
+    fn define_trampoline(&mut self, findex: usize, f: FunctionValue<'ctx>) -> Result<()> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        f.as_global_value()
+            .set_name(&format!("Fun_{findex}$via_table"));
+        f.set_linkage(inkwell::module::Linkage::Private);
+        let entry = self.context.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        let slot = self.function_slot_ptr(findex)?;
+        let target = self
+            .builder
+            .build_load(ptr_type, slot, "callee")?
+            .into_pointer_value();
+        let args: Vec<BasicMetadataValueEnum<'ctx>> =
+            f.get_param_iter().map(|p| p.into()).collect();
+        match self.build_stub_guarded_indirect_call(f.get_type(), target, &args, "tramp")? {
+            Some(v) => self.builder.build_return(Some(&v))?,
+            None => self.builder.build_return(None)?,
+        };
+        self.func_cache.remove(&findex);
+        crate::profile::count("table trampolines", 1);
         Ok(())
     }
 
@@ -4087,6 +4177,12 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 }
+
+/// How many callee bodies one promotion or OSR entry lowers beside its root.
+/// Lowering follows calls, closures and devirtualised sites transitively, and
+/// unbounded it took hundreds of bodies into one compile; the bodies the
+/// inliner can use are the root's near callees.
+const CALLEE_BODIES_PER_COMPILE: usize = 64;
 
 /// Report a promotion whose middle end ran longer than `ASH_PROMOTE_SLOW_MS`
 /// (default 1000; set 0 to report every promotion).

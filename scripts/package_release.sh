@@ -96,6 +96,26 @@ else
   echo "warning: $STD_LIB not found; installed ash will extract its runtime on every run" >&2
 fi
 
+# The static runtime, which `ash --build` links a program that loads no HDLL
+# against. It is not embedded in the binary, so without it an installed ash
+# can build nothing. Debug info is most of the archive and is stripped.
+STATIC_SRC=""
+for c in target/release/libash_std.a target/*/release/libash_std.a; do
+  if [[ -f "$c" ]]; then STATIC_SRC="$c"; break; fi
+done
+if [[ -z "$STATIC_SRC" ]]; then
+  echo "error: libash_std.a not built; ash --build would fail from this archive" >&2
+  exit 1
+fi
+cp "$STATIC_SRC" "$DIST/libash_std.a"
+chmod u+w "$DIST/libash_std.a"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  strip -S "$DIST/libash_std.a"
+else
+  strip --strip-debug "$DIST/libash_std.a"
+fi
+echo "bundled static runtime: $STATIC_SRC"
+
 if [[ "$(uname -s)" == "Darwin" ]]; then
   # Bundle every non-system dylib the binary references. The runtime dylib is
   # walked too: it is a separate Mach-O with its own dependency list, and

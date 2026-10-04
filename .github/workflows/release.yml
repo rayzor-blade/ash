@@ -409,9 +409,16 @@ jobs:
             fi
           done
           
+          # The static runtime `ash --build` links a program that loads no
+          # HDLL against; it is not embedded in the binary. Into the archive
+          # only: every other *.lib left in dist/ is published as an asset.
+          test -s target/release/ash_std.lib
+          cp target/release/ash_std.lib dist/
+
           # Compress inside the dist directory
           cd dist
-          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads
+          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe ash_std.lib simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads
+          rm ash_std.lib
           cp simd.hdll simd-${{ matrix.target }}.hdll
           cp ../target/release/ash_hdll_future.dll ash_future-${{ matrix.target }}.hdll
           ../llvmenv/Library/bin/llvm-lib.exe /def:../crates/ash_hdll_future/ash_future.def /machine:x64 /out:ash_future-${{ matrix.target }}.lib

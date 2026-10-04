@@ -1,6 +1,17 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    // `ASH_VERSION` is set by the release workflow: the tag for a versioned
+    // release, a nightly label otherwise. A local build reports the crate's
+    // own version.
+    println!("cargo:rerun-if-env-changed=ASH_VERSION");
+    let version = std::env::var("ASH_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim_start_matches('v').to_string())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=ASH_BUILD_VERSION={version}");
+
     // HDLLs are ordinary shared objects with undefined HashLink ABI symbols
     // such as `hl_blocking`.  ash provides those symbols from the statically
     // linked ash_std compatibility layer, but ELF executables do not place

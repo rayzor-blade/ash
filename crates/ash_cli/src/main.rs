@@ -56,11 +56,12 @@ enum Command {
 }
 
 /// The version, and which LLVM backends the build registers: the supported
-/// set, or every one for a `-dev` build.
+/// set, or every one for a `-dev` build. A release build is named by its tag
+/// (`build.rs`), a local one by the crate version.
 #[cfg(feature = "all-targets")]
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (all LLVM targets)");
+const VERSION: &str = concat!(env!("ASH_BUILD_VERSION"), " (all LLVM targets)");
 #[cfg(not(feature = "all-targets"))]
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = env!("ASH_BUILD_VERSION");
 
 #[derive(Parser)]
 #[command(

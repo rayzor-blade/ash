@@ -1,9 +1,10 @@
 name: release
 
 # Prebuilt binaries for the install.sh path. A pushed v* tag publishes a
-# versioned release; the nightly schedule and a manual dispatch both rebuild
-# the rolling `nightly` release (kept marked latest so
-# `releases/latest/download/...` always resolves).
+# versioned release, marked latest, which is what install.sh downloads; the
+# nightly schedule and a manual dispatch both rebuild the rolling `nightly`
+# release, which install.sh falls back to only for an asset the latest
+# release lacks.
 # One self-contained tarball per platform: the binary embeds ash_std and
 # links LLVM statically, and simd.hdll serves stock HashLink programs. On
 # macOS the few remaining Homebrew dylibs are bundled beside them (see
@@ -165,6 +166,11 @@ jobs:
       # edge between the packages.
       - name: Build ash (release)
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export ASH_VERSION="$GITHUB_REF_NAME"
+          else
+            export ASH_VERSION="nightly-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
           cargo build --release -p ash_std
           cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           cargo build --release -p ash_hdll_simd
@@ -333,6 +339,11 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export ASH_VERSION="$GITHUB_REF_NAME"
+          else
+            export ASH_VERSION="nightly-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
           cargo build --release -p ash_std
           cargo build --release -p ash ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           cargo build --release -p ash_hdll_simd
@@ -497,4 +508,6 @@ jobs:
             dist/*.lib
             dist/*.zip
           prerelease: false
-          make_latest: true
+          # Never latest: install.sh downloads the latest release, and a
+          # nightly marked latest replaced the versioned one every morning.
+          make_latest: false

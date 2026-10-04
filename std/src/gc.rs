@@ -120,7 +120,12 @@ fn run_pending_finalizers() {
 /// Release one level of the GC lock, and drain the finalizer queue if that
 /// freed it. Every release goes through here so the drain cannot be missed.
 fn gc_lock_release() {
-    if GC_LOCK.release() && PENDING_FINALIZER_COUNT.load(Ordering::Relaxed) != 0 {
+    // Finalizers run on a mutator: the idle collector's thread leaves them
+    // queued, since an hdll's finalizer may expect the program's own thread.
+    if GC_LOCK.release()
+        && PENDING_FINALIZER_COUNT.load(Ordering::Relaxed) != 0
+        && current_mutator_registered()
+    {
         run_pending_finalizers();
     }
 }
@@ -513,6 +518,13 @@ struct MutatorRecord {
     polls_at_stop: u64,
     /// Where this thread last entered a place it could wait. See `mark_site`.
     site: usize,
+    /// Since when this thread has been idle: blocking, with only short turns
+    /// between waits. What the idle collector waits on; see `world_idle`.
+    idle_since: Option<Instant>,
+    /// How long it ran between waits since `idle_since`.
+    ran: Duration,
+    /// When it last left a blocking wait, while it is running.
+    woke_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -574,6 +586,9 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
             polls: TLAB.with(|t| &t.polls as *const AtomicU64 as usize),
             polls_at_stop: 0,
             site: TLAB.with(|t| &t.site as *const AtomicU64 as usize),
+            idle_since: None,
+            ran: Duration::ZERO,
+            woke_at: None,
         });
     }
     TLAB.with(|t| t.registered.set(true));
@@ -766,10 +781,26 @@ pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
 
     if blocking {
         let record = &mut world.mutators[index];
+        if record.blocking_depth == 0 {
+            // A UI loop waits in short slices with a brief turn between
+            // them, so idleness spans waits: it ends only when the turns
+            // add up to more than `IDLE_DUTY` of the time since it began.
+            let now = Instant::now();
+            if let Some(woke) = record.woke_at.take() {
+                record.ran += now - woke;
+            }
+            let since = *record.idle_since.get_or_insert(now);
+            if record.ran.as_secs_f64() > (now - since).as_secs_f64() * IDLE_DUTY {
+                record.idle_since = Some(now);
+                record.ran = Duration::ZERO;
+            }
+        }
         record.blocking_depth = record.blocking_depth.saturating_add(1);
         record.stopped_sp = sp;
         record.saved_regs = saved_regs;
         MUTATOR_WORLD.changed.notify_all();
+        drop(world);
+        start_idle_collector();
         return true;
     }
     if world.mutators[index].blocking_depth == 0 {
@@ -779,6 +810,7 @@ pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
     if world.mutators[index].blocking_depth != 0 {
         return true;
     }
+    world.mutators[index].woke_at = Some(Instant::now());
 
     // A thread leaving its native blocking section while collection is in
     // progress joins the parked mutators before it may execute HL again.
@@ -1915,7 +1947,7 @@ fn quarantine_freed() -> bool {
 /// caller immediately before the call, printed by the per-collection trace
 /// lines. Single mutator + GC lock make a plain static sound here.
 static COLLECT_ORIGIN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-const ORIGIN_NAMES: [&str; 8] = [
+const ORIGIN_NAMES: [&str; 9] = [
     "?",
     "snapshot-done",    // scan_roots_done honoring a deferred trigger
     "tlab-safepoint",   // tlab_refill_then_alloc's maybe_collect_at_safepoint
@@ -1924,6 +1956,7 @@ const ORIGIN_NAMES: [&str; 8] = [
     "large-exhaustion", // allocate_large fallback
     "explicit",         // Gc.major / hlp_gc_major
     "compiled-poll",    // collect_at_compiled_poll honoring a deferred trigger
+    "idle",             // idle_collector, every mutator blocked
 ];
 fn set_collect_origin(o: u8) {
     COLLECT_ORIGIN.store(o, Ordering::Relaxed);
@@ -4349,13 +4382,13 @@ impl ImmixAllocator {
             return;
         }
         // A minor needs an old generation to stop at: at least one earlier
-        // collection has protected blocks. Exhaustion and an explicit
-        // `Gc.major` want old garbage back, so they are majors.
+        // collection has protected blocks. Exhaustion, an explicit `Gc.major`
+        // and an idle collection want old garbage back, so they are majors.
         let origin = COLLECT_ORIGIN.load(Ordering::Relaxed);
         let minor = generational()
             && PROTECT.get().is_some()
             && self.heap.since_major < major_every()
-            && !matches!(origin, 4..=6);
+            && !matches!(origin, 4..=6 | 8);
         if minor {
             self.heap.since_major += 1;
         } else {
@@ -4367,7 +4400,7 @@ impl ImmixAllocator {
         }
         if trace_freed() || debug_roots() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
-            let origin = ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];
+            let origin = ORIGIN_NAMES[(COLLECT_ORIGIN.load(Ordering::Relaxed) as usize).min(ORIGIN_NAMES.len() - 1)];
             let base = self.heap.memory.as_ptr() as usize;
             eprintln!(
                 "[gc-collect] #{seq} origin={origin} heap={base:#x}..{:#x} ranges={} pending={}",
@@ -4539,12 +4572,13 @@ impl ImmixAllocator {
         // report that could drift from this one.
         if gc_stats_enabled() || gc_flag(GC_FLAG_PROFILE) {
             eprintln!(
-                "[gc] #{}{} refill={} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
+                "[gc] #{}{} t={:.2}s refill={} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
                  next-trigger={} (x{:.1}) free={} blocks",
                 n,
                 if minor { " minor" } else { "" },
+                GC_EPOCH.elapsed().as_secs_f64(),
                 REFILLS.load(Ordering::Relaxed),
-                ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize],
+                ORIGIN_NAMES[(COLLECT_ORIGIN.load(Ordering::Relaxed) as usize).min(ORIGIN_NAMES.len() - 1)],
                 pause_ns as f64 / 1e6,
                 freed_blocks,
                 live_blocks,
@@ -5945,7 +5979,10 @@ impl ImmixAllocator {
         // per cycle — still 17.3% of mandelbrot after the first attempt at
         // a threshold. Idle processes deflate on their heartbeat
         // collections, which is what the mechanism was for.
-        let quiet = self.heap.last_collect.elapsed() >= HEARTBEAT;
+        // An idle collection is quiet by construction: it runs only when
+        // every mutator has been waiting.
+        let quiet = self.heap.last_collect.elapsed() >= HEARTBEAT
+            || COLLECT_ORIGIN.load(Ordering::Relaxed) == 8;
         if quiet && !freed.is_empty() {
             let resident_target = 16;
             let surplus = self.heap.free_blocks.len().saturating_sub(resident_target);
@@ -6554,6 +6591,133 @@ pub(crate) unsafe extern "C" fn gc_major() {
     let mut gc = gc_locked_init();
     set_collect_origin(6); // "explicit" — see ORIGIN_NAMES
     gc.collect_garbage();
+}
+
+// ── Idle collection ─────────────────────────────────────────────────────────
+//
+// Every trigger above runs on an allocation, so garbage made in a burst that
+// stops short of the threshold stays until something allocates again: a UI
+// that animates for a second and then waits for input keeps it for as long
+// as it waits. A thread waiting in a native that declared it (`hl_blocking`)
+// is already safe to collect around, so a background thread collects once
+// every mutator has been waiting a while and there is garbage worth it.
+
+/// How long every mutator must have been idle before an idle collection.
+const IDLE_DELAY: Duration = Duration::from_millis(300);
+/// The share of that time a mutator may spend running between waits and
+/// still be idle: an idle UI waking every 100ms for a millisecond is 1%, a
+/// 120Hz animation with millisecond frames 12%.
+const IDLE_DUTY: f64 = 0.05;
+/// How often the idle collector looks.
+const IDLE_TICK: Duration = Duration::from_millis(250);
+/// Garbage worth an idle collection. Fixed rather than the trigger's floor,
+/// which `ASH_GC_TRIGGER_MB` raises to make the busy program collect less.
+const IDLE_MIN_BYTES: usize = 8 * 1024 * 1024;
+
+/// `ASH_GC_IDLE=0` turns idle collection off; safe either way.
+fn idle_collection_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        !cfg!(target_family = "wasm")
+            && std::env::var("ASH_GC_IDLE")
+                .map(|v| v != "0")
+                .unwrap_or(true)
+    })
+}
+
+/// Start the idle collector once, the first time a mutator blocks.
+fn start_idle_collector() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if !idle_collection_enabled() {
+        return;
+    }
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("ash-gc-idle".into())
+            .spawn(idle_collector);
+    });
+}
+
+/// Every mutator has been idle for at least `IDLE_DELAY`, counting a turn
+/// it is in the middle of.
+fn world_idle() -> bool {
+    idle_holdouts().is_some_and(|h| h.is_empty())
+}
+
+/// The mutators keeping the world from being idle, described; `None` when
+/// there are no mutators.
+fn idle_holdouts() -> Option<Vec<String>> {
+    let world = MUTATOR_WORLD.state.lock().unwrap();
+    if world.mutators.is_empty() {
+        return None;
+    }
+    let now = Instant::now();
+    Some(
+        world
+            .mutators
+            .iter()
+            .filter_map(|m| {
+                let who = format!("{} {:#x}", m.role, m.thread);
+                let Some(since) = m.idle_since else {
+                    return Some(format!("{who}: never blocked"));
+                };
+                let mut ran = m.ran;
+                if m.blocking_depth == 0 {
+                    match m.woke_at {
+                        Some(woke) => ran += now - woke,
+                        None => return Some(format!("{who}: running")),
+                    }
+                }
+                let span = now - since;
+                let busy = ran.as_secs_f64() / span.as_secs_f64().max(1e-9);
+                (span < IDLE_DELAY || busy > IDLE_DUTY).then(|| {
+                    format!(
+                        "{who}: idle {:.0}ms, busy {:.0}%",
+                        span.as_secs_f64() * 1e3,
+                        busy * 100.0
+                    )
+                })
+            })
+            .collect(),
+    )
+}
+
+fn idle_collector() {
+    let mut reported = Instant::now();
+    loop {
+        std::thread::sleep(IDLE_TICK);
+        if !world_idle() {
+            // Under ASH_GC_STATS, say what an idle collection is waiting on
+            // while there is garbage for it, at most every two seconds.
+            if gc_stats_enabled() && reported.elapsed() >= Duration::from_secs(2) {
+                let pressure = {
+                    let gc = gc_locked_init();
+                    gc.heap.bytes_since_gc + gc.heap.external_since_gc
+                };
+                if pressure >= IDLE_MIN_BYTES
+                    && let Some(holdouts) = idle_holdouts()
+                {
+                    reported = Instant::now();
+                    eprintln!(
+                        "[gc-idle] t={:.2}s {} pending, waiting on: {}",
+                        GC_EPOCH.elapsed().as_secs_f64(),
+                        fmt_mb(pressure as u64),
+                        holdouts.join("; ")
+                    );
+                }
+            }
+            continue;
+        }
+        let mut gc = gc_locked_init();
+        let pressure = gc.heap.bytes_since_gc + gc.heap.external_since_gc;
+        let worth = pressure >= IDLE_MIN_BYTES
+            || (pressure > 0 && gc.heap.last_collect.elapsed() >= HEARTBEAT);
+        if !worth || !GC_ENABLED.load(Ordering::Relaxed) || !world_idle() {
+            continue;
+        }
+        set_collect_origin(8); // "idle" — see ORIGIN_NAMES
+        gc.collect_garbage();
+    }
 }
 
 /// Upstream hl_gc_stats (gc.c): three counters through out-params, read by

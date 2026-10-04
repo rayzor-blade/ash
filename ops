@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1791103744,"nonce":"qbcyyFRFG/Qc7+UaamjqpUlkNp8=","message":"Fixed in 9b848b4ec960856ba7b9f8a3e157304ba8929f50: chimpmonk's build mode survives 5/5 (was 3/3 aborts); hybrid_worker_placement and llvm_worker_pool pass.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1791103744,"nonce":"X/9MIXLDsUfI9yPGDdpwyrdKiwQ=","status":2}]}

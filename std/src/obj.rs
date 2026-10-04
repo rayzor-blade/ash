@@ -140,7 +140,7 @@ unsafe fn alloc_virtual(t: *mut hl::hl_type) -> Option<ptr::NonNull<hl::vvirtual
             + (nfields as usize * std::mem::size_of::<*mut std::os::raw::c_void>())
             + (data_size as usize);
 
-        let ptr = crate::rt::alloc_locked(total_size)?;
+        let ptr = crate::rt::gc_alloc(total_size)?;
         let v = ptr.as_ptr() as *mut hl::vvirtual;
 
         // Initialize vvirtual struct

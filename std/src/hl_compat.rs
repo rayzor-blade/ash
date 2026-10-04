@@ -280,9 +280,9 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
             // into word zero on return.
             MEM_KIND_FINALIZER => crate::rt::alloc_finalizable(size as usize) as *mut u8,
             MEM_KIND_NOPTR => {
-                crate::rt::alloc_locked_noptr(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr())
+                crate::rt::gc_alloc_noptr(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr())
             }
-            _ => crate::rt::alloc_locked(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr()),
+            _ => crate::rt::gc_alloc(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr()),
         };
         if p.is_null() {
             return ptr::null_mut();
@@ -602,7 +602,7 @@ pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
         let mut len: i32 = 0;
         let content = crate::buffer::hlp_buffer_content(buf as *mut hl_buffer, &mut len);
         if !content.is_null() {
-            let d = crate::rt::alloc_locked(std::mem::size_of::<vdynamic>())
+            let d = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("alloc")
                 .as_ptr() as *mut vdynamic;
             (*d).t = crate::types::hlt_bytes();

@@ -16,7 +16,7 @@ use crate::types::{TSTR, hl_aptr, hl_is_ptr, hlp_type_size};
 pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     unsafe {
         // Allocate memory for the hl_buffer struct
-        let buffer_ptr = match crate::rt::alloc_locked(std::mem::size_of::<hl_buffer>()) {
+        let buffer_ptr = match crate::rt::gc_alloc(std::mem::size_of::<hl_buffer>()) {
             Some(ptr) => ptr.as_ptr() as *mut hl_buffer,
             None => return std::ptr::null_mut(), // Return null if allocation fails
         };
@@ -52,13 +52,13 @@ pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, l
         let size = if len < (*b).blen { (*b).blen } else { len };
 
         // Allocate memory for the _stringitem struct (NOT the pointer typedef)
-        let it: stringitem = match crate::rt::alloc_locked(std::mem::size_of::<_stringitem>()) {
+        let it: stringitem = match crate::rt::gc_alloc(std::mem::size_of::<_stringitem>()) {
             Some(ptr) => ptr.as_ptr() as stringitem,
             None => return, // Return if allocation fails
         };
 
         // Allocate memory for the string data
-        let str_ptr = match crate::rt::alloc_locked((size << 1) as usize) {
+        let str_ptr = match crate::rt::gc_alloc((size << 1) as usize) {
             Some(ptr) => ptr.as_ptr() as *mut uchar,
             None => return, // Return if allocation fails
         };
@@ -210,7 +210,7 @@ unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
 pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) -> *mut hl::uchar {
     unsafe {
         // Allocate memory for the buffer content
-        let buf = match crate::rt::alloc_locked((((*b).totlen + 1) << 1) as usize) {
+        let buf = match crate::rt::gc_alloc((((*b).totlen + 1) << 1) as usize) {
             Some(ptr) => ptr.as_ptr() as *mut hl::uchar,
             None => return ptr::null_mut(), // Return null if allocation fails
         };
@@ -782,7 +782,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                     indexes.as_mut_ptr()
                 } else {
                     let size = ((*o).nfields as usize * std::mem::size_of::<i32>()) as usize;
-                    match crate::rt::alloc_locked(size) {
+                    match crate::rt::gc_alloc(size) {
                         Some(ptr) => ptr.as_ptr() as *mut i32,
                         None => return, // Handle allocation failure
                     }

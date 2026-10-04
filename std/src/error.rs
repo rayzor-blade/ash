@@ -1738,7 +1738,7 @@ thread_local! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
     unsafe {
-        let room = crate::rt::alloc_locked(mem::size_of::<hl::vdynamic>());
+        let room = crate::rt::gc_alloc(mem::size_of::<hl::vdynamic>());
         let d = match room {
             Some(value) => value.as_ptr() as *mut vdynamic,
             None => ERROR_RESERVE.with(|reserve| reserve.get()),

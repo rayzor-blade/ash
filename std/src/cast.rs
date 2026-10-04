@@ -382,10 +382,6 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         let mut t = t;
         let mut data = data;
 
-        // Held for the whole cast, as it always was; the heap query below is the
-        // only thing here that reaches the allocator.
-        let _gc = crate::gc::gc_guard();
-
         if (*t).kind == hl_type_kind_HDYN || (*t).kind == hl_type_kind_HNULL {
             let v = *(data as *mut *mut vdynamic);
             if v.is_null() {

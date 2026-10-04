@@ -717,7 +717,7 @@ pub unsafe extern "C" fn hlp_alloc_record_closure(
         {
             return ptr::null_mut();
         }
-        let c_ptr = crate::rt::alloc_locked(std::mem::size_of::<vclosure>())
+        let c_ptr = crate::rt::gc_alloc(std::mem::size_of::<vclosure>())
             .unwrap_or_else(|| crate::rt::out_of_memory("a closure"))
             .as_ptr() as *mut vclosure;
         ptr::write(
@@ -1132,7 +1132,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
                 _ => t,
             }
         };
-        let c_ptr = crate::rt::alloc_locked(std::mem::size_of::<vclosure>())
+        let c_ptr = crate::rt::gc_alloc(std::mem::size_of::<vclosure>())
             .unwrap_or_else(|| crate::rt::out_of_memory("a closure"))
             .as_ptr() as *mut vclosure;
 

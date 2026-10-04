@@ -8,7 +8,7 @@ use crate::hl;
 
 fn allocate_rnd() -> Option<NonNull<hl::rnd>> {
     let rnd_size = mem::size_of::<hl::rnd>();
-    let rnd_ptr = crate::rt::alloc_locked(rnd_size)?;
+    let rnd_ptr = crate::rt::gc_alloc(rnd_size)?;
 
     // Initialize the rnd struct
     unsafe {

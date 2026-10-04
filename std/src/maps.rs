@@ -10,7 +10,7 @@ use crate::hl::{self, hl_hb_map};
 
 fn allocate_map(initial_capacity: usize) -> Option<NonNull<hl::hl_hb_map>> {
     let map_size = mem::size_of::<hl::hl_hb_map>();
-    let map_ptr = crate::rt::alloc_locked(map_size)?;
+    let map_ptr = crate::rt::gc_alloc(map_size)?;
 
     // Initialize the map struct to zero first
     unsafe {
@@ -25,10 +25,10 @@ fn allocate_map(initial_capacity: usize) -> Option<NonNull<hl::hl_hb_map>> {
             let entries_size = initial_capacity * mem::size_of::<hl::hl_hb_entry>();
             let values_size = initial_capacity * mem::size_of::<hl::hl_hb_value>();
 
-            let cells_ptr = crate::rt::alloc_locked(cells_size)?;
-            let nexts_ptr = crate::rt::alloc_locked(nexts_size)?;
-            let entries_ptr = crate::rt::alloc_locked(entries_size)?;
-            let values_ptr = crate::rt::alloc_locked(values_size)?;
+            let cells_ptr = crate::rt::gc_alloc(cells_size)?;
+            let nexts_ptr = crate::rt::gc_alloc(nexts_size)?;
+            let entries_ptr = crate::rt::gc_alloc(entries_size)?;
+            let values_ptr = crate::rt::gc_alloc(values_size)?;
 
             map.cells = cells_ptr.as_ptr() as *mut c_void;
             map.nexts = nexts_ptr.as_ptr() as *mut c_void;
@@ -176,7 +176,7 @@ unsafe fn hl_freelist_init(f: *mut hl::hl_free_list) {
 unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
     unsafe {
         let new_buckets =
-            crate::rt::alloc_locked(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
+            crate::rt::gc_alloc(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut hl::hl_free_bucket;
 
@@ -399,17 +399,17 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
             mem::size_of::<i32>()
         };
         (*m).entries =
-            crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
+            crate::rt::gc_alloc(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut hl::hl_hb_entry;
-        (*m).values = crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_value>())
+        (*m).values = crate::rt::gc_alloc(nentries as usize * mem::size_of::<hl::hl_hb_value>())
             .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
             .as_ptr() as *mut hl::hl_hb_value;
         (*m).maxentries = nentries;
 
         if old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) {
             // simply expand
-            (*m).nexts = crate::rt::alloc_locked(nentries as usize * ksize)
+            (*m).nexts = crate::rt::gc_alloc(nentries as usize * ksize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut c_void;
             ptr::copy_nonoverlapping(old.entries, (*m).entries, old.maxentries as usize);
@@ -427,7 +427,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
             );
         } else {
             // expand and remap
-            (*m).cells = crate::rt::alloc_locked((ncells + nentries) as usize * ksize)
+            (*m).cells = crate::rt::gc_alloc((ncells + nentries) as usize * ksize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut c_void;
             (*m).nexts = (*m).cells.add(ncells as usize * ksize);

@@ -329,10 +329,44 @@ pub(crate) unsafe extern "C" fn is_worker_lane() -> bool {
 /// The registered interpreter re-entry runner, if any. Used by native code
 /// (e.g. virtual method dispatch fallback) that encounters a stub-sentinel
 /// function pointer it must not call directly.
+///
+/// A worker lane gets [`worker_closure_runner`] instead: the interpreter is
+/// one instance, on the main scheduler, and a worker running it would share
+/// its frame stack with every other thread in it.
 pub(crate) unsafe fn closure_runner() -> Option<ClosureRunner> {
     unsafe {
+        if is_worker_lane() {
+            return Some(worker_closure_runner);
+        }
         let runner = CLOSURE_RUNNER.load(Ordering::Acquire);
         (runner != 0).then(|| std::mem::transmute::<usize, ClosureRunner>(runner))
+    }
+}
+
+/// Run a closure on a worker lane, compiling its function first if it is
+/// not compiled yet, the way a worker's root closure is in `thread_create`.
+unsafe extern "C" fn worker_closure_runner(
+    c: *mut vclosure,
+    args: *mut *mut vdynamic,
+    nargs: i32,
+) -> *mut vdynamic {
+    unsafe {
+        let fun = if c.is_null() || (*c).hasValue == 2 {
+            0
+        } else {
+            (*c).fun as usize
+        };
+        if !is_stub_sentinel(fun) {
+            return hlp_jit_closure_runner(c, args, nargs);
+        }
+        let resolved = resolve_thread_root_sentinel(fun);
+        if resolved.is_null() {
+            crate::error::hlp_error(crate::strings::str_to_uchar_ptr(
+                "a worker thread reached a function that could not be compiled",
+            ));
+        }
+        let mut compiled = crate::types::vclosure_new((*c).t, resolved, (*c).hasValue, (*c).value);
+        hlp_jit_closure_runner(&mut compiled, args, nargs)
     }
 }
 

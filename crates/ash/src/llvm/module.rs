@@ -58,7 +58,7 @@ pub struct JITModule<'ctx> {
     pub(crate) module: Module<'ctx>,
     pub(crate) builder: Builder<'ctx>,
     pub(crate) execution_engine: ExecutionEngine<'ctx>,
-    pub(crate) bytecode: DecodedBytecode,
+    pub(crate) bytecode: std::sync::Arc<DecodedBytecode>,
     pub(crate) types_: Vec<HLType>,
     /// Which classes the program allocates, for the ahead-of-time
     /// devirtualisation guess; built on first use.
@@ -116,6 +116,9 @@ pub struct JITModule<'ctx> {
     pub(crate) aot_shared_runtime: bool,
     pub(crate) type_info_globals: HashMap<usize, GlobalValue<'ctx>>,
     pub(crate) findexes: HashMap<usize, FuncPtr>,
+    /// Symbol names for bytecode functions the type table binds to a field
+    /// or proto, by findex; see `symbol_name`.
+    pub(crate) function_names: HashMap<usize, String>,
     pub(crate) func_types: Vec<*mut hl_type>,
     pub(crate) func_cache: HashMap<usize, FunctionValue<'ctx>>,
     /// Functions the middle end has already optimized. `run_passes` is a
@@ -446,7 +449,7 @@ impl<'ctx> JITModule<'ctx> {
             module,
             builder: context.create_builder(),
             execution_engine,
-            bytecode,
+            bytecode: std::sync::Arc::new(bytecode),
             type_cache: HashMap::new(),
             initialized_type_cache: HashMap::new(),
             name_to_findex: None,
@@ -463,6 +466,7 @@ impl<'ctx> JITModule<'ctx> {
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
             findexes: HashMap::new(),
+            function_names: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),
             native_function_resolver,
@@ -831,11 +835,12 @@ impl<'ctx> JITModule<'ctx> {
     /// cheap -- var-ints, UTF-16 conversion and a `__hlp_hash_gen` for every
     /// field and proto name -- and the interpreter has always held a decoded
     /// copy by the time it pre-warms, so this used to parse the same file a
-    /// second time. Cloning it instead is a memcpy.
+    /// second time. The module shares it rather than copying it: every
+    /// function's opcodes, once per module.
     pub fn new_with_shared_runtime(
         context: &'ctx Context,
         path: &Path,
-        bytecode: &DecodedBytecode,
+        bytecode: std::sync::Arc<DecodedBytecode>,
         shared: SharedRuntimeHandles,
     ) -> Self {
         Self::new_for_tiered(context, path, bytecode, shared)
@@ -865,7 +870,7 @@ impl<'ctx> JITModule<'ctx> {
     fn new_for_tiered(
         context: &'ctx Context,
         path: &Path,
-        bytecode: &DecodedBytecode,
+        bytecode: std::sync::Arc<DecodedBytecode>,
         shared: SharedRuntimeHandles,
     ) -> Self {
         let timing = timing_enabled();
@@ -873,10 +878,6 @@ impl<'ctx> JITModule<'ctx> {
         // Process-global setup is NOT done here. It is `prepare_process_globals`,
         // which the host calls on the main thread before this runs -- see that
         // function for why the split exists.
-        let bytecode = bytecode.clone();
-        phase_timer!(timing, "tiered clone", t);
-        t = std::time::Instant::now();
-
         link_in_mcjit();
         let llvm_module = context.create_module("Hashlink");
         let execution_engine =
@@ -921,6 +922,7 @@ impl<'ctx> JITModule<'ctx> {
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,
             findexes: HashMap::new(),
+            function_names: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),
             native_function_resolver,
@@ -1077,9 +1079,8 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         // Register bytecode functions
-        for fun in &self.bytecode.functions {
-            self.findexes
-                .insert(fun.findex as usize, FuncPtr::Fun(fun.clone()));
+        for (i, fun) in self.bytecode.functions.iter().enumerate() {
+            self.findexes.insert(fun.findex as usize, FuncPtr::Fun(i));
         }
 
         // Register native functions
@@ -1276,7 +1277,8 @@ impl<'ctx> JITModule<'ctx> {
         let natives = self.bytecode.natives.clone();
         let native_len = natives.len();
 
-        let funs = self.bytecode.functions.clone();
+        let bytecode = std::sync::Arc::clone(&self.bytecode);
+        let funs = &bytecode.functions;
         let funs_len = funs.len();
 
         self.func_types = vec![std::ptr::null_mut(); funs_len + native_len];
@@ -1293,7 +1295,7 @@ impl<'ctx> JITModule<'ctx> {
 
         for i in 0..funs_len {
             let findex = (&funs[i]).findex as usize;
-            self.findexes.insert(findex, FuncPtr::Fun(funs[i].clone()));
+            self.findexes.insert(findex, FuncPtr::Fun(i));
             // Clone the one small HLTypeFun, not the entire type table. This
             // sat inside the per-function loop, so it was O(functions x types)
             // deep clones; perf put HLType/HLTypeObj/HLTypeFun::clone and the
@@ -1396,11 +1398,8 @@ impl<'ctx> JITModule<'ctx> {
                     let global_value_index = obj.global_value.wrapping_sub(1) as usize;
                     for proto in &obj.proto {
                         let pfindex = proto.findex as usize;
-                        if let Some(f) = self.findexes.get_mut(&pfindex) {
-                            match f {
-                                FuncPtr::Fun(fun) => fun.field_name = Some(proto.name.clone()),
-                                _ => {}
-                            }
+                        if let Some(FuncPtr::Fun(_)) = self.findexes.get(&pfindex) {
+                            self.function_names.insert(pfindex, proto.name.clone());
                         }
                     }
                     let len = (obj.bindings.len() / 2) as i32;
@@ -1433,13 +1432,8 @@ impl<'ctx> JITModule<'ctx> {
 
                                 match (*ff.t).kind {
                                     hl_type_kind_HFUN | hl_type_kind_HDYN => {
-                                        if let Some(f) = self.findexes.get_mut(&mid) {
-                                            match f {
-                                                FuncPtr::Fun(fun) => {
-                                                    fun.field_name = Some(name.to_string())
-                                                }
-                                                _ => {}
-                                            }
+                                        if let Some(FuncPtr::Fun(_)) = self.findexes.get(&mid) {
+                                            self.function_names.insert(mid, name.to_string());
                                         }
                                     }
                                     _ => {}
@@ -1518,18 +1512,15 @@ impl<'ctx> JITModule<'ctx> {
     /// include AIR V2 lowering and LLVM IR construction for the whole entry
     /// function while appearing to measure only table setup.
     fn compile_entrypoint(&mut self) -> Result<()> {
-        let mut main_obj = HLTypeObj::default();
-        if let FuncPtr::Fun(entry_function) = self
+        let index = self.bytecode.entrypoint as usize;
+        if let FuncPtr::Fun(_) = self
             .findexes
-            .get_mut(&(self.bytecode.entrypoint as usize))
+            .get(&index)
             .filter(|f| matches!(**f, FuncPtr::Fun(_)))
             .expect("Expected to get entrypoint function")
         {
-            main_obj.name = "".to_owned();
-            entry_function.obj = Some(main_obj);
-            entry_function.field_name = Some(String::from("init"));
+            self.function_names.insert(index, String::from("init"));
 
-            let index = self.bytecode.entrypoint as usize;
             let (_, is_pending) = self.get_or_create_function_value(index)?;
             if is_pending {
                 self.compile_function(index)?;

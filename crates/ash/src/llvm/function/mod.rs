@@ -104,7 +104,9 @@ unsafe extern "C" {
 /// Reference to a function or a native object
 #[derive(Debug, Clone)]
 pub enum FuncPtr {
-    Fun(HLFunction),
+    /// Index into `bytecode.functions`, which the module shares rather than
+    /// copies; a per-module name is in `function_names`.
+    Fun(usize),
     Native(HLNative),
 }
 
@@ -506,8 +508,10 @@ impl<'ctx> JITModule<'ctx> {
             .clone();
 
         match fun_ptr {
-            FuncPtr::Fun(f) => {
-                let name = f.name();
+            FuncPtr::Fun(i) => {
+                let bytecode = std::sync::Arc::clone(&self.bytecode);
+                let f = &bytecode.functions[i];
+                let name = self.symbol_name(f);
                 let type_fun = self.bytecode.types[f.type_.0]
                     .fun
                     .clone()
@@ -709,7 +713,9 @@ impl<'ctx> JITModule<'ctx> {
             .ok_or_else(|| anyhow!("Function not found at index {}", index))?
             .clone();
 
-        if let FuncPtr::Fun(f) = fun_ptr {
+        if let FuncPtr::Fun(i) = fun_ptr {
+            let bytecode = std::sync::Arc::clone(&self.bytecode);
+            let f = &bytecode.functions[i];
             // LLVM consumes AIR v2 directly. Serializing the verified SSA
             // function back into HashLink opcodes here made the old bytecode
             // translator the real backend and discarded AIR's phis, cells,
@@ -2031,7 +2037,16 @@ impl<'ctx> JITModule<'ctx> {
             .expect("expect to get function type");
         let func_type = self.create_function_type(&type_fun)?;
 
-        Ok(self.add_body_function(&f.name(), func_type))
+        Ok(self.add_body_function(&self.symbol_name(f), func_type))
+    }
+
+    /// The symbol name `f` gets in this module: the field it is bound to,
+    /// when the type table names one, else `HLFunction::name`.
+    fn symbol_name(&self, f: &HLFunction) -> String {
+        self.function_names
+            .get(&(f.findex as usize))
+            .cloned()
+            .unwrap_or_else(|| f.name())
     }
 
     fn load_function_arguments(
@@ -3474,7 +3489,7 @@ impl<'ctx> JITModule<'ctx> {
             // made that check fail every time, so bench_closure_call ran a
             // recursive type comparison inside a 100M-iteration loop.
             let type_index = match self.findexes.get(&findex) {
-                Some(FuncPtr::Fun(f)) => f.type_.0,
+                Some(FuncPtr::Fun(i)) => self.bytecode.functions[*i].type_.0,
                 Some(FuncPtr::Native(n)) => n.type_.0,
                 None => return Err(anyhow!("no function type for findex {findex}")),
             };
@@ -4032,7 +4047,7 @@ impl<'ctx> JITModule<'ctx> {
         let mut n = 0;
         for (findex, fv) in cache {
             let has_trap = match self.findexes.get(findex) {
-                Some(FuncPtr::Fun(f)) => f
+                Some(FuncPtr::Fun(i)) => self.bytecode.functions[*i]
                     .ops
                     .iter()
                     .any(|op| matches!(op, Opcode::Trap { .. } | Opcode::EndTrap { .. })),

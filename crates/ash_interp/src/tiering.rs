@@ -737,7 +737,7 @@ pub(crate) fn build_llvm_module(
                 ash_core::llvm_init::ensure();
                 let context: &'static inkwell::context::Context =
                     Box::leak(Box::new(inkwell::context::Context::create()));
-                let mut jit = JITModule::new_with_shared_runtime(context, &path, &bytecode, shared);
+                let mut jit = JITModule::new_with_shared_runtime(context, &path, bytecode, shared);
                 jit.set_hot_reload(hot_reload);
                 jit.set_lazy_compilation(compiled_only);
                 PrewarmedJit(Box::into_raw(Box::new(ManuallyDrop::new(jit))))

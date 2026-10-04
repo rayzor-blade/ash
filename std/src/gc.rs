@@ -3223,14 +3223,46 @@ pub struct ImmixAllocator {
     finalizables: HashSet<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct FiberStackInfo {
     pub thread: u64,
     pub id: u32,
     pub base: usize,
     pub size: usize,
     /// SP recorded at the stack's last switch-out; 0 = never suspended.
-    pub saved_sp: usize,
+    /// Shared with the owning thread's `FIBER_SPS`, which stores it at every
+    /// switch without the GC lock; the collector reads it with the world
+    /// stopped.
+    saved_sp: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FiberStackInfo {
+    fn new(thread: u64, id: u32, base: usize, size: usize) -> Self {
+        let info = Self {
+            thread,
+            id,
+            base,
+            size,
+            saved_sp: Default::default(),
+        };
+        FIBER_SPS.with(|sps| {
+            sps.borrow_mut()
+                .insert(id, std::sync::Arc::clone(&info.saved_sp))
+        });
+        info
+    }
+
+    pub fn saved_sp(&self) -> usize {
+        self.saved_sp.load(Ordering::Acquire)
+    }
+}
+
+thread_local! {
+    /// This thread's fiber stacks' saved SPs, by fiber id; id 0 is the
+    /// thread's own stack. Registration, switches and removal of a fiber all
+    /// run on the scheduler thread that owns it.
+    static FIBER_SPS: RefCell<HashMap<u32, std::sync::Arc<std::sync::atomic::AtomicUsize>>> =
+        RefCell::new(HashMap::new());
 }
 
 impl Default for ImmixAllocator {
@@ -4834,8 +4866,8 @@ impl ImmixAllocator {
                         f.id,
                         f.base,
                         f.size,
-                        f.saved_sp,
-                        if f.saved_sp == 0 { "  <- SKIPPED" } else { "" }
+                        f.saved_sp(),
+                        if f.saved_sp() == 0 { "  <- SKIPPED" } else { "" }
                     );
                 }
             }
@@ -4854,7 +4886,7 @@ impl ImmixAllocator {
             // All OTHER stacks owned by this mutator scan from their saved
             // switch-out SP. The id-0 descriptor is its suspended main stack.
             for f in fiber_stacks.iter().filter(|f| f.thread == mutator.thread) {
-                if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
+                if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp() == 0 {
                     continue;
                 }
                 let top = if f.size > 0 {
@@ -4894,7 +4926,7 @@ impl ImmixAllocator {
                 } else {
                     0
                 };
-                let start = stack_scan_start(f.saved_sp, top, window);
+                let start = stack_scan_start(f.saved_sp(), top, window);
                 if start < top {
                     all_newly_marked.extend(self.conservative_scan_range(start, top));
                 }
@@ -5446,12 +5478,12 @@ impl ImmixAllocator {
             for fiber in self
                 .fiber_stacks
                 .iter()
-                .filter(|f| f.thread == mutator.thread && f.saved_sp != 0)
+                .filter(|f| f.thread == mutator.thread && f.saved_sp() != 0)
             {
                 if running.is_some_and(|active| active.id == fiber.id) {
                     continue;
                 }
-                let saved_sp = word_align_up(fiber.saved_sp);
+                let saved_sp = word_align_up(fiber.saved_sp());
                 let saved_top = if fiber.size > 0 {
                     fiber.base + fiber.size
                 } else {
@@ -5820,12 +5852,12 @@ impl ImmixAllocator {
                         for fiber in self
                             .fiber_stacks
                             .iter()
-                            .filter(|f| f.thread == mutator.thread && f.saved_sp != 0)
+                            .filter(|f| f.thread == mutator.thread && f.saved_sp() != 0)
                         {
                             if running.is_some_and(|active| active.id == fiber.id) {
                                 continue;
                             }
-                            let saved_sp = word_align_up(fiber.saved_sp);
+                            let saved_sp = word_align_up(fiber.saved_sp());
                             let saved_top = if fiber.size > 0 {
                                 fiber.base + fiber.size
                             } else {
@@ -6283,6 +6315,7 @@ pub(crate) unsafe extern "C" fn unregister_thread() {
     unregister_current_mutator();
     let mut gc = gc_locked_init();
     gc.fiber_stacks.retain(|fiber| fiber.thread != thread);
+    FIBER_SPS.with(|sps| sps.borrow_mut().clear());
 }
 
 /// Register the globals_data array for conservative scanning.
@@ -6821,33 +6854,21 @@ pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) 
         .iter()
         .any(|f| f.thread == thread && f.id == 0)
     {
-        gc.fiber_stacks.push(FiberStackInfo {
-            thread,
-            id: 0,
-            base: 0,
-            size: 0,
-            saved_sp: 0,
-        });
+        gc.fiber_stacks.push(FiberStackInfo::new(thread, 0, 0, 0));
     }
-    gc.fiber_stacks.push(FiberStackInfo {
-        thread,
-        id,
-        base,
-        size,
-        saved_sp: 0,
-    });
+    gc.fiber_stacks.push(FiberStackInfo::new(thread, id, base, size));
 }
 
+/// Record where `id`'s stack was suspended. Runs at every fiber switch, so
+/// it takes no lock: a collection is honoured here first, as the lock's
+/// acquire would have, and the store is to this thread's own record.
 pub(crate) unsafe fn gc_update_fiber_sp(id: u32, sp: usize) {
-    let thread = thread_self_fast();
-    let mut gc = gc_locked();
-    if let Some(f) = gc
-        .fiber_stacks
-        .iter_mut()
-        .find(|f| f.id == id && (id != 0 || f.thread == thread))
-    {
-        f.saved_sp = sp;
-    }
+    gc_safepoint();
+    FIBER_SPS.with(|sps| {
+        if let Some(saved) = sps.borrow().get(&id) {
+            saved.store(sp, Ordering::Release);
+        }
+    });
 }
 
 /// Must be called BEFORE the fiber's stack memory is freed.
@@ -6856,6 +6877,7 @@ pub(crate) unsafe fn gc_unregister_fiber_stack(id: u32) {
     let mut gc = gc_locked();
     gc.fiber_stacks
         .retain(|f| f.id != id || (id == 0 && f.thread != thread));
+    FIBER_SPS.with(|sps| sps.borrow_mut().remove(&id));
 }
 
 pub(crate) unsafe fn gc_add_persistent(ptr: *mut hl::vdynamic) {

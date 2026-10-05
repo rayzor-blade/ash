@@ -94,7 +94,7 @@ static PREEMPTOR_WAKE: LazyLock<(Mutex<()>, Condvar)> =
     LazyLock::new(|| (Mutex::new(()), Condvar::new()));
 const STUB_SENTINEL_LIMIT: usize = 0x100000;
 
-#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
+#[cfg(not(target_family = "wasm"))]
 const FIBER_QUANTUM: std::time::Duration = std::time::Duration::from_millis(2);
 
 #[derive(Clone, Copy)]

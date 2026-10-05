@@ -15,10 +15,10 @@ mod common;
 use common::{ash_cli_bin, tests_dir};
 use std::process::Command;
 
-/// A helper the LLVM tier emits for `New`. The fixture has to promote an
+/// The helper the LLVM tier emits for `New`. The fixture has to promote an
 /// allocating body to reach it: mandelbrot builds two `Complex` per inner
 /// iteration and promotes early, where a short program never gets there.
-const HELPER: &str = "hlp_alloc_obj_sized";
+const HELPER: &str = "hlp_alloc_obj_sized_flags";
 const FIXTURE: &str = "test_mandelbrot_small.hl";
 
 fn run(hl: &str, forced: Option<&str>) -> (String, String, Option<i32>) {

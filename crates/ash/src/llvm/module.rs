@@ -167,6 +167,13 @@ pub struct JITModule<'ctx> {
     /// compiles whatever the cost heuristics say, because the alternative is
     /// running the old body.
     pub(crate) reload_recompile: bool,
+    /// Whether MCJIT has generated the shared module's code. It does that
+    /// once, at the first address asked of the module; a body lowered into
+    /// it afterwards never becomes code.
+    pub(crate) shared_emitted: bool,
+    /// Bodies `seal_partial_bodies` closed off to throw: present in the
+    /// module, never a function's code.
+    pub(crate) sealed_bodies: std::collections::HashSet<String>,
     /// Ahead-of-time mode: emit an object file rather than JIT into this
     /// process. Natives become `External` declarations the linker resolves
     /// against `libash_std.a` instead of absolute addresses baked into the
@@ -503,6 +510,8 @@ impl<'ctx> JITModule<'ctx> {
             shared_runtime: None,
             hot_reload: false,
             reload_recompile: false,
+            shared_emitted: false,
+            sealed_bodies: Default::default(),
             aot,
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
@@ -959,6 +968,8 @@ impl<'ctx> JITModule<'ctx> {
             shared_runtime: Some(shared.clone()),
             hot_reload: false,
             reload_recompile: false,
+            shared_emitted: false,
+            sealed_bodies: Default::default(),
             aot: false,
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),

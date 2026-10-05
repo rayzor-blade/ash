@@ -1085,11 +1085,37 @@ impl<'ctx> JITModule<'ctx> {
             ));
         }
 
+        // Once the shared module is emitted, a body already in it is code:
+        // install it. Anything else compiles in a module of its own, because
+        // lowering it into the shared module adds IR that MCJIT never turns
+        // into code, and re-optimises the whole module to do it. Under hot
+        // reload a body there may be one a reload has since replaced.
+        let shared_emitted = !self.aot && self.shared_emitted;
+        if shared_emitted
+            && !self.hot_reload
+            && let Some(fn_addr) = self.shared_body_address(findex)
+        {
+            crate::profile::count("llvm promotions served by the shared module", 1);
+            self.install_function_address(findex, fn_addr as *mut c_void);
+            return self.compiled_meta_for(findex, fn_addr);
+        }
+
         // AOT lowers everything into ONE module: the per-function promo module
         // exists to hand MCJIT a small unit to codegen and is added to the
         // engine, which an AOT build has no use for and cannot satisfy —
         // resolving a symbol in this process is exactly what AOT must not do.
-        if !self.aot && self.promote_uses_own_module(findex) {
+        let own_module = !self.aot
+            && if shared_emitted {
+                // A function that would have taken the shared path is held to
+                // that path's bar.
+                self.promote_uses_own_module(findex) || {
+                    self.decline_shared_promotion(findex)?;
+                    true
+                }
+            } else {
+                self.promote_uses_own_module(findex)
+            };
+        if own_module {
             // A private module leaves its callees as declarations and binds
             // them to code the host already has. When a callee has none --
             // no lower tier compiled it, which is the norm with the ladder
@@ -1108,6 +1134,12 @@ impl<'ctx> JITModule<'ctx> {
                     return self.compiled_meta_for(findex, fn_addr);
                 }
                 Err(e) => {
+                    if shared_emitted {
+                        return Err(anyhow!(
+                            "own-module promotion refused and the shared module is \
+                             already emitted: {e:#}"
+                        ));
+                    }
                     if std::env::var_os("ASH_TIER_LOG").is_some() {
                         eprintln!(
                             "[tier] findex={findex} own-module refused ({e:#}); \
@@ -1121,28 +1153,9 @@ impl<'ctx> JITModule<'ctx> {
 
         // Reaching here means the shared module: either the own-module path
         // was refused -- an unresolved callee symbol, most often -- or it was
-        // not attempted. The shared path charges for the whole module, and a
-        // ceiling below High cannot repay that. Declining leaves the function
-        // on its Cranelift code, which is what it was running on already.
-        // A reload's recompile has no such fallback: the body it replaces is
-        // the wrong one.
-        if !self.aot && !self.reload_recompile {
-            if let Some(raw) = self
-                .bytecode
-                .functions
-                .iter()
-                .find(|f| f.findex as usize == findex)
-            {
-                let ceiling = super::air::llvm_ceiling(&self.bytecode, raw);
-                if !super::air::shared_promote_allows(ceiling) {
-                    return Err(anyhow!(
-                        "declined: {ceiling:?} ceiling is not worth the shared module \
-                         ({} bodies)",
-                        self.shared_module_bodies()
-                    ));
-                }
-            }
-        }
+        // not attempted. Declining leaves the function on its Cranelift code,
+        // which is what it was running on already.
+        self.decline_shared_promotion(findex)?;
         let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
         if is_placeholder {
             self.add_pending_compilation(findex);
@@ -1340,6 +1353,8 @@ impl<'ctx> JITModule<'ctx> {
         }
         // Where MCJIT actually emits machine code: the address request is what
         // forces codegen and relocation for everything reachable.
+        // The request emits the module, whether or not it finds `name`.
+        self.shared_emitted = true;
         let fn_addr = {
             let _phase = crate::profile::scope("mcjit codegen");
             self.execution_engine
@@ -1628,6 +1643,49 @@ impl<'ctx> JITModule<'ctx> {
         );
         self.release_module_ir(&osr_module);
         return Ok(addr as u64);
+    }
+
+    /// Refuse a promotion the shared path would not pay for: it charges for
+    /// the whole module, and a ceiling below High cannot repay that. A
+    /// reload's recompile is exempt, because the body it replaces is the
+    /// wrong one.
+    fn decline_shared_promotion(&self, findex: usize) -> Result<()> {
+        if self.aot || self.reload_recompile {
+            return Ok(());
+        }
+        let Some(raw) = self
+            .bytecode
+            .functions
+            .iter()
+            .find(|f| f.findex as usize == findex)
+        else {
+            return Ok(());
+        };
+        let ceiling = super::air::llvm_ceiling(&self.bytecode, raw);
+        if super::air::shared_promote_allows(ceiling) {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "declined: {ceiling:?} ceiling is not worth the shared module ({} bodies)",
+            self.shared_module_bodies()
+        ))
+    }
+
+    /// The address of `findex`'s body in the emitted shared module, if it
+    /// has one that is not a refused body sealed to throw.
+    fn shared_body_address(&self, findex: usize) -> Option<usize> {
+        let f = self.func_cache.get(&findex)?;
+        if f.count_basic_blocks() == 0 {
+            return None;
+        }
+        let name = f.get_name().to_str().ok()?;
+        if self.sealed_bodies.contains(name) {
+            return None;
+        }
+        self.execution_engine
+            .get_function_address(name)
+            .ok()
+            .filter(|&a| a != 0)
     }
 
     /// Hand a module whose code is loaded back from the engine, so its IR is
@@ -3087,6 +3145,7 @@ impl<'ctx> JITModule<'ctx> {
         for (function, blocks) in unsealed {
             let name = function.get_name().to_string_lossy().into_owned();
             let message = self.utf16_message(&format!("Refused at compile time: {name}"))?;
+            self.sealed_bodies.insert(name);
             let error = self.error_function_ptr()?;
             for block in blocks {
                 self.builder.position_at_end(block);

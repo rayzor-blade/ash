@@ -651,6 +651,21 @@ pub fn handler_blocks(f: &Function) -> Vec<bool> {
 ///
 /// Such phis must stay trivial — there is no program point on an exceptional
 /// edge to run a copy on — so no pass rewrites the value or its register.
+/// Every value that is an incoming of a phi in a handler block: the set
+/// [`feeds_handler_phi`] asks about, for a pass that asks it many times.
+pub fn handler_phi_inputs(f: &Function, handlers: &[bool]) -> std::collections::HashSet<ValueId> {
+    f.blocks
+        .iter()
+        .enumerate()
+        .filter(|&(b, _)| handlers[b])
+        .flat_map(|(_, blk)| {
+            blk.phis
+                .iter()
+                .flat_map(|p| p.incoming.iter().map(|&(_, v)| v))
+        })
+        .collect()
+}
+
 pub fn feeds_handler_phi(f: &Function, handlers: &[bool], v: ValueId) -> bool {
     f.blocks.iter().enumerate().any(|(b, blk)| {
         handlers[b]
@@ -659,6 +674,38 @@ pub fn feeds_handler_phi(f: &Function, handlers: &[bool], v: ValueId) -> bool {
                 .iter()
                 .any(|p| p.incoming.iter().any(|&(_, s)| s == v))
     })
+}
+
+/// Redirect every use of a key of `subst` to its value, in one walk of the
+/// function. Each value must be final: one that is itself a key would be
+/// left behind. Returns the number of uses rewritten.
+pub fn replace_uses(
+    f: &mut Function,
+    subst: &std::collections::HashMap<ValueId, ValueId>,
+) -> usize {
+    if subst.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    let mut map = |v: ValueId| match subst.get(&v) {
+        Some(&to) => {
+            n += 1;
+            to
+        }
+        None => v,
+    };
+    for blk in f.blocks.iter_mut() {
+        for phi in blk.phis.iter_mut() {
+            for (_, v) in phi.incoming.iter_mut() {
+                *v = map(*v);
+            }
+        }
+        for ins in blk.instrs.iter_mut() {
+            ins.map_uses(&mut map);
+        }
+        blk.term.map_uses(&mut map);
+    }
+    n
 }
 
 /// Redirect every use of `from` to `to`. Returns the number of uses rewritten.

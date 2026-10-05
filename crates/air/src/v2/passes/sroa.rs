@@ -288,6 +288,7 @@ struct Plan {
 
 fn first_candidate(f: &Function, slots: Option<&SlotAllocs>) -> Option<Plan> {
     let mut visited: HashSet<ValueId> = HashSet::new();
+    let index = Index::build(f);
     for (b, blk) in f.blocks.iter().enumerate() {
         for (k, ins) in blk.instrs.iter().enumerate() {
             let shape = match ins {
@@ -312,7 +313,16 @@ fn first_candidate(f: &Function, slots: Option<&SlotAllocs>) -> Option<Plan> {
             if !visited.insert(dst) {
                 continue;
             }
-            if let Some(plan) = plan_for(f, BlockId(b as u32), k, dst, shape, slots, &mut visited) {
+            if let Some(plan) = plan_for(
+                f,
+                &index,
+                BlockId(b as u32),
+                k,
+                dst,
+                shape,
+                slots,
+                &mut visited,
+            ) {
                 return Some(plan);
             }
         }
@@ -334,6 +344,63 @@ fn why(alloc: ValueId, reason: &str) {
 enum DefSite {
     Ins(usize, usize),
     Phi(usize, usize),
+}
+
+/// Where a value is used: a phi, an instruction, or a block's terminator.
+/// Ordered as `classify` visits a function -- block by block, and in each
+/// block the phis, the terminator, then the instructions.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UseSite {
+    Phi(usize, usize),
+    Term(usize),
+    Ins(usize, usize),
+}
+
+impl UseSite {
+    fn key(self) -> (usize, u8, usize) {
+        match self {
+            UseSite::Phi(b, i) => (b, 0, i),
+            UseSite::Term(b) => (b, 1, 0),
+            UseSite::Ins(b, k) => (b, 2, k),
+        }
+    }
+}
+
+/// Every value's definition and uses, built once per round so that
+/// classifying an allocation costs its web rather than the whole function:
+/// a function with thousands of escaping allocations classified each one
+/// against every instruction.
+struct Index {
+    defs: Vec<Option<DefSite>>,
+    users: Vec<Vec<UseSite>>,
+}
+
+impl Index {
+    fn build(f: &Function) -> Self {
+        let n = f.values.len();
+        let mut defs = vec![None; n];
+        let mut users: Vec<Vec<UseSite>> = vec![Vec::new(); n];
+        for (b, blk) in f.blocks.iter().enumerate() {
+            for (pi, phi) in blk.phis.iter().enumerate() {
+                defs[phi.dst.idx()] = Some(DefSite::Phi(b, pi));
+                for &(_, v) in &phi.incoming {
+                    users[v.idx()].push(UseSite::Phi(b, pi));
+                }
+            }
+            for (k, ins) in blk.instrs.iter().enumerate() {
+                if let Some(d) = ins.dst() {
+                    defs[d.idx()] = Some(DefSite::Ins(b, k));
+                }
+                for u in ins.uses() {
+                    users[u.idx()].push(UseSite::Ins(b, k));
+                }
+            }
+            for u in blk.term.uses() {
+                users[u.idx()].push(UseSite::Term(b));
+            }
+        }
+        Index { defs, users }
+    }
 }
 
 /// The web grown from one allocation: its roots, aliases and uses.
@@ -365,48 +432,54 @@ struct Web {
 
 /// Grow the alias web from `alloc`, classify every use, or `None` when any
 /// part of it escapes.
-fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAllocs>) -> Option<Web> {
-    // ---- definitions -------------------------------------------------------
-    let mut defs: HashMap<ValueId, DefSite> = HashMap::new();
-    for (b, blk) in f.blocks.iter().enumerate() {
-        for (pi, phi) in blk.phis.iter().enumerate() {
-            defs.insert(phi.dst, DefSite::Phi(b, pi));
-        }
-        for (k, ins) in blk.instrs.iter().enumerate() {
-            if let Some(d) = ins.dst() {
-                defs.insert(d, DefSite::Ins(b, k));
-            }
-        }
-    }
+fn classify(
+    f: &Function,
+    index: &Index,
+    alloc: ValueId,
+    shape: Shape,
+    slots: Option<&SlotAllocs>,
+) -> Option<Web> {
+    let defs = |v: ValueId| index.defs[v.idx()];
 
-    // ---- growth to a fixed point ------------------------------------------
+    // ---- growth -------------------------------------------------------------
     // Copies connect in both directions; a phi touching the web absorbs its
-    // destination and every incoming.
+    // destination and every incoming. Each value joins once, and joining
+    // follows its definition and its uses.
     let mut aliases: BTreeSet<ValueId> = BTreeSet::from([alloc]);
-    loop {
-        let before = aliases.len();
-        for blk in &f.blocks {
-            for phi in &blk.phis {
-                if aliases.contains(&phi.dst)
-                    || phi.incoming.iter().any(|&(_, v)| aliases.contains(&v))
-                {
-                    aliases.insert(phi.dst);
-                    for &(_, v) in &phi.incoming {
-                        aliases.insert(v);
+    let mut work = vec![alloc];
+    while let Some(v) = work.pop() {
+        let mut joined: Vec<ValueId> = Vec::new();
+        let absorb_phi = |b: usize, pi: usize, joined: &mut Vec<ValueId>| {
+            let phi = &f.blocks[b].phis[pi];
+            joined.push(phi.dst);
+            joined.extend(phi.incoming.iter().map(|&(_, u)| u));
+        };
+        match defs(v) {
+            Some(DefSite::Phi(b, pi)) => absorb_phi(b, pi, &mut joined),
+            Some(DefSite::Ins(b, k)) => {
+                if let Instr::Copy { src, .. } = f.blocks[b].instrs[k] {
+                    joined.push(src);
+                }
+            }
+            None => {}
+        }
+        for &site in &index.users[v.idx()] {
+            match site {
+                UseSite::Phi(b, pi) => absorb_phi(b, pi, &mut joined),
+                UseSite::Ins(b, k) => {
+                    if let Instr::Copy { dst, src } = f.blocks[b].instrs[k]
+                        && src == v
+                    {
+                        joined.push(dst);
                     }
                 }
-            }
-            for ins in &blk.instrs {
-                if let Instr::Copy { dst, src } = ins
-                    && (aliases.contains(dst) || aliases.contains(src))
-                {
-                    aliases.insert(*dst);
-                    aliases.insert(*src);
-                }
+                UseSite::Term(_) => {}
             }
         }
-        if aliases.len() == before {
-            break;
+        for u in joined {
+            if aliases.insert(u) {
+                work.push(u);
+            }
         }
     }
 
@@ -425,8 +498,8 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAlloc
     };
     let mut root_ids: Vec<ValueId> = Vec::new();
     for &v in &aliases {
-        match defs.get(&v) {
-            Some(&DefSite::Ins(b, k)) => match &f.blocks[b].instrs[k] {
+        match defs(v) {
+            Some(DefSite::Ins(b, k)) => match &f.blocks[b].instrs[k] {
                 Instr::New { dst } if shape == Shape::Object(f.value_ty(*dst)) => {
                     root_ids.push(v);
                     web.root_block.push(b);
@@ -462,7 +535,7 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAlloc
                     return None;
                 }
             },
-            Some(&DefSite::Phi(b, pi)) => {
+            Some(DefSite::Phi(b, pi)) => {
                 root_ids.push(v);
                 web.root_block.push(b);
                 web.obj_phis.push((b, pi, root_ids.len() - 1));
@@ -483,8 +556,8 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAlloc
                 web.root_of.insert(v, r);
                 break;
             }
-            match defs.get(&cur) {
-                Some(&DefSite::Ins(b, k)) => match &f.blocks[b].instrs[k] {
+            match defs(cur) {
+                Some(DefSite::Ins(b, k)) => match &f.blocks[b].instrs[k] {
                     Instr::Copy { src, .. } => cur = *src,
                     _ => unreachable!("validated above"),
                 },
@@ -501,236 +574,248 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAlloc
     let note = |web: &mut Web, field: usize, ty: TypeRef| -> bool {
         *web.field_ty.entry(field).or_insert(ty) == ty
     };
-    for (b, blk) in f.blocks.iter().enumerate() {
-        for phi in &blk.phis {
-            // Growth absorbed every phi that names an alias; one that carries
-            // an alias but is not itself in the web cannot exist any more.
-            if !aliases.contains(&phi.dst)
-                && phi.incoming.iter().any(|&(_, v)| aliases.contains(&v))
-            {
-                why(alloc, "phi merge outside the web");
-                return None;
-            }
-            if aliases.contains(&phi.dst) && blk.handler.is_some() {
-                why(alloc, "inside a trap region");
-                return None;
-            }
-        }
-        if blk.term.uses().iter().any(|u| aliases.contains(u)) {
-            why(alloc, "terminator operand");
-            return None;
-        }
-        for (k, ins) in blk.instrs.iter().enumerate() {
-            if !ins.uses().iter().any(|u| aliases.contains(u)) {
+    // The web's phis and every site that uses it, in function order.
+    let mut sites: Vec<UseSite> = aliases
+        .iter()
+        .flat_map(|&v| {
+            let def = match defs(v) {
+                Some(DefSite::Phi(b, pi)) => Some(UseSite::Phi(b, pi)),
+                _ => None,
+            };
+            def.into_iter().chain(index.users[v.idx()].iter().copied())
+        })
+        .collect();
+    sites.sort_unstable_by_key(|s| s.key());
+    sites.dedup();
+    for site in sites {
+        let (b, k) = match site {
+            UseSite::Phi(b, pi) => {
+                let blk = &f.blocks[b];
+                let phi = &blk.phis[pi];
+                // Growth absorbed every phi that names an alias; one that
+                // carries an alias but is not itself in the web cannot exist
+                // any more.
+                if !aliases.contains(&phi.dst)
+                    && phi.incoming.iter().any(|&(_, v)| aliases.contains(&v))
+                {
+                    why(alloc, "phi merge outside the web");
+                    return None;
+                }
+                if aliases.contains(&phi.dst) && blk.handler.is_some() {
+                    why(alloc, "inside a trap region");
+                    return None;
+                }
                 continue;
             }
-            if blk.handler.is_some() {
-                why(alloc, "inside a trap region");
+            UseSite::Term(_) => {
+                why(alloc, "terminator operand");
                 return None;
             }
-            let root = |web: &Web, v: &ValueId| web.root_of[v];
-            match (ins, shape) {
-                (Instr::Copy { src, .. }, _) if aliases.contains(src) => {
-                    web.touch_at.push((root(&web, src), b));
+            UseSite::Ins(b, k) => (b, k),
+        };
+        let blk = &f.blocks[b];
+        let ins = &blk.instrs[k];
+        if blk.handler.is_some() {
+            why(alloc, "inside a trap region");
+            return None;
+        }
+        let root = |web: &Web, v: &ValueId| web.root_of[v];
+        match (ins, shape) {
+            (Instr::Copy { src, .. }, _) if aliases.contains(src) => {
+                web.touch_at.push((root(&web, src), b));
+            }
+            (Instr::NullCheck { value, .. }, _) if aliases.contains(value) => {
+                web.touch_at.push((root(&web, value), b));
+            }
+            (
+                Instr::FieldGet {
+                    dst,
+                    obj,
+                    obj_ty,
+                    field,
+                },
+                Shape::Object(ty),
+            ) if aliases.contains(obj) && *obj_ty == ty => {
+                if !note(&mut web, *field, f.value_ty(*dst)) {
+                    return None;
                 }
-                (Instr::NullCheck { value, .. }, _) if aliases.contains(value) => {
-                    web.touch_at.push((root(&web, value), b));
+                web.touch_at.push((root(&web, obj), b));
+            }
+            (
+                Instr::FieldSet {
+                    obj,
+                    obj_ty,
+                    field,
+                    src,
+                },
+                Shape::Object(ty),
+            ) if aliases.contains(obj) && *obj_ty == ty => {
+                if aliases.contains(src) || !note(&mut web, *field, f.value_ty(*src)) {
+                    why(alloc, "stored into a field");
+                    return None;
                 }
-                (
-                    Instr::FieldGet {
-                        dst,
-                        obj,
-                        obj_ty,
-                        field,
-                    },
-                    Shape::Object(ty),
-                ) if aliases.contains(obj) && *obj_ty == ty => {
-                    if !note(&mut web, *field, f.value_ty(*dst)) {
-                        return None;
-                    }
-                    web.touch_at.push((root(&web, obj), b));
+                let r = root(&web, obj);
+                web.def_blocks.entry((r, *field)).or_default().insert(b);
+                web.touch_at.push((r, b));
+            }
+            (
+                Instr::EnumField {
+                    dst,
+                    value,
+                    construct,
+                    field,
+                },
+                Shape::Enum(c),
+            ) if aliases.contains(value) && *construct == c => {
+                if !note(&mut web, *field, f.value_ty(*dst)) {
+                    return None;
                 }
-                (
-                    Instr::FieldSet {
-                        obj,
-                        obj_ty,
-                        field,
-                        src,
-                    },
-                    Shape::Object(ty),
-                ) if aliases.contains(obj) && *obj_ty == ty => {
-                    if aliases.contains(src) || !note(&mut web, *field, f.value_ty(*src)) {
-                        why(alloc, "stored into a field");
-                        return None;
-                    }
-                    let r = root(&web, obj);
-                    web.def_blocks.entry((r, *field)).or_default().insert(b);
-                    web.touch_at.push((r, b));
+                web.touch_at.push((root(&web, value), b));
+            }
+            (
+                Instr::SetEnumField {
+                    value,
+                    construct,
+                    field,
+                    src,
+                },
+                Shape::Enum(c),
+            ) if aliases.contains(value) && *construct == c => {
+                if aliases.contains(src) || !note(&mut web, *field, f.value_ty(*src)) {
+                    why(alloc, "stored into a field");
+                    return None;
                 }
-                (
-                    Instr::EnumField {
-                        dst,
-                        value,
-                        construct,
-                        field,
-                    },
-                    Shape::Enum(c),
-                ) if aliases.contains(value) && *construct == c => {
-                    if !note(&mut web, *field, f.value_ty(*dst)) {
-                        return None;
-                    }
-                    web.touch_at.push((root(&web, value), b));
+                let r = root(&web, value);
+                web.def_blocks.entry((r, *field)).or_default().insert(b);
+                web.touch_at.push((r, b));
+            }
+            (
+                Instr::MemGet {
+                    kind: MemAccess::Mem,
+                    dst,
+                    base,
+                    index,
+                },
+                Shape::Slot(scratch),
+            ) if aliases.contains(base) => {
+                let s = slots.expect("a slot web has its allocations");
+                let Some(elem) = s.lane_elem(f.value_ty(*dst)) else {
+                    why(alloc, "lane read of a width the slot form cannot address");
+                    return None;
+                };
+                let Some(lane) = s.lane_at(*index, elem) else {
+                    why(alloc, "lane read at a non-constant or unaligned offset");
+                    return None;
+                };
+                if !note(&mut web, 0, scratch.int_ty) {
+                    return None;
                 }
-                (
-                    Instr::SetEnumField {
-                        value,
-                        construct,
-                        field,
-                        src,
-                    },
-                    Shape::Enum(c),
-                ) if aliases.contains(value) && *construct == c => {
-                    if aliases.contains(src) || !note(&mut web, *field, f.value_ty(*src)) {
-                        why(alloc, "stored into a field");
-                        return None;
-                    }
-                    let r = root(&web, value);
-                    web.def_blocks.entry((r, *field)).or_default().insert(b);
-                    web.touch_at.push((r, b));
+                web.touch_at.push((root(&web, base), b));
+                web.lane_touch.insert((b, k), (elem, lane));
+                continue;
+            }
+            (
+                Instr::MemSet {
+                    kind: MemAccess::Mem,
+                    base,
+                    index,
+                    src,
+                },
+                Shape::Slot(scratch),
+            ) if aliases.contains(base) => {
+                let s = slots.expect("a slot web has its allocations");
+                if aliases.contains(src) {
+                    why(alloc, "stored into a slot");
+                    return None;
                 }
-                (
-                    Instr::MemGet {
-                        kind: MemAccess::Mem,
-                        dst,
-                        base,
-                        index,
-                    },
-                    Shape::Slot(scratch),
-                ) if aliases.contains(base) => {
-                    let s = slots.expect("a slot web has its allocations");
-                    let Some(elem) = s.lane_elem(f.value_ty(*dst)) else {
-                        why(alloc, "lane read of a width the slot form cannot address");
-                        return None;
-                    };
-                    let Some(lane) = s.lane_at(*index, elem) else {
-                        why(alloc, "lane read at a non-constant or unaligned offset");
-                        return None;
-                    };
-                    if !note(&mut web, 0, scratch.int_ty) {
-                        return None;
-                    }
-                    web.touch_at.push((root(&web, base), b));
-                    web.lane_touch.insert((b, k), (elem, lane));
-                    continue;
+                let Some(elem) = s.lane_elem(f.value_ty(*src)) else {
+                    why(alloc, "lane write of a width the slot form cannot address");
+                    return None;
+                };
+                let Some(lane) = s.lane_at(*index, elem) else {
+                    why(alloc, "lane write at a non-constant or unaligned offset");
+                    return None;
+                };
+                if !note(&mut web, 0, scratch.int_ty) {
+                    return None;
                 }
-                (
-                    Instr::MemSet {
-                        kind: MemAccess::Mem,
-                        base,
-                        index,
-                        src,
-                    },
-                    Shape::Slot(scratch),
-                ) if aliases.contains(base) => {
-                    let s = slots.expect("a slot web has its allocations");
-                    if aliases.contains(src) {
-                        why(alloc, "stored into a slot");
-                        return None;
-                    }
-                    let Some(elem) = s.lane_elem(f.value_ty(*src)) else {
-                        why(alloc, "lane write of a width the slot form cannot address");
-                        return None;
-                    };
-                    let Some(lane) = s.lane_at(*index, elem) else {
-                        why(alloc, "lane write at a non-constant or unaligned offset");
-                        return None;
-                    };
-                    if !note(&mut web, 0, scratch.int_ty) {
-                        return None;
-                    }
-                    let r = root(&web, base);
-                    web.def_blocks.entry((r, 0)).or_default().insert(b);
-                    web.touch_at.push((r, b));
-                    web.lane_touch.insert((b, k), (elem, lane));
-                    continue;
-                }
-                (Instr::VecOp { dst, out, args, .. }, Shape::Slot(scratch)) => {
-                    // Whole-slot operands only: the pointer with a zero
-                    // offset, never as an array, a scalar or the base of
-                    // an offset access.
-                    let whole = |base: &ValueId, off: &ValueId| {
-                        aliases.contains(base) && slots.is_some_and(|s| s.zero.contains(off))
-                    };
-                    for a in args {
-                        match a {
-                            VecArg::Slot { base, off } if aliases.contains(base) => {
-                                if !whole(base, off) {
-                                    why(alloc, "slot read at a non-zero offset");
-                                    return None;
-                                }
-                                if !note(&mut web, 0, scratch.int_ty) {
-                                    return None;
-                                }
-                                web.touch_at.push((root(&web, base), b));
-                            }
-                            other if other.ids().iter().any(|u| aliases.contains(u)) => {
-                                why(alloc, "slot used as a scalar or array operand");
-                                return None;
-                            }
-                            _ => {}
-                        }
-                    }
-                    match out {
-                        VecOut::Slot { base, off } if aliases.contains(base) => {
+                let r = root(&web, base);
+                web.def_blocks.entry((r, 0)).or_default().insert(b);
+                web.touch_at.push((r, b));
+                web.lane_touch.insert((b, k), (elem, lane));
+                continue;
+            }
+            (Instr::VecOp { dst, out, args, .. }, Shape::Slot(scratch)) => {
+                // Whole-slot operands only: the pointer with a zero
+                // offset, never as an array, a scalar or the base of
+                // an offset access.
+                let whole = |base: &ValueId, off: &ValueId| {
+                    aliases.contains(base) && slots.is_some_and(|s| s.zero.contains(off))
+                };
+                for a in args {
+                    match a {
+                        VecArg::Slot { base, off } if aliases.contains(base) => {
                             if !whole(base, off) {
-                                why(alloc, "slot written at a non-zero offset");
-                                return None;
-                            }
-                            // The write's void result becomes the vector
-                            // value; a use of the void result would then
-                            // read a vector.
-                            if f.blocks.iter().any(|blk| {
-                                blk.instrs.iter().any(|i| i.uses().contains(dst))
-                                    || blk
-                                        .phis
-                                        .iter()
-                                        .any(|p| p.incoming.iter().any(|(_, v)| v == dst))
-                                    || blk.term.uses().contains(dst)
-                            }) {
-                                why(alloc, "void result of a slot write is used");
+                                why(alloc, "slot read at a non-zero offset");
                                 return None;
                             }
                             if !note(&mut web, 0, scratch.int_ty) {
                                 return None;
                             }
-                            let r = root(&web, base);
-                            web.def_blocks.entry((r, 0)).or_default().insert(b);
-                            web.touch_at.push((r, b));
+                            web.touch_at.push((root(&web, base), b));
                         }
                         other if other.ids().iter().any(|u| aliases.contains(u)) => {
-                            why(alloc, "slot used as an array destination");
+                            why(alloc, "slot used as a scalar or array operand");
                             return None;
                         }
                         _ => {}
                     }
-                    web.vec_touch.insert((b, k));
-                    continue;
                 }
-                _ => {
-                    let mut d = format!("{:?}", ins);
-                    d.truncate(100);
-                    why(alloc, &format!("escapes into an instruction: {d}"));
-                    return None;
+                match out {
+                    VecOut::Slot { base, off } if aliases.contains(base) => {
+                        if !whole(base, off) {
+                            why(alloc, "slot written at a non-zero offset");
+                            return None;
+                        }
+                        // The write's void result becomes the vector
+                        // value; a use of the void result would then
+                        // read a vector.
+                        if !index.users[dst.idx()].is_empty() {
+                            why(alloc, "void result of a slot write is used");
+                            return None;
+                        }
+                        if !note(&mut web, 0, scratch.int_ty) {
+                            return None;
+                        }
+                        let r = root(&web, base);
+                        web.def_blocks.entry((r, 0)).or_default().insert(b);
+                        web.touch_at.push((r, b));
+                    }
+                    other if other.ids().iter().any(|u| aliases.contains(u)) => {
+                        why(alloc, "slot used as an array destination");
+                        return None;
+                    }
+                    _ => {}
                 }
+                web.vec_touch.insert((b, k));
+                continue;
             }
-            web.touch.insert((b, k));
+            _ => {
+                let mut d = format!("{:?}", ins);
+                d.truncate(100);
+                why(alloc, &format!("escapes into an instruction: {d}"));
+                return None;
+            }
         }
+        web.touch.insert((b, k));
     }
     Some(web)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_for(
     f: &Function,
+    index: &Index,
     ablock: BlockId,
     _aidx: usize,
     alloc: ValueId,
@@ -742,7 +827,7 @@ fn plan_for(
         return None;
     }
     let is_slot = matches!(shape, Shape::Slot(_));
-    let mut web = classify(f, alloc, shape, slots)?;
+    let mut web = classify(f, index, alloc, shape, slots)?;
     // The web refuses or fires as a unit; never re-plan it from another member.
     for (b, k, _, _) in &web.sites {
         if let Some(d) = f.blocks[*b].instrs[*k].dst() {

@@ -3,7 +3,7 @@
 
 use super::{
     DefSite, Pass, PassOptions, PassStats, RegClaims, clobber_free, compact_values, def_sites,
-    feeds_handler_phi, handler_blocks, param_values, privatize, replace_all_uses,
+    handler_blocks, handler_phi_inputs, param_values, privatize, replace_uses,
 };
 use crate::v2::analysis::{AliasClass, CfgInfo, read_class};
 use crate::v2::ir::*;
@@ -139,6 +139,9 @@ impl Pass for GlobalValueNumbering {
         let cfg = CfgInfo::build(f);
         let defs = def_sites(f);
         let handlers = handler_blocks(f);
+        // Phis are not edited until the rewrites below, so this holds for
+        // the whole walk.
+        let handler_inputs = handler_phi_inputs(f, &handlers);
         let is_param = param_values(f);
         let mut claims = RegClaims::build(f);
 
@@ -188,8 +191,8 @@ impl Pass for GlobalValueNumbering {
                 // Copy propagation: the destination is just another name.
                 if let Instr::Copy { src, .. } = ins {
                     let src = resolve(&subst, src);
-                    if can_replace(f, &handlers, dst)
-                        && can_replace(f, &handlers, src)
+                    if can_replace(&handler_inputs, dst)
+                        && can_replace(&handler_inputs, src)
                         && privatize(f, src, &mut claims, is_param[src.idx()])
                     {
                         subst.insert(dst, src);
@@ -212,8 +215,8 @@ impl Pass for GlobalValueNumbering {
 
                 if let Some(&prev) = table.get(&key)
                     && f.value_ty(prev) == f.value_ty(dst)
-                    && can_replace(f, &handlers, dst)
-                    && can_replace(f, &handlers, prev)
+                    && can_replace(&handler_inputs, dst)
+                    && can_replace(&handler_inputs, prev)
                 {
                     let ok = match (eff, read_class(&normalized)) {
                         (Effect::ReadMem, Some(class)) => {
@@ -250,10 +253,14 @@ impl Pass for GlobalValueNumbering {
         if rewrites.is_empty() {
             return Ok(stats);
         }
-        for (from, to) in rewrites {
-            let to = resolve(&subst, to);
-            stats.replaced += replace_all_uses(f, from, to);
-        }
+        // One walk for every rewrite. Each target resolves to a value that
+        // is never itself replaced, so applying them together is applying
+        // them in order.
+        let all: HashMap<ValueId, ValueId> = rewrites
+            .iter()
+            .map(|&(from, to)| (from, resolve(&subst, to)))
+            .collect();
+        stats.replaced += replace_uses(f, &all);
         for b in 0..f.blocks.len() {
             let mut k = 0usize;
             f.blocks[b].instrs.retain(|_| {
@@ -268,8 +275,8 @@ impl Pass for GlobalValueNumbering {
     }
 }
 
-fn can_replace(f: &Function, handlers: &[bool], v: ValueId) -> bool {
-    !feeds_handler_phi(f, handlers, v)
+fn can_replace(handler_inputs: &HashSet<ValueId>, v: ValueId) -> bool {
+    !handler_inputs.contains(&v)
 }
 
 /// True when the value produced by the dominating load still holds at the

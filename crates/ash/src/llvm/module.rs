@@ -301,6 +301,16 @@ pub(crate) fn run_middle_end_at(
     if spec == "off" {
         return Ok(());
     }
+    // O3 unrolls up to twice the size O2 does, and the full-unroll pass runs
+    // before the loop vectorizer: an inner loop with a small constant trip
+    // count is flattened into straight-line code, and the loop around it no
+    // longer vectorizes. Holding O3 to O2's threshold keeps that outer loop
+    // the vectorizer's to widen, which is what the JIT tier, at O2, already
+    // gets. O2 never reads this option.
+    static UNROLL: std::sync::Once = std::sync::Once::new();
+    UNROLL.call_once(|| {
+        crate::target_abi::parse_llvm_options(&[c"-unroll-threshold-aggressive=150"])
+    });
 
     let triple = module.get_triple().as_str().to_string_lossy().into_owned();
     // A module that names no target cannot be optimized, and the error from

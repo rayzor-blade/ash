@@ -284,21 +284,33 @@ fn enable_wasm_sjlj() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let args = [
-            c"ash".as_ptr(),
-            c"-wasm-enable-sjlj".as_ptr(),
-            c"-wasm-enable-eh".as_ptr(),
-            c"-wasm-use-legacy-eh=false".as_ptr(),
-        ];
-        let overview = c"ash wasm codegen";
-        unsafe {
-            inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
-                args.len() as i32,
-                args.as_ptr(),
-                overview.as_ptr(),
-            );
-        }
+        parse_llvm_options(&[
+            c"-wasm-enable-sjlj",
+            c"-wasm-enable-eh",
+            c"-wasm-use-legacy-eh=false",
+        ]);
     });
+}
+
+/// Hand LLVM command-line options to its global option registry.
+///
+/// The registry is process-wide and not thread-safe, and compiles run on
+/// several threads, so every caller goes through one lock. Each option may
+/// be given once per process: callers guard themselves with a `Once`.
+#[cfg(feature = "llvm")]
+pub(crate) fn parse_llvm_options(options: &[&std::ffi::CStr]) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let args: Vec<*const std::ffi::c_char> = std::iter::once(c"ash".as_ptr())
+        .chain(options.iter().map(|o| o.as_ptr()))
+        .collect();
+    unsafe {
+        inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
+            args.len() as i32,
+            args.as_ptr(),
+            c"ash".as_ptr(),
+        );
+    }
 }
 
 /// Put the machine into the exception model wasm setjmp lowering needs.

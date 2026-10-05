@@ -373,10 +373,24 @@ impl<'ctx> JITModule<'ctx> {
         // guaranteed to reach -- the receiver or closure guard of a
         // devirtualised call. A poll ahead of the header makes the header a
         // non-exiting block and no rotation happens. Ahead of time the poll
-        // stays in front of the header: its calls carry no such guard yet,
-        // and the rotated loop's register image around an indirect call
-        // costs more than it returns there.
-        let polls_on_back_edges = !self.aot;
+        // stays in front of the header of a loop with an indirect call: its
+        // calls carry no such guard yet, and the rotated loop's register
+        // image around an indirect call costs more than it returns there. A
+        // loop without one takes the back-edge form, because the vectorizer
+        // only widens a rotated loop.
+        let mut back_edge_poll = vec![!self.aot; air.blocks.len()];
+        if self.aot {
+            for lp in &loops.loops {
+                back_edge_poll[lp.header.idx()] = !lp.blocks.iter().any(|b| {
+                    air.blocks[b.idx()].instrs.iter().any(|i| {
+                        matches!(
+                            i,
+                            AirInstr::CallMethod { .. } | AirInstr::CallClosure { .. }
+                        )
+                    })
+                });
+            }
+        }
         let has_polls = poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
         let mut poll_entries = vec![None; air.blocks.len()];
@@ -392,17 +406,15 @@ impl<'ctx> JITModule<'ctx> {
                     .context
                     .append_basic_block(function, &format!("air_b{bi}_fiber_poll"));
                 poll_entries[bi] = Some(poll);
-                if !polls_on_back_edges {
+                if !back_edge_poll[bi] {
                     entries[bi] = Some(poll);
                 }
             }
         }
-        if polls_on_back_edges {
-            for lp in &loops.loops {
-                if poll_headers[lp.header.idx()] {
-                    for latch in &lp.latches {
-                        back_edges.insert((latch.0, lp.header.0));
-                    }
+        for lp in &loops.loops {
+            if poll_headers[lp.header.idx()] && back_edge_poll[lp.header.idx()] {
+                for latch in &lp.latches {
+                    back_edges.insert((latch.0, lp.header.0));
                 }
             }
         }
@@ -514,7 +526,7 @@ impl<'ctx> JITModule<'ctx> {
             // stepped value is what is defined; in front of the header, the
             // phi, whose slot the edge has already written.
             if let Some(test) = air.strip_tests.iter().find(|t| t.header.0 == bi as u32) {
-                let value = if polls_on_back_edges {
+                let value = if back_edge_poll[bi] {
                     test.stepped
                 } else {
                     test.phi
@@ -554,7 +566,7 @@ impl<'ctx> JITModule<'ctx> {
                 handled_slot,
                 "air_fiber_poll_handled_epoch",
             )?;
-            if polls_on_back_edges {
+            if back_edge_poll[bi] {
                 handled
                     .as_instruction_value()
                     .expect("handled epoch load is an instruction")
@@ -586,7 +598,7 @@ impl<'ctx> JITModule<'ctx> {
 
             self.builder.position_at_end(poll_call);
             let store = self.builder.build_store(handled_slot, current)?;
-            if polls_on_back_edges {
+            if back_edge_poll[bi] {
                 store.set_volatile(true).map_err(|error| {
                     anyhow!("failed to mark epoch slot store volatile: {error:?}")
                 })?;

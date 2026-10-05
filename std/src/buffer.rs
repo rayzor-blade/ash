@@ -162,11 +162,23 @@ use std::ptr;
 /// upstream prints the class name for (hashlink src/std/buffer.c:236).
 unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const uchar {
     unsafe {
+        let mut f = f;
         let addr = f as usize;
         if addr == 0 {
             return ptr::null();
         }
-        if crate::fiber::is_stub_sentinel(addr) {
+        // A worker lane cannot hand the stub to the interpreter, and the
+        // closure built below carries no function type for the compiled
+        // runner to check its call against: compile `__string` and call it
+        // like any other compiled one.
+        if crate::fiber::is_stub_sentinel(addr) && crate::fiber::is_worker_lane() {
+            f = crate::fiber::compile_for_worker_lane(addr);
+            if f.is_null() {
+                crate::error::hlp_error(crate::strings::str_to_uchar_ptr(
+                    "a worker thread reached a function that could not be compiled",
+                ));
+            }
+        } else if crate::fiber::is_stub_sentinel(addr) {
             let Some(runner) = crate::fiber::closure_runner() else {
                 return ptr::null();
             };

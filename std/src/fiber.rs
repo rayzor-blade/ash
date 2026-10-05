@@ -343,6 +343,12 @@ pub(crate) unsafe fn closure_runner() -> Option<ClosureRunner> {
     }
 }
 
+/// On a worker lane, the compiled code for a stub sentinel, compiled now if
+/// it is not yet; null when it cannot be compiled.
+pub(crate) unsafe fn compile_for_worker_lane(address: usize) -> *mut c_void {
+    unsafe { resolve_thread_root_sentinel(address) }
+}
+
 /// Run a closure on a worker lane, compiling its function first if it is
 /// not compiled yet, the way a worker's root closure is in `thread_create`.
 unsafe extern "C" fn worker_closure_runner(

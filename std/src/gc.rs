@@ -3372,6 +3372,62 @@ fn mark_allocation_shared(
     out.push((start, size));
 }
 
+/// Scan the marked objects of one old block for pointers, as a minor's roots:
+/// the block was written since it was traced, so any of them may now point
+/// at a young object. Only the part of an object inside this block is
+/// scanned; a part in another block is scanned with that block if it was
+/// written, and needs no scan if it was not.
+fn scan_old_block(
+    blocks: &[Block],
+    alloc_sizes: &[u32],
+    objects: &[std::sync::atomic::AtomicU8],
+    heap_start: usize,
+    heap_end: usize,
+    block_addr: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let block_end = block_addr + BLOCK_SIZE;
+    if let Some((begin, size)) = containing_allocation(blocks, alloc_sizes, objects, block_addr)
+        && begin < block_addr
+        && objects[begin / ALLOC_QUANTUM].load(Ordering::Relaxed) & OBJECT_MARK != 0
+    {
+        let end = (begin + size).min(block_end);
+        scan_allocation_shared(
+            blocks,
+            alloc_sizes,
+            objects,
+            heap_start,
+            heap_end,
+            block_addr,
+            end - block_addr,
+            out,
+        );
+    }
+    for q in block_addr / ALLOC_QUANTUM..block_end / ALLOC_QUANTUM {
+        let slot = objects[q].load(Ordering::Relaxed);
+        if slot & OBJECT_MARK == 0 {
+            continue;
+        }
+        let begin = q * ALLOC_QUANTUM;
+        let size = match slot & !OBJECT_MARK {
+            0 => continue,
+            SPAN_OBJECT => alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE,
+            code => code as usize * ALLOC_QUANTUM,
+        };
+        let end = (begin + size).min(block_end);
+        scan_allocation_shared(
+            blocks,
+            alloc_sizes,
+            objects,
+            heap_start,
+            heap_end,
+            begin,
+            end - begin,
+            out,
+        );
+    }
+}
+
 /// Trace only the allocation's bytes, never other objects sharing its lines.
 #[inline]
 fn scan_allocation_shared(
@@ -3450,6 +3506,11 @@ struct MarkJob {
     heap_end: usize,
     queue: *const MarkQueue,
     threads: usize,
+    /// A minor's old roots, as heap offsets of the blocks holding them; each
+    /// worker claims blocks through `next_root` and scans their marked
+    /// objects before it takes from the queue.
+    root_blocks: (*const usize, usize),
+    next_root: *const std::sync::atomic::AtomicUsize,
 }
 
 // Read-only for the duration of a job, which runs entirely inside a stopped
@@ -3562,6 +3623,37 @@ fn mark_worker(job: &MarkJob) {
     const BATCH: usize = 64;
     const SPILL: usize = 512;
     let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
+    // The old roots first, a few blocks per claim. Done before the queue, so
+    // a worker counts itself idle only once no root block is left unclaimed.
+    if job.root_blocks.1 > 0 {
+        let roots = unsafe { std::slice::from_raw_parts(job.root_blocks.0, job.root_blocks.1) };
+        let next = unsafe { &*job.next_root };
+        const CLAIM: usize = 8;
+        loop {
+            let at = next.fetch_add(CLAIM, Ordering::Relaxed);
+            if at >= roots.len() {
+                break;
+            }
+            for &block_addr in &roots[at..(at + CLAIM).min(roots.len())] {
+                scan_old_block(
+                    blocks,
+                    alloc_sizes,
+                    objects,
+                    heap_start,
+                    heap_end,
+                    block_addr,
+                    &mut local,
+                );
+                if local.len() >= SPILL {
+                    let half = local.len() / 2;
+                    let mut work = queue.work.lock().expect("mark queue poisoned");
+                    work.extend(local.drain(..half));
+                    drop(work);
+                    queue.ready.notify_all();
+                }
+            }
+        }
+    }
     loop {
         if local.is_empty() {
             let mut work = queue.work.lock().expect("mark queue poisoned");
@@ -4302,6 +4394,40 @@ impl ImmixAllocator {
     /// Transitively scan newly-marked allocations. Line bits only control
     /// recycling; the worklist and duplicate suppression are object-granular.
     fn conservative_trace(&mut self, initial: Vec<(usize, usize)>) {
+        self.trace_from(initial, &[]);
+    }
+
+    /// A minor's old roots: scan the marked objects of `root_blocks` (see
+    /// [`scan_old_block`]) and trace from what they point at. Spread over
+    /// the marking threads by block, since a program that writes all over
+    /// its old objects dirties most blocks.
+    fn trace_old_blocks(&mut self, root_blocks: &[usize]) {
+        let threads = mark_threads();
+        if threads <= 1 || cfg!(target_family = "wasm") {
+            let heap_start = self.heap.memory.as_ptr() as usize;
+            let heap_end = heap_start + self.heap.memory.len;
+            let mut worklist = Vec::new();
+            for &block_addr in root_blocks {
+                scan_old_block(
+                    &self.blocks,
+                    &self.heap.alloc_sizes,
+                    &self.heap.objects,
+                    heap_start,
+                    heap_end,
+                    block_addr,
+                    &mut worklist,
+                );
+            }
+            self.conservative_trace(worklist);
+        } else {
+            self.trace_from(Vec::new(), root_blocks);
+        }
+    }
+
+    /// Trace from `initial`, and from `root_blocks` when the marking threads
+    /// take it (see [`MarkJob::root_blocks`]).
+    #[cfg_attr(target_family = "wasm", allow(unused_variables))]
+    fn trace_from(&mut self, initial: Vec<(usize, usize)>, root_blocks: &[usize]) {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
         let threads = mark_threads();
@@ -4314,7 +4440,7 @@ impl ImmixAllocator {
         let alloc_sizes = &self.heap.alloc_sizes;
         let mut worklist = initial;
         let mut budget = SERIAL_BUDGET;
-        while threads <= 1 || budget > 0 || worklist.len() < 256 {
+        while root_blocks.is_empty() && (threads <= 1 || budget > 0 || worklist.len() < 256) {
             let Some((start, size)) = worklist.pop() else {
                 return;
             };
@@ -4344,6 +4470,7 @@ impl ImmixAllocator {
             let blocks: &[Block] = &self.blocks;
             let alloc_sizes: &[u32] = &self.heap.alloc_sizes;
             let objects = &self.heap.objects;
+            let next_root = std::sync::atomic::AtomicUsize::new(0);
             let queue = MarkQueue {
                 work: std::sync::Mutex::new(worklist),
                 ready: std::sync::Condvar::new(),
@@ -4358,6 +4485,8 @@ impl ImmixAllocator {
                 heap_end,
                 queue: &queue as *const MarkQueue,
                 threads,
+                root_blocks: (root_blocks.as_ptr(), root_blocks.len()),
+                next_root: &next_root as *const std::sync::atomic::AtomicUsize,
             });
         }
     }
@@ -4385,6 +4514,7 @@ impl ImmixAllocator {
         // collection has protected blocks. Exhaustion, an explicit `Gc.major`
         // and an idle collection want old garbage back, so they are majors.
         let origin = COLLECT_ORIGIN.load(Ordering::Relaxed);
+        let t_prep0 = Instant::now();
         let minor = generational()
             && PROTECT.get().is_some()
             && self.heap.since_major < major_every()
@@ -4398,6 +4528,7 @@ impl ImmixAllocator {
                 self.clear_all_marks();
             }
         }
+        let t_prep = t_prep0.elapsed();
         if trace_freed() || debug_roots() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
             let origin = ORIGIN_NAMES[(COLLECT_ORIGIN.load(Ordering::Relaxed) as usize).min(ORIGIN_NAMES.len() - 1)];
@@ -4421,7 +4552,7 @@ impl ImmixAllocator {
         let t_stop = t0.elapsed();
         let t_mark0 = Instant::now();
         if minor {
-            let old = self.old_roots();
+            let old = self.old_root_blocks();
             if gc_stats_enabled() {
                 let clean = PROTECT.get().map_or(0, |t| {
                     t.state
@@ -4430,14 +4561,13 @@ impl ImmixAllocator {
                         .count()
                 });
                 eprintln!(
-                    "[gc-minor] old roots={} ({}) clean blocks={clean} used={}",
+                    "[gc-minor] old root blocks={} clean blocks={clean} used={}",
                     old.len(),
-                    fmt_mb(old.iter().map(|(_, s)| *s as u64).sum()),
                     self.heap.used_blocks.len()
                 );
             }
             if !old.is_empty() {
-                self.conservative_trace(old);
+                self.trace_old_blocks(&old);
             }
         }
         self.mark_roots(&stopped_world.snapshots);
@@ -4526,16 +4656,23 @@ impl ImmixAllocator {
         // here on nothing touches the heap, so the world can restart -- the
         // zone walk below and the stderr writes are not reasons to keep ten
         // threads stopped, and `pause` above has already been measured.
+        let t_protect0 = Instant::now();
         let protected = self.protect_kept_blocks();
+        let t_protect = t_protect0.elapsed();
         drop(stopped_world);
         if gc_stats_enabled() {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+            // `prep` is inside `stop`: lifting protection and clearing marks
+            // before a major. `protect` comes after `total` but before the
+            // world resumes, so the threads wait for it too.
             eprintln!(
-                "[gc-split] stop={:.2}ms mark={:.2}ms sweep={:.2}ms total={:.2}ms",
+                "[gc-split] stop={:.2}ms (prep {:.2}ms) mark={:.2}ms sweep={:.2}ms total={:.2}ms protect={:.2}ms",
                 ms(t_stop),
+                ms(t_prep),
                 ms(t_mark),
                 ms(t_sweep),
-                ms(pause)
+                ms(pause),
+                ms(t_protect)
             );
         }
 
@@ -4593,76 +4730,90 @@ impl ImmixAllocator {
         }
     }
 
-    /// The old generation's contribution to a minor collection's roots:
-    /// every marked object in a used block that is not protected-and-clean,
+    /// The old generation's contribution to a minor collection's roots: the
+    /// used blocks that hold marked objects and are not protected-and-clean,
     /// since a clean block has not been written since it was traced and a
-    /// marked object in any other block may now point at a young one. An
-    /// object spanning into a block from an earlier one counts for it too.
-    fn old_roots(&self) -> Vec<(usize, usize)> {
+    /// marked object in any other block may now point at a young one. Sorted,
+    /// so the marking threads walk the heap in order.
+    fn old_root_blocks(&self) -> Vec<usize> {
         let Some(t) = PROTECT.get() else {
             return Vec::new();
         };
-        let mut roots = Vec::new();
-        // An object spanning several dirty blocks is pushed once.
-        let mut spanning: HashSet<usize> = HashSet::new();
-        for &block_addr in &self.heap.used_blocks {
-            let idx = block_addr / BLOCK_SIZE;
-            let block = &self.blocks[idx];
-            // A block nothing has marked holds no old object; that is every
-            // block allocated since the last collection.
-            if t.state[idx].load(Ordering::Acquire) == PROTECT_CLEAN
-                || block.noptr
-                || !block.any_marked.load(Ordering::Relaxed)
-            {
-                continue;
-            }
-            if let Some((begin, size)) = containing_allocation(
-                &self.blocks,
-                &self.heap.alloc_sizes,
-                &self.heap.objects,
-                block_addr,
-            ) && begin < block_addr
-                && self.heap.objects[begin / ALLOC_QUANTUM].load(Ordering::Relaxed) & OBJECT_MARK
-                    != 0
-                && spanning.insert(begin)
-            {
-                roots.push((begin, size));
-            }
-            for q in block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM {
-                let slot = self.heap.objects[q].load(Ordering::Relaxed);
-                if slot & OBJECT_MARK == 0 {
-                    continue;
-                }
-                let begin = q * ALLOC_QUANTUM;
-                let size = match slot & !OBJECT_MARK {
-                    0 => continue,
-                    SPAN_OBJECT => self.heap.alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE,
-                    code => code as usize * ALLOC_QUANTUM,
-                };
-                roots.push((begin, size));
-            }
-        }
+        let mut roots: Vec<usize> = self
+            .heap
+            .used_blocks
+            .iter()
+            .copied()
+            .filter(|&block_addr| {
+                let idx = block_addr / BLOCK_SIZE;
+                let block = &self.blocks[idx];
+                t.state[idx].load(Ordering::Acquire) != PROTECT_CLEAN
+                    && !block.noptr
+                    && block.any_marked.load(Ordering::Relaxed)
+            })
+            .collect();
+        roots.sort_unstable();
         roots
     }
 
     /// Before a major: forget every sticky mark, which the generational
-    /// sweep leaves in place on the blocks it keeps.
+    /// sweep leaves in place on the blocks it keeps. Memory-bound, over every
+    /// used block, so a large heap is split across threads.
     fn clear_all_marks(&mut self) {
-        for &block_addr in &self.heap.used_blocks {
-            let block = &mut self.blocks[block_addr / BLOCK_SIZE];
-            if !*block.any_marked.get_mut() {
-                continue;
+        let blocks: Vec<usize> = self
+            .heap
+            .used_blocks
+            .iter()
+            .copied()
+            .filter(|&b| *self.blocks[b / BLOCK_SIZE].any_marked.get_mut())
+            .collect();
+        // `&mut self` excludes every other access for the whole call, and
+        // each block's table entries and mark words belong to that block
+        // alone, so threads given disjoint blocks write disjoint memory.
+        let objects = self.heap.objects.as_mut_ptr() as usize;
+        let block_meta = self.blocks.as_mut_ptr() as usize;
+        let clear = move |part: &[usize]| {
+            const MARKS: u64 = u64::from_ne_bytes([OBJECT_MARK; 8]);
+            for &block_addr in part {
+                let table = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (objects as *mut u8).add(block_addr / ALLOC_QUANTUM),
+                        BLOCK_SIZE / ALLOC_QUANTUM,
+                    )
+                };
+                for word in table.chunks_exact_mut(8) {
+                    let w = u64::from_ne_bytes(word.try_into().unwrap()) & !MARKS;
+                    word.copy_from_slice(&w.to_ne_bytes());
+                }
+                let block = unsafe { &*(block_meta as *const Block).add(block_addr / BLOCK_SIZE) };
+                for word in block.mark_bits.iter() {
+                    word.store(0, Ordering::Relaxed);
+                }
+                block.any_marked.store(false, Ordering::Relaxed);
             }
-            for slot in &mut self.heap.objects
-                [block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
-            {
-                *slot.get_mut() &= !OBJECT_MARK;
+        };
+        // Threads are spawned for this, not taken from the marking pool:
+        // only a major clears, and it does so once. Compiled out on wasm,
+        // where naming a spawn imports `pthread_create` (see
+        // conservative_trace).
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let threads = mark_threads();
+            const PER_THREAD_MIN: usize = 2048;
+            if threads > 1 && blocks.len() >= 2 * PER_THREAD_MIN {
+                let chunk = blocks.len().div_ceil(threads.min(blocks.len() / PER_THREAD_MIN));
+                std::thread::scope(|scope| {
+                    let mut parts = blocks.chunks(chunk);
+                    let first = parts.next().unwrap_or(&[]);
+                    for part in parts {
+                        scope.spawn(move || clear(part));
+                    }
+                    clear(first);
+                });
+                return;
             }
-            for word in block.mark_bits.iter_mut() {
-                *word.get_mut() = 0;
-            }
-            *block.any_marked.get_mut() = false;
         }
+        clear(&blocks);
     }
 
     /// Makes every block this collection kept read-only; see the

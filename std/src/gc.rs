@@ -5042,7 +5042,7 @@ impl ImmixAllocator {
                     if val < heap_start || val >= heap_end {
                         continue;
                     }
-                    let Some((target, _)) = containing_allocation(
+                    let Some((target, target_size)) = containing_allocation(
                         &self.blocks,
                         &self.heap.alloc_sizes,
                         &self.heap.objects,
@@ -5057,26 +5057,15 @@ impl ImmixAllocator {
                         missed += 1;
                         if missed <= 16 {
                             eprintln!(
-                                "[gc-cards] missed barrier: old object {:#x} (+{off}, {size} bytes) of {} -> young {:#x} of {}",
+                                "[gc-cards] missed barrier: old object {:#x} (+{off}, {size} bytes) of {} -> young {:#x} (+{}, {target_size} bytes) of {}",
                                 heap_start + begin,
                                 describe_header(unsafe { *((heap_start + begin) as *const usize) }),
                                 heap_start + target,
+                                val - heap_start - target,
                                 describe_header(unsafe { *((heap_start + target) as *const usize) }),
                             );
                             if std::env::var("ASH_GC_CARD_VERIFY").is_ok_and(|v| v == "dump") {
-                                let words: Vec<String> = (0..size.min(256) / WORD)
-                                    .map(|i| format!("{:#x}", unsafe {
-                                        *((heap_start + begin + i * WORD) as *const usize)
-                                    }))
-                                    .collect();
-                                let text: String = (0..24)
-                                    .map(|i| unsafe {
-                                        *((heap_start + target + i * 2) as *const u16)
-                                    })
-                                    .map(|c| char::from_u32(c as u32).filter(|c| !c.is_control()).unwrap_or('.'))
-                                    .collect();
-                                eprintln!("[gc-cards]   old words: {}", words.join(" "));
-                                eprintln!("[gc-cards]   young as utf-16: {text:?}");
+                                self.dump_card_miss(begin, size, off, target, target_size);
                             }
                         }
                     }
@@ -5084,6 +5073,45 @@ impl ImmixAllocator {
             }
         }
         missed
+    }
+
+    /// `ASH_GC_CARD_VERIFY=dump`'s detail for one missed barrier: the old
+    /// object's first words and the words around the store, the young
+    /// allocation's first words, and the allocation the old object's header
+    /// word points into when that is in the heap. Every read stays inside
+    /// its allocation.
+    fn dump_card_miss(&self, old: usize, old_size: usize, off: usize, young: usize, young_size: usize) {
+        let heap_start = self.heap.memory.as_ptr() as usize;
+        let words = |begin: usize, from: usize, to: usize| -> String {
+            (from / WORD..to / WORD)
+                .map(|i| format!("{:#x}", unsafe { *((heap_start + begin + i * WORD) as *const usize) }))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        eprintln!("[gc-cards]   old words: {}", words(old, 0, old_size.min(64)));
+        let near = off.saturating_sub(32);
+        eprintln!(
+            "[gc-cards]   old words from +{near}: {}",
+            words(old, near, (off + 40).min(old_size))
+        );
+        eprintln!("[gc-cards]   young words: {}", words(young, 0, young_size.min(64)));
+        let header = unsafe { *((heap_start + old) as *const usize) };
+        if let Some(h) = header.checked_sub(heap_start)
+            && h < self.heap.memory.len
+            && let Some((at, size)) = containing_allocation(
+                &self.blocks,
+                &self.heap.alloc_sizes,
+                &self.heap.objects,
+                h,
+            )
+        {
+            eprintln!(
+                "[gc-cards]   old header points into {:#x} (+{}, {size} bytes): {}",
+                heap_start + at,
+                h - at,
+                words(at, 0, size.min(64))
+            );
+        }
     }
 
     /// Before a major: forget every sticky mark, which the generational

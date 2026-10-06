@@ -25,9 +25,10 @@ fn allocate_map(initial_capacity: usize) -> Option<NonNull<hl::hl_hb_map>> {
             let entries_size = initial_capacity * mem::size_of::<hl::hl_hb_entry>();
             let values_size = initial_capacity * mem::size_of::<hl::hl_hb_value>();
 
-            let cells_ptr = crate::rt::gc_alloc(cells_size)?;
-            let nexts_ptr = crate::rt::gc_alloc(nexts_size)?;
-            let entries_ptr = crate::rt::gc_alloc(entries_size)?;
+            // Cells, nexts and entries hold only ints; values holds the pointers.
+            let cells_ptr = crate::rt::gc_alloc_noptr(cells_size)?;
+            let nexts_ptr = crate::rt::gc_alloc_noptr(nexts_size)?;
+            let entries_ptr = crate::rt::gc_alloc_noptr(entries_size)?;
             let values_ptr = crate::rt::gc_alloc(values_size)?;
 
             map.cells = cells_ptr.as_ptr() as *mut c_void;
@@ -176,13 +177,14 @@ unsafe fn hl_freelist_init(f: *mut hl::hl_free_list) {
 unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
     unsafe {
         let new_buckets =
-            crate::rt::gc_alloc(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
+            crate::rt::gc_alloc_noptr(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut hl::hl_free_bucket;
 
         ptr::copy_nonoverlapping((*f).buckets, new_buckets, (*f).head as usize);
 
         (*f).buckets = new_buckets;
+        crate::gc::write_barrier(&raw mut (*f).buckets as usize);
         (*f).nbuckets = new_size;
     }
 }
@@ -403,7 +405,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
             mem::size_of::<i32>()
         };
         (*m).entries =
-            crate::rt::gc_alloc(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
+            crate::rt::gc_alloc_noptr(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut hl::hl_hb_entry;
         (*m).values = crate::rt::gc_alloc(nentries as usize * mem::size_of::<hl::hl_hb_value>())
@@ -413,7 +415,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
 
         if old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) {
             // simply expand
-            (*m).nexts = crate::rt::gc_alloc(nentries as usize * ksize)
+            (*m).nexts = crate::rt::gc_alloc_noptr(nentries as usize * ksize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut c_void;
             ptr::copy_nonoverlapping(old.entries, (*m).entries, old.maxentries as usize);
@@ -431,7 +433,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
             );
         } else {
             // expand and remap
-            (*m).cells = crate::rt::gc_alloc((ncells + nentries) as usize * ksize)
+            (*m).cells = crate::rt::gc_alloc_noptr((ncells + nentries) as usize * ksize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
                 .as_ptr() as *mut c_void;
             (*m).nexts = (*m).cells.add(ncells as usize * ksize);

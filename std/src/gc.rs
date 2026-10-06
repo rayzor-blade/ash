@@ -2615,12 +2615,20 @@ fn protect_enabled() -> bool {
     }) && !cards_enabled()
 }
 
-/// `ASH_GC_CARDS=1` asks for card mode; off otherwise for now, since the
-/// barrier costs compiled code more than card mode saves on most programs.
-/// Safe to run with: a native library without the barrier still turns it off.
+/// Card mode unless `ASH_GC_CARDS=0`, which keeps page protection. A native
+/// library without the barrier still turns it off.
 fn cards_requested() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("ASH_GC_CARDS").is_ok_and(|v| v == "1"))
+    *V.get_or_init(|| !std::env::var("ASH_GC_CARDS").is_ok_and(|v| v == "0"))
+}
+
+/// `ASH_GC_CARDS=force`: stay in card mode when a library without the
+/// barrier loads. Unsafe for real programs, whose libraries may store young
+/// pointers unseen; for running the card verifier over programs that load
+/// one.
+fn cards_forced() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_CARDS").is_ok_and(|v| v == "force"))
 }
 
 /// Set once a native library without the write barrier has loaded.
@@ -2647,7 +2655,7 @@ pub unsafe extern "C" fn hlp_gc_native_library_loaded(
     len: usize,
     barrier_aware: bool,
 ) {
-    if barrier_aware || UNBARRIERED_NATIVE.swap(true, Ordering::Relaxed) {
+    if barrier_aware || cards_forced() || UNBARRIERED_NATIVE.swap(true, Ordering::Relaxed) {
         return;
     }
     let mut gc = gc_locked_init();

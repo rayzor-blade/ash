@@ -180,9 +180,10 @@ pub struct JITModule<'ctx> {
     /// IR, because an address valid in THIS process means nothing in the one
     /// that will run the object. See `docs/wasm/README.md`.
     pub(crate) aot: bool,
-    /// Whether an AOT module carries the write barrier: card mode asked for
-    /// at build time (`ASH_GC_CARDS=1`) and no native library outside the
-    /// runtime, which would turn card mode off at startup. Decided once.
+    /// Whether an AOT module carries the write barrier: card mode not refused
+    /// at build time (`ASH_GC_CARDS=0`), a target whose runtime has minors,
+    /// and no native library outside the runtime, which would turn card mode
+    /// off at startup, unless `ASH_GC_CARDS=force`. Decided once.
     pub(crate) aot_barriers: std::cell::OnceCell<bool>,
     /// The AIR instruction being emitted is a store that needs no write
     /// barrier (`barrier_free_stores`).

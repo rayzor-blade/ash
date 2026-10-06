@@ -129,6 +129,13 @@ impl TargetAbi {
         })
     }
 
+    /// Whether the runtime on this target collects generationally, so the
+    /// write barrier has minors to serve. Unix only, as in `ash_std::gc`.
+    pub fn generational_gc(&self) -> bool {
+        let t = self.triple.to_ascii_lowercase();
+        !t.starts_with("wasm") && !t.contains("windows")
+    }
+
     pub fn triple(&self) -> &str {
         &self.triple
     }

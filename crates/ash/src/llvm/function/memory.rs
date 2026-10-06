@@ -20,12 +20,15 @@ impl<'ctx> JITModule<'ctx> {
     /// See `JITModule::aot_barriers`.
     pub(crate) fn aot_wants_barriers(&self) -> bool {
         *self.aot_barriers.get_or_init(|| {
-            std::env::var("ASH_GC_CARDS").is_ok_and(|v| v == "1")
-                && self
-                    .bytecode
-                    .natives
-                    .iter()
-                    .all(|n| crate::native_lib::is_runtime_lib(&n.lib))
+            let cards = std::env::var("ASH_GC_CARDS");
+            !cards.as_deref().is_ok_and(|v| v == "0")
+                && self.target_abi.generational_gc()
+                && (cards.as_deref().is_ok_and(|v| v == "force")
+                    || self
+                        .bytecode
+                        .natives
+                        .iter()
+                        .all(|n| crate::native_lib::is_runtime_lib(&n.lib)))
         })
     }
 

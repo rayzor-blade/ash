@@ -432,3 +432,64 @@ pub fn is_non_null_result(ins: &Instr) -> bool {
             | Instr::CellRef { .. }
     )
 }
+
+/// The heap stores of `f` that need no write barrier, as `(block,
+/// instruction)` positions: a store of a `Null` constant, and a store into an
+/// object allocated earlier in the same block with nothing between that
+/// could collect. Such an object is still young, and the barrier only
+/// records old objects' pointers to young ones.
+///
+/// "Could collect" is anything that may allocate or call: an `Alloc`,
+/// `MayThrow` or `ClobberAll` effect, except `NullCheck`, which only leaves
+/// the block; and a field store into an object not known to be fresh, since
+/// a virtual's fallback is a runtime call.
+pub fn barrier_free_stores(f: &Function) -> std::collections::HashSet<(usize, usize)> {
+    use std::collections::HashSet;
+    let nulls: HashSet<ValueId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::Null { dst } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashSet::new();
+    for (b, blk) in f.blocks.iter().enumerate() {
+        let mut fresh: HashSet<ValueId> = HashSet::new();
+        for (k, ins) in blk.instrs.iter().enumerate() {
+            let target = match ins {
+                Instr::FieldSet { obj, src, .. } => Some((*obj, *src)),
+                Instr::MemSet { base, src, .. } => Some((*base, *src)),
+                Instr::SetEnumField { value, src, .. } => Some((*value, *src)),
+                Instr::SetRef { r, value } => Some((*r, *value)),
+                _ => None,
+            };
+            if let Some((into, src)) = target
+                && (fresh.contains(&into) || nulls.contains(&src))
+            {
+                out.insert((b, k));
+            }
+            match ins {
+                Instr::New { dst } | Instr::EnumAlloc { dst, .. } | Instr::MakeEnum { dst, .. } => {
+                    fresh.clear();
+                    fresh.insert(*dst);
+                }
+                Instr::Copy { dst, src } if fresh.contains(src) => {
+                    fresh.insert(*dst);
+                }
+                Instr::FieldSet { obj, .. } if !fresh.contains(obj) => fresh.clear(),
+                Instr::NullCheck { .. } => {}
+                _ if matches!(
+                    ins.effect(),
+                    Effect::Alloc | Effect::MayThrow | Effect::ClobberAll
+                ) =>
+                {
+                    fresh.clear()
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}

@@ -8206,3 +8206,50 @@ fn stripmine_skips_a_loop_with_a_variable_step() {
     pm.run(&mut f).expect("stripmine");
     assert!(f.strip_tests.is_empty(), "no constant step, no test");
 }
+
+#[test]
+fn barrier_free_stores_are_fresh_targets_and_null_sources() {
+    let ops = vec![
+        Opcode::New { dst: Reg(1) },
+        Opcode::Null { dst: Reg(2) },
+        // Into the object just allocated: no barrier.
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(0),
+            src: Reg(0),
+        },
+        // A call can collect, so the object may be old after it.
+        Opcode::Call0 {
+            dst: Reg(3),
+            fun: RefFun(2),
+        },
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(1),
+            src: Reg(3),
+        },
+        // A null is never a young pointer.
+        Opcode::SetField {
+            obj: Reg(0),
+            field: RefField(0),
+            src: Reg(2),
+        },
+        Opcode::SetField {
+            obj: Reg(0),
+            field: RefField(0),
+            src: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let f = lower(&ops, &[t(5), t(5), t(5), t(5)]).unwrap();
+    let free = super::analysis::barrier_free_stores(&f);
+    let mut elided = Vec::new();
+    for (b, blk) in f.blocks.iter().enumerate() {
+        for (k, ins) in blk.instrs.iter().enumerate() {
+            if matches!(ins, Instr::FieldSet { .. }) {
+                elided.push(free.contains(&(b, k)));
+            }
+        }
+    }
+    assert_eq!(elided, [true, false, true, false]);
+}

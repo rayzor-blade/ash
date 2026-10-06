@@ -616,6 +616,7 @@ impl<'ctx> JITModule<'ctx> {
             poll_blocks[bi].extend(blocks_after(function, poll_before));
         }
 
+        let barrier_free = air::v2::analysis::barrier_free_stores(air);
         for (bi, block) in air.blocks.iter().enumerate() {
             if !included.get(bi).copied().unwrap_or(false) {
                 continue;
@@ -625,6 +626,7 @@ impl<'ctx> JITModule<'ctx> {
                 traps.current = block.handler.map(|h| h.0);
             }
             for (ii, instr) in block.instrs.iter().enumerate() {
+                self.skip_barrier.set(barrier_free.contains(&(bi, ii)));
                 if let AirInstr::Pos { file, line, site } = instr
                     && !marker_emits
                 {
@@ -1175,6 +1177,7 @@ impl<'ctx> JITModule<'ctx> {
                 );
             }
         }
+        self.skip_barrier.set(false);
         self.finish_wasm_traps(function)?;
 
         // Leave the caller in a valid insertion block. It is unreachable;

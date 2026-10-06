@@ -1630,6 +1630,14 @@ const CARDS_PER_BLOCK: usize = BLOCK_SIZE / CARD_SIZE;
 /// heap address is at `CARD_BIAS_HOOK + (addr >> CARD_SHIFT)`.
 static CARD_BIAS_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// `CARD_BIAS_HOOK`, `HEAP_BASE_HOOK` and `HEAP_LEN_HOOK` in that order, for
+/// AOT code linked statically with the runtime to inline the barrier. Written
+/// once, when the heap is created; zero before that, which marks nothing.
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static ash_gc_card_table: [std::sync::atomic::AtomicUsize; 3] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+
 /// The write barrier: record that the word at `addr` may now hold a pointer
 /// to a young object. Every store of a pointer into an existing heap object
 /// that ash's own code makes goes through this or its inlined form; an
@@ -3954,6 +3962,9 @@ impl ImmixAllocator {
                 .wrapping_sub(heap.memory.as_ptr() as usize >> CARD_SHIFT),
             Ordering::Relaxed,
         );
+        ash_gc_card_table[0].store(CARD_BIAS_HOOK.load(Ordering::Relaxed), Ordering::Relaxed);
+        ash_gc_card_table[1].store(heap.memory.as_ptr() as usize, Ordering::Relaxed);
+        ash_gc_card_table[2].store(heap_size, Ordering::Relaxed);
 
         if gc_stats_enabled() {
             unsafe {

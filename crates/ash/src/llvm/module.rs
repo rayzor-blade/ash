@@ -184,6 +184,9 @@ pub struct JITModule<'ctx> {
     /// at build time (`ASH_GC_CARDS=1`) and no native library outside the
     /// runtime, which would turn card mode off at startup. Decided once.
     pub(crate) aot_barriers: std::cell::OnceCell<bool>,
+    /// The AIR instruction being emitted is a store that needs no write
+    /// barrier (`barrier_free_stores`).
+    pub(crate) skip_barrier: std::cell::Cell<bool>,
     /// Compile reached functions into independent modules and dispatch calls
     /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:
     /// MCJIT modules cannot accept new function bodies after finalization.
@@ -518,6 +521,7 @@ impl<'ctx> JITModule<'ctx> {
             sealed_bodies: Default::default(),
             aot,
             aot_barriers: std::cell::OnceCell::new(),
+            skip_barrier: std::cell::Cell::new(false),
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
             inline_alloc: std::cell::OnceCell::new(),
@@ -977,6 +981,7 @@ impl<'ctx> JITModule<'ctx> {
             sealed_bodies: Default::default(),
             aot: false,
             aot_barriers: std::cell::OnceCell::new(),
+            skip_barrier: std::cell::Cell::new(false),
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
             inline_alloc: std::cell::OnceCell::new(),

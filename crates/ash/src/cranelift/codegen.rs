@@ -262,6 +262,8 @@ pub fn lower_air_function(
         let mut cg = AirCodegen {
             ctx,
             f: air,
+            barrier_free: air::v2::analysis::barrier_free_stores(air),
+            skip_barrier: false,
             findex,
             b: def.builder(),
             fcfg,
@@ -377,6 +379,8 @@ pub fn compile_osr_entry(
         let mut cg = AirCodegen {
             ctx,
             f: air,
+            barrier_free: air::v2::analysis::barrier_free_stores(air),
+            skip_barrier: false,
             findex,
             b: def.builder(),
             fcfg,
@@ -582,6 +586,10 @@ fn import_natives(
 struct AirCodegen<'a, 'b> {
     ctx: &'a CraneliftTierContext,
     f: &'a AirFunction,
+    /// The stores that need no write barrier (`barrier_free_stores`), and
+    /// whether the instruction being emitted is one.
+    barrier_free: std::collections::HashSet<(usize, usize)>,
+    skip_barrier: bool,
     findex: usize,
     b: FunctionBuilder<'b>,
     /// Captured from the def before `builder()` borrows it; `finalize` needs
@@ -671,8 +679,10 @@ impl AirCodegen<'_, '_> {
             self.emit_header_polls(bid, poll_headers[bid.idx()])?;
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
+                self.skip_barrier = self.barrier_free.contains(&(bid.idx(), ii));
                 self.emit(&instr)
                     .with_context(|| format!("AIR b{} instruction {}: {instr:?}", bid.0, ii))?;
+                self.skip_barrier = false;
             }
             let term = self.f.blocks[bid.idx()].term.clone();
             self.emit_term(bid, &term)
@@ -1126,7 +1136,9 @@ impl AirCodegen<'_, '_> {
             self.emit_header_polls(bid, poll_headers[bid.idx()])?;
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
+                self.skip_barrier = self.barrier_free.contains(&(bid.idx(), ii));
                 self.emit(&instr)?;
+                self.skip_barrier = false;
             }
             let term = self.f.blocks[bid.idx()].term.clone();
             self.emit_term(bid, &term)?;
@@ -1432,7 +1444,7 @@ impl AirCodegen<'_, '_> {
     /// `addr` when `src` may be a pointer and `addr` lies in the heap (see
     /// `crate::card_table`).
     fn emit_write_barrier(&mut self, addr: Value, src: ValueId) -> Result<()> {
-        if !self.value_is_ptr(src)? {
+        if self.skip_barrier || !self.value_is_ptr(src)? {
             return Ok(());
         }
         // No card table: card mode is off, now and for the rest of the run.

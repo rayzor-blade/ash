@@ -10,7 +10,7 @@
 use air::v2::ir::{CellId, MemAccess as AirMemAccess, ValueId};
 use inkwell::AddressSpace;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicValue, PointerValue};
+use inkwell::values::{BasicValue, IntValue, PointerValue};
 
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
@@ -40,6 +40,9 @@ impl<'ctx> JITModule<'ctx> {
         addr: PointerValue<'ctx>,
     ) -> Result<()> {
         use crate::hl_bindings::*;
+        if self.skip_barrier.get() {
+            return Ok(());
+        }
         let kind = self.types_[lowering.regs[src.idx()].0].kind;
         if matches!(
             kind,
@@ -55,30 +58,52 @@ impl<'ctx> JITModule<'ctx> {
             return Ok(());
         }
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        if self.aot {
-            if self.aot_wants_barriers() {
+        let i64_type = self.context.i64_type();
+        let (bias, base, len) = if self.aot {
+            if !self.aot_wants_barriers() {
+                return Ok(());
+            }
+            // The runtime's `ash_gc_card_table` is data, which only a static
+            // link with direct data relocations can name; elsewhere call.
+            if self.aot_shared_runtime || !self.target_abi.direct_data_relocations {
                 let barrier =
                     self.declare_native("hlp_gc_write_barrier", &[ptr_type.into()], None);
                 self.builder
                     .build_call(barrier, &[addr.into()], "write_barrier")?;
+                return Ok(());
             }
-            return Ok(());
-        }
-        // No card table: card mode is off, now and for the rest of the run.
-        let Some(t) = crate::card_table::card_table() else {
-            return Ok(());
+            let table_ty = i64_type.array_type(3);
+            let table = self
+                .aot_runtime_global("ash_gc_card_table", table_ty)
+                .as_pointer_value();
+            let field = |i: u64, name: &str| -> Result<IntValue<'ctx>> {
+                let at = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        table_ty,
+                        table,
+                        &[i64_type.const_zero(), i64_type.const_int(i, false)],
+                        name,
+                    )?
+                };
+                Ok(self.builder.build_load(i64_type, at, name)?.into_int_value())
+            };
+            (field(0, "wb_bias")?, field(1, "wb_base")?, field(2, "wb_len")?)
+        } else {
+            // No card table: card mode is off, now and for the rest of the run.
+            let Some(t) = crate::card_table::card_table() else {
+                return Ok(());
+            };
+            (
+                i64_type.const_int(t.bias as u64, false),
+                i64_type.const_int(t.base as u64, false),
+                i64_type.const_int(t.len as u64, false),
+            )
         };
-        let i64_type = self.context.i64_type();
         let at = self.builder.build_ptr_to_int(addr, i64_type, "wb_addr")?;
-        let off = self
-            .builder
-            .build_int_sub(at, i64_type.const_int(t.base as u64, false), "wb_off")?;
-        let inside = self.builder.build_int_compare(
-            inkwell::IntPredicate::ULT,
-            off,
-            i64_type.const_int(t.len as u64, false),
-            "wb_inside",
-        )?;
+        let off = self.builder.build_int_sub(at, base, "wb_off")?;
+        let inside =
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::ULT, off, len, "wb_inside")?;
         let current_fn = self
             .builder
             .get_insert_block()
@@ -94,11 +119,7 @@ impl<'ctx> JITModule<'ctx> {
             false,
             "wb_card",
         )?;
-        let card = self.builder.build_int_add(
-            card,
-            i64_type.const_int(t.bias as u64, false),
-            "wb_card_addr",
-        )?;
+        let card = self.builder.build_int_add(card, bias, "wb_card_addr")?;
         let card = self.builder.build_int_to_ptr(card, ptr_type, "wb_card_ptr")?;
         self.builder
             .build_store(card, self.context.i8_type().const_int(1, false))?;

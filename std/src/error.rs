@@ -902,7 +902,7 @@ unsafe fn aot_frame_in_program(pc: usize) -> bool {
 }
 
 #[cfg(unix)]
-unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
+pub(crate) unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
     unsafe {
         // The table first, and by the pc itself: where dladdr is blind -- every
         // hidden body on Linux -- it is the only thing that can name the frame.

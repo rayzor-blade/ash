@@ -65,5 +65,7 @@ pub mod types;
 #[macro_use]
 pub mod debugger;
 pub(crate) mod sort;
+#[cfg(unix)]
+pub(crate) mod stall;
 pub(crate) mod ucs2;
 pub(crate) mod unicase;

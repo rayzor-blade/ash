@@ -485,6 +485,10 @@ struct MutatorSnapshot {
 
 struct MutatorRecord {
     thread: u64,
+    /// The thread's `pthread_t`, to interrupt it and say where it is when a
+    /// world stop waits on it (see `crate::stall`).
+    #[cfg(unix)]
+    pthread: libc::pthread_t,
     /// How this thread came to be a mutator. Only used to explain a slow world
     /// stop: the three kinds reach a safepoint by quite different means, and
     /// which one is late is the whole diagnosis.
@@ -574,6 +578,8 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
     } else {
         world.mutators.push(MutatorRecord {
             thread,
+            #[cfg(unix)]
+            pthread: unsafe { libc::pthread_self() },
             role,
             stack_top,
             stopped_sp: 0,
@@ -969,6 +975,18 @@ fn stop_mutator_world() -> StoppedWorld {
                     world.mutators.len(),
                     stragglers.join(", ")
                 );
+                #[cfg(unix)]
+                for m in world
+                    .mutators
+                    .iter()
+                    .filter(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
+                {
+                    let frames: Vec<String> = crate::stall::sample(m.pthread, m.stack_top)
+                        .into_iter()
+                        .map(crate::stall::name)
+                        .collect();
+                    eprintln!("[gc]   {} {:#x} is at: {}", m.role, m.thread, frames.join(" <- "));
+                }
             }
         }
         if reported {

@@ -892,8 +892,19 @@ impl NativeLibraryManager {
                     .map_err(|e| hdll_load_error(name, path, &e.to_string()))?;
             Library::from(loaded)
         };
+        let barrier_aware = unsafe { library.get::<*const u8>(b"ash_hdll_barrier_aware\0") }.is_ok();
+        note_native_library(&clean, barrier_aware);
         registry.insert(clean, Arc::new(library));
         Ok(())
+    }
+}
+
+/// Tell the collector a native library loaded, and whether it declares the
+/// write barrier (`hlp_gc_native_library_loaded`).
+pub fn note_native_library(name: &str, barrier_aware: bool) {
+    type Loaded = unsafe extern "C" fn(*const u8, usize, bool);
+    if let Some(addr) = std_symbol_addr("hlp_gc_native_library_loaded") {
+        unsafe { std::mem::transmute::<usize, Loaded>(addr)(name.as_ptr(), name.len(), barrier_aware) };
     }
 }
 

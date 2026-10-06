@@ -331,7 +331,10 @@ pub(crate) unsafe fn write_raw_kind(p: *mut u8, kind: hl::hl_type_kind, v: NanBo
             hl::hl_type_kind_HF32 => (p as *mut f32).write_unaligned(v.as_f64() as f32),
             hl::hl_type_kind_HF64 => (p as *mut f64).write_unaligned(v.as_f64()),
             hl::hl_type_kind_HI64 => (p as *mut i64).write_unaligned(v.as_i64_lossy()),
-            _ => (p as *mut usize).write_unaligned(v.as_ptr()),
+            _ => {
+                (p as *mut usize).write_unaligned(v.as_ptr());
+                crate::barrier::write_barrier(p);
+            }
         }
     }
 }

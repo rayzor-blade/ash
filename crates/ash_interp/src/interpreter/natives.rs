@@ -1546,6 +1546,7 @@ impl HLInterpreter {
                         wr(addr as *mut f64, val.as_f64());
                     } else {
                         wr(addr as *mut usize, val.as_ptr());
+                        crate::barrier::write_barrier(addr);
                     }
                 }
             }

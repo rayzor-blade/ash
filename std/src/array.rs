@@ -94,6 +94,9 @@ pub unsafe extern "C" fn hlp_array_blit(
             dst_ptr as *mut vbyte,
             (len as usize) * (size as usize),
         );
+        if crate::types::hl_is_ptr(dst_at) {
+            crate::gc::write_barrier_range(dst_ptr as usize, (len as usize) * (size as usize));
+        }
     }
 }
 

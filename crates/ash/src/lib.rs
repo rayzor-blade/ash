@@ -8,6 +8,7 @@ pub mod air_pipeline;
 pub mod bytecode;
 pub mod bytecode_encode;
 pub mod c_types;
+pub mod card_table;
 pub mod callsite_profile;
 pub mod cranelift;
 pub mod devirt;

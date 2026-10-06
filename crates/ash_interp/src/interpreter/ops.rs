@@ -223,6 +223,7 @@ impl HLInterpreter {
                             src_val.as_ptr()
                         };
                         *(data.add(idx * 8) as *mut usize) = ptr_val;
+                        crate::barrier::write_barrier(data.add(idx * 8));
                     }
                 }
             }

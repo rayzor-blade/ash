@@ -71,6 +71,8 @@ being taken:
 | `ASH_GC_GEN` | `0` makes every collection a major. By default (unix) most are minor: the blocks a collection kept are write-protected, the first store into one faults and marks it dirty, and the next collection traces only young blocks and dirty old ones. A rooting bug in a long-lived object only shows under a major, so hunt those with `ASH_GC_GEN=0` |
 | `ASH_GC_MAJOR_EVERY` | collections between majors (default 8); exhaustion and `Gc.major` force one |
 | `ASH_GC_PROTECT` | `1` keeps the write-protection and its counts (`ASH_GC_STATS`) with `ASH_GC_GEN=0` |
+| `ASH_GC_CARDS` | `1`: minors find written old objects from the write barrier's 512-byte cards instead of write-protection, so a minor scans the written cards rather than whole written blocks. Compiled code then carries the barrier. A native library that does not export `ash_hdll_barrier_aware` switches back to write-protection; safe to run with |
+| `ASH_GC_CARD_VERIFY` | with `ASH_GC_CARDS=1`: before each minor, report any old object holding a young pointer in a clean card -- a store the barrier missed; `abort` also aborts, `dump` also prints the objects. Slow |
 | `ASH_GC_COLLECT_AT_REFILLS` | `a,b,c`, `a-b` or `every:N`: collect at exactly those bump-region refills, numbered from 1 as `ASH_GC_STATS` reports them, to replay a timing-dependent collection |
 | `ASH_GC_SWEEP_AUDIT` | report roots that still point into a block being freed or a line run being recycled |
 | `ASH_GC_POISON` | `1` fills freed blocks and recycled line runs with `0xA5`, so a stale reference faults at its first use |

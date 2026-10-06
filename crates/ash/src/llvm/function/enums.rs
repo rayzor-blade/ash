@@ -247,6 +247,7 @@ impl<'ctx> JITModule<'ctx> {
             )?
         };
         self.builder.build_store(param_ptr, src_val)?;
+        self.emit_write_barrier(lowering, src, param_ptr)?;
         self.builder.build_unconditional_branch(cont_block)?;
         self.builder.position_at_end(cont_block);
         Ok(())

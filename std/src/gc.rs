@@ -1621,6 +1621,95 @@ pub extern "C" fn hlp_gc_allocation_code(addr: usize) -> u32 {
 static HEAP_BASE_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static HEAP_LEN_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Bytes of heap per card of the write barrier's card table.
+const CARD_SHIFT: usize = 9;
+const CARD_SIZE: usize = 1 << CARD_SHIFT;
+const CARDS_PER_BLOCK: usize = BLOCK_SIZE / CARD_SIZE;
+
+/// The card table's address minus `heap base >> CARD_SHIFT`, so the card of a
+/// heap address is at `CARD_BIAS_HOOK + (addr >> CARD_SHIFT)`.
+static CARD_BIAS_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The write barrier: record that the word at `addr` may now hold a pointer
+/// to a young object. Every store of a pointer into an existing heap object
+/// that ash's own code makes goes through this or its inlined form; an
+/// address outside the heap is ignored. See `cards_enabled`.
+#[inline(always)]
+pub(crate) fn write_barrier(addr: usize) {
+    let lo = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+    if addr.wrapping_sub(lo) < HEAP_LEN_HOOK.load(Ordering::Relaxed) {
+        let card = CARD_BIAS_HOOK
+            .load(Ordering::Relaxed)
+            .wrapping_add(addr >> CARD_SHIFT);
+        unsafe { (*(card as *const std::sync::atomic::AtomicU8)).store(1, Ordering::Relaxed) };
+    }
+}
+
+/// A word that may be an object's `hl_type*`, described for the card
+/// verifier without allocating: its kind, and an object type's name.
+fn describe_header(word: usize) -> String {
+    if word < 0x10000 || !word.is_multiple_of(std::mem::align_of::<usize>()) {
+        return format!("? ({word:#x})");
+    }
+    unsafe {
+        let t = word as *const hl::hl_type;
+        let kind = (*t).kind;
+        let mut out = format!("kind {kind}");
+        if kind == hl::hl_type_kind_HOBJ || kind == hl::hl_type_kind_HSTRUCT {
+            let obj = (*t).__bindgen_anon_1.obj;
+            if !obj.is_null() && !(*obj).name.is_null() {
+                let mut name = String::new();
+                let mut p = (*obj).name;
+                while *p != 0 && name.len() < 80 {
+                    name.push(char::from_u32(*p as u32).unwrap_or('?'));
+                    p = p.add(1);
+                }
+                out.push(' ');
+                out.push_str(&name);
+            }
+        }
+        out
+    }
+}
+
+/// [`write_barrier`] for every word in `addr..addr + len`: a bulk copy of
+/// pointers.
+pub(crate) fn write_barrier_range(addr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let first = addr & !(CARD_SIZE - 1);
+    let mut at = first;
+    while at < addr + len {
+        write_barrier(at);
+        at += CARD_SIZE;
+    }
+}
+
+/// [`write_barrier`] for code outside this crate that cannot inline it.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_gc_write_barrier(addr: *mut c_void) {
+    write_barrier(addr as usize);
+}
+
+/// What an inlined barrier needs: the card bias, the heap's base and its
+/// length, written through the three pointers. Fixed once the heap exists.
+/// A length of 0 means card mode is off and the barrier can be left out: it
+/// can only turn off later, never on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_gc_card_info(bias: *mut usize, base: *mut usize, len: *mut usize) {
+    let _ = gc_locked_init();
+    unsafe {
+        *bias = CARD_BIAS_HOOK.load(Ordering::Relaxed);
+        *base = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+        *len = if cards_enabled() {
+            HEAP_LEN_HOOK.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+    }
+}
+
 /// `ASH_GC_CHECK_FRESH=1`: report memory handed out twice. Every allocation
 /// claims its quanta in a shadow owner table that only the sweep clears,
 /// for the objects it found dead, so a claim over a live owner is a block
@@ -1730,6 +1819,7 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
             }
             let lo = rblock + start * LINE_SIZE;
             let span_bytes = len * LINE_SIZE;
+            gc.blocks[rblock / BLOCK_SIZE].allocated = true;
             gc.clear_allocation_metadata(lo, span_bytes);
             let base = unsafe { gc.heap.memory.as_mut_ptr().add(lo) };
             // Zeroed for the same reason a fresh block is: every caller of
@@ -2493,10 +2583,65 @@ const PROTECT_CLEAN: u8 = 1;
 const PROTECT_DIRTY: u8 = 2;
 
 fn protect_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    static WANTED: OnceLock<bool> = OnceLock::new();
+    *WANTED.get_or_init(|| {
         cfg!(unix) && (std::env::var("ASH_GC_PROTECT").is_ok_and(|v| v == "1") || generational())
-    })
+    }) && !cards_enabled()
+}
+
+/// `ASH_GC_CARDS=1` asks for card mode; off otherwise for now, since the
+/// barrier costs compiled code more than card mode saves on most programs.
+/// Safe to run with: a native library without the barrier still turns it off.
+fn cards_requested() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_CARDS").is_ok_and(|v| v == "1"))
+}
+
+/// Set once a native library without the write barrier has loaded.
+static UNBARRIERED_NATIVE: AtomicBool = AtomicBool::new(false);
+
+/// Minors find the old objects written since the last collection from the
+/// write barrier's cards rather than from page protection, so a minor scans
+/// the written cards rather than every written block. On unless a native
+/// library that does not declare the barrier is loaded (see
+/// `hlp_gc_native_library_loaded`): its stores into Haxe objects bypass the
+/// barrier, and only page protection sees them.
+fn cards_enabled() -> bool {
+    generational() && cards_requested() && !UNBARRIERED_NATIVE.load(Ordering::Relaxed)
+}
+
+/// A native library was loaded. One that is not `barrier_aware` -- it does
+/// not export `ash_hdll_barrier_aware` -- may store young pointers into old
+/// Haxe objects without the write barrier, so the collector leaves card
+/// mode: the next collection is a major, and page protection tracks writes
+/// after it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_gc_native_library_loaded(
+    name: *const u8,
+    len: usize,
+    barrier_aware: bool,
+) {
+    if barrier_aware || UNBARRIERED_NATIVE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let mut gc = gc_locked_init();
+    gc.heap.since_major = major_every();
+    if gc_stats_enabled() && cards_requested() {
+        let name = unsafe { std::slice::from_raw_parts(name, len) };
+        eprintln!(
+            "[gc] {} stores without the write barrier: page protection from the next collection",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
+/// `ASH_GC_CARD_VERIFY=1`: before each minor in card mode, look for an old
+/// object holding a pointer to a young one in a clean card -- a store the
+/// barrier missed -- and report each; `=abort` also aborts, so a test run
+/// fails on one. Slow; for testing.
+fn card_verify() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ASH_GC_CARD_VERIFY").is_some())
 }
 
 /// Most collections are minor. Marks stick: a block kept by the last
@@ -3064,6 +3209,12 @@ struct ImmixHeap {
     noptr_block_end: usize,
     /// Minor collections since the last major; see `generational`.
     since_major: u32,
+    /// A collection has run, so kept objects are old and a minor can stop
+    /// at them.
+    old_generation: bool,
+    /// The write barrier's cards, one byte per `CARD_SIZE` bytes of heap: 1
+    /// when ash stored into that card since the last collection.
+    cards: Vec<std::sync::atomic::AtomicU8>,
     /// Blocks kept by the last major. A minor cannot free an old object, so
     /// the kept set grows between majors; once it passes twice this the
     /// next collection is a major, which bounds that growth.
@@ -3159,6 +3310,10 @@ struct Block {
     /// their bytes, and dirty tracking never protects it. Fixed while the
     /// block is in use; a freed block takes the kind of its next user.
     noptr: bool,
+    /// Objects were allocated in this block since the last collection. In
+    /// card mode a minor sweeps only these: nothing else can hold a young
+    /// object.
+    allocated: bool,
 }
 
 /// Claim a line for the marker. Returns true for the thread that set it, so a
@@ -3372,38 +3527,41 @@ fn mark_allocation_shared(
     out.push((start, size));
 }
 
-/// Scan the marked objects of one old block for pointers, as a minor's roots:
-/// the block was written since it was traced, so any of them may now point
-/// at a young object. Only the part of an object inside this block is
-/// scanned; a part in another block is scanned with that block if it was
-/// written, and needs no scan if it was not.
-fn scan_old_block(
+/// Scan the marked objects in one old range for pointers, as a minor's
+/// roots: the range was written since it was traced, so any of them may now
+/// point at a young object. Only the part of an object inside the range is
+/// scanned; a part outside it is scanned with the range it lies in if that
+/// was written, and needs no scan if it was not.
+#[allow(clippy::too_many_arguments)]
+fn scan_old_range(
     blocks: &[Block],
     alloc_sizes: &[u32],
     objects: &[std::sync::atomic::AtomicU8],
     heap_start: usize,
     heap_end: usize,
-    block_addr: usize,
+    start: usize,
+    end: usize,
     out: &mut Vec<(usize, usize)>,
 ) {
-    let block_end = block_addr + BLOCK_SIZE;
-    if let Some((begin, size)) = containing_allocation(blocks, alloc_sizes, objects, block_addr)
-        && begin < block_addr
+    if let Some((begin, size)) = containing_allocation(blocks, alloc_sizes, objects, start)
+        && begin < start
         && objects[begin / ALLOC_QUANTUM].load(Ordering::Relaxed) & OBJECT_MARK != 0
     {
-        let end = (begin + size).min(block_end);
-        scan_allocation_shared(
-            blocks,
-            alloc_sizes,
-            objects,
-            heap_start,
-            heap_end,
-            block_addr,
-            end - block_addr,
-            out,
-        );
+        let stop = (begin + size).min(end);
+        if stop > start {
+            scan_allocation_shared(
+                blocks,
+                alloc_sizes,
+                objects,
+                heap_start,
+                heap_end,
+                start,
+                stop - start,
+                out,
+            );
+        }
     }
-    for q in block_addr / ALLOC_QUANTUM..block_end / ALLOC_QUANTUM {
+    for q in start / ALLOC_QUANTUM..end / ALLOC_QUANTUM {
         let slot = objects[q].load(Ordering::Relaxed);
         if slot & OBJECT_MARK == 0 {
             continue;
@@ -3414,7 +3572,7 @@ fn scan_old_block(
             SPAN_OBJECT => alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE,
             code => code as usize * ALLOC_QUANTUM,
         };
-        let end = (begin + size).min(block_end);
+        let stop = (begin + size).min(end);
         scan_allocation_shared(
             blocks,
             alloc_sizes,
@@ -3422,7 +3580,7 @@ fn scan_old_block(
             heap_start,
             heap_end,
             begin,
-            end - begin,
+            stop - begin,
             out,
         );
     }
@@ -3506,10 +3664,10 @@ struct MarkJob {
     heap_end: usize,
     queue: *const MarkQueue,
     threads: usize,
-    /// A minor's old roots, as heap offsets of the blocks holding them; each
-    /// worker claims blocks through `next_root` and scans their marked
-    /// objects before it takes from the queue.
-    root_blocks: (*const usize, usize),
+    /// A minor's old roots, as heap offset ranges written since the last
+    /// collection; each worker claims ranges through `next_root` and scans
+    /// the marked objects in them before it takes from the queue.
+    root_ranges: (*const (usize, usize), usize),
     next_root: *const std::sync::atomic::AtomicUsize,
 }
 
@@ -3623,10 +3781,10 @@ fn mark_worker(job: &MarkJob) {
     const BATCH: usize = 64;
     const SPILL: usize = 512;
     let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
-    // The old roots first, a few blocks per claim. Done before the queue, so
-    // a worker counts itself idle only once no root block is left unclaimed.
-    if job.root_blocks.1 > 0 {
-        let roots = unsafe { std::slice::from_raw_parts(job.root_blocks.0, job.root_blocks.1) };
+    // The old roots first, a few ranges per claim. Done before the queue, so
+    // a worker counts itself idle only once no root range is left unclaimed.
+    if job.root_ranges.1 > 0 {
+        let roots = unsafe { std::slice::from_raw_parts(job.root_ranges.0, job.root_ranges.1) };
         let next = unsafe { &*job.next_root };
         const CLAIM: usize = 8;
         loop {
@@ -3634,14 +3792,15 @@ fn mark_worker(job: &MarkJob) {
             if at >= roots.len() {
                 break;
             }
-            for &block_addr in &roots[at..(at + CLAIM).min(roots.len())] {
-                scan_old_block(
+            for &(start, end) in &roots[at..(at + CLAIM).min(roots.len())] {
+                scan_old_range(
                     blocks,
                     alloc_sizes,
                     objects,
                     heap_start,
                     heap_end,
-                    block_addr,
+                    start,
+                    end,
                     &mut local,
                 );
                 if local.len() >= SPILL {
@@ -3731,6 +3890,8 @@ impl ImmixAllocator {
             noptr_point: 0,
             noptr_block_end: 0,
             since_major: 0,
+            old_generation: false,
+            cards: allocation_table(heap_size >> CARD_SHIFT),
             live_after_major: 0,
             alloc_count: 0,
             alloc_sizes: vec![0u32; heap_size / LINE_SIZE],
@@ -3788,6 +3949,11 @@ impl ImmixAllocator {
         BLOCK_COUNT_HOOK.store(block_count, Ordering::Relaxed);
         HEAP_BASE_HOOK.store(heap.memory.as_ptr() as usize, Ordering::Relaxed);
         HEAP_LEN_HOOK.store(heap_size, Ordering::Relaxed);
+        CARD_BIAS_HOOK.store(
+            (heap.cards.as_ptr() as usize)
+                .wrapping_sub(heap.memory.as_ptr() as usize >> CARD_SHIFT),
+            Ordering::Relaxed,
+        );
 
         if gc_stats_enabled() {
             unsafe {
@@ -3896,11 +4062,21 @@ impl ImmixAllocator {
     /// Take a block off the free list, un-madvising it first if its pages
     /// were marked reusable, and clearing any stale mark bits left by
     /// conservative scans of stale pointers into freed blocks.
+    /// Mark the cards of the block at `block_addr` clean.
+    fn clear_cards(&self, block_addr: usize) {
+        let first = block_addr >> CARD_SHIFT;
+        for card in &self.heap.cards[first..first + CARDS_PER_BLOCK] {
+            card.store(0, Ordering::Relaxed);
+        }
+    }
+
     fn acquire_free_block(&mut self, noptr: bool) -> Option<usize> {
         let addr = self.heap.free_blocks.pop()?;
         self.clear_allocation_metadata(addr, BLOCK_SIZE);
         self.blocks[addr / BLOCK_SIZE].has_span = false;
         self.blocks[addr / BLOCK_SIZE].noptr = noptr;
+        self.blocks[addr / BLOCK_SIZE].allocated = true;
+        self.clear_cards(addr);
         self.heap.used_blocks.insert(addr);
         self.reclaim_block_pages(addr);
         clear_marks(&self.blocks[addr / BLOCK_SIZE]);
@@ -4135,6 +4311,8 @@ impl ImmixAllocator {
                     self.blocks[block / BLOCK_SIZE].has_span = false;
                     self.blocks[block / BLOCK_SIZE].noptr = noptr;
                     self.heap.used_blocks.insert(block);
+                    self.blocks[block / BLOCK_SIZE].allocated = true;
+                    self.clear_cards(block);
                     self.reclaim_block_pages(block);
                     clear_marks(&self.blocks[block / BLOCK_SIZE]);
                 }
@@ -4397,37 +4575,38 @@ impl ImmixAllocator {
         self.trace_from(initial, &[]);
     }
 
-    /// A minor's old roots: scan the marked objects of `root_blocks` (see
-    /// [`scan_old_block`]) and trace from what they point at. Spread over
-    /// the marking threads by block, since a program that writes all over
-    /// its old objects dirties most blocks.
-    fn trace_old_blocks(&mut self, root_blocks: &[usize]) {
+    /// A minor's old roots: scan the marked objects in `root_ranges` (see
+    /// [`scan_old_range`]) and trace from what they point at. Spread over
+    /// the marking threads by range, since a program that writes all over
+    /// its old objects dirties most of them.
+    fn trace_old_ranges(&mut self, root_ranges: &[(usize, usize)]) {
         let threads = mark_threads();
         if threads <= 1 || cfg!(target_family = "wasm") {
             let heap_start = self.heap.memory.as_ptr() as usize;
             let heap_end = heap_start + self.heap.memory.len;
             let mut worklist = Vec::new();
-            for &block_addr in root_blocks {
-                scan_old_block(
+            for &(start, end) in root_ranges {
+                scan_old_range(
                     &self.blocks,
                     &self.heap.alloc_sizes,
                     &self.heap.objects,
                     heap_start,
                     heap_end,
-                    block_addr,
+                    start,
+                    end,
                     &mut worklist,
                 );
             }
             self.conservative_trace(worklist);
         } else {
-            self.trace_from(Vec::new(), root_blocks);
+            self.trace_from(Vec::new(), root_ranges);
         }
     }
 
-    /// Trace from `initial`, and from `root_blocks` when the marking threads
-    /// take it (see [`MarkJob::root_blocks`]).
+    /// Trace from `initial`, and from `root_ranges` when the marking threads
+    /// take it (see [`MarkJob::root_ranges`]).
     #[cfg_attr(target_family = "wasm", allow(unused_variables))]
-    fn trace_from(&mut self, initial: Vec<(usize, usize)>, root_blocks: &[usize]) {
+    fn trace_from(&mut self, initial: Vec<(usize, usize)>, root_ranges: &[(usize, usize)]) {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
         let threads = mark_threads();
@@ -4440,7 +4619,7 @@ impl ImmixAllocator {
         let alloc_sizes = &self.heap.alloc_sizes;
         let mut worklist = initial;
         let mut budget = SERIAL_BUDGET;
-        while root_blocks.is_empty() && (threads <= 1 || budget > 0 || worklist.len() < 256) {
+        while root_ranges.is_empty() && (threads <= 1 || budget > 0 || worklist.len() < 256) {
             let Some((start, size)) = worklist.pop() else {
                 return;
             };
@@ -4485,7 +4664,7 @@ impl ImmixAllocator {
                 heap_end,
                 queue: &queue as *const MarkQueue,
                 threads,
-                root_blocks: (root_blocks.as_ptr(), root_blocks.len()),
+                root_ranges: (root_ranges.as_ptr(), root_ranges.len()),
                 next_root: &next_root as *const std::sync::atomic::AtomicUsize,
             });
         }
@@ -4516,7 +4695,8 @@ impl ImmixAllocator {
         let origin = COLLECT_ORIGIN.load(Ordering::Relaxed);
         let t_prep0 = Instant::now();
         let minor = generational()
-            && PROTECT.get().is_some()
+            && self.heap.old_generation
+            && (cards_enabled() || PROTECT.get().is_some())
             && self.heap.since_major < major_every()
             && !matches!(origin, 4..=6 | 8);
         if minor {
@@ -4552,7 +4732,16 @@ impl ImmixAllocator {
         let t_stop = t0.elapsed();
         let t_mark0 = Instant::now();
         if minor {
-            let old = self.old_root_blocks();
+            if cards_enabled() && card_verify() {
+                let missed = self.verify_cards();
+                if missed > 0 {
+                    eprintln!("[gc-cards] {missed} missed barrier(s) before this minor");
+                    if std::env::var("ASH_GC_CARD_VERIFY").is_ok_and(|v| v == "abort") {
+                        std::process::abort();
+                    }
+                }
+            }
+            let old = self.old_root_ranges();
             if gc_stats_enabled() {
                 let clean = PROTECT.get().map_or(0, |t| {
                     t.state
@@ -4561,13 +4750,14 @@ impl ImmixAllocator {
                         .count()
                 });
                 eprintln!(
-                    "[gc-minor] old root blocks={} clean blocks={clean} used={}",
+                    "[gc-minor] old root ranges={} ({}) clean blocks={clean} used={}",
                     old.len(),
+                    fmt_mb(old.iter().map(|(a, b)| (b - a) as u64).sum()),
                     self.heap.used_blocks.len()
                 );
             }
             if !old.is_empty() {
-                self.trace_old_blocks(&old);
+                self.trace_old_ranges(&old);
             }
         }
         self.mark_roots(&stopped_world.snapshots);
@@ -4658,6 +4848,10 @@ impl ImmixAllocator {
         // threads stopped, and `pause` above has already been measured.
         let t_protect0 = Instant::now();
         let protected = self.protect_kept_blocks();
+        self.reset_cards();
+        if generational() {
+            self.heap.old_generation = true;
+        }
         let t_protect = t_protect0.elapsed();
         drop(stopped_world);
         if gc_stats_enabled() {
@@ -4731,29 +4925,165 @@ impl ImmixAllocator {
     }
 
     /// The old generation's contribution to a minor collection's roots: the
-    /// used blocks that hold marked objects and are not protected-and-clean,
-    /// since a clean block has not been written since it was traced and a
-    /// marked object in any other block may now point at a young one. Sorted,
-    /// so the marking threads walk the heap in order.
-    fn old_root_blocks(&self) -> Vec<usize> {
-        let Some(t) = PROTECT.get() else {
-            return Vec::new();
-        };
-        let mut roots: Vec<usize> = self
+    /// parts of used blocks holding marked objects that were written since
+    /// they were traced, since a marked object there may now point at a
+    /// young one. In card mode those are runs of dirty cards; otherwise whole
+    /// blocks that are not protected-and-clean. Sorted, so the marking
+    /// threads walk the heap in order.
+    fn old_root_ranges(&self) -> Vec<(usize, usize)> {
+        let mut blocks: Vec<usize> = self
             .heap
             .used_blocks
             .iter()
             .copied()
             .filter(|&block_addr| {
-                let idx = block_addr / BLOCK_SIZE;
-                let block = &self.blocks[idx];
-                t.state[idx].load(Ordering::Acquire) != PROTECT_CLEAN
-                    && !block.noptr
-                    && block.any_marked.load(Ordering::Relaxed)
+                let block = &self.blocks[block_addr / BLOCK_SIZE];
+                !block.noptr && block.any_marked.load(Ordering::Relaxed)
             })
             .collect();
-        roots.sort_unstable();
-        roots
+        blocks.sort_unstable();
+        if cards_enabled() {
+            let mut ranges = Vec::new();
+            for block_addr in blocks {
+                let first = block_addr >> CARD_SHIFT;
+                let mut c = 0;
+                while c < CARDS_PER_BLOCK {
+                    if self.heap.cards[first + c].load(Ordering::Relaxed) == 0 {
+                        c += 1;
+                        continue;
+                    }
+                    let run = c;
+                    while c < CARDS_PER_BLOCK
+                        && self.heap.cards[first + c].load(Ordering::Relaxed) != 0
+                    {
+                        c += 1;
+                    }
+                    ranges.push((block_addr + run * CARD_SIZE, block_addr + c * CARD_SIZE));
+                }
+            }
+            return ranges;
+        }
+        let Some(t) = PROTECT.get() else {
+            return Vec::new();
+        };
+        blocks
+            .into_iter()
+            .filter(|&block_addr| t.state[block_addr / BLOCK_SIZE].load(Ordering::Acquire) != PROTECT_CLEAN)
+            .map(|block_addr| (block_addr, block_addr + BLOCK_SIZE))
+            .collect()
+    }
+
+    /// After a collection in card mode: every survivor is old, so no card is
+    /// dirty and no block has been allocated in.
+    fn reset_cards(&mut self) {
+        if !cards_enabled() {
+            return;
+        }
+        for &block_addr in &self.heap.used_blocks {
+            let first = block_addr >> CARD_SHIFT;
+            for card in &self.heap.cards[first..first + CARDS_PER_BLOCK] {
+                card.store(0, Ordering::Relaxed);
+            }
+            self.blocks[block_addr / BLOCK_SIZE].allocated = false;
+        }
+        // The blocks threads are still bumping through take new objects
+        // after the world resumes without passing a refill.
+        for &block_addr in self
+            .heap
+            .tlab_blocks
+            .values()
+            .chain(self.heap.noptr_tlab_blocks.values())
+        {
+            self.blocks[block_addr / BLOCK_SIZE].allocated = true;
+        }
+    }
+
+    /// See `card_verify`: an old object's pointer to a young object in a
+    /// clean card is a store the barrier did not see. Reports each and
+    /// returns how many there were.
+    fn verify_cards(&self) -> usize {
+        let heap_start = self.heap.memory.as_ptr() as usize;
+        let heap_end = heap_start + self.heap.memory.len;
+        let mut missed = 0usize;
+        // Rescanned by every collection (see `mark_roots`), so a store into
+        // one needs no card.
+        let persistent: HashSet<usize> = self
+            .roots
+            .borrow()
+            .persistent_roots
+            .iter()
+            .map(|&p| (p as usize).wrapping_sub(heap_start))
+            .collect();
+        for &block_addr in &self.heap.used_blocks {
+            let block = &self.blocks[block_addr / BLOCK_SIZE];
+            if block.noptr || !block.any_marked.load(Ordering::Relaxed) {
+                continue;
+            }
+            for q in block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM {
+                let slot = self.heap.objects[q].load(Ordering::Relaxed);
+                if slot & OBJECT_MARK == 0 {
+                    continue;
+                }
+                let begin = q * ALLOC_QUANTUM;
+                if persistent.contains(&begin) {
+                    continue;
+                }
+                let size = match slot & !OBJECT_MARK {
+                    0 => continue,
+                    SPAN_OBJECT => self.heap.alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE,
+                    code => code as usize * ALLOC_QUANTUM,
+                };
+                for off in (0..size).step_by(WORD) {
+                    let at = begin + off;
+                    if self.heap.cards[at >> CARD_SHIFT].load(Ordering::Relaxed) != 0 {
+                        continue;
+                    }
+                    let val = unsafe { *((heap_start + at) as *const usize) };
+                    if val < heap_start || val >= heap_end {
+                        continue;
+                    }
+                    let Some((target, _)) = containing_allocation(
+                        &self.blocks,
+                        &self.heap.alloc_sizes,
+                        &self.heap.objects,
+                        val - heap_start,
+                    ) else {
+                        continue;
+                    };
+                    if self.heap.objects[target / ALLOC_QUANTUM].load(Ordering::Relaxed)
+                        & OBJECT_MARK
+                        == 0
+                    {
+                        missed += 1;
+                        if missed <= 16 {
+                            eprintln!(
+                                "[gc-cards] missed barrier: old object {:#x} (+{off}, {size} bytes) of {} -> young {:#x} of {}",
+                                heap_start + begin,
+                                describe_header(unsafe { *((heap_start + begin) as *const usize) }),
+                                heap_start + target,
+                                describe_header(unsafe { *((heap_start + target) as *const usize) }),
+                            );
+                            if std::env::var("ASH_GC_CARD_VERIFY").is_ok_and(|v| v == "dump") {
+                                let words: Vec<String> = (0..size.min(256) / WORD)
+                                    .map(|i| format!("{:#x}", unsafe {
+                                        *((heap_start + begin + i * WORD) as *const usize)
+                                    }))
+                                    .collect();
+                                let text: String = (0..24)
+                                    .map(|i| unsafe {
+                                        *((heap_start + target + i * 2) as *const u16)
+                                    })
+                                    .map(|c| char::from_u32(c as u32).filter(|c| !c.is_control()).unwrap_or('.'))
+                                    .collect();
+                                eprintln!("[gc-cards]   old words: {}", words.join(" "));
+                                eprintln!("[gc-cards]   young as utf-16: {text:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        missed
     }
 
     /// Before a major: forget every sticky mark, which the generational
@@ -4931,10 +5261,25 @@ impl ImmixAllocator {
                 self.mark_allocation(addr - heap_start, &mut all_newly_marked);
             }
         }
+        // A persistent root's contents are scanned even when it is already
+        // marked: runtime metadata such as a class's `hl_runtime_obj` is
+        // filled in after it is allocated, without the write barrier, so a
+        // minor that stopped at it as an old object would miss what it holds.
         for &persistent_ptr in &root_set.persistent_roots {
             let addr = persistent_ptr as usize;
             if addr >= heap_start && addr < heap_end {
+                let before = all_newly_marked.len();
                 self.mark_allocation(addr - heap_start, &mut all_newly_marked);
+                if all_newly_marked.len() == before
+                    && let Some(object) = containing_allocation(
+                        &self.blocks,
+                        &self.heap.alloc_sizes,
+                        &self.heap.objects,
+                        addr - heap_start,
+                    )
+                {
+                    all_newly_marked.push(object);
+                }
             }
         }
         // A native root is a SLOT, so read through it rather than marking the
@@ -5777,11 +6122,17 @@ impl ImmixAllocator {
         for block_addr in used_block_addrs {
             let block_index = block_addr / BLOCK_SIZE;
             // A clean old block was neither traced nor written: nothing in
-            // it changed, so a minor leaves it exactly as it is.
+            // it changed, so a minor leaves it exactly as it is. In card mode
+            // the test is that nothing was allocated in it: only allocation
+            // puts a young object in a block.
             if minor
-                && PROTECT
-                    .get()
-                    .is_some_and(|t| t.state[block_index].load(Ordering::Acquire) == PROTECT_CLEAN)
+                && if cards_enabled() {
+                    !self.blocks[block_index].allocated
+                } else {
+                    PROTECT.get().is_some_and(|t| {
+                        t.state[block_index].load(Ordering::Acquire) == PROTECT_CLEAN
+                    })
+                }
             {
                 continue;
             }

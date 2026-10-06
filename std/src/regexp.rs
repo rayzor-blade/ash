@@ -193,6 +193,8 @@ pub unsafe extern "C" fn hlp_regexp_match(
         let source = str_bytes as *const u16;
         if !state.subject.as_ref().is_some_and(|s| s.is(source)) {
             state.subject = Some(Subject::new(source, utf16z(str_bytes)));
+            // The state is a GC block and now holds the subject's address.
+            crate::gc::write_barrier_range(r as usize, std::mem::size_of::<RegexpState>());
         }
         let subject = state.subject.as_ref().unwrap();
         let total_len = subject.units.len() as i32;

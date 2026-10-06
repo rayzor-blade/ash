@@ -234,6 +234,7 @@ impl<'ctx> JITModule<'ctx> {
                 let field_ptr = self.build_field_ptr(obj_type_idx, field, obj_val)?;
                 let st = self.builder.build_store(field_ptr, src_val)?;
                 self.tbaa_field(Some(st), obj_type_idx, field);
+                self.emit_write_barrier(lowering, src, field_ptr)?;
             }
             hl_type_kind_HVIRTUAL => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -290,6 +291,7 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.position_at_end(then_block);
                 self.builder
                     .build_store(field_value_ptr.into_pointer_value(), src_val)?;
+                self.emit_write_barrier(lowering, src, field_value_ptr.into_pointer_value())?;
                 self.builder.build_unconditional_branch(cont_block)?;
 
                 // Field doesn't exist: box value + call hlp_obj_set_field

@@ -17,6 +17,96 @@ use crate::types::HLFunction;
 use anyhow::{Result, anyhow};
 
 impl<'ctx> JITModule<'ctx> {
+    /// See `JITModule::aot_barriers`.
+    pub(crate) fn aot_wants_barriers(&self) -> bool {
+        *self.aot_barriers.get_or_init(|| {
+            std::env::var("ASH_GC_CARDS").is_ok_and(|v| v == "1")
+                && self
+                    .bytecode
+                    .natives
+                    .iter()
+                    .all(|n| crate::native_lib::is_runtime_lib(&n.lib))
+        })
+    }
+
+    /// The write barrier for a store of `src` to `addr`: mark the card of
+    /// `addr` when `src` may be a pointer and `addr` lies in the heap (see
+    /// `crate::card_table`). A JIT body knows where the cards are and marks
+    /// one inline; an AOT or wasm module asks the runtime it is linked with.
+    pub(super) fn emit_write_barrier(
+        &self,
+        lowering: &HLFunction,
+        src: ValueId,
+        addr: PointerValue<'ctx>,
+    ) -> Result<()> {
+        use crate::hl_bindings::*;
+        let kind = self.types_[lowering.regs[src.idx()].0].kind;
+        if matches!(
+            kind,
+            hl_type_kind_HVOID
+                | hl_type_kind_HUI8
+                | hl_type_kind_HUI16
+                | hl_type_kind_HI32
+                | hl_type_kind_HI64
+                | hl_type_kind_HF32
+                | hl_type_kind_HF64
+                | hl_type_kind_HBOOL
+        ) {
+            return Ok(());
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if self.aot {
+            if self.aot_wants_barriers() {
+                let barrier =
+                    self.declare_native("hlp_gc_write_barrier", &[ptr_type.into()], None);
+                self.builder
+                    .build_call(barrier, &[addr.into()], "write_barrier")?;
+            }
+            return Ok(());
+        }
+        // No card table: card mode is off, now and for the rest of the run.
+        let Some(t) = crate::card_table::card_table() else {
+            return Ok(());
+        };
+        let i64_type = self.context.i64_type();
+        let at = self.builder.build_ptr_to_int(addr, i64_type, "wb_addr")?;
+        let off = self
+            .builder
+            .build_int_sub(at, i64_type.const_int(t.base as u64, false), "wb_off")?;
+        let inside = self.builder.build_int_compare(
+            inkwell::IntPredicate::ULT,
+            off,
+            i64_type.const_int(t.len as u64, false),
+            "wb_inside",
+        )?;
+        let current_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| anyhow!("write barrier outside a function"))?;
+        let mark = self.context.append_basic_block(current_fn, "wb_mark");
+        let done = self.context.append_basic_block(current_fn, "wb_done");
+        self.builder.build_conditional_branch(inside, mark, done)?;
+        self.builder.position_at_end(mark);
+        let card = self.builder.build_right_shift(
+            at,
+            i64_type.const_int(crate::card_table::CARD_SHIFT as u64, false),
+            false,
+            "wb_card",
+        )?;
+        let card = self.builder.build_int_add(
+            card,
+            i64_type.const_int(t.bias as u64, false),
+            "wb_card_addr",
+        )?;
+        let card = self.builder.build_int_to_ptr(card, ptr_type, "wb_card_ptr")?;
+        self.builder
+            .build_store(card, self.context.i8_type().const_int(1, false))?;
+        self.builder.build_unconditional_branch(done)?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
     /// `dst = base[index]` at the width selected by `kind`.
     ///
     /// I8/I16 load a byte or half-word and shape it for the destination
@@ -263,6 +353,7 @@ impl<'ctx> JITModule<'ctx> {
                 };
                 let st = self.builder.build_store(addr, src_val)?;
                 self.tbaa.tag(st, self.tbaa.payload());
+                self.emit_write_barrier(lowering, src, addr)?;
             }
             AirMemAccess::Array => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -316,6 +407,7 @@ impl<'ctx> JITModule<'ctx> {
                 };
                 let st = self.builder.build_store(slot, src_val)?;
                 self.tbaa.tag(st, self.tbaa.payload());
+                self.emit_write_barrier(lowering, src, slot)?;
             }
         }
         Ok(())
@@ -487,6 +579,7 @@ impl<'ctx> JITModule<'ctx> {
             "setref_val",
         )?;
         self.builder.build_store(ptr, val)?;
+        self.emit_write_barrier(lowering, value, ptr)?;
         self.builder.build_unconditional_branch(cont_block)?;
         self.builder.position_at_end(cont_block);
         Ok(())

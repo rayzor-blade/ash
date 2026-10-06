@@ -1412,6 +1412,53 @@ impl AirCodegen<'_, '_> {
     }
 
     /// The extension an AIR value takes when it widens, from its HL kind.
+    /// Whether `v` may hold a pointer, so a store of it into the heap needs
+    /// the write barrier.
+    fn value_is_ptr(&self, v: ValueId) -> Result<bool> {
+        Ok(!matches!(
+            self.ctx.type_kind(self.f.value_ty(v).0 as usize)?,
+            hl::hl_type_kind_HVOID
+                | hl::hl_type_kind_HUI8
+                | hl::hl_type_kind_HUI16
+                | hl::hl_type_kind_HI32
+                | hl::hl_type_kind_HI64
+                | hl::hl_type_kind_HF32
+                | hl::hl_type_kind_HF64
+                | hl::hl_type_kind_HBOOL
+        ))
+    }
+
+    /// The write barrier for a store of `src` to `addr`: mark the card of
+    /// `addr` when `src` may be a pointer and `addr` lies in the heap (see
+    /// `crate::card_table`).
+    fn emit_write_barrier(&mut self, addr: Value, src: ValueId) -> Result<()> {
+        if !self.value_is_ptr(src)? {
+            return Ok(());
+        }
+        // No card table: card mode is off, now and for the rest of the run.
+        let Some(t) = crate::card_table::card_table() else {
+            return Ok(());
+        };
+        let base = self.b.ins().iconst(types::I64, t.base as i64);
+        let len = self.b.ins().iconst(types::I64, t.len as i64);
+        let off = self.b.ins().isub(addr, base);
+        let inside = self.b.ins().icmp(IntCC::UnsignedLessThan, off, len);
+        let mark_bb = self.b.create_block();
+        let done_bb = self.b.create_block();
+        self.b.ins().brif(inside, mark_bb, &[], done_bb, &[]);
+        self.b.switch_to_block(mark_bb);
+        let card = self
+            .b
+            .ins()
+            .ushr_imm(addr, crate::card_table::CARD_SHIFT as i64);
+        let card = self.b.ins().iadd_imm(card, t.bias as i64);
+        let one = self.b.ins().iconst(types::I8, 1);
+        self.b.ins().store(MemFlagsData::trusted(), one, card, 0);
+        self.b.ins().jump(done_bb, &[]);
+        self.b.switch_to_block(done_bb);
+        Ok(())
+    }
+
     fn widen_of_value(&self, v: ValueId) -> Result<Widen> {
         Ok(widen_of(self.ctx.type_kind(self.f.value_ty(v).0 as usize)?))
     }
@@ -1879,6 +1926,8 @@ impl AirCodegen<'_, '_> {
                 let widen = self.widen_of_value(*src)?;
                 let v = self.coerce(raw, pty, widen)?;
                 self.b.ins().store(MemFlagsData::trusted(), v, e, off);
+                let addr = self.b.ins().iadd_imm(e, off as i64);
+                self.emit_write_barrier(addr, *src)?;
             }
 
             Instr::Cast { kind, dst, src } => self.emit_cast(*kind, *dst, *src)?,
@@ -1933,6 +1982,7 @@ impl AirCodegen<'_, '_> {
                 let p = self.get(*r)?;
                 let v = self.get(*value)?;
                 self.b.ins().store(MemFlagsData::trusted(), v, p, 0);
+                self.emit_write_barrier(p, *value)?;
             }
 
             // HashLink defines ORefOffset in elements of the destination
@@ -2143,6 +2193,8 @@ impl AirCodegen<'_, '_> {
                 // spill into whatever is laid out next to it.
                 let v = self.coerce(raw, fty, widen)?;
                 self.b.ins().store(MemFlagsData::trusted(), v, base, off);
+                let addr = self.b.ins().iadd_imm(base, off as i64);
+                self.emit_write_barrier(addr, src)?;
                 Ok(())
             }
             hl::hl_type_kind_HVIRTUAL => {
@@ -2165,6 +2217,7 @@ impl AirCodegen<'_, '_> {
                 self.b
                     .ins()
                     .store(MemFlagsData::trusted(), value, field_ptr, 0);
+                self.emit_write_barrier(field_ptr, src)?;
                 self.b.ins().jump(join_bb, &[]);
 
                 self.b.switch_to_block(fallback_bb);
@@ -2657,6 +2710,7 @@ impl AirCodegen<'_, '_> {
             MemAccess::Mem => {
                 let addr = self.b.ins().iadd(vbase, idx);
                 self.b.ins().store(MemFlagsData::trusted(), raw, addr, 0);
+                self.emit_write_barrier(addr, src)?;
                 Ok(())
             }
             MemAccess::Array => {
@@ -2674,6 +2728,11 @@ impl AirCodegen<'_, '_> {
                     addr,
                     crate::layout::VARRAY_DATA_OFFSET,
                 );
+                let at = self
+                    .b
+                    .ins()
+                    .iadd_imm(addr, crate::layout::VARRAY_DATA_OFFSET as i64);
+                self.emit_write_barrier(at, src)?;
                 Ok(())
             }
             MemAccess::I8 | MemAccess::I16 => {

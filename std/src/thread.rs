@@ -1293,6 +1293,7 @@ pub unsafe extern "C" fn hlp_atomic_store_ptr(
     unsafe {
         use std::sync::atomic::AtomicPtr;
         (*(a as *const AtomicPtr<c_void>)).store(value, Ordering::SeqCst);
+        crate::gc::write_barrier(a as usize);
         value
     }
 }

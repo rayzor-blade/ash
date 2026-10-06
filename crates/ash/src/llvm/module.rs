@@ -180,6 +180,10 @@ pub struct JITModule<'ctx> {
     /// IR, because an address valid in THIS process means nothing in the one
     /// that will run the object. See `docs/wasm/README.md`.
     pub(crate) aot: bool,
+    /// Whether an AOT module carries the write barrier: card mode asked for
+    /// at build time (`ASH_GC_CARDS=1`) and no native library outside the
+    /// runtime, which would turn card mode off at startup. Decided once.
+    pub(crate) aot_barriers: std::cell::OnceCell<bool>,
     /// Compile reached functions into independent modules and dispatch calls
     /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:
     /// MCJIT modules cannot accept new function bodies after finalization.
@@ -513,6 +517,7 @@ impl<'ctx> JITModule<'ctx> {
             shared_emitted: false,
             sealed_bodies: Default::default(),
             aot,
+            aot_barriers: std::cell::OnceCell::new(),
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
             inline_alloc: std::cell::OnceCell::new(),
@@ -971,6 +976,7 @@ impl<'ctx> JITModule<'ctx> {
             shared_emitted: false,
             sealed_bodies: Default::default(),
             aot: false,
+            aot_barriers: std::cell::OnceCell::new(),
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
             inline_alloc: std::cell::OnceCell::new(),

@@ -1142,6 +1142,45 @@ impl<'ctx> JITModule<'ctx> {
         let entry = self.context.append_basic_block(init, "entry");
         self.builder.position_at_end(entry);
 
+        // The native libraries this program calls, linked in rather than
+        // opened by a loader that could ask them: none is known to carry the
+        // write barrier, so the collector is told before anything allocates
+        // (`hlp_gc_native_library_loaded`).
+        let mut libs: Vec<String> = self
+            .bytecode
+            .natives
+            .iter()
+            .map(|n| n.lib.strip_prefix('?').unwrap_or(&n.lib).to_string())
+            .filter(|lib| !crate::native_lib::is_runtime_lib(lib))
+            .collect();
+        libs.sort_unstable();
+        libs.dedup();
+        // Code built without the barrier stores like a native library does.
+        if !self.aot_wants_barriers() && libs.is_empty() {
+            libs.push("this program, built without the write barrier".to_string());
+        }
+        if !libs.is_empty() {
+            let loaded = self.aot_runtime_fn(
+                "hlp_gc_native_library_loaded",
+                void_type.fn_type(
+                    &[ptr_type.into(), size_type.into(), self.context.bool_type().into()],
+                    false,
+                ),
+            );
+            for lib in &libs {
+                let name = self.builder.build_global_string_ptr(lib, "native_lib")?;
+                self.builder.build_call(
+                    loaded,
+                    &[
+                        name.as_pointer_value().into(),
+                        size_type.const_int(lib.len() as u64, false).into(),
+                        self.context.bool_type().const_zero().into(),
+                    ],
+                    "",
+                )?;
+            }
+        }
+
         // The classes whose instances carry a host's tail, before anything
         // allocates one.
         if !tails.is_empty() {

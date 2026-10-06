@@ -71,9 +71,12 @@ pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, l
         (*it).size = size;
         (*it).len = len;
         (*it).next = (*b).data;
+        // Allocating `str_ptr` can collect, after which `it` is old.
+        crate::gc::write_barrier_range(it as usize, std::mem::size_of::<_stringitem>());
 
         // Update the buffer
         (*b).data = it;
+        crate::gc::write_barrier(&raw mut (*b).data as usize);
 
         // Update total length
         (*b).totlen += len;

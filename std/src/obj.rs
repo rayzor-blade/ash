@@ -353,6 +353,8 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
                     (*binding).ptr,
                     o as *mut std::ffi::c_void,
                 ) as *mut c_void;
+                // Allocating the closure can collect, after which `o` is old.
+                crate::gc::write_barrier(field_ptr as usize);
             } else {
                 *field_ptr = (*binding).ptr;
             }
@@ -508,6 +510,7 @@ pub unsafe extern "C" fn hlp_write_dyn(
                 }
 
                 *(data as *mut *mut c_void) = ret;
+                crate::gc::write_barrier(data as usize);
             }
         }
     }
@@ -1729,6 +1732,11 @@ unsafe fn hlp_dynobj_remap_virtuals(
                     ptr::null_mut()
                 };
             }
+            // The fields now point into `o`'s new, young data.
+            crate::gc::write_barrier_range(
+                hl_vfields(v) as usize,
+                (*(*(*v).t).__bindgen_anon_1.virt).nfields as usize * mem::size_of::<*mut c_void>(),
+            );
 
             v = (*v).next;
         }
@@ -1839,6 +1847,8 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
         );
         (*o).nfields += 1;
         (*o).lookup = new_lookup;
+        // Its values, data and lookup are new arrays.
+        crate::gc::write_barrier_range(o as usize, mem::size_of::<vdynobj>());
 
         hlp_dynobj_remap_virtuals(o, f, address_offset);
         f
@@ -2039,6 +2049,11 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
         );
         (*o).virtuals = v;
         (*v).value = o as *mut vdynamic;
+        // `v` may be old by now, and its value and fields point into `o`.
+        crate::gc::write_barrier_range(
+            v as usize,
+            mem::size_of::<vvirtual>() + nfields as usize * mem::size_of::<*mut c_void>(),
+        );
         (*v).value
     }
 }
@@ -2241,7 +2256,15 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 
                 if !interface_address.is_null() {
                     *interface_address = v;
+                    crate::gc::write_barrier(interface_address as usize);
                 }
+                // Building it allocated, so `v` may already be old.
+                crate::gc::write_barrier_range(
+                    v as usize,
+                    mem::size_of::<vvirtual>()
+                        + (*(*vt).__bindgen_anon_1.virt).nfields as usize
+                            * mem::size_of::<*mut c_void>(),
+                );
 
                 v
             }
@@ -2309,6 +2332,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 
                 (*v).next = (*o).virtuals;
                 (*o).virtuals = v;
+                crate::gc::write_barrier(&raw mut (*o).virtuals as usize);
 
                 if need_recast != 0 {
                     let extra_check = (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields > 63;
@@ -2338,6 +2362,13 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                         }
                     }
                 }
+                // Adding fields to `o` allocated, so `v` may already be old.
+                crate::gc::write_barrier_range(
+                    v as usize,
+                    mem::size_of::<vvirtual>()
+                        + (*(*vt).__bindgen_anon_1.virt).nfields as usize
+                            * mem::size_of::<*mut c_void>(),
+                );
 
                 v
             }
@@ -2901,6 +2932,7 @@ pub unsafe extern "C" fn hlp_dyn_setp(
 
         if hlp_same_type(t, ft) || (hl_is_ptr(ft) && value.is_null()) {
             *(addr as *mut *mut c_void) = value;
+            crate::gc::write_barrier(addr as usize);
         } else if hlp_is_dynamic(t) {
             hlp_write_dyn(addr, ft, value as *mut vdynamic, false);
         } else {

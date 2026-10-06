@@ -328,6 +328,7 @@ pub unsafe extern "C" fn hlp_hbset(
             while c >= 0 {
                 if m.match_entry(c as usize, hash, key) {
                     (*(*m).values.wrapping_add(c as usize)).value = value;
+                    crate::gc::write_barrier((*m).values.wrapping_add(c as usize) as usize);
                     return;
                 }
                 c = m.m_next(c as u32);
@@ -337,10 +338,12 @@ pub unsafe extern "C" fn hlp_hbset(
         c = hl_freelist_get(&mut (*m).lfree);
         if c < 0 {
             hl_hb_resize(m);
+            crate::gc::write_barrier_range(m as usize, std::mem::size_of::<hl::hl_hb_map>());
             ckey = hash % (*m).ncells as u32;
             c = hl_freelist_get(&mut (*m).lfree);
         }
         m.set_entry(c as usize, hash, key);
+        crate::gc::write_barrier((*m).entries.wrapping_add(c as usize) as usize);
         // nexts[c] = cells[ckey] (old head of chain), then cells[ckey] = c
         if (*m).maxentries < _MLIMIT {
             let src = ((*m).cells as *const i8).wrapping_add(ckey as usize);
@@ -354,6 +357,7 @@ pub unsafe extern "C" fn hlp_hbset(
             ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), c);
         }
         (*(*m).values.wrapping_add(c as usize)).value = value;
+        crate::gc::write_barrier((*m).values.wrapping_add(c as usize) as usize);
         (*m).nentries += 1;
     }
 }
@@ -734,6 +738,7 @@ unsafe fn slots_reserve(rm: *mut RootedMap, need: usize) -> bool {
             ptr::copy_nonoverlapping((*rm).slots, fresh, (*rm).capacity);
         }
         (*rm).slots = fresh;
+        crate::gc::write_barrier(&raw mut (*rm).slots as usize);
         (*rm).capacity = cap;
         true
     }
@@ -778,10 +783,12 @@ pub unsafe extern "C" fn hlp_hiset(m: *mut c_void, key: i32, value: *mut hl::vdy
         let idx = &mut *((*rm).index as *mut IntIndex);
         if let Some(&slot) = idx.slot_of.get(&key) {
             *(*rm).slots.add(slot) = value;
+            crate::gc::write_barrier((*rm).slots.add(slot) as usize);
             return;
         }
         if let Some(slot) = slot_claim(rm, idx, 1) {
             *(*rm).slots.add(slot) = value;
+            crate::gc::write_barrier((*rm).slots.add(slot) as usize);
             idx.slot_of.insert(key, slot);
         }
     }
@@ -912,10 +919,12 @@ pub unsafe extern "C" fn hlp_hi64set(m: *mut c_void, key: i64, value: *mut hl::v
         let idx = &mut *((*rm).index as *mut Int64Index);
         if let Some(&slot) = idx.slot_of.get(&key) {
             *(*rm).slots.add(slot) = value;
+            crate::gc::write_barrier((*rm).slots.add(slot) as usize);
             return;
         }
         if let Some(slot) = slot_claim(rm, idx, 1) {
             *(*rm).slots.add(slot) = value;
+            crate::gc::write_barrier((*rm).slots.add(slot) as usize);
             idx.slot_of.insert(key, slot);
         }
     }
@@ -1041,12 +1050,16 @@ pub unsafe extern "C" fn hlp_hoset(m: *mut c_void, key: *mut hl::vdynamic, val: 
         let idx = &mut *((*rm).index as *mut ObjIndex);
         if let Some(&slot) = idx.slot_of.get(&(key as usize)) {
             *(*rm).slots.add(slot * 2) = key;
+            crate::gc::write_barrier((*rm).slots.add(slot * 2) as usize);
             *(*rm).slots.add(slot * 2 + 1) = val;
+            crate::gc::write_barrier((*rm).slots.add(slot * 2 + 1) as usize);
             return;
         }
         if let Some(slot) = slot_claim(rm, idx, 2) {
             *(*rm).slots.add(slot * 2) = key;
+            crate::gc::write_barrier((*rm).slots.add(slot * 2) as usize);
             *(*rm).slots.add(slot * 2 + 1) = val;
+            crate::gc::write_barrier((*rm).slots.add(slot * 2 + 1) as usize);
             idx.slot_of.insert(key as usize, slot);
         }
     }

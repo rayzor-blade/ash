@@ -1,0 +1,73 @@
+name: publish Haxelib
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag; nightly is allowed for validation only'
+        required: true
+        type: string
+      publish:
+        description: 'Submit the validated release packages to Haxelib'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: true
+    secrets:
+      HAXELIB_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: haxelib-ash
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: validate and publish packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: rayzor-blade/ash
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      PACKAGES: ash-future ash-simd
+    steps:
+      # Use the maintained publisher even when submitting an older release.
+      - uses: actions/checkout@v7
+        with:
+          repository: rayzor-blade/ash
+          ref: main
+          persist-credentials: false
+      - uses: krdlab/setup-haxe@v2
+        with:
+          haxe-version: 4.3.6
+      - run: haxelib newrepo
+      - name: Download the existing release packages
+        run: |
+          mkdir -p release
+          for name in $PACKAGES; do
+            gh release download "$RELEASE_TAG" --repo "$GH_REPO" \
+              --pattern "$name-*.zip" --dir release
+          done
+      - name: Validate archives, versions and native libraries
+        run: python3 scripts/publish_haxelib.py release --packages $PACKAGES --tag "$RELEASE_TAG" --independent-versions --prepare-contributors
+      - name: Submit in dependency order
+        if: inputs.publish
+        env:
+          HAXELIB_PASSWORD: ${{ secrets.HAXELIB_PASSWORD }}
+        run: python3 scripts/publish_haxelib.py release --packages $PACKAGES --tag "$RELEASE_TAG" --independent-versions --prepare-contributors --submit
+      - uses: actions/upload-artifact@v7
+        if: ${{ !inputs.publish }}
+        with:
+          name: validated-haxelibs-ash
+          path: release/*.zip
+          if-no-files-found: error

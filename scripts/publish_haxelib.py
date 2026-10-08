@@ -102,7 +102,7 @@ def registry_versions(name):
         if "No such Project" in result.stdout + result.stderr:
             return set()
         raise ValueError(f"Could not query Haxelib for {name}: {result.stdout}{result.stderr}")
-    return set(re.findall(r"(?m)^\s+\S+\s+(\d+\.\d+\.\d+(?:-\S+)?)\s*:", result.stdout))
+    return set(re.findall(r"(?m)^\s+[^\n]*?\s(\d+\.\d+\.\d+(?:-[^:\s]+)?)\s*:", result.stdout))
 
 
 def submit(packages, account, password):

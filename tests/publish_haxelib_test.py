@@ -75,7 +75,7 @@ class PublishTest(unittest.TestCase):
         with patch.object(PUBLISHER.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "TLS failure")):
             with self.assertRaisesRegex(ValueError, "Could not query Haxelib"):
                 PUBLISHER.registry_versions("ashui")
-        with patch.object(PUBLISHER.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "Releases:\n   2026-10-08 0.1.0 : First\n   2026-10-09 0.2.0-rc.1 : Next\n", "")):
+        with patch.object(PUBLISHER.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "Releases:\n   2026-10-08 03:30:37 0.1.0 : First\n   2026-10-09 0.2.0-rc.1 : Next\n", "")):
             self.assertEqual(PUBLISHER.registry_versions("ashui"), {"0.1.0", "0.2.0-rc.1"})
 
     def test_nightly_cannot_be_published(self):

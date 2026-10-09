@@ -484,9 +484,9 @@ pub struct HLInterpreter {
     /// them would only cost a malloc, but the unwind path is where a long-lived
     /// program would otherwise leak its whole call depth of buffers.
     reg_pool: Vec<Vec<NanBoxedValue>>,
-    /// Calls this interpreter has made of each large function still
-    /// encoded. See [`Self::call_body`].
-    called_large: HashMap<usize, u32>,
+    /// Functions decoded by chunk whose first call this interpreter has
+    /// made. See [`Self::call_body`].
+    called_large: std::collections::HashSet<usize>,
     /// What a host registered into the program this interpreter was built
     /// for, so `enable_reload` can give the same registrations to the copy
     /// it decodes from disk.
@@ -1014,7 +1014,7 @@ impl HLInterpreter {
             targets,
             code_addr_findex: HashMap::new(),
             reg_pool: Vec::new(),
-            called_large: HashMap::new(),
+            called_large: std::collections::HashSet::new(),
             host_modules: bytecode.host_modules.clone(),
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
@@ -4775,11 +4775,7 @@ impl HLInterpreter {
         // pinned. Running SSA calls keep their own Rc; a future fallback
         // prepares again. Loop bodies keep their canonical OSR coordinates.
         let f = &bytecode.functions[func_idx];
-        if !self.osr_attached.contains_key(&findex)
-            && !f.ops().iter().any(|op| {
-                air::opcode_info::jump_offset(op).is_some_and(|d| d < 0)
-            })
-        {
+        if !self.osr_attached.contains_key(&findex) && !f.shape(&bytecode.types).back_edge {
             self.ssa.forget(func_idx);
         }
         Some(entry)
@@ -5594,11 +5590,14 @@ impl HLInterpreter {
         // `interpret_loop`; a box does not move its contents.
         let (ops, owned_body) = match func.decoded_ops() {
             Some(ops) => (ops as *const [Opcode], None),
-            None => {
-                let owned = self.call_body(bc, func_idx, func);
-                let body = owned.as_deref().unwrap_or(func);
-                (body.ops() as *const [Opcode], owned)
-            }
+            None => match self.call_body(bc, func_idx, func) {
+                Some(owned) => (owned.ops() as *const [Opcode], Some(owned)),
+                // Read a chunk at a time through `op_at` by `interpret_loop`.
+                None if func.body().is_chunked() => {
+                    (std::ptr::slice_from_raw_parts(std::ptr::null(), 0), None)
+                }
+                None => (func.ops() as *const [Opcode], None),
+            },
         };
         frame.body = owned_body
             .as_deref()
@@ -5658,24 +5657,23 @@ impl HLInterpreter {
             self.fiber_safe_point(1);
             let frame = self.stack.last().unwrap();
             let pc = frame.pc;
-            let ops: &[Opcode] = if (frame.ops as *const Opcode).is_null() {
-                self.frame_body(bytecode, func_idx).ops()
-            } else {
-                // The frame's body, which outlives the frame; see `ops`.
-                unsafe { &*frame.ops }
-            };
-
-            if pc >= ops.len() {
-                return Ok(NanBoxedValue::void());
-            }
-
             // Borrowed, not cloned. `Cache::body` hands back a reference tied
             // to `bytecode` rather than to `self`, so the dispatch loop never
             // needed a copy -- and `Opcode` carries a `Vec<Reg>` in its CallN,
             // CallMethod, CallThis, CallClosure and Switch variants, so the
             // copy was a heap allocation per dispatch on exactly those. The
             // sampler charged 2% of a whole nbody run to `Opcode::clone`.
-            let op = &ops[pc];
+            let op = if (frame.ops as *const Opcode).is_null() {
+                // A body read by chunk (see `call_body`), or a frame pushed
+                // without its ops.
+                self.frame_body(bytecode, func_idx).op_at(pc)
+            } else {
+                // The frame's body, which outlives the frame; see `ops`.
+                unsafe { &*frame.ops }.get(pc)
+            };
+            let Some(op) = op else {
+                return Ok(NanBoxedValue::void());
+            };
             if let Opcode::Throw { exc } = op {
                 self.capture_exception_stack(bytecode);
                 if let Some(thrown) = self.stack.last().map(|f| f.registers.get(exc.0)) {
@@ -5962,33 +5960,27 @@ impl HLInterpreter {
         }
     }
 
-    /// The body the innermost frame is executing, when it is `func_idx`'s:
-    /// the one it started on, whatever the AIR cache holds now. Any other
-    /// frame's body is resolved through the cache.
-    #[inline]
-    /// The body a call of a large function still encoded runs from, for its
-    /// first few calls: a copy the call owns, decoded when the frame first
-    /// reads it and freed when the call returns. A function called only a
-    /// few times -- the static initializers that build a program's tables
-    /// are the large ones -- then never keeps its ops. Later calls decode
-    /// the shared body.
+    /// The body the first call of a function decoded by chunk runs from: a
+    /// copy the call owns, decoded whole and freed when the call returns. A
+    /// large function is mostly a static initializer that runs once, start
+    /// to end. Later calls run the shared body a chunk at a time, so one that
+    /// returns early -- a guard in front of a large initialization --
+    /// decodes only the chunks it reaches.
     fn call_body(
         &mut self,
         bc: &DecodedBytecode,
         func_idx: usize,
         func: &HLFunction,
     ) -> Option<Box<HLFunction>> {
-        const LARGE_OPS: usize = 2048;
-        const OWNED_CALLS: u32 = 4;
         let raw = bc.functions.get(func_idx)?;
-        if !std::ptr::eq(func, raw) || !func.body().encoded_ops().is_some_and(|n| n >= LARGE_OPS) {
-            return None;
-        }
-        let calls = self.called_large.entry(func_idx).or_insert(0);
-        *calls += 1;
-        (*calls <= OWNED_CALLS).then(|| Box::new(func.clone()))
+        (std::ptr::eq(func, raw) && func.body().is_chunked() && self.called_large.insert(func_idx))
+            .then(|| Box::new(func.clone()))
     }
 
+    /// The body the innermost frame is executing, when it is `func_idx`'s:
+    /// the one it started on, whatever the AIR cache holds now. Any other
+    /// frame's body is resolved through the cache.
+    #[inline]
     fn frame_body<'b>(&self, bytecode: &'b DecodedBytecode, func_idx: usize) -> &'b HLFunction {
         match self.stack.last() {
             Some(f) if f.function_index == func_idx && !f.body.is_null() => unsafe { &*f.body },

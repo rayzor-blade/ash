@@ -4,7 +4,7 @@ use crate::opcodes::{
     RefString, RefType, Reg,
 };
 use crate::types::{
-    BodyShape, EncodedBody, FunctionBody, HLConstant, HLEnumConstruct, HLFunction, HLNative, HLObjField,
+    BodyShape, CHUNK_OPS, EncodedBody, FunctionBody, HLConstant, HLEnumConstruct, HLFunction, HLNative, HLObjField,
     HLObjProto, HLType, HLTypeEnum, HLTypeFun, HLTypeObj, HLTypeVirtual, OP_NARGS, TypeRef,
     ValueTypeKind,
 };
@@ -42,6 +42,9 @@ pub struct BytecodeDecoder {
     entrypoint: u32,
     has_debug: bool,
     ndebug_files: usize,
+    /// Bodies with at least this many ops are recorded for decoding by
+    /// chunk; see [`chunked_body_ops`].
+    chunked_ops: usize,
     decoded: DecodedBytecode,
 }
 
@@ -75,8 +78,21 @@ impl BytecodeDecoder {
     /// The whole program is in memory so that a function body can be left
     /// encoded, as a range of these bytes; see [`FunctionBody`].
     fn decode_slice(all: &[u8], pointer_size: usize) -> Result<DecodedBytecode, io::Error> {
+        Self::decode_slice_chunked(all, pointer_size, chunked_body_ops())
+    }
+
+    /// [`Self::decode_slice`], recording every body of at least
+    /// `chunked_ops` ops for decoding by chunk.
+    pub(crate) fn decode_slice_chunked(
+        all: &[u8],
+        pointer_size: usize,
+        chunked_ops: usize,
+    ) -> Result<DecodedBytecode, io::Error> {
         let mut reader: &[u8] = all;
-        let mut decoder = BytecodeDecoder::default();
+        let mut decoder = BytecodeDecoder {
+            chunked_ops,
+            ..BytecodeDecoder::default()
+        };
 
         // Search for the magic header
         let finder = memchr::memmem::Finder::new("HLB");
@@ -607,10 +623,16 @@ impl BytecodeDecoder {
             fun.regs = regs;
 
             let at = all.len() - r.len();
+            let chunked = nops >= self.chunked_ops;
+            let mut chunk_at = Vec::new();
             let mut ops = Vec::with_capacity(nops);
-            for _ in 0..nops {
+            for i in 0..nops {
+                if chunked && i % CHUNK_OPS == 0 {
+                    chunk_at.push((all.len() - r.len() - at) as u32);
+                }
                 ops.push(self.read_opcode(r)?);
             }
+            let debug_at = all.len() - r.len() - at;
             let mut debug = Vec::new();
             if self.has_debug {
                 debug = self.read_debug_infos(r, nops)?;
@@ -635,6 +657,8 @@ impl BytecodeDecoder {
                         nops,
                         has_debug: self.has_debug,
                         ndebug_files: self.ndebug_files,
+                        debug_at,
+                        chunk_at: chunk_at.into(),
                     },
                     shape,
                 ));
@@ -1301,26 +1325,52 @@ fn decode_eagerly() -> bool {
     *EAGER.get_or_init(|| std::env::var("ASH_DECODE_EAGER").is_ok_and(|v| v == "1"))
 }
 
-/// Decode a body [`BytecodeDecoder::read_functions`] left encoded. The same
-/// bytes decoded at load, so they cannot fail to now.
-pub(crate) fn decode_body(e: &EncodedBody) -> (Vec<Opcode>, Vec<i32>) {
-    let mut d = BytecodeDecoder {
+/// `ASH_DECODE_CHUNKED_OPS`: a body with at least this many ops (default
+/// 2048) can be decoded a chunk at a time; safe to run with any value.
+fn chunked_body_ops() -> usize {
+    static OPS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *OPS.get_or_init(|| {
+        std::env::var("ASH_DECODE_CHUNKED_OPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2048)
+    })
+}
+
+/// A decoder for the parts of a body [`BytecodeDecoder::read_functions`]
+/// left encoded. The same bytes decoded at load, so they cannot fail to now.
+fn body_decoder(e: &EncodedBody) -> BytecodeDecoder {
+    BytecodeDecoder {
         has_debug: e.has_debug,
         ndebug_files: e.ndebug_files,
         ..BytecodeDecoder::default()
-    };
-    let mut r: &[u8] = &e.bytes;
-    let ops = (0..e.nops)
+    }
+}
+
+/// `count` ops starting `from` bytes into the body.
+pub(crate) fn decode_ops(e: &EncodedBody, from: usize, count: usize) -> Vec<Opcode> {
+    let mut d = body_decoder(e);
+    let mut r: &[u8] = &e.bytes[from..];
+    (0..count)
         .map(|_| d.read_opcode(&mut r))
         .collect::<io::Result<Vec<_>>>()
-        .expect("a body that decoded at load decodes again");
-    let debug = if e.has_debug {
-        d.read_debug_infos(&mut r, e.nops)
-            .expect("a body that decoded at load decodes again")
-    } else {
-        Vec::new()
-    };
-    (ops, debug)
+        .expect("a body that decoded at load decodes again")
+}
+
+/// Chunk `k` of a body recorded for decoding by chunk.
+pub(crate) fn decode_chunk(e: &EncodedBody, k: usize) -> Box<[Opcode]> {
+    let count = CHUNK_OPS.min(e.nops - k * CHUNK_OPS);
+    decode_ops(e, e.chunk_at[k] as usize, count).into()
+}
+
+/// The body's `(file, line)` debug pairs, flattened.
+pub(crate) fn decode_debug(e: &EncodedBody) -> Vec<i32> {
+    if !e.has_debug {
+        return Vec::new();
+    }
+    body_decoder(e)
+        .read_debug_infos(&mut &e.bytes[e.debug_at..], e.nops)
+        .expect("a body that decoded at load decodes again")
 }
 
 /// `ASH_DECODE_STATS=1`: how many function bodies the run decoded.
@@ -1331,10 +1381,15 @@ pub fn decode_report(bc: &DecodedBytecode) -> Vec<String> {
     let mut decoded: Vec<&HLFunction> =
         bc.functions.iter().filter(|f| f.body().is_decoded()).collect();
     let ops: usize = decoded.iter().map(|f| f.ops().len()).sum();
+    let read_by_chunk: Vec<&HLFunction> =
+        bc.functions.iter().filter(|f| f.body().decoded_chunks() > 0).collect();
+    let chunks: usize = read_by_chunk.iter().map(|f| f.body().decoded_chunks()).sum();
     let mut out = vec![format!(
-        "[decode] bodies decoded {} of {} ({ops} ops)",
+        "[decode] bodies decoded {} of {} ({ops} ops); {} read by chunk ({chunks} chunks of {} ops)",
         decoded.len(),
-        bc.functions.len()
+        bc.functions.len(),
+        read_by_chunk.len(),
+        CHUNK_OPS
     )];
     // `=2` also names the largest decoded bodies by their first source line.
     if std::env::var("ASH_DECODE_STATS").is_ok_and(|v| v == "2") {
@@ -1753,6 +1808,45 @@ mod test {
         f.set_ops(bc.functions[k].ops().to_vec());
         assert_eq!(f.debug(), bc.functions[k].debug());
         assert_eq!(format!("{:?}", f.ops()), format!("{:?}", bc.functions[k].ops()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_body_read_by_chunk_matches_the_body_decoded_whole() -> Result<(), std::io::Error> {
+        init_std_library();
+        let mut path =
+            PathBuf::from_str(env!("CARGO_MANIFEST_DIR")).expect("Expected to get manifest path");
+        path.push("test/tests/test_stdlib.hl");
+        let bytes = std::fs::read(&path)?;
+        let ptr = std::mem::size_of::<usize>();
+        // Every body is recorded for decoding by chunk.
+        let chunked = BytecodeDecoder::decode_slice_chunked(&bytes, ptr, 1)?;
+        let whole = BytecodeDecoder::decode_slice_chunked(&bytes, ptr, usize::MAX)?;
+        let mut multi_chunk = 0;
+        for (c, w) in chunked.functions.iter().zip(&whole.functions) {
+            let n = w.ops().len();
+            if n == 0 {
+                continue;
+            }
+            assert!(c.body().is_chunked(), "findex {}", c.findex);
+            multi_chunk += usize::from(n > super::CHUNK_OPS);
+            // Read back to front, so a later chunk decodes before an earlier.
+            for pc in (0..n).rev() {
+                assert_eq!(
+                    format!("{:?}", c.op_at(pc)),
+                    format!("{:?}", w.ops().get(pc)),
+                    "findex {} pc {pc}",
+                    c.findex
+                );
+            }
+            assert!(c.op_at(n).is_none());
+            // Reading by chunk leaves the whole body encoded, and the debug
+            // pairs decode on their own.
+            assert!(!c.body().is_decoded());
+            assert_eq!(c.debug(), w.debug(), "findex {}", c.findex);
+            assert_eq!(c.body().decoded_chunks(), n.div_ceil(super::CHUNK_OPS));
+        }
+        assert!(multi_chunk > 0, "the fixture has a body longer than one chunk");
         Ok(())
     }
 

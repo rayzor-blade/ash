@@ -257,22 +257,33 @@ pub struct HLNative {
     pub findex: i32,
 }
 
+/// Ops in a chunk of a body decoded on its own; see [`HLFunction::op_at`].
+pub const CHUNK_OPS: usize = 256;
+
 /// A function's ops and their `(file, line)` debug pairs. The decoder may
-/// leave them encoded, as the body's own bytes; they are decoded the first
-/// time either is read, once, and the bytes dropped.
+/// leave them encoded, as the body's own bytes; the ops and the debug pairs
+/// are each decoded the first time they are read, once, and the bytes are
+/// dropped when both have been. A large body can also be decoded a chunk at
+/// a time, for a caller that reads only the chunks it reaches.
 #[derive(Debug, Default)]
 pub struct FunctionBody {
-    decoded: std::sync::OnceLock<(Vec<Opcode>, Vec<i32>)>,
+    ops: std::sync::OnceLock<Vec<Opcode>>,
+    debug: std::sync::OnceLock<Vec<i32>>,
+    chunks: std::sync::OnceLock<Box<[std::sync::OnceLock<Box<[Opcode]>>]>>,
     encoded: std::sync::Mutex<Option<EncodedBody>>,
     /// Recorded by the decoder; see [`HLFunction::shape`].
     shape: Option<BodyShape>,
 }
 
 impl Clone for FunctionBody {
+    /// A clone decodes into its own slots, so a copy of an encoded body
+    /// never decodes the original's.
     fn clone(&self) -> Self {
         FunctionBody {
-            decoded: self.decoded.clone(),
-            encoded: std::sync::Mutex::new(self.encoded_body()),
+            ops: self.ops.clone(),
+            debug: self.debug.clone(),
+            chunks: std::sync::OnceLock::new(),
+            encoded: std::sync::Mutex::new(self.lock_encoded().clone()),
             shape: self.shape,
         }
     }
@@ -329,6 +340,11 @@ pub struct EncodedBody {
     pub(crate) nops: usize,
     pub(crate) has_debug: bool,
     pub(crate) ndebug_files: usize,
+    /// Where the debug pairs start in `bytes`.
+    pub(crate) debug_at: usize,
+    /// Where each [`CHUNK_OPS`] chunk of ops starts in `bytes`, for a body
+    /// large enough to be decoded by chunk; empty otherwise.
+    pub(crate) chunk_at: Box<[u32]>,
 }
 
 impl std::fmt::Debug for EncodedBody {
@@ -340,55 +356,118 @@ impl std::fmt::Debug for EncodedBody {
 impl FunctionBody {
     pub(crate) fn decoded(ops: Vec<Opcode>, debug: Vec<i32>) -> Self {
         FunctionBody {
-            decoded: std::sync::OnceLock::from((ops, debug)),
-            encoded: std::sync::Mutex::new(None),
-            shape: None,
+            ops: std::sync::OnceLock::from(ops),
+            debug: std::sync::OnceLock::from(debug),
+            ..FunctionBody::default()
         }
     }
 
     pub(crate) fn encoded(body: EncodedBody, shape: BodyShape) -> Self {
         FunctionBody {
-            decoded: std::sync::OnceLock::new(),
             encoded: std::sync::Mutex::new(Some(body)),
             shape: Some(shape),
+            ..FunctionBody::default()
         }
     }
 
-    fn encoded_body(&self) -> Option<EncodedBody> {
-        self.encoded.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    fn lock_encoded(&self) -> std::sync::MutexGuard<'_, Option<EncodedBody>> {
+        self.encoded.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn get(&self) -> &(Vec<Opcode>, Vec<i32>) {
-        self.decoded.get_or_init(|| {
-            let encoded = self.encoded.lock().unwrap_or_else(|e| e.into_inner()).take();
-            match encoded {
-                Some(e) => crate::bytecode::decode_body(&e),
-                None => (Vec::new(), Vec::new()),
-            }
-        })
+    /// Drop the bytes once nothing is left to decode from them.
+    fn release_bytes(&self) {
+        if self.ops.get().is_some() && self.debug.get().is_some() {
+            *self.lock_encoded() = None;
+        }
     }
 
-    fn get_mut(&mut self) -> &mut (Vec<Opcode>, Vec<i32>) {
-        self.get();
-        self.decoded.get_mut().expect("decoded just above")
+    fn ops(&self) -> &Vec<Opcode> {
+        if let Some(ops) = self.ops.get() {
+            return ops;
+        }
+        let ops = self.ops.get_or_init(|| {
+            self.lock_encoded()
+                .as_ref()
+                .map(|e| crate::bytecode::decode_ops(e, 0, e.nops))
+                .unwrap_or_default()
+        });
+        self.release_bytes();
+        ops
     }
 
-    /// Whether the ops have been decoded, or never were encoded.
+    fn debug(&self) -> &Vec<i32> {
+        if let Some(debug) = self.debug.get() {
+            return debug;
+        }
+        let debug = self.debug.get_or_init(|| {
+            self.lock_encoded()
+                .as_ref()
+                .map(crate::bytecode::decode_debug)
+                .unwrap_or_default()
+        });
+        self.release_bytes();
+        debug
+    }
+
+    /// Op `pc`, decoding only its chunk when the body is decoded by chunk.
+    fn op_at(&self, pc: usize) -> Option<&Opcode> {
+        if let Some(ops) = self.ops.get() {
+            return ops.get(pc);
+        }
+        let chunks = self.chunks.get_or_init(|| {
+            let n = self.lock_encoded().as_ref().map_or(0, |e| e.chunk_at.len());
+            (0..n).map(|_| std::sync::OnceLock::new()).collect()
+        });
+        let Some(chunk) = chunks.get(pc / CHUNK_OPS) else {
+            return self.ops().get(pc);
+        };
+        if let Some(ops) = chunk.get() {
+            return ops.get(pc % CHUNK_OPS);
+        }
+        let decoded = self
+            .lock_encoded()
+            .as_ref()
+            .map(|e| crate::bytecode::decode_chunk(e, pc / CHUNK_OPS));
+        match decoded {
+            Some(ops) => chunk.get_or_init(|| ops).get(pc % CHUNK_OPS),
+            // The bytes went because the whole body was decoded meanwhile.
+            None => self.ops().get(pc),
+        }
+    }
+
+    fn get_mut(&mut self) -> (&mut Vec<Opcode>, &mut Vec<i32>) {
+        self.ops();
+        self.debug();
+        (
+            self.ops.get_mut().expect("decoded just above"),
+            self.debug.get_mut().expect("decoded just above"),
+        )
+    }
+
+    /// Whether the ops have been decoded whole, or never were encoded.
     pub fn is_decoded(&self) -> bool {
-        self.decoded.get().is_some()
-            || self.encoded.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+        self.ops.get().is_some() || self.lock_encoded().is_none()
+    }
+
+    /// Whether the ops are still encoded and can be decoded by chunk.
+    pub fn is_chunked(&self) -> bool {
+        self.ops.get().is_none()
+            && self.lock_encoded().as_ref().is_some_and(|e| !e.chunk_at.is_empty())
+    }
+
+    /// The chunks decoded so far, for a body decoded by chunk.
+    pub fn decoded_chunks(&self) -> usize {
+        self.chunks
+            .get()
+            .map_or(0, |c| c.iter().filter(|c| c.get().is_some()).count())
     }
 
     /// How many ops a body still encoded holds; `None` once decoded.
     pub fn encoded_ops(&self) -> Option<usize> {
-        if self.decoded.get().is_some() {
+        if self.ops.get().is_some() {
             return None;
         }
-        self.encoded
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|e| e.nops)
+        self.lock_encoded().as_ref().map(|e| e.nops)
     }
 }
 
@@ -429,13 +508,19 @@ impl HLFunction {
     }
 
     pub fn ops(&self) -> &[Opcode] {
-        &self.body.get().0
+        self.body.ops()
     }
 
     /// The ops when they are already decoded, without decoding them.
     #[inline]
     pub fn decoded_ops(&self) -> Option<&[Opcode]> {
-        self.body.decoded.get().map(|(ops, _)| ops.as_slice())
+        self.body.ops.get().map(Vec::as_slice)
+    }
+
+    /// Op `pc`, decoding only the chunk that holds it when the body is
+    /// decoded by chunk ([`FunctionBody::is_chunked`]); `None` past the end.
+    pub fn op_at(&self, pc: usize) -> Option<&Opcode> {
+        self.body.op_at(pc)
     }
 
     /// How many ops the body has, without decoding it.
@@ -444,19 +529,19 @@ impl HLFunction {
     }
 
     pub fn ops_mut(&mut self) -> &mut Vec<Opcode> {
-        &mut self.body.get_mut().0
+        self.body.get_mut().0
     }
 
     pub fn set_ops(&mut self, ops: Vec<Opcode>) {
-        self.body.get_mut().0 = ops;
+        *self.body.get_mut().0 = ops;
     }
 
     pub fn debug(&self) -> &[i32] {
-        &self.body.get().1
+        self.body.debug()
     }
 
     pub fn set_debug(&mut self, debug: Vec<i32>) {
-        self.body.get_mut().1 = debug;
+        *self.body.get_mut().1 = debug;
     }
 
     pub fn name(&self) -> String {

@@ -36,6 +36,12 @@ pub fn str_to_uchar_ptr(s: &str) -> *const u16 {
     static_slice.as_ptr()
 }
 
+/// "null" as a NUL-terminated UTF-16 string, converted once.
+fn null_utf16() -> *const u16 {
+    static NULL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *NULL.get_or_init(|| str_to_uchar_ptr("null") as usize) as *const u16
+}
+
 /// Calculates the length of a null-terminated UTF-16 string.
 ///
 /// This function is safe to call with null pointers, returning 0 in that case.
@@ -584,12 +590,12 @@ pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) 
             || !(d as usize).is_multiple_of(std::mem::align_of::<usize>())
         {
             *len = 4;
-            return str_to_uchar_ptr("null") as *mut vbyte;
+            return null_utf16() as *mut vbyte;
         }
         let t = (*d).t;
         if t.is_null() {
             *len = 4;
-            return str_to_uchar_ptr("null") as *mut vbyte;
+            return null_utf16() as *mut vbyte;
         }
         let kind = (*t).kind;
 

@@ -237,8 +237,8 @@ pub unsafe extern "C" fn hl_buffer_cstr(b: *mut c_void, s: *const u8) {
         }
         let cstr = std::ffi::CStr::from_ptr(s as *const std::ffi::c_char);
         if let Ok(st) = cstr.to_str() {
-            let utf16 = crate::strings::str_to_uchar_ptr(st);
-            crate::buffer::hlp_buffer_str(b as *mut hl_buffer, utf16);
+            let utf16: Vec<u16> = st.encode_utf16().collect();
+            crate::buffer::hlp_buffer_str_sub(b as *mut hl_buffer, utf16.as_ptr(), utf16.len() as i32);
         }
     }
 }
@@ -374,6 +374,17 @@ pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
 // String/encoding functions
 // ============================================================================
 
+/// `s` as a NUL-terminated UTF-16 string in GC memory, as upstream returns
+/// one: the collector frees it once nothing holds it.
+fn gc_utf16(s: &str) -> *const hl::uchar {
+    let utf16: Vec<u16> = s.encode_utf16().chain([0]).collect();
+    let Some(out) = crate::rt::gc_alloc_noptr(utf16.len() * 2) else {
+        crate::rt::out_of_memory("a string");
+    };
+    unsafe { ptr::copy_nonoverlapping(utf16.as_ptr(), out.as_ptr() as *mut u16, utf16.len()) };
+    out.as_ptr() as *const hl::uchar
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
     unsafe {
@@ -382,8 +393,7 @@ pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
         }
         let cstr = std::ffi::CStr::from_ptr(str as *const std::ffi::c_char);
         if let Ok(s) = cstr.to_str() {
-            let ptr = crate::strings::str_to_uchar_ptr(s);
-            return ptr;
+            return gc_utf16(s);
         }
         ptr::null()
     }
@@ -432,7 +442,7 @@ pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uc
         let bytes = std::slice::from_raw_parts(str, len as usize);
         let s = String::from_utf8_lossy(bytes);
 
-        crate::strings::str_to_uchar_ptr(&s)
+        gc_utf16(&s)
     }
 }
 
@@ -567,8 +577,9 @@ pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
         }
         let cstr = std::ffi::CStr::from_ptr(name as *const std::ffi::c_char);
         if let Ok(s) = cstr.to_str() {
-            let utf16 = crate::strings::str_to_uchar_ptr(s);
-            crate::obj::hlp_hash_gen(utf16, true)
+            // The hash cache keeps its own copy of the name.
+            let utf16: Vec<u16> = s.encode_utf16().chain([0]).collect();
+            crate::obj::hlp_hash_gen(utf16.as_ptr(), true)
         } else {
             0
         }

@@ -63,7 +63,7 @@ being taken:
 | `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |
 | `ASH_STRIP_MINE` | `0` makes compiled loops poll on every iteration instead of once per strip of 256 |
 | `ASH_AIR` | `v2` runs the interpreter over AIR instead of opcodes |
-| `ASH_GC_STATS` | print collections, reclaimed blocks, live bytes, pause times at exit |
+| `ASH_GC_STATS` | print collections, reclaimed blocks, live bytes, pause times and finalizer registrations / queued / completed / pending counts at exit |
 | `ASH_GC_HEAP_MB` | heap reservation; committed on demand, so a ceiling |
 | `ASH_GC_TRIGGER_MB` | floor for the adaptive collection threshold |
 | `ASH_GC_SHARE_PCT` | target share of run time spent collecting (default 5); the trigger adapts toward it |
@@ -96,6 +96,13 @@ many collections over a long run use `ASH_GC_TRIGGER_MB=1`. A clean stress
 run does not rule out a rooting bug exposed by TLAB line reuse; run a second
 time with TLAB and recycling enabled. `ASH_GC_NO_RECLAIM=1 ASH_GC_RECYCLE=0`
 disables block reclamation and line reuse for comparison.
+
+`ASH_GC_STATS=1` counts finalizer registrations, queued callbacks and
+completed callbacks cumulatively. `pending` counts callbacks waiting for a
+mutator to run them; callbacks currently executing are outside that queue.
+These counters describe GC-owned handles, not Rust compiler caches or GPU
+textures. The external allocation total includes a 4 KiB pressure charge per
+finalizable handle, so it is not a census of the native bytes those handles own.
 
 ## Profiling
 

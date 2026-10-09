@@ -112,8 +112,14 @@ fn run_pending_finalizers() {
         PENDING_FINALIZER_COUNT.store(0, Ordering::Relaxed);
         mem::take(&mut *queue)
     };
+    let count = due.len() as u64;
     for (block, finalize) in due {
         unsafe { finalize(block as *mut c_void) };
+    }
+    if gc_stats_enabled() {
+        GC_STATS
+            .finalizers_completed
+            .fetch_add(count, Ordering::Relaxed);
     }
 }
 
@@ -2247,6 +2253,11 @@ fn gc_stress_every() -> usize {
 
 struct GcStatCounters {
     collections: AtomicU64,
+    /// Diagnostic only: updates are gated by `ASH_GC_STATS`, outside the
+    /// ordinary allocation fast path. Completed counts callbacks that returned.
+    finalizers_registered: AtomicU64,
+    finalizers_queued: AtomicU64,
+    finalizers_completed: AtomicU64,
     blocks_reclaimed: AtomicU64,
     /// Lines served from a kept block's free spans rather than a fresh block.
     lines_recycled: AtomicU64,
@@ -2267,6 +2278,9 @@ struct GcStatCounters {
 
 static GC_STATS: GcStatCounters = GcStatCounters {
     collections: AtomicU64::new(0),
+    finalizers_registered: AtomicU64::new(0),
+    finalizers_queued: AtomicU64::new(0),
+    finalizers_completed: AtomicU64::new(0),
     blocks_reclaimed: AtomicU64::new(0),
     lines_recycled: AtomicU64::new(0),
     bytes_allocated: AtomicU64::new(0),
@@ -2480,6 +2494,15 @@ fn print_gc_stats_report() {
         growth_factor()
     );
     eprintln!("[gc] collections:      {}", n);
+    if gc_stats_enabled() {
+        eprintln!(
+            "[gc] finalizers:       registered {}, queued {}, completed {}, pending {}",
+            GC_STATS.finalizers_registered.load(Ordering::Relaxed),
+            GC_STATS.finalizers_queued.load(Ordering::Relaxed),
+            GC_STATS.finalizers_completed.load(Ordering::Relaxed),
+            PENDING_FINALIZER_COUNT.load(Ordering::Relaxed),
+        );
+    }
     // Counted since the deadline was added and never reported, so a run whose
     // collections were all thrown away looked like a run that collected. It
     // is the one number here that means something is wrong rather than slow:
@@ -4468,7 +4491,12 @@ impl ImmixAllocator {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let addr = ptr as usize;
         if addr >= heap_start && addr < heap_start + self.heap.memory.len {
-            self.finalizables.insert(addr - heap_start);
+            let inserted = self.finalizables.insert(addr - heap_start);
+            if inserted && gc_stats_enabled() {
+                GC_STATS
+                    .finalizers_registered
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             self.track_external(FINALIZER_CHARGE);
         }
     }
@@ -4544,6 +4572,11 @@ impl ImmixAllocator {
         }
         if queued != 0 {
             PENDING_FINALIZER_COUNT.fetch_add(queued, Ordering::Relaxed);
+            if gc_stats_enabled() {
+                GC_STATS
+                    .finalizers_queued
+                    .fetch_add(queued as u64, Ordering::Relaxed);
+            }
         }
     }
 

@@ -5255,9 +5255,8 @@ impl ImmixAllocator {
                         BLOCK_SIZE / ALLOC_QUANTUM,
                     )
                 };
-                for word in table.chunks_exact_mut(8) {
-                    let w = u64::from_ne_bytes(word.try_into().unwrap()) & !MARKS;
-                    word.copy_from_slice(&w.to_ne_bytes());
+                for word in table.as_chunks_mut::<8>().0 {
+                    *word = (u64::from_ne_bytes(*word) & !MARKS).to_ne_bytes();
                 }
                 let block = unsafe { &*(block_meta as *const Block).add(block_addr / BLOCK_SIZE) };
                 for word in block.mark_bits.iter() {

@@ -1605,6 +1605,82 @@ pub struct InlineSite {
 }
 
 impl Function {
+    /// Storage retained by this body, including nested vectors. Conservative
+    /// allocation overhead keeps byte-budgeted caches below their limit.
+    pub fn allocated_bytes(&self) -> usize {
+        fn vec_bytes<T>(v: &Vec<T>) -> usize {
+            v.capacity() * std::mem::size_of::<T>() + usize::from(v.capacity() != 0) * 16
+        }
+        let mut bytes = std::mem::size_of::<Self>()
+            + vec_bytes(&self.values)
+            + vec_bytes(&self.cells)
+            + vec_bytes(&self.blocks)
+            + vec_bytes(&self.reg_types)
+            + vec_bytes(&self.float_types)
+            + vec_bytes(&self.pending_ints)
+            + vec_bytes(&self.scalar_remainders)
+            + vec_bytes(&self.inline_sites)
+            + vec_bytes(&self.strip_tests)
+            + self.natives.allocated_bytes();
+        for block in &self.blocks {
+            bytes += vec_bytes(&block.phis) + vec_bytes(&block.instrs);
+            for phi in &block.phis {
+                bytes += vec_bytes(&phi.incoming);
+            }
+            for instr in &block.instrs {
+                bytes += match instr {
+                    Instr::Call { args, .. }
+                    | Instr::CallMethod { args, .. }
+                    | Instr::CallClosure { args, .. }
+                    | Instr::Intrinsic { args, .. }
+                    | Instr::MakeEnum { args, .. } => vec_bytes(args),
+                    Instr::VecOp { args, .. } => vec_bytes(args),
+                    _ => 0,
+                };
+            }
+            if let Terminator::Switch { targets, .. } = &block.term {
+                bytes += vec_bytes(targets);
+            }
+        }
+        bytes
+    }
+
+    /// Passes grow and then delete instructions. Keep the finished body,
+    /// without retaining their temporary growth capacity in runtime caches.
+    pub fn shrink_to_fit(&mut self) {
+        self.values.shrink_to_fit();
+        self.cells.shrink_to_fit();
+        self.blocks.shrink_to_fit();
+        self.reg_types.shrink_to_fit();
+        self.float_types.shrink_to_fit();
+        self.pending_ints.shrink_to_fit();
+        self.scalar_remainders.shrink_to_fit();
+        self.inline_sites.shrink_to_fit();
+        self.strip_tests.shrink_to_fit();
+        self.natives.shrink_to_fit();
+        for block in &mut self.blocks {
+            block.phis.shrink_to_fit();
+            block.instrs.shrink_to_fit();
+            for phi in &mut block.phis {
+                phi.incoming.shrink_to_fit();
+            }
+            for instr in &mut block.instrs {
+                match instr {
+                    Instr::Call { args, .. }
+                    | Instr::CallMethod { args, .. }
+                    | Instr::CallClosure { args, .. }
+                    | Instr::Intrinsic { args, .. }
+                    | Instr::MakeEnum { args, .. } => args.shrink_to_fit(),
+                    Instr::VecOp { args, .. } => args.shrink_to_fit(),
+                    _ => {}
+                }
+            }
+            if let Terminator::Switch { targets, .. } = &mut block.term {
+                targets.shrink_to_fit();
+            }
+        }
+    }
+
     /// An empty function over `reg_types`: no values, cells, blocks, natives,
     /// float types or identity.
     pub fn new(reg_types: Vec<TypeRef>) -> Self {

@@ -4130,7 +4130,7 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         func_idx: usize,
         header_pc: usize,
-        ssa: Option<(&'static crate::ssa::Prepared, usize, Option<u32>)>,
+        ssa: Option<(&crate::ssa::Prepared, usize, Option<u32>)>,
     ) -> Result<Option<NanBoxedValue>> {
         if !osr_transfer_enabled() {
             return Ok(None);
@@ -4207,7 +4207,7 @@ impl HLInterpreter {
         let ret_kind = bytecode.types[fun_ty.ret.0].kind;
 
         let regs: &[ash_core::types::TypeRef] = match ssa {
-            Some((prep, _, _)) => prep.osr_reg_types,
+            Some((prep, _, _)) => prep.osr_reg_types(),
             None => &body.regs,
         };
         // The register-image width is the second witness: a pipeline
@@ -4231,10 +4231,10 @@ impl HLInterpreter {
         let slot_of_reg: Option<Vec<u32>> = ssa.map(|(prep, header_block, from)| {
             let mut slots = vec![u32::MAX; regs.len()];
             for &v in prep
-                .liveness
+                .liveness()
                 .live_in(air::v2::ir::BlockId(header_block as u32))
             {
-                let r = prep.ir.value_reg(v) as usize;
+                let r = prep.ir().value_reg(v) as usize;
                 if r < slots.len() {
                     slots[r] = v.idx() as u32;
                 }
@@ -4245,7 +4245,7 @@ impl HLInterpreter {
             // incoming values are still in the phi sources for the edge we
             // arrived on, and it is those the entry must resume with.
             if let Some(from) = from {
-                for phi in &prep.ir.blocks[header_block].phis {
+                for phi in &prep.ir().blocks[header_block].phis {
                     let Some(&(_, src)) = phi
                         .incoming
                         .iter()
@@ -4253,7 +4253,7 @@ impl HLInterpreter {
                     else {
                         continue;
                     };
-                    let r = prep.ir.value_reg(phi.dst) as usize;
+                    let r = prep.ir().value_reg(phi.dst) as usize;
                     if r < slots.len() {
                         slots[r] = src.idx() as u32;
                     }
@@ -4262,7 +4262,7 @@ impl HLInterpreter {
             // Cells last: a pinned register is backed by its cell for the
             // whole function, so the cell owns the register wherever both
             // could claim it.
-            for (i, c) in prep.ir.cells.iter().enumerate() {
+            for (i, c) in prep.ir().cells.iter().enumerate() {
                 let r = c.reg as usize;
                 if r < slots.len() {
                     slots[r] = prep.cell_base + i as u32;
@@ -5548,7 +5548,7 @@ impl HLInterpreter {
             self.ssa.prepare(bc, func_idx);
         }
         if let Some(prep) = self.ssa.body(func_idx) {
-            return self.execute_ssa_function(bc, native_resolver, func_idx, prep, args);
+            return self.execute_ssa_function(bc, native_resolver, func_idx, &prep, args);
         }
         if self.air.needs_prepare(func_idx) {
             let _compiling = CompileBlocking::enter(self.fn_blocking);
@@ -7277,14 +7277,14 @@ impl HLInterpreter {
         bc: &DecodedBytecode,
         native_resolver: &NativeFunctionResolver,
         func_idx: usize,
-        prep: &'static crate::ssa::Prepared,
+        prep: &crate::ssa::Prepared,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
         if self.stack.len() >= self.max_stack_depth {
             return Err(anyhow!("Stack overflow (depth {})", self.stack.len()));
         }
 
-        let ir = prep.ir;
+        let ir = prep.ir();
         let buf = self.reg_pool.pop().unwrap_or_default();
         let mut frame =
             InterpreterFrame::with_buffer(func_idx, ir.values.len() + ir.cells.len(), buf);

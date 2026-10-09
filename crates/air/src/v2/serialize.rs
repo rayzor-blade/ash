@@ -84,6 +84,60 @@ pub struct Serialized {
     pub term_pcs: Vec<usize>,
 }
 
+impl Serialized {
+    pub fn allocated_bytes(&self) -> usize {
+        fn vec_bytes<T>(v: &Vec<T>) -> usize {
+            v.capacity() * std::mem::size_of::<T>() + usize::from(v.capacity() != 0) * 16
+        }
+        std::mem::size_of::<Self>()
+            + vec_bytes(&self.ops)
+            + vec_bytes(&self.reg_types)
+            + vec_bytes(&self.new_ints)
+            + vec_bytes(&self.block_pcs)
+            + vec_bytes(&self.instr_pcs)
+            + vec_bytes(&self.term_pcs)
+            + self.instr_pcs.iter().map(vec_bytes).sum::<usize>()
+            + self
+                .ops
+                .iter()
+                .map(|op| match op {
+                    Opcode::CallN { args, .. }
+                    | Opcode::CallMethod { args, .. }
+                    | Opcode::CallThis { args, .. }
+                    | Opcode::CallClosure { args, .. }
+                    | Opcode::MakeEnum { args, .. }
+                    | Opcode::IndirectCall { args, .. } => vec_bytes(args),
+                    Opcode::Switch { offsets, .. } => vec_bytes(offsets),
+                    _ => 0,
+                })
+                .sum::<usize>()
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.ops.shrink_to_fit();
+        self.reg_types.shrink_to_fit();
+        self.new_ints.shrink_to_fit();
+        self.block_pcs.shrink_to_fit();
+        self.instr_pcs.shrink_to_fit();
+        self.term_pcs.shrink_to_fit();
+        for pcs in &mut self.instr_pcs {
+            pcs.shrink_to_fit();
+        }
+        for op in &mut self.ops {
+            match op {
+                Opcode::CallN { args, .. }
+                | Opcode::CallMethod { args, .. }
+                | Opcode::CallThis { args, .. }
+                | Opcode::CallClosure { args, .. }
+                | Opcode::MakeEnum { args, .. }
+                | Opcode::IndirectCall { args, .. } => args.shrink_to_fit(),
+                Opcode::Switch { offsets, .. } => offsets.shrink_to_fit(),
+                _ => {}
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Entry {
     /// A real block.

@@ -69,10 +69,11 @@
 //! the reload path calls [`Cache::invalidate`] — bodies prepared from the old
 //! bytecode describe functions the new bytecode may not even have at the same
 //! findex. A frame already inside a prepared body keeps it: prepared bodies
-//! are leaked, so the frame finishes on the body it started with and the next
-//! call resolves the new one.
+//! are reference counted, so the frame finishes on the body it started with
+//! and the next call resolves the new one. Retired bodies are then freed.
 
-use std::sync::OnceLock;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
 
 use air::v2::{Function, Instr};
 use ash_core::air_pipeline::AshModule;
@@ -116,43 +117,64 @@ fn logging() -> bool {
 /// An IR body plus the type view the shared `op_*` semantics read operand
 /// types out of.
 pub struct Prepared {
-    pub ir: &'static Function,
-    /// `HLFunction` with `regs` = per-value types (values then cells) and no
-    /// `ops`. See the module docs: a type view, not a serialized body.
-    pub shim: &'static HLFunction,
-    /// Where the cell block starts in the frame, i.e. `ir.values.len()`.
+    /// The canonical body, also used by compiler tiers and OSR. No IR clone.
+    optimized: Arc<ash_core::air_pipeline::Optimized>,
+    /// Indices of executable instructions in each canonical block. Position
+    /// markers stay in the shared IR for codegen, but never enter dispatch.
+    pub instructions: Vec<Box<[u32]>>,
+    pub shim: HLFunction,
     pub cell_base: u32,
-    /// Bytecode pc each AIR block starts at, so a hot back edge can name its
-    /// header the way the tiering and OSR machinery do -- both key on a pc,
-    /// and `compile_osr_entry` finds the block by searching this same table.
-    pub block_pcs: &'static [usize],
-    /// Bytecode pc of each instruction, indexed by block then position, so a
-    /// frame can name the instruction that raised rather than its block.
-    pub instr_pcs: &'static [Vec<usize>],
-    /// Bytecode pc of each block's terminator, so a block that ends in a
-    /// throw can name the line it throws from.
-    pub term_pcs: &'static [usize],
-    /// Which values are live where, for building an OSR entry's live state.
-    pub liveness: &'static air::v2::liveness::Liveness,
-    /// Type of each serialized register, for encoding that state.
-    pub osr_reg_types: &'static [TypeRef],
-    /// The configuration this body was lowered under.
-    ///
-    /// Carried rather than recomputed because the point of checking it is to
-    /// catch a walker that has drifted off the configuration the OSR entries
-    /// were built from -- asking `interpreter_config_for` again at the
-    /// transfer would just re-derive the answer both sides were supposed to
-    /// have used, which is the assumption under test.
     pub cfg: ash_core::air_pipeline::AirConfigKey,
-    /// The source position of each serialized pc, from the body's markers,
-    /// with the inline site it sits in. Every entry is `NONE` when markers
-    /// were not emitted.
-    pub positions: &'static [air::v2::positions::PcPosition],
-    /// The inline sites `positions` point into.
-    pub inline_sites: &'static [air::v2::InlineSite],
+    pub positions: Box<[air::v2::positions::PcPosition]>,
+    osr: OnceLock<OsrState>,
+}
+
+struct OsrState {
+    liveness: air::v2::liveness::Liveness,
+    reg_types: Box<[TypeRef]>,
 }
 
 impl Prepared {
+    pub fn ir(&self) -> &Function {
+        &self.optimized.ir
+    }
+
+    pub fn block_pcs(&self) -> &[usize] {
+        &self.optimized.ser.block_pcs
+    }
+
+    pub fn instr_pcs(&self) -> &[Vec<usize>] {
+        &self.optimized.ser.instr_pcs
+    }
+
+    pub fn term_pcs(&self) -> &[usize] {
+        &self.optimized.ser.term_pcs
+    }
+
+    fn osr(&self) -> &OsrState {
+        self.osr.get_or_init(|| OsrState {
+            liveness: air::v2::liveness::Liveness::analyze(
+                self.ir(),
+                &air::v2::CfgInfo::build(self.ir()),
+            ),
+            reg_types: self
+                .optimized
+                .ser
+                .reg_types
+                .iter()
+                .map(|t| TypeRef(t.0 as usize))
+                .collect(),
+        })
+    }
+
+    pub fn liveness(&self) -> &air::v2::liveness::Liveness {
+        &self.osr().liveness
+    }
+
+    pub fn osr_reg_types(&self) -> &[TypeRef] {
+        &self.osr().reg_types
+    }
+
     /// Visit the frames the instruction at serialized `pc` stands for,
     /// innermost first as `(findex, file, line)`: the position itself, then
     /// the call that inlined it into each enclosing function. `false` when
@@ -165,7 +187,12 @@ impl Prepared {
         if pos.file < 0 && pos.site.is_none() {
             return false;
         }
-        air::v2::positions::for_each_frame(pos, self.inline_sites, self.shim.findex as u32, visit);
+        air::v2::positions::for_each_frame(
+            pos,
+            &self.ir().inline_sites,
+            self.shim.findex as u32,
+            visit,
+        );
         true
     }
 }
@@ -173,12 +200,10 @@ impl Prepared {
 /// What a function executes, decided once on its first call.
 enum Body {
     Untried,
-    /// Leaked rather than stored inline: a frame holds its `Prepared` for the
-    /// whole call, and a nested call preparing a function it has not seen
-    /// before can grow `bodies` and move everything in it. Owning the
-    /// `Prepared` by reference means that growth cannot move what an outer
-    /// frame is executing.
-    Ready(&'static Prepared),
+    /// A running call owns a reference, so cache growth, invalidation and
+    /// reload cannot move or destroy its body. Retired bodies are freed once
+    /// their last active call returns.
+    Ready(Rc<Prepared>),
     /// The pipeline refused it, or its IR uses something not implemented here.
     Raw,
 }
@@ -186,7 +211,7 @@ enum Body {
 /// Per-function prepared IR, plus the module view it was lowered against.
 #[derive(Default)]
 pub struct Cache {
-    module: Option<(*const DecodedBytecode, &'static AshModule<'static>)>,
+    module: Option<(*const DecodedBytecode, Box<AshModule<'static>>)>,
     /// Indexed by index into `bytecode.functions`, like `func_idx` elsewhere.
     bodies: Vec<Body>,
     prepared: usize,
@@ -215,17 +240,14 @@ impl Cache {
         }
 
         let key = bc as *const DecodedBytecode;
-        if self.module.map(|(p, _)| p) != Some(key) {
-            // Built once and leaked with its bytecode borrow widened, for the
-            // same reasons `crate::air::Cache::prepare` documents: `AshModule`
-            // indexes every function and native, and `HLInterpreter` has no
-            // lifetime to hang the borrow on. The pointer key is what keeps
-            // that honest — a hot reload installs a different bytecode, and the
-            // stale module leaves the cache here before anything reads it.
-            let leaked: &AshModule<'_> = Box::leak(Box::new(AshModule::new(bc)));
-            let m: &'static AshModule<'static> = unsafe { std::mem::transmute(leaked) };
+        if self.module.as_ref().map(|(p, _)| *p) != Some(key) {
+            // The bytecode borrow is widened because HLInterpreter has no
+            // lifetime parameter. The pointer key invalidates this view before
+            // a different bytecode can use it; unlike the old leaked module,
+            // the cache owns it and releases its lowered callee cache.
+            let m: AshModule<'static> = unsafe { std::mem::transmute(AshModule::new(bc)) };
             self.bodies.clear();
-            self.module = Some((key, m));
+            self.module = Some((key, Box::new(m)));
         }
 
         if self.bodies.len() < bc.functions.len() {
@@ -236,7 +258,12 @@ impl Cache {
             return;
         }
 
-        let m = self.module.expect("module cached just above").1;
+        let m = self
+            .module
+            .as_ref()
+            .expect("module cached just above")
+            .1
+            .as_ref();
         let raw = &bc.functions[func_idx];
         // The configuration every OSR site lowers this function under, which
         // is the whole point: the transfer is by position through
@@ -257,10 +284,8 @@ impl Cache {
             &bare
         };
         self.bodies[func_idx] =
-            match ash_core::air_pipeline::optimized_with_config(view, raw, air_cfg)
-                .map(|o| (o.ir.clone(), o.ser.clone()))
-            {
-                Ok((mut ir, ser_view)) => match unsupported(&ir) {
+            match ash_core::air_pipeline::optimized_with_config(view, raw, air_cfg) {
+                Ok(optimized) => match unsupported(&optimized.ir) {
                     Some(what) => {
                         if logging() {
                             eprintln!(
@@ -273,65 +298,38 @@ impl Cache {
                         Body::Raw
                     }
                     None => {
+                        let ir = &optimized.ir;
+                        let ser_view = &optimized.ser;
                         let cell_base = ir.values.len() as u32;
-                        // Serialized once, for the block -> pc table alone: the
-                        // tiering and OSR machinery key a loop header on a
-                        // bytecode pc, and this is where that mapping is computed.
-                        // The body itself is still executed from the IR; only the
-                        // table is kept.
-                        let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
-                        let mut instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
-                        let term_pcs: Vec<usize> = ser_view.term_pcs.clone();
-                        let cfg = air::v2::CfgInfo::build(&ir);
-                        // Read off the markers before they go: the position
-                        // table is keyed by serialized pc, which they do not
-                        // occupy.
-                        let positions =
-                            air::v2::positions::positions_by_pc_with(&ir, &ser_view, &cfg);
-                        let inline_sites: Vec<air::v2::InlineSite> = ir.inline_sites.clone();
-                        // This copy of the body is the walker's alone. A
-                        // marker names a line and executes nothing, so it
-                        // leaves, together with its pc entry, and the loop
-                        // below never dispatches one. Values, blocks and the
-                        // serialized pcs are untouched, which is what the OSR
-                        // transfer keys on.
-                        for (b, blk) in ir.blocks.iter_mut().enumerate() {
-                            if let Some(pcs) = instr_pcs.get_mut(b) {
-                                let mut keep = blk
-                                    .instrs
+                        let positions = air::v2::positions::positions_by_pc(ir, ser_view);
+                        let instructions = ir
+                            .blocks
+                            .iter()
+                            .map(|blk| {
+                                blk.instrs
                                     .iter()
-                                    .map(|i| !matches!(i, air::v2::Instr::Pos { .. }));
-                                pcs.retain(|_| keep.next().unwrap_or(true));
-                            }
-                            blk.instrs
-                                .retain(|i| !matches!(i, air::v2::Instr::Pos { .. }));
-                        }
-                        let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
-                        let osr_reg_types: Vec<TypeRef> = ser_view
-                            .reg_types
-                            .iter()
-                            .map(|t| TypeRef(t.0 as usize))
+                                    .enumerate()
+                                    .filter(|(_, i)| !matches!(i, Instr::Pos { .. }))
+                                    .map(|(i, _)| u32::try_from(i).expect("AIR instruction index"))
+                                    .collect::<Box<[_]>>()
+                            })
                             .collect();
-                        let mut shim = raw.clone();
-                        // air numbers types with u32, ash with usize; same indices.
-                        shim.regs = ir
-                            .values
-                            .iter()
-                            .map(|v| TypeRef(v.ty.0 as usize))
-                            .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
-                            .collect();
-                        shim.ops = Vec::new();
-                        // Indexed by opcode, and the pcs this interpreter
-                        // publishes are indexed into the SERIALIZED opcodes -- so
-                        // the table has to be the one built for those. Leaving it
-                        // empty sent a trace to `air.body()`, which under
-                        // ASH_AIR=v2 is the raw function, whose numbering the
-                        // optimizer has already changed: every reported line was
-                        // off by the drift between them. The markers give the
-                        // exact table; without them it is realigned from the
-                        // raw one.
-                        shim.debug =
-                            crate::air::optimized_debug_from(raw, &ser_view.ops, &positions);
+                        // Construct a type view directly: cloning raw would
+                        // copy its opcodes/debug table only to discard them.
+                        let shim = HLFunction {
+                            type_: raw.type_.clone(),
+                            findex: raw.findex,
+                            ref_: raw.ref_,
+                            field_name: raw.field_name.clone(),
+                            regs: ir
+                                .values
+                                .iter()
+                                .map(|v| TypeRef(v.ty.0 as usize))
+                                .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
+                                .collect(),
+                            debug: crate::air::optimized_debug_from(raw, &ser_view.ops, &positions),
+                            ..HLFunction::default()
+                        };
                         if logging() {
                             eprintln!(
                                 "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",
@@ -344,19 +342,15 @@ impl Cache {
                             );
                         }
                         self.prepared += 1;
-                        Body::Ready(Box::leak(Box::new(Prepared {
-                            ir: Box::leak(Box::new(ir)),
-                            shim: Box::leak(Box::new(shim)),
+                        Body::Ready(Rc::new(Prepared {
+                            optimized,
+                            instructions,
+                            shim,
                             cell_base,
-                            block_pcs: Box::leak(block_pcs.into_boxed_slice()),
-                            instr_pcs: Box::leak(instr_pcs.into_boxed_slice()),
-                            term_pcs: Box::leak(term_pcs.into_boxed_slice()),
-                            liveness: Box::leak(Box::new(liveness)),
-                            osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
                             cfg: air_cfg,
-                            positions: Box::leak(positions.into_boxed_slice()),
-                            inline_sites: Box::leak(inline_sites.into_boxed_slice()),
-                        })))
+                            positions: positions.into_boxed_slice(),
+                            osr: OnceLock::new(),
+                        }))
                     }
                 },
                 Err(e) => {
@@ -376,9 +370,9 @@ impl Cache {
     /// the caller holds this across `&mut self` dispatch, including the nested
     /// calls that function makes.
     #[inline]
-    pub fn body(&self, func_idx: usize) -> Option<&'static Prepared> {
+    pub fn body(&self, func_idx: usize) -> Option<Rc<Prepared>> {
         match self.bodies.get(func_idx) {
-            Some(Body::Ready(p)) => Some(p),
+            Some(Body::Ready(p)) => Some(Rc::clone(p)),
             _ => None,
         }
     }
@@ -394,8 +388,7 @@ impl Cache {
     /// For the demand policy: a function that has just shown a hot loop needs
     /// the shared configuration from now on, and the body sitting here was
     /// prepared under the cheap one. Frames already running are unaffected --
-    /// each holds its own leaked `Prepared` for the length of its call, which
-    /// is exactly why these are leaked rather than owned here. That is also
+    /// each owns its `Prepared` for the length of its call. That is also
     /// the policy's cost: the frame that reported the loop keeps walking the
     /// body it started with.
     pub fn forget(&mut self, func_idx: usize) {
@@ -494,5 +487,35 @@ fn unsupported_instr(i: &Instr) -> Option<&'static str> {
         | Instr::Prefetch { .. }
         | Instr::Pos { .. }
         | Instr::Asm { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidate_releases_prepared_body_after_its_active_call_returns() {
+        let ir = Function::new(Vec::new());
+        let ser = air::v2::serialize(&ir).unwrap();
+        let canonical = Arc::new(ash_core::air_pipeline::Optimized { ir, ser });
+        let weak = Arc::downgrade(&canonical);
+        let mut cache = Cache::default();
+        cache.bodies.push(Body::Ready(Rc::new(Prepared {
+            optimized: canonical,
+            instructions: Vec::new(),
+            shim: HLFunction::default(),
+            cell_base: 0,
+            cfg: ash_core::air_pipeline::AirConfigKey::interpreter(),
+            positions: Box::new([]),
+            osr: OnceLock::new(),
+        })));
+        let active = cache.body(0).unwrap();
+        assert!(active.osr.get().is_none(), "OSR data must not be eager");
+        cache.invalidate();
+        assert!(cache.body(0).is_none());
+        assert!(weak.upgrade().is_some(), "active frame still owns its body");
+        drop(active);
+        assert!(weak.upgrade().is_none(), "retired body must be freed");
     }
 }

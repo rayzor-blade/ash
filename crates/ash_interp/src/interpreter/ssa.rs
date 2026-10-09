@@ -73,11 +73,11 @@ impl HLInterpreter {
         bc: &DecodedBytecode,
         native_resolver: &NativeFunctionResolver,
         func_idx: usize,
-        prep: &'static crate::ssa::Prepared,
+        prep: &crate::ssa::Prepared,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
-        let ir = prep.ir;
-        let func = prep.shim;
+        let ir = prep.ir();
+        let func = &prep.shim;
         let mut block = 0usize;
         // Which edge control arrived on. Phi sources are keyed by it, and the
         // exceptional edge into a handler sets it too, so a handler that does
@@ -105,7 +105,7 @@ impl HLInterpreter {
                 // Named by the header's bytecode pc, which is what the
                 // tiering map and `compile_osr_entry` both key on -- the
                 // block index would look up a different block, or none.
-                if hot && let Some(&header_pc) = prep.block_pcs.get(block) {
+                if hot && let Some(&header_pc) = prep.block_pcs().get(block) {
                     self.note_hot_loop(bc, func_idx, header_pc);
                     // Promotion swaps a pointer, which only the next
                     // call observes; a loop entered once would keep
@@ -124,7 +124,7 @@ impl HLInterpreter {
                 .blocks
                 .get(block)
                 .ok_or_else(|| anyhow!("SSA block {} out of range in {}", block, func.name()))?;
-            let work = (blk.instrs.len() + 1).min(u32::MAX as usize) as u32;
+            let work = (prep.instructions[block].len() + 1).min(u32::MAX as usize) as u32;
             self.fiber_safe_point(work);
             // Polled per block rather than per call: a Haxe loop whose body
             // AIR inlined makes no calls at all, so a function-entry poll
@@ -137,7 +137,7 @@ impl HLInterpreter {
             // this reads it as a pc -- a trace resolves it against the debug
             // table, which numbered lines by opcode. Publishing the index put
             // a frame on whatever line happened to share its number.
-            self.stack.last_mut().unwrap().pc = prep.block_pcs.get(block).copied().unwrap_or(block);
+            self.stack.last_mut().unwrap().pc = prep.block_pcs().get(block).copied().unwrap_or(block);
 
             // A phi group is a parallel copy. Read every source before writing
             // any destination, or `x, y = y, x` collapses into `x, y = y, y`.
@@ -170,11 +170,12 @@ impl HLInterpreter {
                 }
             }
 
-            let pcs = prep.instr_pcs.get(block);
-            for (i, ins) in blk.instrs.iter().enumerate() {
-                // Position markers were stripped from this copy of the body
-                // when it was prepared (`ssa::Cache::prepare`); none reaches
-                // the dispatch below.
+            let pcs = prep.instr_pcs().get(block);
+            for &index in &prep.instructions[block] {
+                let i = index as usize;
+                let ins = &blk.instrs[i];
+                // Walk only executable instruction indices; the canonical
+                // IR keeps its source markers for the compiler tiers.
                 // The raising instruction's own pc, not its block's: a trace
                 // resolves this against the debug table, and every
                 // instruction in a block shares the block's line otherwise.
@@ -248,7 +249,7 @@ impl HLInterpreter {
                     // The terminator's own pc: the instruction loop above sets
                     // `frame.pc` per instruction, and a block whose whole body
                     // is a throw runs none of them.
-                    if let Some(&pc) = prep.term_pcs.get(block) {
+                    if let Some(&pc) = prep.term_pcs().get(block) {
                         self.stack.last_mut().unwrap().pc = pc;
                     }
                     self.capture_exception_stack(bc);
@@ -363,12 +364,12 @@ impl HLInterpreter {
         bc: &DecodedBytecode,
         native_resolver: &NativeFunctionResolver,
         func_idx: usize,
-        prep: &'static crate::ssa::Prepared,
+        prep: &crate::ssa::Prepared,
         args: &[NanBoxedValue],
         ins: &air::v2::Instr,
     ) -> Result<Option<usize>> {
         use air::v2::Instr as I;
-        let func = prep.shim;
+        let func = &prep.shim;
         let cell_base = prep.cell_base;
         if check_frames() {
             let top = self.stack.last().map(|f| f.function_index);
@@ -451,7 +452,7 @@ impl HLInterpreter {
                 index,
                 stride,
             } => {
-                let lanes = prep.ir.values[dst.0 as usize].lanes as usize;
+                let lanes = prep.ir().values[dst.0 as usize].lanes as usize;
                 let idx0 = get!(index).as_i32();
                 let mut out = Vec::with_capacity(lanes);
                 for k in 0..lanes {
@@ -477,7 +478,7 @@ impl HLInterpreter {
                 }
             }
             I::VecSplat { dst, src } => {
-                let n = prep.ir.values[dst.0 as usize].lanes as usize;
+                let n = prep.ir().values[dst.0 as usize].lanes as usize;
                 let v = get!(src);
                 self.stack
                     .last_mut()
@@ -538,7 +539,7 @@ impl HLInterpreter {
             // is what this did the first time a widened loop reached here.
             I::Int { dst, idx } => {
                 let v = prep
-                    .ir
+                    .ir()
                     .int_at(*idx, |i| bc.ints.get(i).copied())
                     .ok_or_else(|| anyhow!("int constant {idx} is not in the pool"))?;
                 // An I64 destination takes the signed value, as HashLink's

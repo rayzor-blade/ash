@@ -58,6 +58,7 @@ being taken:
 | `ASH_PROFILE_OUT` | write the profile to a file instead of stderr |
 | `ASH_INLINE_ALLOC` | `0` makes compiled code call the runtime for every allocation instead of bumping the thread's region inline. Safe, slower |
 | `ASH_SROA_WHY` | `1` reports why each allocation the optimiser looked at was kept in memory, including ash-simd slots |
+| `ASH_AIR_CACHE_STATS` | report live canonical AIR storage, bounded strong-cache residency, hits, misses and evictions at exit (conservative owned-storage bytes, not RSS) |
 | `ASH_AIR_LEVEL` | `0..3`: how hard the AIR optimiser works |
 | `ASH_AIR_NO_WIDEN` | `1` disables loop widening |
 | `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |
@@ -103,6 +104,24 @@ mutator to run them; callbacks currently executing are outside that queue.
 These counters describe GC-owned handles, not Rust compiler caches or GPU
 textures. The external allocation total includes a 4 KiB pressure charge per
 finalizable handle, so it is not a census of the native bytes those handles own.
+
+### AIR storage
+
+AIR caches belong to Rust, outside the GC. Optimized bodies share an 8 MiB
+strong reuse budget; lowered callees share a 2 MiB budget per module across
+its views. An oversized body is served without retaining a strong cache
+reference. Eviction releases unused bodies, while weak entries find the same
+canonical body if an interpreter or compiler still owns it. The SSA walker
+shares that body and its pc maps, skips source markers through a compact
+instruction index, and builds OSR liveness only when a transfer needs it.
+Invalidation releases retired walker bodies after their last active call.
+
+`ASH_AIR_CACHE_STATS=1` separates live body storage from cache residency. Live
+storage can exceed the reuse budget because executable interpreter bodies
+must remain available while the program uses them. Counts include vector
+capacity and nested operands with conservative allocation overhead; they
+exclude executable code, GC pages, GPU resources and allocator fragmentation.
+Use an allocation profiler or physical-footprint measurement for those.
 
 ## Profiling
 

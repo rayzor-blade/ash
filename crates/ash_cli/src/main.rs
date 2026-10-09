@@ -1388,7 +1388,10 @@ fn run() -> Result<()> {
                 let _p = ash_core::profile::scope("run");
                 interpreter.execute_entrypoint(&bytecode, &native_resolver)?
             };
-            for line in ash_core::air_pipeline::pass_time_report() {
+            for line in ash_core::air_pipeline::pass_time_report()
+                .into_iter()
+                .chain(ash_core::air_pipeline::cache_report())
+            {
                 eprintln!("{line}");
             }
             if ash_core::jit_map::dump_wanted() {
@@ -1487,7 +1490,10 @@ fn run() -> Result<()> {
             // whatever the mode, because the interpreter prepares on the
             // mutator and a pinned-interpreter run is exactly where that cost
             // is easiest to see.
-            for line in ash_core::air_pipeline::pass_time_report() {
+            for line in ash_core::air_pipeline::pass_time_report()
+                .into_iter()
+                .chain(ash_core::air_pipeline::cache_report())
+            {
                 eprintln!("{line}");
             }
             if ash_core::jit_map::dump_wanted() {
@@ -1729,7 +1735,10 @@ fn emit_optimized(
     }
     // Every function went through the pipeline, so this is where its cost
     // over a whole program shows.
-    for line in ash_core::air_pipeline::pass_time_report() {
+    for line in ash_core::air_pipeline::pass_time_report()
+        .into_iter()
+        .chain(ash_core::air_pipeline::cache_report())
+    {
         eprintln!("{line}");
     }
     Ok(())

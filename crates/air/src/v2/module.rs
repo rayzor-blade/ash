@@ -82,6 +82,32 @@ pub struct NativeTable {
 }
 
 impl NativeTable {
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        // BTreeMap nodes hold up to eleven keys; charging a full node per
+        // entry overestimates small maps rather than under-budgeting them.
+        self.imports.capacity() * std::mem::size_of::<NativeImport>()
+            + self.by_findex.len() * 256
+            + self
+                .imports
+                .iter()
+                .map(|i| {
+                    i.lib.capacity()
+                        + i.name.capacity()
+                        + i.args.capacity() * std::mem::size_of::<TypeRef>()
+                        + 48
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.imports.shrink_to_fit();
+        for i in &mut self.imports {
+            i.lib.shrink_to_fit();
+            i.name.shrink_to_fit();
+            i.args.shrink_to_fit();
+        }
+    }
+
     pub fn new() -> Self {
         NativeTable::default()
     }

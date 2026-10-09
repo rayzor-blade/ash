@@ -72,11 +72,12 @@ pub struct AshModule<'b> {
     /// The inliner asks for a body once per candidate site, and handing it
     /// `CalleeBody::Bytecode` made that a clone of the opcode array plus a
     /// fresh lowering every time. Lowering a given callee is the same work
-    /// whoever asks, so it is done once: measured on deltablue, the inliner
+    /// whoever asks, so recent bodies share a 2 MiB reuse cache across views.
+    /// Measured on deltablue, the inliner
     /// was 11.2ms of the 15.2ms this pipeline spent preparing bodies.
-    lowered: Mutex<HashMap<usize, Function>>,
+    lowered: Arc<Mutex<crate::air_cache::BodyCache<usize, Function>>>,
     /// [`Self::is_frameless`] answers, by findex.
-    frameless: Mutex<HashMap<usize, bool>>,
+    frameless: Arc<Mutex<HashMap<usize, bool>>>,
 }
 
 impl<'b> AshModule<'b> {
@@ -98,8 +99,8 @@ impl<'b> AshModule<'b> {
                     .collect(),
             ),
             callees: CalleeView::All,
-            lowered: Mutex::new(HashMap::new()),
-            frameless: Mutex::new(HashMap::new()),
+            lowered: Arc::new(Mutex::new(crate::air_cache::BodyCache::new(2 * 1024 * 1024))),
+            frameless: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -130,8 +131,8 @@ impl<'b> AshModule<'b> {
             native_at: Arc::clone(&self.native_at),
             function_at: Arc::clone(&self.function_at),
             callees,
-            lowered: Mutex::new(HashMap::new()),
-            frameless: Mutex::new(HashMap::new()),
+            lowered: Arc::clone(&self.lowered),
+            frameless: Arc::clone(&self.frameless),
         }
     }
 
@@ -346,38 +347,40 @@ impl<'b> ModuleInfo for AshModule<'b> {
             return None;
         }
         let body = self.lowered_body(findex)?;
-        self.offer(findex, body)
+        self.offer(findex, (*body).clone())
     }
 }
 
 impl AshModule<'_> {
-    /// The callee's own body, lowered once and cached.
+    /// The callee's own body, shared through a bounded reuse cache.
     ///
     /// Lowered against a module that offers no callees: this is the callee's
     /// own body, and letting it inline its own callees here would expand the
     /// same work at every site that asks for it. With its positions, so the
     /// markers the inliner copies still say which line of the callee a frame
     /// is stopped on.
-    fn lowered_body(&self, findex: usize) -> Option<Function> {
+    fn lowered_body(&self, findex: usize) -> Option<Arc<Function>> {
         let cached = self
             .lowered
             .lock()
             .expect("callee cache poisoned")
-            .get(&findex)
-            .cloned();
+            .get(&findex);
         if cached.is_some() {
             return cached;
         }
         let f = self.function(findex)?;
         let bare = self.without_callees_view();
-        let body =
+        let mut body =
             air::v2::lower::lower_with_positions(&f.ops, &reg_types_of(f), &bare, positions_of(f))
                 .ok()?;
-        self.lowered
-            .lock()
-            .expect("callee cache poisoned")
-            .insert(findex, body.clone());
-        Some(body)
+        body.shrink_to_fit();
+        let bytes = body.allocated_bytes();
+        Some(
+            self.lowered
+                .lock()
+                .expect("callee cache poisoned")
+                .insert(findex, Arc::new(body), bytes),
+        )
     }
 
     /// `body` as this view hands it to the inliner. A frameless callee loses
@@ -636,7 +639,7 @@ pub fn fma() -> bool {
     FMA.load(std::sync::atomic::Ordering::Acquire)
 }
 
-/// One function's AIR, lowered and optimized exactly once.
+/// One canonical optimized body shared by its live consumers.
 ///
 /// Bytecode lowers to AIR once and every consumer reads that. Before this,
 /// five callers each ran the pipeline from scratch -- the interpreter, the SSA
@@ -646,8 +649,8 @@ pub fn fma() -> bool {
 /// That is why an opcode index meant different things in different tiers,
 /// which is a property on-stack replacement needs to hold.
 ///
-/// `ser` is the flat form, kept only for the consumers that still read
-/// opcodes. It is a *product* of the IR, not a stage the IR passes through on
+/// `ser` includes the pc/register mapping OSR needs and the flat form for
+/// opcode consumers. It is a *product* of the IR, not a stage the IR passes through on
 /// its way to a backend: a backend composes CLIF or LLVM IR from `ir`.
 pub struct Optimized {
     pub ir: Function,
@@ -920,15 +923,19 @@ pub fn hot_reload() -> bool {
     HOT_RELOAD.load(std::sync::atomic::Ordering::Acquire)
 }
 
-type CacheKey = (i32, AirConfigKey);
+type CacheKey = (usize, i32, AirConfigKey);
 
-static OPTIMIZED: OnceLock<Mutex<HashMap<CacheKey, Arc<Optimized>>>> = OnceLock::new();
+static OPTIMIZED: OnceLock<Mutex<crate::air_cache::BodyCache<CacheKey, Optimized>>> = OnceLock::new();
 
-fn optimized_cache() -> &'static Mutex<HashMap<CacheKey, Arc<Optimized>>> {
-    OPTIMIZED.get_or_init(|| Mutex::new(HashMap::new()))
+fn optimized_cache() -> &'static Mutex<crate::air_cache::BodyCache<CacheKey, Optimized>> {
+    OPTIMIZED.get_or_init(|| Mutex::new(crate::air_cache::BodyCache::new(8 * 1024 * 1024)))
 }
 
 /// The optimized AIR for `f`, computing it on first ask.
+///
+/// Recent bodies have an 8 MiB strong reuse budget. Weak index entries keep
+/// active interpreter/compiler bodies canonical after eviction; an unused
+/// evicted body is released. Bytecode identity is part of the key.
 ///
 /// Shared across threads because the tiers are: the interpreter asks on the
 /// main thread while a broker compiles on another. The pipeline runs outside
@@ -945,13 +952,13 @@ pub fn optimized_with_config(
     f: &HLFunction,
     cfg: AirConfigKey,
 ) -> Result<Arc<Optimized>, PipelineError> {
-    let key = (f.findex, cfg);
+    let key = (m.bc as *const DecodedBytecode as usize, f.findex, cfg);
     if let Some(hit) = optimized_cache()
         .lock()
         .expect("air cache poisoned")
         .get(&key)
     {
-        return Ok(Arc::clone(hit));
+        return Ok(hit);
     }
     let mut opts = PassOptions::default();
     opts.fma = cfg.fma;
@@ -965,12 +972,36 @@ pub fn optimized_with_config(
     // The pipeline runs outside the lock: it is the expensive part, and holding
     // a process-wide lock across it would serialize the brokers against the
     // interpreter.
-    let (ser, ir, _report) = optimize_full(m, f, cfg.level, &opts)?;
+    let (mut ser, mut ir, _report) = optimize_full(m, f, cfg.level, &opts)?;
+    ir.shrink_to_fit();
+    ser.shrink_to_fit();
+    let bytes = ir.allocated_bytes() + ser.allocated_bytes();
     let entry = Arc::new(Optimized { ir, ser });
     let mut cache = optimized_cache().lock().expect("air cache poisoned");
-    Ok(Arc::clone(
-        cache.entry(key).or_insert_with(|| Arc::clone(&entry)),
-    ))
+    Ok(cache.insert(key, entry, bytes))
+}
+
+/// Opt-in AIR storage census. Reports actual live canonical bodies separately
+/// from strong cache residency; externally owned bodies survive eviction.
+pub fn cache_report() -> Vec<String> {
+    if std::env::var_os("ASH_AIR_CACHE_STATS").is_none() {
+        return Vec::new();
+    }
+    let cache = optimized_cache().lock().expect("air cache poisoned");
+    let (bodies, live, resident) = cache.storage();
+    let (mut ir_bytes, mut serialized_bytes, mut instructions, mut markers) = (0, 0, 0, 0);
+    cache.for_each_live(|_, body| {
+        ir_bytes += body.ir.allocated_bytes();
+        serialized_bytes += body.ser.allocated_bytes();
+        for block in &body.ir.blocks {
+            instructions += block.instrs.len();
+            markers += block.instrs.iter().filter(|i| matches!(i, air::v2::Instr::Pos { .. })).count();
+        }
+    });
+    vec![format!(
+        "[air-cache] bodies={bodies} live_bytes={live} resident_bytes={resident} budget_bytes={} hits={} misses={} evictions={} ir_bytes={ir_bytes} serialized_bytes={serialized_bytes} instructions={instructions} markers={markers}",
+        8 * 1024 * 1024, cache.hits, cache.misses, cache.evictions,
+    )]
 }
 
 /// Whether to time each pass, from `ASH_AIR_TIME_PASSES`.

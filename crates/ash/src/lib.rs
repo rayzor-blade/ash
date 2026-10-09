@@ -4,6 +4,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+mod air_cache;
 pub mod air_pipeline;
 pub mod bytecode;
 pub mod bytecode_encode;

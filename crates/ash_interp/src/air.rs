@@ -220,6 +220,8 @@ pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
 /// position and the inline site it sits in, so a frame stopped in inlined
 /// code can name the callee's frames as well as its own.
 pub(crate) struct InlineInfo {
+    // Keep positional identity stable for OSR after strong-cache eviction.
+    _canonical: std::sync::Arc<ash_core::air_pipeline::Optimized>,
     pub positions: Box<[air::v2::positions::PcPosition]>,
     pub sites: Box<[air::v2::InlineSite]>,
 }
@@ -399,6 +401,7 @@ impl Cache {
                 let info = InlineInfo {
                     positions: positions.into_boxed_slice(),
                     sites: o.ir.inline_sites.clone().into_boxed_slice(),
+                    _canonical: std::sync::Arc::clone(&o),
                 };
                 (o.ser.clone(), debug, info)
             })

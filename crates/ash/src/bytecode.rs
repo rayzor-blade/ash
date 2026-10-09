@@ -4,8 +4,9 @@ use crate::opcodes::{
     RefString, RefType, Reg,
 };
 use crate::types::{
-    HLConstant, HLEnumConstruct, HLFunction, HLNative, HLObjField, HLObjProto, HLType, HLTypeEnum,
-    HLTypeFun, HLTypeObj, HLTypeVirtual, OP_NARGS, TypeRef, ValueTypeKind,
+    BodyShape, EncodedBody, FunctionBody, HLConstant, HLEnumConstruct, HLFunction, HLNative, HLObjField,
+    HLObjProto, HLType, HLTypeEnum, HLTypeFun, HLTypeObj, HLTypeVirtual, OP_NARGS, TypeRef,
+    ValueTypeKind,
 };
 use ash_macro::load_symbol;
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -61,21 +62,20 @@ impl BytecodeDecoder {
 
     /// Decode bytecode held in memory: what a host loads from a bundle.
     pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedBytecode, io::Error> {
-        Self::decode_reader(bytes, std::mem::size_of::<*const u8>())
+        Self::decode_slice(bytes, std::mem::size_of::<*const u8>())
     }
 
     fn decode_with_pointer_size(
         path: &Path,
         pointer_size: usize,
     ) -> Result<DecodedBytecode, io::Error> {
-        let file = std::fs::File::open(path)?;
-        Self::decode_reader(io::BufReader::with_capacity(512 * 1024, file), pointer_size)
+        Self::decode_slice(&std::fs::read(path)?, pointer_size)
     }
 
-    fn decode_reader(
-        mut reader: impl BufRead,
-        pointer_size: usize,
-    ) -> Result<DecodedBytecode, io::Error> {
+    /// The whole program is in memory so that a function body can be left
+    /// encoded, as a range of these bytes; see [`FunctionBody`].
+    fn decode_slice(all: &[u8], pointer_size: usize) -> Result<DecodedBytecode, io::Error> {
+        let mut reader: &[u8] = all;
         let mut decoder = BytecodeDecoder::default();
 
         // Search for the magic header
@@ -125,7 +125,7 @@ impl BytecodeDecoder {
         }
 
         // Decode the rest of the file
-        match decoder._decode(&mut reader, pointer_size) {
+        match decoder._decode(&mut reader, all, pointer_size) {
             Ok(decoded) => Ok(decoded),
             Err(e) => Err(std::io::Error::new(
                 e.kind(),
@@ -215,7 +215,8 @@ impl BytecodeDecoder {
 
     fn _decode(
         &mut self,
-        r: &mut impl BufRead,
+        r: &mut &[u8],
+        all: &[u8],
         pointer_size: usize,
     ) -> Result<DecodedBytecode, std::io::Error> {
         self.decoded.ints = self.read_ints(r)?;
@@ -241,11 +242,9 @@ impl BytecodeDecoder {
         // println!("Globals {:?}", self.decoded.globals.len());
         self.decoded.natives = self.read_natives(r)?;
         // println!("Natives {:?}", self.decoded.natives.len());
-        self.decoded.functions = self.read_functions(r)?;
-        let mut facts = BodyFacts::default();
-        for f in &self.decoded.functions {
-            facts.note(f);
-        }
+        let (functions, mut facts) = self.read_functions(r, all)?;
+        facts.finish(&self.decoded.natives);
+        self.decoded.functions = functions;
         let _ = self.decoded.body_facts.set(facts);
         // println!("Functions {:?}", self.decoded.functions.len());
         self.decoded.constants = self.read_constants(r)?;
@@ -583,44 +582,67 @@ impl BytecodeDecoder {
             .collect()
     }
 
-    fn read_functions(&mut self, r: &mut impl BufRead) -> Result<Vec<HLFunction>, std::io::Error> {
-        let mut funcs = vec![HLFunction::default(); self.nfunctions as usize];
-        for i in 0..self.nfunctions {
+    /// Every function, each body decoded once to check it and to note its
+    /// [`BodyFacts`], then left encoded unless `ASH_DECODE_EAGER` is set: most
+    /// of a program's functions never run, and a decoded body is several
+    /// times the size of its bytes.
+    fn read_functions(
+        &mut self,
+        r: &mut &[u8],
+        all: &[u8],
+    ) -> Result<(Vec<HLFunction>, BodyFacts), std::io::Error> {
+        let lazy = !decode_eagerly();
+        let mut funcs = Vec::with_capacity(self.nfunctions as usize);
+        let mut facts = BodyFacts::default();
+        for _ in 0..self.nfunctions {
             let mut fun = HLFunction::default();
             fun.type_ = self.get_type(r)?;
             fun.findex = self.read_var_u(r)? as i32;
-            let nregs = self.read_var_u(r)? as i32;
-            let nops = self.read_var_u(r)? as i32;
-            let mut regs: Vec<TypeRef> = Vec::with_capacity(nregs as usize);
-            let mut ops = Vec::with_capacity(nops as usize);
-            for i in 0..nregs as usize {
-                let reg_type = self.get_type(r)?;
-                regs.insert(i, reg_type);
+            let nregs = self.read_var_u(r)? as usize;
+            let nops = self.read_var_u(r)? as usize;
+            let mut regs: Vec<TypeRef> = Vec::with_capacity(nregs);
+            for _ in 0..nregs {
+                regs.push(self.get_type(r)?);
             }
             fun.regs = regs;
 
-            for i in 0..nops as usize {
-                let opcode = self.read_opcode(r)?;
-                ops.insert(i, opcode);
+            let at = all.len() - r.len();
+            let mut ops = Vec::with_capacity(nops);
+            for _ in 0..nops {
+                ops.push(self.read_opcode(r)?);
             }
-            fun.set_ops(ops);
-
-            if (self.has_debug) {
-                fun.set_debug(self.read_debug_infos(r, nops as usize)?);
+            let mut debug = Vec::new();
+            if self.has_debug {
+                debug = self.read_debug_infos(r, nops)?;
 
                 if self.version >= 3 {
                     // skip assigns (no need here)
                     let nassigns = self.read_var_u(r)? as usize;
-                    for i in 0..nassigns {
-                        self.read_var_u(r).expect("expected to read uint");
-                        self.read_var_int(r).expect("expected to read int");
+                    for _ in 0..nassigns {
+                        self.read_var_u(r)?;
+                        self.read_var_int(r)?;
                     }
                 }
             }
-            funcs[i as usize] = fun;
+            let end = all.len() - r.len();
+            fun.set_body(FunctionBody::decoded(ops, debug));
+            facts.note(&fun);
+            if lazy {
+                let shape = BodyShape::of(&fun, &self.decoded.types);
+                fun.set_body(FunctionBody::encoded(
+                    EncodedBody {
+                        bytes: all[at..end].into(),
+                        nops,
+                        has_debug: self.has_debug,
+                        ndebug_files: self.ndebug_files,
+                    },
+                    shape,
+                ));
+            }
+            funcs.push(fun);
         }
 
-        Ok(funcs)
+        Ok((funcs, facts))
     }
 
     #[inline]
@@ -1272,6 +1294,64 @@ impl BytecodeDecoder {
     }
 }
 
+/// `ASH_DECODE_EAGER=1` keeps every function body decoded from load, as before
+/// bodies were decoded on first use; safe to run with.
+fn decode_eagerly() -> bool {
+    static EAGER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EAGER.get_or_init(|| std::env::var("ASH_DECODE_EAGER").is_ok_and(|v| v == "1"))
+}
+
+/// Decode a body [`BytecodeDecoder::read_functions`] left encoded. The same
+/// bytes decoded at load, so they cannot fail to now.
+pub(crate) fn decode_body(e: &EncodedBody) -> (Vec<Opcode>, Vec<i32>) {
+    let mut d = BytecodeDecoder {
+        has_debug: e.has_debug,
+        ndebug_files: e.ndebug_files,
+        ..BytecodeDecoder::default()
+    };
+    let mut r: &[u8] = &e.bytes;
+    let ops = (0..e.nops)
+        .map(|_| d.read_opcode(&mut r))
+        .collect::<io::Result<Vec<_>>>()
+        .expect("a body that decoded at load decodes again");
+    let debug = if e.has_debug {
+        d.read_debug_infos(&mut r, e.nops)
+            .expect("a body that decoded at load decodes again")
+    } else {
+        Vec::new()
+    };
+    (ops, debug)
+}
+
+/// `ASH_DECODE_STATS=1`: how many function bodies the run decoded.
+pub fn decode_report(bc: &DecodedBytecode) -> Vec<String> {
+    if std::env::var_os("ASH_DECODE_STATS").is_none() {
+        return Vec::new();
+    }
+    let mut decoded: Vec<&HLFunction> =
+        bc.functions.iter().filter(|f| f.body().is_decoded()).collect();
+    let ops: usize = decoded.iter().map(|f| f.ops().len()).sum();
+    let mut out = vec![format!(
+        "[decode] bodies decoded {} of {} ({ops} ops)",
+        decoded.len(),
+        bc.functions.len()
+    )];
+    // `=2` also names the largest decoded bodies by their first source line.
+    if std::env::var("ASH_DECODE_STATS").is_ok_and(|v| v == "2") {
+        decoded.sort_by_key(|f| std::cmp::Reverse(f.ops().len()));
+        for f in decoded.iter().take(25) {
+            let at = f
+                .debug()
+                .chunks(2)
+                .find(|p| p[0] >= 0)
+                .and_then(|p| Some((bc.debug_files.get(p[0] as usize)?, p[1])));
+            let at = at.map_or(String::from("?"), |(file, line)| format!("{file}:{line}"));
+            out.push(format!("[decode]   {:6} ops  findex {:5}  {at}", f.ops().len(), f.findex));
+        }
+    }
+    out
+}
+
 #[derive(Default, Clone)]
 pub struct DecodedBytecode {
     pub ints: Vec<i32>,
@@ -1309,9 +1389,40 @@ pub struct BodyFacts {
     pub called: std::collections::HashSet<usize>,
     /// Every type index a `New` allocates.
     pub instantiated: std::collections::HashSet<usize>,
+    /// Every function that reads the call stack: calls one of the natives
+    /// that return it, directly or through the functions it calls.
+    pub stack_readers: std::collections::HashSet<usize>,
+    /// Static calls `(caller, callee)` noted since the last `finish`.
+    calls: Vec<(u32, u32)>,
 }
 
 impl BodyFacts {
+    /// Fold the calls noted since the last call into `stack_readers`.
+    pub(crate) fn finish(&mut self, natives: &[HLNative]) {
+        let mut callers: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+        for (caller, callee) in std::mem::take(&mut self.calls) {
+            callers.entry(callee).or_default().push(caller);
+        }
+        let mut work: Vec<u32> = natives
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.name.as_str(),
+                    "call_stack_raw" | "exception_stack_raw" | "call_stack" | "exception_stack"
+                )
+            })
+            .map(|n| n.findex as u32)
+            .chain(self.stack_readers.iter().map(|&f| f as u32))
+            .collect();
+        while let Some(f) = work.pop() {
+            for &caller in callers.get(&f).into_iter().flatten() {
+                if self.stack_readers.insert(caller as usize) {
+                    work.push(caller);
+                }
+            }
+        }
+    }
+
     pub(crate) fn note(&mut self, f: &HLFunction) {
         for op in f.ops() {
             match op {
@@ -1320,8 +1431,11 @@ impl BodyFacts {
                 | Opcode::Call2 { fun, .. }
                 | Opcode::Call3 { fun, .. }
                 | Opcode::Call4 { fun, .. }
-                | Opcode::CallN { fun, .. }
-                | Opcode::StaticClosure { fun, .. } => {
+                | Opcode::CallN { fun, .. } => {
+                    self.called.insert(fun.0);
+                    self.calls.push((f.findex as u32, fun.0 as u32));
+                }
+                Opcode::StaticClosure { fun, .. } => {
                     self.called.insert(fun.0);
                 }
                 Opcode::New { dst } => {
@@ -1352,14 +1466,22 @@ impl DecodedBytecode {
             for f in &self.functions {
                 facts.note(f);
             }
+            facts.finish(&self.natives);
             facts
         })
+    }
+
+    /// Whether function `findex` reads the call stack; see
+    /// [`BodyFacts::stack_readers`].
+    pub fn reads_call_stack(&self, findex: usize) -> bool {
+        self.body_facts().stack_readers.contains(&findex)
     }
 
     /// Append a function, keeping [`DecodedBytecode::body_facts`] current.
     pub(crate) fn push_function(&mut self, f: HLFunction) {
         if let Some(facts) = self.body_facts.get_mut() {
             facts.note(&f);
+            facts.finish(&self.natives);
         }
         self.functions.push(f);
     }
@@ -1597,6 +1719,77 @@ mod test {
         // }
 
         Ok(())
+    }
+
+    #[test]
+    fn bodies_stay_encoded_until_read_and_decode_whole() -> Result<(), std::io::Error> {
+        init_std_library();
+        let mut path =
+            PathBuf::from_str(env!("CARGO_MANIFEST_DIR")).expect("Expected to get manifest path");
+        path.push("test/test.hl");
+        let bc = BytecodeDecoder::decode(&path)?;
+        if std::env::var("ASH_DECODE_EAGER").is_ok_and(|v| v == "1") {
+            return Ok(());
+        }
+        assert!(bc.has_debug, "the fixture carries debug positions");
+        assert!(bc.functions.iter().all(|f| !f.body().is_decoded()));
+
+        for f in &bc.functions {
+            let n = f.ops().len();
+            assert!(f.body().is_decoded());
+            assert_eq!(f.debug().len(), 2 * n, "findex {}", f.findex);
+        }
+
+        // Replacing the ops of a body that is still encoded keeps its debug
+        // positions. The expected values come from the first decode.
+        let k = bc
+            .functions
+            .iter()
+            .position(|f| f.ops().len() > 1)
+            .expect("a function with ops");
+        let again = BytecodeDecoder::decode(&path)?;
+        let mut f = again.functions[k].clone();
+        assert!(!f.body().is_decoded());
+        f.set_ops(bc.functions[k].ops().to_vec());
+        assert_eq!(f.debug(), bc.functions[k].debug());
+        assert_eq!(format!("{:?}", f.ops()), format!("{:?}", bc.functions[k].ops()));
+        Ok(())
+    }
+
+    #[test]
+    fn stack_readers_follow_static_calls_to_the_stack_natives() {
+        use super::DecodedBytecode;
+        use crate::opcodes::{Opcode, RefFun, Reg};
+        use crate::types::{HLFunction, HLNative};
+
+        let calling = |findex: i32, callee: usize| {
+            let mut f = HLFunction::with_body(
+                vec![Opcode::Call0 {
+                    dst: Reg(0),
+                    fun: RefFun(callee),
+                }],
+                Vec::new(),
+            );
+            f.findex = findex;
+            f
+        };
+        let mut bc = DecodedBytecode {
+            natives: vec![HLNative {
+                lib: "std".into(),
+                name: "call_stack".into(),
+                findex: 50,
+                ..HLNative::default()
+            }],
+            // 1 reads the stack; 2 reaches it through 1; 3 calls neither.
+            functions: vec![calling(1, 50), calling(2, 1), calling(3, 4)],
+            ..DecodedBytecode::default()
+        };
+        assert!(bc.reads_call_stack(1) && bc.reads_call_stack(2));
+        assert!(!bc.reads_call_stack(3));
+
+        // A function appended later that calls a reader is one too.
+        bc.push_function(calling(5, 2));
+        assert!(bc.reads_call_stack(5));
     }
 
     #[test]

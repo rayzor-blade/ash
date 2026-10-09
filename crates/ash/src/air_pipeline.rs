@@ -349,6 +349,14 @@ impl<'b> ModuleInfo for AshModule<'b> {
         let body = self.lowered_body(findex)?;
         self.offer(findex, (*body).clone())
     }
+
+    fn reads_call_stack(&self, findex: usize) -> Option<bool> {
+        Some(self.bc.reads_call_stack(findex))
+    }
+
+    fn callee_ops(&self, findex: usize) -> Option<usize> {
+        Some(self.function(findex)?.op_count())
+    }
 }
 
 impl AshModule<'_> {

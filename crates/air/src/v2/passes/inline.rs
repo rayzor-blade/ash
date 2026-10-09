@@ -121,6 +121,9 @@ impl<'m> Inlining<'m> {
     }
 
     fn is_stack_sensitive_inner(&self, findex: usize, visiting: &mut HashSet<usize>) -> bool {
+        if let Some(known) = self.info.reads_call_stack(findex) {
+            return known;
+        }
         if let Some(&sensitive) = self.stack_sensitive.borrow().get(&findex) {
             return sensitive;
         }
@@ -265,6 +268,17 @@ impl Inlining<'_> {
                 if self_call
                     && (self.self_expanded.get() >= SELF_INLINE_MAX_SITES
                         || caller_size > SELF_INLINE_MAX_BODY)
+                {
+                    continue;
+                }
+                // Refused on its opcode count alone when that is far over the
+                // budget: lowering does not shrink a body sixteen-fold, and
+                // lowering a large callee only to refuse it decodes it.
+                if !self_call
+                    && self
+                        .info
+                        .callee_ops(*fun)
+                        .is_some_and(|n| n > opts.inline_max_callee.saturating_mul(16))
                 {
                     continue;
                 }

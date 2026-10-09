@@ -257,17 +257,149 @@ pub struct HLNative {
     pub findex: i32,
 }
 
+/// A function's ops and their `(file, line)` debug pairs. The decoder may
+/// leave them encoded, as the body's own bytes; they are decoded the first
+/// time either is read, once, and the bytes dropped.
+#[derive(Debug, Default)]
+pub struct FunctionBody {
+    decoded: std::sync::OnceLock<(Vec<Opcode>, Vec<i32>)>,
+    encoded: std::sync::Mutex<Option<EncodedBody>>,
+    /// Recorded by the decoder; see [`HLFunction::shape`].
+    shape: Option<BodyShape>,
+}
+
+impl Clone for FunctionBody {
+    fn clone(&self) -> Self {
+        FunctionBody {
+            decoded: self.decoded.clone(),
+            encoded: std::sync::Mutex::new(self.encoded_body()),
+            shape: self.shape,
+        }
+    }
+}
+
+/// What deciding how to run a body asks of its ops, recorded when the
+/// decoder first reads them so that asking does not decode them again.
+#[derive(Debug, Clone, Copy)]
+pub struct BodyShape {
+    /// A jump or switch target lies backward: the body can loop.
+    pub back_edge: bool,
+    /// A multiply writes a float register: the optimizer could fuse it.
+    pub float_mul: bool,
+    /// A `Prefetch` or an `Asm`, which the JIT does not compile.
+    pub jit_unsupported: bool,
+}
+
+impl BodyShape {
+    pub fn of(f: &HLFunction, types: &[HLType]) -> Self {
+        BodyShape {
+            back_edge: ops_have_back_edge(f.ops()),
+            float_mul: ops_have_float_mul(f.ops(), &f.regs, types),
+            jit_unsupported: f
+                .ops()
+                .iter()
+                .any(|op| matches!(op, Opcode::Prefetch { .. } | Opcode::Asm { .. })),
+        }
+    }
+}
+
+/// Whether a jump or a switch target in `ops` lies backward.
+pub fn ops_have_back_edge(ops: &[Opcode]) -> bool {
+    ops.iter().any(|op| match op {
+        Opcode::Switch { offsets, end, .. } => *end < 0 || offsets.iter().any(|o| *o < 0),
+        _ => air::opcode_info::jump_offset(op).is_some_and(|o| o < 0),
+    })
+}
+
+/// Whether a multiply in `ops` writes a float register.
+pub fn ops_have_float_mul(ops: &[Opcode], regs: &[TypeRef], types: &[HLType]) -> bool {
+    ops.iter().any(|op| match op {
+        Opcode::Mul { dst, .. } => regs
+            .get(dst.0 as usize)
+            .and_then(|t| types.get(t.0))
+            .is_some_and(|t| t.kind == hl::hl_type_kind_HF64 || t.kind == hl::hl_type_kind_HF32),
+        _ => false,
+    })
+}
+
+/// An undecoded body's bytes, and what decoding them needs.
+#[derive(Clone)]
+pub struct EncodedBody {
+    pub(crate) bytes: Box<[u8]>,
+    pub(crate) nops: usize,
+    pub(crate) has_debug: bool,
+    pub(crate) ndebug_files: usize,
+}
+
+impl std::fmt::Debug for EncodedBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EncodedBody {{ bytes: {}, nops: {} }}", self.bytes.len(), self.nops)
+    }
+}
+
+impl FunctionBody {
+    pub(crate) fn decoded(ops: Vec<Opcode>, debug: Vec<i32>) -> Self {
+        FunctionBody {
+            decoded: std::sync::OnceLock::from((ops, debug)),
+            encoded: std::sync::Mutex::new(None),
+            shape: None,
+        }
+    }
+
+    pub(crate) fn encoded(body: EncodedBody, shape: BodyShape) -> Self {
+        FunctionBody {
+            decoded: std::sync::OnceLock::new(),
+            encoded: std::sync::Mutex::new(Some(body)),
+            shape: Some(shape),
+        }
+    }
+
+    fn encoded_body(&self) -> Option<EncodedBody> {
+        self.encoded.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn get(&self) -> &(Vec<Opcode>, Vec<i32>) {
+        self.decoded.get_or_init(|| {
+            let encoded = self.encoded.lock().unwrap_or_else(|e| e.into_inner()).take();
+            match encoded {
+                Some(e) => crate::bytecode::decode_body(&e),
+                None => (Vec::new(), Vec::new()),
+            }
+        })
+    }
+
+    fn get_mut(&mut self) -> &mut (Vec<Opcode>, Vec<i32>) {
+        self.get();
+        self.decoded.get_mut().expect("decoded just above")
+    }
+
+    /// Whether the ops have been decoded, or never were encoded.
+    pub fn is_decoded(&self) -> bool {
+        self.decoded.get().is_some()
+            || self.encoded.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+    }
+
+    /// How many ops a body still encoded holds; `None` once decoded.
+    pub fn encoded_ops(&self) -> Option<usize> {
+        if self.decoded.get().is_some() {
+            return None;
+        }
+        self.encoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|e| e.nops)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct HLFunction {
     pub type_: TypeRef,
     pub findex: i32,
-    /// Reached through [`HLFunction::ops`], so a body can be decoded on first
-    /// use.
-    ops: Vec<Opcode>,
-    pub regs: Vec<TypeRef>,
-    /// `(file, line)` per op, flattened. Reached through
+    /// The ops and debug pairs, reached through [`HLFunction::ops`] and
     /// [`HLFunction::debug`].
-    debug: Vec<i32>,
+    body: FunctionBody,
+    pub regs: Vec<TypeRef>,
     pub ref_: i32,
     pub obj: Option<HLTypeObj>,
     pub field_name: Option<String>,
@@ -277,30 +409,54 @@ impl HLFunction {
     /// A function with this body and every other field at its default.
     pub fn with_body(ops: Vec<Opcode>, debug: Vec<i32>) -> Self {
         HLFunction {
-            ops,
-            debug,
+            body: FunctionBody::decoded(ops, debug),
             ..HLFunction::default()
         }
     }
 
+    pub(crate) fn set_body(&mut self, body: FunctionBody) {
+        self.body = body;
+    }
+
+    pub fn body(&self) -> &FunctionBody {
+        &self.body
+    }
+
+    /// The body's [`BodyShape`], from the decoder's record when there is one,
+    /// else from the ops.
+    pub fn shape(&self, types: &[HLType]) -> BodyShape {
+        self.body.shape.unwrap_or_else(|| BodyShape::of(self, types))
+    }
+
     pub fn ops(&self) -> &[Opcode] {
-        &self.ops
+        &self.body.get().0
+    }
+
+    /// The ops when they are already decoded, without decoding them.
+    #[inline]
+    pub fn decoded_ops(&self) -> Option<&[Opcode]> {
+        self.body.decoded.get().map(|(ops, _)| ops.as_slice())
+    }
+
+    /// How many ops the body has, without decoding it.
+    pub fn op_count(&self) -> usize {
+        self.body.encoded_ops().unwrap_or_else(|| self.ops().len())
     }
 
     pub fn ops_mut(&mut self) -> &mut Vec<Opcode> {
-        &mut self.ops
+        &mut self.body.get_mut().0
     }
 
     pub fn set_ops(&mut self, ops: Vec<Opcode>) {
-        self.ops = ops;
+        self.body.get_mut().0 = ops;
     }
 
     pub fn debug(&self) -> &[i32] {
-        &self.debug
+        &self.body.get().1
     }
 
     pub fn set_debug(&mut self, debug: Vec<i32>) {
-        self.debug = debug;
+        self.body.get_mut().1 = debug;
     }
 
     pub fn name(&self) -> String {
@@ -327,7 +483,7 @@ impl HLFunction {
         }
 
         // Hash opcode stream (discriminant + numeric fields)
-        for op in &self.ops {
+        for op in self.ops() {
             h = hash_opcode(h, op);
         }
 

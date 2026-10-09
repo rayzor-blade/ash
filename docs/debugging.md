@@ -59,6 +59,8 @@ being taken:
 | `ASH_INLINE_ALLOC` | `0` makes compiled code call the runtime for every allocation instead of bumping the thread's region inline. Safe, slower |
 | `ASH_SROA_WHY` | `1` reports why each allocation the optimiser looked at was kept in memory, including ash-simd slots |
 | `ASH_AIR_CACHE_STATS` | report live canonical AIR storage, bounded strong-cache residency, hits, misses and evictions at exit (conservative owned-storage bytes, not RSS) |
+| `ASH_DECODE_STATS` | `1` reports at exit how many function bodies the run decoded. The decoder checks every body at load, then leaves it encoded until something reads it: most functions a `.hl` carries never run |
+| `ASH_DECODE_EAGER` | `1` keeps every function body decoded from load instead. Safe to run with; for comparing memory |
 | `ASH_AIR_LEVEL` | `0..3`: how hard the AIR optimiser works |
 | `ASH_AIR_NO_WIDEN` | `1` disables loop widening |
 | `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |

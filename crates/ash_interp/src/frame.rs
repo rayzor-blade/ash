@@ -264,6 +264,9 @@ pub struct InterpreterFrame {
     /// optimized body, and the raw body numbers its opcodes differently.
     /// Null for a frame that has no body of its own (a native call).
     pub body: *const HLFunction,
+    /// `body`'s ops, taken once when the frame is pushed, for the dispatch
+    /// loop to index every step. Null when the frame was pushed without them.
+    pub ops: *const [ash_core::opcodes::Opcode],
     /// Prepared SSA body of this activation. The dispatch caller owns its Rc
     /// until this frame returns, including while the cache retires its copy.
     pub ssa_body: *const crate::ssa::Prepared,
@@ -312,6 +315,7 @@ impl InterpreterFrame {
             },
             pc: 0,
             body: std::ptr::null(),
+            ops: std::ptr::slice_from_raw_parts(std::ptr::null(), 0),
             ssa_body: std::ptr::null(),
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
@@ -336,6 +340,7 @@ impl InterpreterFrame {
             },
             pc: 0,
             body: std::ptr::null(),
+            ops: std::ptr::slice_from_raw_parts(std::ptr::null(), 0),
             ssa_body: std::ptr::null(),
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),

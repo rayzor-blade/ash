@@ -484,6 +484,9 @@ pub struct HLInterpreter {
     /// them would only cost a malloc, but the unwind path is where a long-lived
     /// program would otherwise leak its whole call depth of buffers.
     reg_pool: Vec<Vec<NanBoxedValue>>,
+    /// Calls this interpreter has made of each large function still
+    /// encoded. See [`Self::call_body`].
+    called_large: HashMap<usize, u32>,
     /// What a host registered into the program this interpreter was built
     /// for, so `enable_reload` can give the same registrations to the copy
     /// it decodes from disk.
@@ -1011,6 +1014,7 @@ impl HLInterpreter {
             targets,
             code_addr_findex: HashMap::new(),
             reg_pool: Vec::new(),
+            called_large: HashMap::new(),
             host_modules: bytecode.host_modules.clone(),
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
@@ -5025,10 +5029,13 @@ impl HLInterpreter {
         {
             return Err("name_blacklisted".to_string());
         }
-        if config.min_ops_for_promotion > 0 && func.ops().len() < config.min_ops_for_promotion {
+        if config.min_ops_for_promotion > 0 && func.op_count() < config.min_ops_for_promotion {
             return Err("op_count_below_min".to_string());
         }
+        // The shape decides without decoding the body; the ops are read only
+        // to name the one refused.
         if !config.compiled_only
+            && func.shape(&bytecode.types).jit_unsupported
             && let Some(bad) = func.ops().iter().find(|op| !Self::is_v1_tierable_opcode(op))
         {
             return Err(format!("unsupported_opcode op={:?}", bad));
@@ -5583,7 +5590,20 @@ impl HLInterpreter {
         let reg_count = func.regs.len();
         let buf = self.reg_pool.pop().unwrap_or_default();
         let mut frame = InterpreterFrame::with_buffer(func_idx, reg_count, buf);
-        frame.body = func as *const HLFunction;
+        // `owned_body` lives until the frame is popped below, after
+        // `interpret_loop`; a box does not move its contents.
+        let (ops, owned_body) = match func.decoded_ops() {
+            Some(ops) => (ops as *const [Opcode], None),
+            None => {
+                let owned = self.call_body(bc, func_idx, func);
+                let body = owned.as_deref().unwrap_or(func);
+                (body.ops() as *const [Opcode], owned)
+            }
+        };
+        frame.body = owned_body
+            .as_deref()
+            .map_or(func as *const HLFunction, |b| b as *const HLFunction);
+        frame.ops = ops;
 
         // Bind arguments to first N registers
         let type_fun = bc.types[func.type_.0]
@@ -5636,10 +5656,14 @@ impl HLInterpreter {
             // calls is invisible to a poll placed at function entry.
             self.report_stall_if_asked(bytecode);
             self.fiber_safe_point(1);
-            let func = self.frame_body(bytecode, func_idx);
-            let ops = func.ops();
             let frame = self.stack.last().unwrap();
             let pc = frame.pc;
+            let ops: &[Opcode] = if (frame.ops as *const Opcode).is_null() {
+                self.frame_body(bytecode, func_idx).ops()
+            } else {
+                // The frame's body, which outlives the frame; see `ops`.
+                unsafe { &*frame.ops }
+            };
 
             if pc >= ops.len() {
                 return Ok(NanBoxedValue::void());
@@ -5662,7 +5686,7 @@ impl HLInterpreter {
                 eprintln!(
                     "[TRACE] f{} {} pc={} op={:?}",
                     func_idx,
-                    func.name(),
+                    self.frame_body(bytecode, func_idx).name(),
                     pc,
                     op
                 );
@@ -5766,6 +5790,7 @@ impl HLInterpreter {
                     }
                     match call_result {
                         Ok(ret) => {
+                            let func = self.frame_body(bytecode, func_idx);
                             let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
                             let coerced = self.call_result_for(bytecode, findex, ret, dst_kind);
                             self.stack.last_mut().unwrap().registers.set(dst, coerced);
@@ -5941,6 +5966,29 @@ impl HLInterpreter {
     /// the one it started on, whatever the AIR cache holds now. Any other
     /// frame's body is resolved through the cache.
     #[inline]
+    /// The body a call of a large function still encoded runs from, for its
+    /// first few calls: a copy the call owns, decoded when the frame first
+    /// reads it and freed when the call returns. A function called only a
+    /// few times -- the static initializers that build a program's tables
+    /// are the large ones -- then never keeps its ops. Later calls decode
+    /// the shared body.
+    fn call_body(
+        &mut self,
+        bc: &DecodedBytecode,
+        func_idx: usize,
+        func: &HLFunction,
+    ) -> Option<Box<HLFunction>> {
+        const LARGE_OPS: usize = 2048;
+        const OWNED_CALLS: u32 = 4;
+        let raw = bc.functions.get(func_idx)?;
+        if !std::ptr::eq(func, raw) || !func.body().encoded_ops().is_some_and(|n| n >= LARGE_OPS) {
+            return None;
+        }
+        let calls = self.called_large.entry(func_idx).or_insert(0);
+        *calls += 1;
+        (*calls <= OWNED_CALLS).then(|| Box::new(func.clone()))
+    }
+
     fn frame_body<'b>(&self, bytecode: &'b DecodedBytecode, func_idx: usize) -> &'b HLFunction {
         match self.stack.last() {
             Some(f) if f.function_index == func_idx && !f.body.is_null() => unsafe { &*f.body },

@@ -273,7 +273,7 @@ impl Cache {
         // the optimizer could fuse a multiply-add in is prepared regardless;
         // see `may_fuse`.
         if crate::air::skip_loop_free()
-            && !crate::air::has_back_edge(raw)
+            && !crate::air::has_back_edge(bc, raw)
             && !crate::air::may_fuse(bc, raw)
         {
             self.bodies[func_idx] = Body::Raw;

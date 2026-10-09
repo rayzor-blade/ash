@@ -320,6 +320,24 @@ pub trait ModuleInfo {
         let _ = findex;
         None
     }
+
+    /// Whether bytecode function `findex` reads the call stack: calls one of
+    /// the natives that return it, directly or through the functions it
+    /// calls. Inlining it would change what it reads. `None` -- the default
+    /// -- means the embedder cannot say, and the inliner works it out from
+    /// the bodies.
+    fn reads_call_stack(&self, findex: usize) -> Option<bool> {
+        let _ = findex;
+        None
+    }
+
+    /// How many opcodes bytecode function `findex` has, when the embedder can
+    /// say without producing its body, so the inliner can refuse a callee far
+    /// over its budget without lowering it.
+    fn callee_ops(&self, findex: usize) -> Option<usize> {
+        let _ = findex;
+        None
+    }
 }
 
 /// Module info that knows nothing: lowering records no natives and no float
@@ -399,6 +417,12 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     }
     fn callee(&self, findex: usize) -> Option<CalleeBody> {
         (**self).callee(findex)
+    }
+    fn reads_call_stack(&self, findex: usize) -> Option<bool> {
+        (**self).reads_call_stack(findex)
+    }
+    fn callee_ops(&self, findex: usize) -> Option<usize> {
+        (**self).callee_ops(findex)
     }
 }
 

@@ -288,25 +288,11 @@ pub(crate) fn skip_loop_free() -> bool {
 /// instead, a call made before the function is compiled and one made after
 /// could differ in the last bit.
 pub(crate) fn may_fuse(bc: &DecodedBytecode, f: &HLFunction) -> bool {
-    ash_core::air_pipeline::fma()
-        && f.ops().iter().any(|op| match op {
-            Opcode::Mul { dst, .. } => f
-                .regs
-                .get(dst.0 as usize)
-                .and_then(|t| bc.types.get(t.0))
-                .is_some_and(|t| {
-                    t.kind == ash_core::hl_bindings::hl_type_kind_HF64
-                        || t.kind == ash_core::hl_bindings::hl_type_kind_HF32
-                }),
-            _ => false,
-        })
+    ash_core::air_pipeline::fma() && f.shape(&bc.types).float_mul
 }
 
-pub(crate) fn has_back_edge(f: &HLFunction) -> bool {
-    f.ops().iter().any(|op| match op {
-        Opcode::Switch { offsets, end, .. } => *end < 0 || offsets.iter().any(|offset| *offset < 0),
-        _ => air::opcode_info::jump_offset(op).is_some_and(|offset| offset < 0),
-    })
+pub(crate) fn has_back_edge(bc: &DecodedBytecode, f: &HLFunction) -> bool {
+    f.shape(&bc.types).back_edge
 }
 
 impl Cache {
@@ -393,7 +379,7 @@ impl Cache {
         // the register layout under that frame. test_stdlib died with
         // "Sub: incompatible types". Whatever is chosen for a function has to
         // hold for the whole process.
-        if skip_loop_free() && !has_back_edge(raw) && !may_fuse(bc, raw) {
+        if skip_loop_free() && !has_back_edge(bc, raw) && !may_fuse(bc, raw) {
             self.bodies[func_idx] = Body::Raw;
             return;
         }
@@ -560,31 +546,32 @@ impl Cache {
 mod tests {
     use super::*;
     use air::opcodes::{RefFun, Reg};
+    use ash_core::types::ops_have_back_edge;
 
     #[test]
     fn preparation_keeps_backward_conditional_and_switch_edges() {
-        let body = |op| HLFunction::with_body(vec![op], Vec::new());
-        assert!(!has_back_edge(&body(Opcode::JAlways { offset: 0 })));
-        assert!(!has_back_edge(&body(Opcode::JFalse {
+        let body = |op| vec![op];
+        assert!(!ops_have_back_edge(&body(Opcode::JAlways { offset: 0 })));
+        assert!(!ops_have_back_edge(&body(Opcode::JFalse {
             cond: Reg(0),
             offset: 1
         })));
-        assert!(has_back_edge(&body(Opcode::JAlways { offset: -1 })));
-        assert!(has_back_edge(&body(Opcode::JFalse {
+        assert!(ops_have_back_edge(&body(Opcode::JAlways { offset: -1 })));
+        assert!(ops_have_back_edge(&body(Opcode::JFalse {
             cond: Reg(0),
             offset: -2
         })));
-        assert!(!has_back_edge(&body(Opcode::Switch {
+        assert!(!ops_have_back_edge(&body(Opcode::Switch {
             reg: Reg(0),
             offsets: vec![0, 2],
             end: 4
         })));
-        assert!(has_back_edge(&body(Opcode::Switch {
+        assert!(ops_have_back_edge(&body(Opcode::Switch {
             reg: Reg(0),
             offsets: vec![0, -2],
             end: 4
         })));
-        assert!(has_back_edge(&body(Opcode::Switch {
+        assert!(ops_have_back_edge(&body(Opcode::Switch {
             reg: Reg(0),
             offsets: vec![0, 2],
             end: -2

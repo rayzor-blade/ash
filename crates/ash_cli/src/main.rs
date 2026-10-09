@@ -1391,6 +1391,7 @@ fn run() -> Result<()> {
             for line in ash_core::air_pipeline::pass_time_report()
                 .into_iter()
                 .chain(ash_core::air_pipeline::cache_report())
+                .chain(ash_core::bytecode::decode_report(&bytecode))
             {
                 eprintln!("{line}");
             }
@@ -1493,6 +1494,7 @@ fn run() -> Result<()> {
             for line in ash_core::air_pipeline::pass_time_report()
                 .into_iter()
                 .chain(ash_core::air_pipeline::cache_report())
+                .chain(ash_core::bytecode::decode_report(&bytecode))
             {
                 eprintln!("{line}");
             }

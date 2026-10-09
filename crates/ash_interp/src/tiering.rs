@@ -33,7 +33,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 pub enum TierMode {
     /// Two tiers: Cranelift at `jit_threshold` (falling back to LLVM for
     /// functions outside the Cranelift opcode subset), LLVM at
-    /// `jit_threshold * 100`.
+    /// `opt_threshold`.
     #[default]
     Auto,
     /// One tier, Cranelift only. Functions outside the subset never promote —
@@ -88,11 +88,9 @@ pub struct TieredConfig {
     /// ticking the callee's counter, so a threshold far above the Cranelift
     /// one is unreachable for any function whose callers compile.
     ///
-    /// It carries the whole tier-1 load, so it has to fire while the program
-    /// is still running. Measured against the speculative LLVM compile that
-    /// used to shadow it: at 1000 closure_call is 198ms because the rung
-    /// arrives too late, at 100-250 it is 156ms — better than the speculative
-    /// path managed (163ms), with fib, deltablue and binary_trees unchanged.
+    /// Presets choose how eagerly to pay LLVM's compilation and memory cost:
+    /// applications keep ordinary UI work in Cranelift, while throughput and
+    /// frame-budget presets reach the optimising tier sooner.
     pub opt_threshold: u64,
     /// Cap on how wide a signature may be to promote.
     ///
@@ -130,9 +128,9 @@ impl Default for TieredConfig {
 /// | Preset        | jit | opt   | Suits                                       |
 /// |---------------|-----|-------|---------------------------------------------|
 /// | `Script`      |  20 | 2 000 | one-shot CLI work; optimise only if the run lasts |
-/// | `Application` | 100 | 1 000 | the default: balanced startup and peak      |
+/// | `Application` | 100 | 10 000 | ordinary UI work stays in Cranelift         |
 /// | `Game`        |  10 |   200 | frame budgets: compile during load, not play |
-/// | `Server`      |  50 |   500 | long-lived processes; compile cost amortises |
+/// | `Server`      |  50 |   250 | long-lived processes; compile cost amortises |
 /// | `Benchmark`   |   2 |    10 | drive everything through every tier          |
 /// | `Development` | 100 | 5 000 | favours iteration over peak                 |
 /// | `Interpreter` | off |   off | no JIT at all                               |
@@ -196,10 +194,13 @@ impl TierPreset {
                 opt_threshold: 2_000,
                 ..base
             },
+            // GUI work arrives in short bursts with long idle periods. Keep
+            // warm functions in Cranelift; reserve LLVM for sustained hot
+            // loops that can amortise its compilation and retained metadata.
             TierPreset::Application => TieredConfig {
                 enabled: true,
                 jit_threshold: 100,
-                opt_threshold: 250,
+                opt_threshold: 10_000,
                 ..base
             },
             // A frame budget is the constraint, not throughput. Promote while

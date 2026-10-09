@@ -23,7 +23,7 @@ ash --build mygame.wasm --target wasm32-wasip1 main.hl
 | `--mode` | `interp`, `hybrid`, `jit` | `hybrid` | see below |
 | `--preset` | `script`, `application`, `game`, `server`, `benchmark`, `development`, `interpreter` | `application` | promotion thresholds for the program's shape |
 | `--jit-threshold` | integer | 100 | calls before Cranelift compiles a function |
-| `--opt-threshold` | integer | 1000 | calls before LLVM recompiles it; counted on interpreted calls only |
+| `--opt-threshold` | integer | 10,000 | calls before LLVM recompiles it; counted on interpreted calls only |
 | `--jit-tier` | `auto`, `cranelift`, `llvm`, `off` | `auto` | restrict the ladder to one compiler, or disable promotion |
 | `--jit-log` | flag | | log every promotion, decline and tier transfer to stderr |
 | `--quiet` | flag | | suppress everything ash prints that the program did not |
@@ -48,6 +48,14 @@ isolating the interpreter from a problem, not for ordinary use.
 `--jit-tier cranelift` and `--jit-tier llvm` pin one compiler; `off` keeps
 the tiering machinery and disables promotion. Explicit thresholds override
 the preset. `ASH_TIER` supplies `--jit-tier` when the flag is absent.
+
+The default `application` preset compiles warm functions in Cranelift at
+100 calls and reserves LLVM for sustained work at 10,000 interpreted calls
+or loop back-edges. This keeps ordinary GUI interactions in the middle tier
+and avoids LLVM compilation and retained metadata for short bursts of work.
+A compiled caller dispatches directly without increasing its callees' counters,
+so many warm functions remain in Cranelift. LLVM remains available for long
+running loops; `--jit-tier cranelift` disables that tier entirely.
 
 **Floating point.** The optimiser fuses `a * b + c` into one rounding, and
 every engine — interpreter, both JIT tiers, AOT — computes the same number

@@ -185,7 +185,7 @@ struct Cli {
     ///
     /// Reached by INTERPRETED calls only, so a value far above
     /// --jit-threshold is unreachable once a function's callers compile.
-    #[arg(long, default_value_t = 1_000)]
+    #[arg(long, default_value_t = TierPreset::Application.to_config().opt_threshold)]
     opt_threshold: u64,
 
     /// Enable tiered runtime promotion logs

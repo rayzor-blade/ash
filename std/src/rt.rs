@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bumped whenever a slot is added, removed or changes signature.
-pub const RT_VERSION: u32 = 7;
+pub const RT_VERSION: u32 = 8;
 
 /// `timeout_ns` value meaning "no deadline" for [`RuntimeVTable::park`].
 pub const RT_NO_TIMEOUT: u64 = u64::MAX;
@@ -210,6 +210,10 @@ runtime_table! {
     mark_main_thread() = ash::mark_main_thread;
     is_main_thread() -> bool = ash::is_main_thread;
     foreign_threads_seen() -> bool = ash::foreign_threads_seen;
+
+    // A native host waits on its own event source between scheduler turns.
+    host_wait(timeout: f64, wake: unsafe extern "C" fn()) -> f64 = crate::fiber::host_wait;
+    host_resumed() = crate::fiber::host_resumed;
 
     // ── Program ─────────────────────────────────────────────────────────
     // Run by a compiled program's `main` after the heap is up and the

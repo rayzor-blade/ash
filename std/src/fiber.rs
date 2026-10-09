@@ -110,6 +110,7 @@ enum SchedulerCommand {
 struct SchedulerEndpoint {
     commands: Mutex<VecDeque<SchedulerCommand>>,
     changed: Condvar,
+    host_wake: std::sync::atomic::AtomicPtr<()>,
     /// Logical fibers assigned to this worker, including parked fibers.
     ///
     /// krio stacks are `!Send`, so a fiber cannot migrate after installation.
@@ -123,6 +124,7 @@ impl SchedulerEndpoint {
         Self {
             commands: Mutex::new(VecDeque::new()),
             changed: Condvar::new(),
+            host_wake: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
             assigned: AtomicUsize::new(0),
         }
     }
@@ -131,6 +133,11 @@ impl SchedulerEndpoint {
         self.commands.lock().unwrap().push_back(command);
         request_fiber_poll();
         self.changed.notify_one();
+        let wake = self.host_wake.load(Ordering::Acquire);
+        if !wake.is_null() {
+            // The host's wake must only notify its event source, never call the VM.
+            unsafe { std::mem::transmute::<*mut (), unsafe extern "C" fn()>(wake)() };
+        }
     }
 }
 
@@ -1736,6 +1743,69 @@ pub(crate) unsafe fn schedule_step() -> bool {
     }
 }
 
+/// Prepare to wait on a native event source. Runs ready work and returns the
+/// shorter of the host timeout and the current scheduler's next deadline.
+/// Negative timeouts mean no deadline. `wake` notifies that source when a
+/// completion queues work between this call and `ash_host_resumed`.
+///
+/// # Safety
+/// Call on the scheduler's thread, outside the event loop's internal locks.
+/// `wake` must be thread-safe, must not enter the VM, and must remain callable
+/// for the process lifetime (a sender may already have loaded it at resume).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ash_host_wait(timeout: f64, wake: unsafe extern "C" fn()) -> f64 {
+    unsafe { crate::rt::call::host_wait(timeout, wake) }
+}
+
+/// End the native wait before returning to the program or polling work again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ash_host_resumed() {
+    unsafe { crate::rt::call::host_resumed() };
+}
+
+pub(crate) unsafe extern "C" fn host_wait(timeout: f64, wake: unsafe extern "C" fn()) -> f64 {
+    // Register before inspecting work: a racing completion is then either
+    // observed below or leaves a wake latched in the host's event source.
+    SCHEDULER.with(|scheduler| {
+        scheduler
+            .borrow()
+            .endpoint
+            .host_wake
+            .store(wake as *mut (), Ordering::Release);
+    });
+    let ran = unsafe { crate::rt::schedule_step() };
+    SCHEDULER.with(|scheduler| {
+        let scheduler = scheduler.borrow();
+        if ran
+            || !scheduler.ready.is_empty()
+            || !scheduler.endpoint.commands.lock().unwrap().is_empty()
+        {
+            return 0.0;
+        }
+        let Some(Reverse((deadline, _, _))) = scheduler.timers.peek() else {
+            return timeout;
+        };
+        let next = deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64();
+        if timeout < 0.0 {
+            next
+        } else {
+            timeout.min(next)
+        }
+    })
+}
+
+pub(crate) unsafe extern "C" fn host_resumed() {
+    SCHEDULER.with(|scheduler| {
+        scheduler
+            .borrow()
+            .endpoint
+            .host_wake
+            .store(ptr::null_mut(), Ordering::Release);
+    });
+}
+
 /// Cooperative scheduling safe point for a running VM.
 ///
 /// Blocking primitives already call [`block_yield`], but a main-thread event
@@ -1790,6 +1860,62 @@ pub(crate) unsafe fn block_yield() {
             // may round the wait up to the OS timer resolution — acceptable,
             // because this is pacing and not a deadline.
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_wait_tests {
+    use super::*;
+    static NOTIFIED: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn notify() {
+        NOTIFIED.fetch_add(1, Ordering::Release);
+    }
+
+    #[test]
+    fn parked_scheduler_wakes_host_for_cross_thread_work() {
+        let endpoint = Arc::new(SchedulerEndpoint::new());
+        endpoint
+            .host_wake
+            .store(notify as *mut (), Ordering::Release);
+        let worker = Arc::clone(&endpoint);
+        let before = NOTIFIED.load(Ordering::Acquire);
+        std::thread::spawn(move || {
+            worker.push(SchedulerCommand::Wake(Waiter {
+                scheduler_id: 1,
+                fiber_id: 2,
+                token: 3,
+            }));
+        })
+        .join()
+        .unwrap();
+        assert_eq!(NOTIFIED.load(Ordering::Acquire), before + 1);
+        assert_eq!(endpoint.commands.lock().unwrap().len(), 1);
+        endpoint.host_wake.store(ptr::null_mut(), Ordering::Release);
+        endpoint.push(SchedulerCommand::Wake(Waiter {
+            scheduler_id: 1,
+            fiber_id: 2,
+            token: 4,
+        }));
+        assert_eq!(NOTIFIED.load(Ordering::Acquire), before + 1);
+    }
+
+    #[test]
+    fn host_wait_obeys_fiber_deadlines_and_unbounded_idle() {
+        unsafe {
+            assert_eq!(host_wait(-1.0, notify), -1.0);
+            host_resumed();
+            let deadline = Instant::now() + std::time::Duration::from_secs(8);
+            SCHEDULER.with(|s| s.borrow_mut().timers.push(Reverse((deadline, 0, 0))));
+            let wait = host_wait(-1.0, notify);
+            assert!(wait > 7.0 && wait <= 8.0);
+            assert_eq!(host_wait(0.02, notify), 0.02);
+            host_resumed();
+            SCHEDULER.with(|s| {
+                let mut s = s.borrow_mut();
+                assert!(s.endpoint.host_wake.load(Ordering::Acquire).is_null());
+                s.timers.clear();
+            });
         }
     }
 }

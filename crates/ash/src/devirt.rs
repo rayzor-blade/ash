@@ -22,15 +22,9 @@ impl ReachableTargets {
     pub fn analyze(bc: &DecodedBytecode) -> Self {
         let n = bc.types.len();
         let mut instantiated = vec![false; n];
-        for f in &bc.functions {
-            for op in f.ops() {
-                if let Opcode::New { dst } = op {
-                    if let Some(&TypeRef(t)) = f.regs.get(dst.0 as usize) {
-                        if t < n {
-                            instantiated[t] = true;
-                        }
-                    }
-                }
+        for &t in &bc.body_facts().instantiated {
+            if t < n {
+                instantiated[t] = true;
             }
         }
         let mut children = vec![Vec::new(); n];

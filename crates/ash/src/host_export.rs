@@ -758,7 +758,7 @@ impl DecodedBytecode {
         function.regs = regs;
         function.set_ops(ops);
         function.set_debug(debug);
-        self.functions.push(function);
+        self.push_function(function);
         findex as usize
     }
 }

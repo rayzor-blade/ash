@@ -566,7 +566,7 @@ impl DecodedBytecode {
         function.regs = regs;
         function.set_ops(ops);
         function.set_debug(debug);
-        self.functions.push(function);
+        self.push_function(function);
         if let Opcode::Call0 { fun, .. } = &mut self.functions[entry].ops_mut()[call_at] {
             *fun = RefFun(findex as usize);
         }

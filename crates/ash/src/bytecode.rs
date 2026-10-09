@@ -242,6 +242,11 @@ impl BytecodeDecoder {
         self.decoded.natives = self.read_natives(r)?;
         // println!("Natives {:?}", self.decoded.natives.len());
         self.decoded.functions = self.read_functions(r)?;
+        let mut facts = BodyFacts::default();
+        for f in &self.decoded.functions {
+            facts.note(f);
+        }
+        let _ = self.decoded.body_facts.set(facts);
         // println!("Functions {:?}", self.decoded.functions.len());
         self.decoded.constants = self.read_constants(r)?;
         // println!("Constants {:?}", self.decoded.constants.len());
@@ -1291,6 +1296,43 @@ pub struct DecodedBytecode {
     /// The registrations themselves, in order, so a program decoded again
     /// (a hot reload) can be given the same ones.
     pub host_modules: Vec<crate::host_module::RegisteredModule>,
+    /// See [`DecodedBytecode::body_facts`].
+    pub(crate) body_facts: std::sync::OnceLock<BodyFacts>,
+}
+
+/// What every function body says that a whole-program question needs,
+/// gathered as the bodies are decoded so that answering it does not need
+/// every body.
+#[derive(Debug, Default, Clone)]
+pub struct BodyFacts {
+    /// Every findex a call or a static closure names.
+    pub called: std::collections::HashSet<usize>,
+    /// Every type index a `New` allocates.
+    pub instantiated: std::collections::HashSet<usize>,
+}
+
+impl BodyFacts {
+    pub(crate) fn note(&mut self, f: &HLFunction) {
+        for op in f.ops() {
+            match op {
+                Opcode::Call0 { fun, .. }
+                | Opcode::Call1 { fun, .. }
+                | Opcode::Call2 { fun, .. }
+                | Opcode::Call3 { fun, .. }
+                | Opcode::Call4 { fun, .. }
+                | Opcode::CallN { fun, .. }
+                | Opcode::StaticClosure { fun, .. } => {
+                    self.called.insert(fun.0);
+                }
+                Opcode::New { dst } => {
+                    if let Some(t) = f.regs.get(dst.0 as usize) {
+                        self.instantiated.insert(t.0);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// HashLink's field hash of `name`, the one the decoder stores for every
@@ -1302,6 +1344,26 @@ pub fn field_hash(name: &str) -> i32 {
 }
 
 impl DecodedBytecode {
+    /// Facts about every function body: recorded by the decoder, and gathered
+    /// from the bodies on first use for a program built any other way.
+    pub fn body_facts(&self) -> &BodyFacts {
+        self.body_facts.get_or_init(|| {
+            let mut facts = BodyFacts::default();
+            for f in &self.functions {
+                facts.note(f);
+            }
+            facts
+        })
+    }
+
+    /// Append a function, keeping [`DecodedBytecode::body_facts`] current.
+    pub(crate) fn push_function(&mut self, f: HLFunction) {
+        if let Some(facts) = self.body_facts.get_mut() {
+            facts.note(&f);
+        }
+        self.functions.push(f);
+    }
+
     /// Compute a hash for every bytecode function, keyed by findex.
     /// Used for hot-reload diffing: functions with identical hashes are unchanged.
     ///
@@ -1535,6 +1597,48 @@ mod test {
         // }
 
         Ok(())
+    }
+
+    #[test]
+    fn body_facts_record_calls_closures_and_allocations_and_follow_pushes() {
+        use super::DecodedBytecode;
+        use crate::opcodes::{Opcode, RefFun, Reg};
+        use crate::types::{HLFunction, TypeRef};
+
+        let mut caller = HLFunction::with_body(
+            vec![
+                Opcode::Call1 {
+                    dst: Reg(0),
+                    fun: RefFun(7),
+                    arg0: Reg(1),
+                },
+                Opcode::StaticClosure {
+                    dst: Reg(0),
+                    fun: RefFun(9),
+                },
+                Opcode::New { dst: Reg(1) },
+            ],
+            Vec::new(),
+        );
+        caller.regs = vec![TypeRef(0), TypeRef(42)];
+        let mut bc = DecodedBytecode {
+            functions: vec![caller],
+            ..DecodedBytecode::default()
+        };
+        let facts = bc.body_facts();
+        assert!(facts.called.contains(&7) && facts.called.contains(&9));
+        assert!(facts.instantiated.contains(&42));
+        assert!(!facts.called.contains(&11));
+
+        // A function appended once the facts exist is folded in.
+        bc.push_function(HLFunction::with_body(
+            vec![Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(11),
+            }],
+            Vec::new(),
+        ));
+        assert!(bc.body_facts().called.contains(&11));
     }
 }
 

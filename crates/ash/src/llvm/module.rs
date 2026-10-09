@@ -1271,36 +1271,8 @@ impl<'ctx> JITModule<'ctx> {
         // Tree-shaking: only resolve natives that are actually referenced by
         // bytecode functions. Bytecodes declare natives for all possible functions
         // (process, socket, etc.) but only a subset are actually called.
-        let mut needed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-        // Scan all bytecode functions for call opcodes referencing native findexes
-        let native_findex_set: std::collections::HashSet<usize> = self
-            .bytecode
-            .natives
-            .iter()
-            .map(|n| n.findex as usize)
-            .collect();
-
-        for func in &self.bytecode.functions {
-            for op in func.ops() {
-                // Extract referenced findex from call opcodes
-                let findex = match op {
-                    Opcode::Call0 { fun, .. } => Some(fun.0),
-                    Opcode::Call1 { fun, .. } => Some(fun.0),
-                    Opcode::Call2 { fun, .. } => Some(fun.0),
-                    Opcode::Call3 { fun, .. } => Some(fun.0),
-                    Opcode::Call4 { fun, .. } => Some(fun.0),
-                    Opcode::CallN { fun, .. } => Some(fun.0),
-                    Opcode::StaticClosure { fun, .. } => Some(fun.0),
-                    _ => None,
-                };
-                if let Some(fi) = findex {
-                    if native_findex_set.contains(&fi) {
-                        needed.insert(fi);
-                    }
-                }
-            }
-        }
+        let bytecode = std::sync::Arc::clone(&self.bytecode);
+        let needed = &bytecode.body_facts().called;
 
         let natives = self.bytecode.natives.clone();
         let mut resolved = 0;

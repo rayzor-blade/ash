@@ -301,7 +301,11 @@ impl Cache {
                         let ir = &optimized.ir;
                         let ser_view = &optimized.ser;
                         let cell_base = ir.values.len() as u32;
-                        let positions = air::v2::positions::positions_by_pc(ir, ser_view);
+                        let positions = if air::v2::positions::has_markers(ir) {
+                            air::v2::positions::positions_by_pc(ir, ser_view)
+                        } else {
+                            Vec::new()
+                        };
                         let instructions = ir
                             .blocks
                             .iter()
@@ -327,7 +331,20 @@ impl Cache {
                                 .map(|v| TypeRef(v.ty.0 as usize))
                                 .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
                                 .collect(),
-                            debug: crate::air::optimized_debug_from(raw, &ser_view.ops, &positions),
+                            // Positions are emitted directly from the canonical IR.
+                            // A source-free body needs no duplicate debug table.
+                            debug: if positions.iter().any(|p| p.file >= 0) {
+                                positions.iter().flat_map(|p| [p.file, p.line]).collect()
+                            } else if !raw.debug.is_empty() {
+                                // Escape-hatch runs without IR markers still
+                                // need the legacy source alignment for traces.
+                                match optimized.serialized() {
+                                    Ok(ser) => crate::air::optimized_debug(raw, &ser.ops),
+                                    Err(_) => Vec::new(),
+                                }
+                            } else {
+                                Vec::new()
+                            },
                             ..HLFunction::default()
                         };
                         if logging() {
@@ -498,7 +515,10 @@ mod tests {
     fn invalidate_releases_prepared_body_after_its_active_call_returns() {
         let ir = Function::new(Vec::new());
         let ser = air::v2::serialize(&ir).unwrap();
-        let canonical = Arc::new(ash_core::air_pipeline::Optimized { ir, ser });
+        let canonical = Arc::new(ash_core::air_pipeline::Optimized {
+            ir,
+            ser: ser.into(),
+        });
         let weak = Arc::downgrade(&canonical);
         let mut cache = Cache::default();
         cache.bodies.push(Body::Ready(Rc::new(Prepared {
@@ -512,6 +532,12 @@ mod tests {
         })));
         let active = cache.body(0).unwrap();
         assert!(active.osr.get().is_none(), "OSR data must not be eager");
+        // Entry-only promotion retires the cache's reference while an
+        // activation still owns its source and transfer coordinates.
+        cache.forget(0);
+        assert!(cache.body(0).is_none());
+        assert!(cache.needs_prepare(0));
+        assert!(weak.upgrade().is_some());
         cache.invalidate();
         assert!(cache.body(0).is_none());
         assert!(weak.upgrade().is_some(), "active frame still owns its body");

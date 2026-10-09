@@ -84,6 +84,78 @@ pub struct Serialized {
     pub term_pcs: Vec<usize>,
 }
 
+/// Register and PC layout shared by SSA execution and tier transfers.
+///
+/// Flat opcodes are a serialization product, not part of the live SSA body.
+/// This keeps their exact coordinate system without retaining a second body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerializedLayout {
+    pub op_count: usize,
+    pub reg_types: Vec<TypeRef>,
+    pub num_regs: usize,
+    /// i32 constants this serialization needed that the pool may not hold.
+    ///
+    /// `Opcode::Int` names a POOL INDEX, not a value, and a pass cannot mint
+    /// a pool entry -- the inliner documents the same limit. Scalarizing a
+    /// vector needs `k * stride` per lane, so the values are reported here and
+    /// the caller appends them, exactly as `reg_types` already reports
+    /// registers the serializer invented. Indices are assigned as
+    /// `ints.len() + position in this vector`, which is where the caller must
+    /// place them.
+    pub new_ints: Vec<i32>,
+    /// Opcode index where each block's emission begins, indexed by
+    /// [`BlockId`]. For a loop header this is the pc its back-edges target
+    /// (the `Label`, when one was required) — i.e. exactly the pc an
+    /// interpreter running `ops` observes as the jump destination. This is
+    /// what lets an OSR producer turn [`crate::v2::analysis`] block ids into
+    /// entry sites without re-discovering headers by probe timing.
+    pub block_pcs: Vec<usize>,
+    /// Opcode index each instruction is emitted at, indexed by [`BlockId`]
+    /// then position in the block.
+    ///
+    /// `block_pcs` is enough to name a block, which is all a jump target
+    /// needs. A stack trace needs more: it reports the line of the
+    /// instruction that raised, and every instruction in a block would
+    /// otherwise share the block's line.
+    pub instr_pcs: Vec<Vec<usize>>,
+    /// Opcode index each block's terminator is emitted at, indexed by
+    /// [`BlockId`].
+    ///
+    /// A throwing terminator is the only instruction in a block that can raise
+    /// without appearing in `instr_pcs`, so a block whose whole body is
+    /// `throw` had no pc to report and named entry zero of the debug table.
+    pub term_pcs: Vec<usize>,
+}
+
+impl SerializedLayout {
+    pub fn allocated_bytes(&self) -> usize {
+        fn vec_bytes<T>(v: &Vec<T>) -> usize {
+            v.capacity() * std::mem::size_of::<T>() + usize::from(v.capacity() != 0) * 16
+        }
+        std::mem::size_of::<Self>()
+            + vec_bytes(&self.reg_types)
+            + vec_bytes(&self.new_ints)
+            + vec_bytes(&self.block_pcs)
+            + vec_bytes(&self.instr_pcs)
+            + vec_bytes(&self.term_pcs)
+            + self.instr_pcs.iter().map(vec_bytes).sum::<usize>()
+    }
+}
+
+impl From<Serialized> for SerializedLayout {
+    fn from(ser: Serialized) -> Self {
+        Self {
+            op_count: ser.ops.len(),
+            reg_types: ser.reg_types,
+            num_regs: ser.num_regs,
+            new_ints: ser.new_ints,
+            block_pcs: ser.block_pcs,
+            instr_pcs: ser.instr_pcs,
+            term_pcs: ser.term_pcs,
+        }
+    }
+}
+
 impl Serialized {
     pub fn allocated_bytes(&self) -> usize {
         fn vec_bytes<T>(v: &Vec<T>) -> usize {

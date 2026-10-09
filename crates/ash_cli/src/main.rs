@@ -1653,19 +1653,22 @@ fn emit_optimized(
                     part.iter()
                         .map(|f| match ash_core::air_pipeline::optimized(module, f) {
                             Ok(o) => {
+                                let Ok(ser) = o.serialized() else {
+                                    return Outcome::Refused;
+                                };
                                 if f.ops.iter().any(takes_ref) {
                                     Outcome::Pinned
-                                } else if o.ser.ops.iter().any(backward_switch) {
+                                } else if ser.ops.iter().any(backward_switch) {
                                     Outcome::Unencodable
                                 } else {
                                     Outcome::Optimized(
-                                        o.ser.ops.clone(),
+                                        ser.ops,
                                         o.ser
                                             .reg_types
                                             .iter()
                                             .map(|t| TypeRef(t.0 as usize))
                                             .collect(),
-                                        o.ser.new_ints.clone(),
+                                        ser.new_ints,
                                     )
                                 }
                             }

@@ -197,7 +197,13 @@ mod tests {
         .unwrap();
         let header = BlockId(crate::osr::analyze(&ir).entry_headers[0]);
         let ser = serialize(&ir).unwrap();
-        (Arc::new(Optimized { ir, ser }), header)
+        (
+            Arc::new(Optimized {
+                ir,
+                ser: ser.into(),
+            }),
+            header,
+        )
     }
 
     #[test]

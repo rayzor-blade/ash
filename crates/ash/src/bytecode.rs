@@ -249,7 +249,10 @@ impl BytecodeDecoder {
         self.decoded.entrypoint = self.entrypoint;
         self.decoded.has_debug = self.has_debug;
 
-        Ok(self.decoded.clone())
+        // Transfer the decode instead of cloning every opcode and type before
+        // dropping the decoder. The temporary second program inflated startup
+        // allocation and left allocator pages behind.
+        Ok(std::mem::take(&mut self.decoded))
     }
 
     fn read_ints(&mut self, r: &mut impl BufRead) -> Result<Vec<i32>, std::io::Error> {

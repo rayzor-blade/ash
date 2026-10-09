@@ -10,7 +10,38 @@
 
 use super::analysis::CfgInfo;
 use super::ir::{Function, InlineSite, Instr};
-use super::serialize::Serialized;
+use super::serialize::{Serialized, SerializedLayout};
+
+/// The exact emitted coordinate system, with or without a flat opcode body.
+pub trait PositionLayout {
+    fn op_count(&self) -> usize;
+    fn instr_pcs(&self) -> &[Vec<usize>];
+    fn term_pcs(&self) -> &[usize];
+}
+
+impl PositionLayout for Serialized {
+    fn op_count(&self) -> usize {
+        self.ops.len()
+    }
+    fn instr_pcs(&self) -> &[Vec<usize>] {
+        &self.instr_pcs
+    }
+    fn term_pcs(&self) -> &[usize] {
+        &self.term_pcs
+    }
+}
+
+impl PositionLayout for SerializedLayout {
+    fn op_count(&self) -> usize {
+        self.op_count
+    }
+    fn instr_pcs(&self) -> &[Vec<usize>] {
+        &self.instr_pcs
+    }
+    fn term_pcs(&self) -> &[usize] {
+        &self.term_pcs
+    }
+}
 
 /// The position an emitted opcode came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,9 +67,9 @@ impl PcPosition {
 /// A block that opens without a marker -- one a pass minted -- inherits the
 /// position its first already-visited predecessor ended on, which is the
 /// position the code it was split off from had.
-pub fn positions_by_pc(f: &Function, ser: &Serialized) -> Vec<PcPosition> {
+pub fn positions_by_pc(f: &Function, ser: &impl PositionLayout) -> Vec<PcPosition> {
     if !has_markers(f) {
-        return vec![PcPosition::NONE; ser.ops.len()];
+        return vec![PcPosition::NONE; ser.op_count()];
     }
     positions_by_pc_with(f, ser, &CfgInfo::build(f))
 }
@@ -52,8 +83,12 @@ pub fn has_markers(f: &Function) -> bool {
 }
 
 /// [`positions_by_pc`] with a CFG the caller already built.
-pub fn positions_by_pc_with(f: &Function, ser: &Serialized, cfg: &CfgInfo) -> Vec<PcPosition> {
-    let mut out = vec![PcPosition::NONE; ser.ops.len()];
+pub fn positions_by_pc_with(
+    f: &Function,
+    ser: &impl PositionLayout,
+    cfg: &CfgInfo,
+) -> Vec<PcPosition> {
+    let mut out = vec![PcPosition::NONE; ser.op_count()];
     if f.blocks.is_empty() || !has_markers(f) {
         return out;
     }
@@ -81,11 +116,11 @@ pub fn positions_by_pc_with(f: &Function, ser: &Serialized, cfg: &CfgInfo) -> Ve
                 };
                 continue;
             }
-            if let Some(pc) = ser.instr_pcs.get(b.idx()).and_then(|pcs| pcs.get(k)) {
+            if let Some(pc) = ser.instr_pcs().get(b.idx()).and_then(|pcs| pcs.get(k)) {
                 set(*pc, cur);
             }
         }
-        if let Some(pc) = ser.term_pcs.get(b.idx()) {
+        if let Some(pc) = ser.term_pcs().get(b.idx()) {
             set(*pc, cur);
         }
         exit_pos[b.idx()] = Some(cur);

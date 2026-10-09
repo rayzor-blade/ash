@@ -5384,6 +5384,14 @@ fn inlined_code_keeps_the_callee_position_and_names_the_call() {
 
     let ser = serialize(&f).expect("serialize");
     let pos = super::positions::positions_by_pc(&f, &ser);
+    // Source/inline coordinates survive discarding the flat body and
+    // regenerating it later for a flat consumer.
+    let expected_ops = ops_text(&ser.ops);
+    let layout = super::serialize::SerializedLayout::from(ser.clone());
+    assert_eq!(super::positions::positions_by_pc(&f, &layout), pos);
+    let rematerialized = serialize(&f).expect("materialize flat consumer");
+    assert_eq!(ops_text(&rematerialized.ops), expected_ops);
+    assert_eq!(super::serialize::SerializedLayout::from(rematerialized), layout);
     let add_pc = ser
         .ops
         .iter()

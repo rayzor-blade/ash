@@ -110,7 +110,7 @@ impl<'ctx> JITModule<'ctx> {
             let args: Vec<u32> = fun.args.iter().map(|a| types[a.0].kind as u32).collect();
             wanted.insert(signature_key(ret, &args), (ret, args));
         };
-        for ty in &self.types_ {
+        for ty in self.types_.iter() {
             let Some(fun) = ty.fun.as_ref() else { continue };
             record(&mut wanted, fun, &self.types_);
             // A method's closure form -- the same function with `this`

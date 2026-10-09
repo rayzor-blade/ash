@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
                 .enumerate()
                 .map(|(b, &pc)| (pc, b))
                 .collect();
-            for (pc, op) in opt.ser.ops.iter().enumerate() {
+            for (pc, op) in opt.serialized()?.ops.iter().enumerate() {
                 match starts.get(&pc) {
                     Some(b) => println!("b{b:<3} {pc:4}: {op:?}"),
                     None => println!("     {pc:4}: {op:?}"),

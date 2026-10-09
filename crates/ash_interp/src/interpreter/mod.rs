@@ -4767,6 +4767,17 @@ impl HLInterpreter {
             );
         }
         tiered.entries[findex] = Some(entry);
+        // Once entry-only code is installed, the fallback body need not stay
+        // pinned. Running SSA calls keep their own Rc; a future fallback
+        // prepares again. Loop bodies keep their canonical OSR coordinates.
+        let f = &bytecode.functions[func_idx];
+        if !self.osr_attached.contains_key(&findex)
+            && !f.ops.iter().any(|op| {
+                air::opcode_info::jump_offset(op).is_some_and(|d| d < 0)
+            })
+        {
+            self.ssa.forget(func_idx);
+        }
         Some(entry)
     }
 
@@ -7288,6 +7299,8 @@ impl HLInterpreter {
         let buf = self.reg_pool.pop().unwrap_or_default();
         let mut frame =
             InterpreterFrame::with_buffer(func_idx, ir.values.len() + ir.cells.len(), buf);
+        frame.body = &prep.shim;
+        frame.ssa_body = prep;
 
         // A pinned argument register never gets a `Param`: lowering emits those
         // only for registers it promoted to SSA. On the serialize path that is

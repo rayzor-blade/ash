@@ -395,15 +395,16 @@ impl Cache {
         // IR rather than executing: on deltablue that is ~20ms of ~51ms.
         let prepared = {
             let _phase = ash_core::profile::scope("air prepare (main thread)");
-            optimized_with_config(m, raw, cfg).map(|o| {
+            optimized_with_config(m, raw, cfg).and_then(|o| {
                 let positions = air::v2::positions::positions_by_pc(&o.ir, &o.ser);
-                let debug = optimized_debug_from(raw, &o.ser.ops, &positions);
+                let ser = o.serialized()?;
+                let debug = optimized_debug_from(raw, &ser.ops, &positions);
                 let info = InlineInfo {
                     positions: positions.into_boxed_slice(),
                     sites: o.ir.inline_sites.clone().into_boxed_slice(),
                     _canonical: std::sync::Arc::clone(&o),
                 };
-                (o.ser.clone(), debug, info)
+                Ok((ser, debug, info))
             })
         };
         self.bodies[func_idx] = match prepared {

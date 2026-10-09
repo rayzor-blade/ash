@@ -185,11 +185,12 @@ impl HLInterpreter {
                     push(sites, function_index, frame.pc, true, Some((file, line)));
                 }
             };
-            let named = match self.ssa.body(frame.function_index) {
-                Some(prep) => prep.frames_at(frame.pc, &mut visit),
-                None => self
-                    .air
-                    .frames_at(frame.function_index, frame.pc, &mut visit),
+            let named = if !frame.ssa_body.is_null() {
+                // The active call owns this body even after cache retirement
+                // or reload. Looking up by function index can name new code.
+                unsafe { &*frame.ssa_body }.frames_at(frame.pc, &mut visit)
+            } else {
+                self.air.frames_at(frame.function_index, frame.pc, &mut visit)
             };
             if !named {
                 push(sites, frame.function_index, frame.pc, true, None);

@@ -584,11 +584,13 @@ impl<'ctx> JITModule<'ctx> {
         let kind = c_type.kind;
 
         // Find the corresponding Rust type in types_
-        let type_index = self.c_ptr_to_type_index.clone().get(&ptr).unwrap().clone();
+        let type_index = *self.c_ptr_to_type_index.get(&ptr)
+            .ok_or_else(|| anyhow!("Native type pointer has no decoded type index"))?;
 
         // Cycle detection: if already processed or being processed, return early.
         // Check if the type's detail field is already populated.
         let already_processed = match kind {
+            hl_type_kind_HABSTRACT => self.types_[type_index].abs_name.is_some(),
             hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => self.types_[type_index].obj.is_some(),
             hl_type_kind_HFUN | hl_type_kind_HMETHOD => self.types_[type_index].fun.is_some(),
             hl_type_kind_HENUM => self.types_[type_index].tenum.is_some(),

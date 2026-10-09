@@ -127,5 +127,5 @@ pub use module::{
     CalleeBody, ModuleInfo, ModuleTables, NO_MODULE_INFO, NativeImport, NativeTable, NoModuleInfo,
 };
 pub use passes::{OptLevel, Pass, PassManager, PassOptions, PassReport, PassStats};
-pub use serialize::{Serialized, serialize};
+pub use serialize::{Serialized, SerializedLayout, serialize};
 pub use verify::verify;

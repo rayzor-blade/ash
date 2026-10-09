@@ -649,12 +649,40 @@ pub fn fma() -> bool {
 /// That is why an opcode index meant different things in different tiers,
 /// which is a property on-stack replacement needs to hold.
 ///
-/// `ser` includes the pc/register mapping OSR needs and the flat form for
-/// opcode consumers. It is a *product* of the IR, not a stage the IR passes through on
-/// its way to a backend: a backend composes CLIF or LLVM IR from `ir`.
+/// `ser` retains only the exact PC/register mapping OSR needs. Flat opcode
+/// consumers call [`Optimized::serialized`] when needed; no duplicate opcode
+/// array remains pinned by the cache. Native SSA codegen reads `ir`.
 pub struct Optimized {
     pub ir: Function,
-    pub ser: Serialized,
+    pub ser: air::v2::SerializedLayout,
+}
+
+impl Optimized {
+    /// Materialize flat opcodes for the legacy walker, flat codegen or export.
+    /// SSA and native SSA codegen only retain `ser`'s transfer coordinates.
+    /// No second opcode array is pinned by the shared cache.
+    pub fn serialized(&self) -> Result<Serialized, PipelineError> {
+        let result = guard(|| serialize(&self.ir));
+        let fail = |cause: String, panicked: bool| PipelineError {
+            findex: self.ir.findex.map(|i| i as i32).unwrap_or(-1),
+            name: format!("Fun_{:?}", self.ir.findex),
+            stage: Stage::Serialize,
+            cause,
+            panicked,
+        };
+        match result {
+            Ok(Ok(ser)) => {
+                debug_assert_eq!(ser.ops.len(), self.ser.op_count);
+                debug_assert_eq!(ser.block_pcs, self.ser.block_pcs);
+                debug_assert_eq!(ser.instr_pcs, self.ser.instr_pcs);
+                debug_assert_eq!(ser.term_pcs, self.ser.term_pcs);
+                debug_assert_eq!(ser.reg_types, self.ser.reg_types);
+                Ok(ser)
+            }
+            Ok(Err(e)) => Err(fail(format!("{e:#}"), false)),
+            Err(p) => Err(fail(p, true)),
+        }
+    }
 }
 
 /// What a cached entry was produced under.
@@ -975,6 +1003,7 @@ pub fn optimized_with_config(
     let (mut ser, mut ir, _report) = optimize_full(m, f, cfg.level, &opts)?;
     ir.shrink_to_fit();
     ser.shrink_to_fit();
+    let ser = air::v2::SerializedLayout::from(ser);
     let bytes = ir.allocated_bytes() + ser.allocated_bytes();
     let entry = Arc::new(Optimized { ir, ser });
     let mut cache = optimized_cache().lock().expect("air cache poisoned");
@@ -999,7 +1028,7 @@ pub fn cache_report() -> Vec<String> {
         }
     });
     vec![format!(
-        "[air-cache] bodies={bodies} live_bytes={live} resident_bytes={resident} budget_bytes={} hits={} misses={} evictions={} ir_bytes={ir_bytes} serialized_bytes={serialized_bytes} instructions={instructions} markers={markers}",
+        "[air-cache] bodies={bodies} live_bytes={live} resident_bytes={resident} budget_bytes={} hits={} misses={} evictions={} ir_bytes={ir_bytes} layout_bytes={serialized_bytes} instructions={instructions} markers={markers}",
         8 * 1024 * 1024, cache.hits, cache.misses, cache.evictions,
     )]
 }

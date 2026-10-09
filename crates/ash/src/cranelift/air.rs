@@ -169,7 +169,10 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
         func.findex as usize,
         opt.ir.inline_sites.iter().map(|site| site.callee as usize),
     );
-    let s = &opt.ser;
+    let s = match opt.serialized() {
+        Ok(s) => s,
+        Err(e) => return decline(format!("{} failed: {}", e.stage, e.brief())),
+    };
 
     // Re-gate. The passes only ever remove opcodes, but the serializer
     // *normalizes* some (`GetThis` -> `Field`, `CallThis` -> `CallMethod`) and
@@ -204,7 +207,7 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
         );
     }
     Body {
-        ops: Cow::Owned(s.ops.clone()),
+        ops: Cow::Owned(s.ops),
         // v2 indexes the module type table with u32, ash with usize; the
         // values are the same indices.
         regs: Cow::Owned(s.reg_types.iter().map(|t| TypeRef(t.0 as usize)).collect()),

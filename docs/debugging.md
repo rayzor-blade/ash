@@ -111,7 +111,9 @@ AIR caches belong to Rust, outside the GC. Optimized bodies share an 8 MiB
 strong reuse budget; lowered callees share a 2 MiB budget per module across
 its views. An oversized body is served without retaining a strong cache
 reference. Eviction releases unused bodies, while weak entries find the same
-canonical body if an interpreter or compiler still owns it. The SSA walker
+canonical body if an interpreter or compiler still owns it. Flat opcodes are
+materialized only for flat consumers; canonical bodies keep only the register
+and PC layout alongside SSA. The SSA walker
 shares that body and its pc maps, skips source markers through a compact
 instruction index, and builds OSR liveness only when a transfer needs it.
 Invalidation releases retired walker bodies after their last active call.
@@ -122,6 +124,13 @@ must remain available while the program uses them. Counts include vector
 capacity and nested operands with conservative allocation overhead; they
 exclude executable code, GC pages, GPU resources and allocator fragmentation.
 Use an allocation profiler or physical-footprint measurement for those.
+
+LLVM reads an immutable view of the same decoded type table. Reverse native
+type conversion detaches that view only when it needs to fill missing metadata.
+An entry-only function's prepared interpreter body is retired after compiled
+code lands; active calls keep their own owner and loop bodies retain their OSR
+coordinates. `ASH_AIR_CACHE_STATS` reports the retained layout bytes separately
+from the IR, rather than counting discarded flat opcode arrays.
 
 ## Profiling
 

@@ -264,6 +264,9 @@ pub struct InterpreterFrame {
     /// optimized body, and the raw body numbers its opcodes differently.
     /// Null for a frame that has no body of its own (a native call).
     pub body: *const HLFunction,
+    /// Prepared SSA body of this activation. The dispatch caller owns its Rc
+    /// until this frame returns, including while the cache retires its copy.
+    pub ssa_body: *const crate::ssa::Prepared,
     /// Lanes of the vector values this frame holds, by `ValueId`.
     ///
     /// The register file is one `NanBoxedValue` per value and the interpreter
@@ -309,6 +312,7 @@ impl InterpreterFrame {
             },
             pc: 0,
             body: std::ptr::null(),
+            ssa_body: std::ptr::null(),
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,
@@ -332,6 +336,7 @@ impl InterpreterFrame {
             },
             pc: 0,
             body: std::ptr::null(),
+            ssa_body: std::ptr::null(),
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,

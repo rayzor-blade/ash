@@ -41,6 +41,36 @@ unsafe extern "C" {
 
 pub use crate::runtime_handles::{CompiledFunctionMeta, SharedRuntimeHandles};
 
+#[derive(Clone)]
+pub(crate) enum TypeTable {
+    Shared(std::sync::Arc<DecodedBytecode>),
+    // Reverse conversion may fill a missing native type. Detach only then;
+    // ordinary compilation leaves the decoded program immutable and shared.
+    Owned(std::sync::Arc<Vec<HLType>>),
+}
+
+impl std::ops::Deref for TypeTable {
+    type Target = [HLType];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(bc) => &bc.types,
+            Self::Owned(types) => types,
+        }
+    }
+}
+
+impl std::ops::DerefMut for TypeTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if let Self::Shared(bc) = self {
+            *self = Self::Owned(std::sync::Arc::new(bc.types.clone()));
+        }
+        match self {
+            Self::Owned(types) => std::sync::Arc::make_mut(types).as_mut_slice(),
+            Self::Shared(_) => unreachable!("shared table detached above"),
+        }
+    }
+}
+
 pub struct JITModule<'ctx> {
     pub(crate) context: &'ctx Context,
     /// ABI of the code being produced. JITs use the host; AOT may select a
@@ -59,7 +89,7 @@ pub struct JITModule<'ctx> {
     pub(crate) builder: Builder<'ctx>,
     pub(crate) execution_engine: ExecutionEngine<'ctx>,
     pub(crate) bytecode: std::sync::Arc<DecodedBytecode>,
-    pub(crate) types_: Vec<HLType>,
+    pub(crate) types_: TypeTable,
     /// Which classes the program allocates, for the ahead-of-time
     /// devirtualisation guess; built on first use.
     pub(crate) reachable_targets: std::cell::OnceCell<crate::devirt::ReachableTargets>,
@@ -462,8 +492,9 @@ impl<'ctx> JITModule<'ctx> {
 
         let native_function_resolver = NativeFunctionResolver::new();
 
-        let types_ = bytecode.types.clone();
-        phase_timer!(timing, "resolver+types clone", t);
+        let bytecode = std::sync::Arc::new(bytecode);
+        let types_ = TypeTable::Shared(std::sync::Arc::clone(&bytecode));
+        phase_timer!(timing, "resolver+types view", t);
         t = std::time::Instant::now();
 
         let mut module = JITModule {
@@ -474,7 +505,7 @@ impl<'ctx> JITModule<'ctx> {
             module,
             builder: context.create_builder(),
             execution_engine,
-            bytecode: std::sync::Arc::new(bytecode),
+            bytecode,
             type_cache: HashMap::new(),
             initialized_type_cache: HashMap::new(),
             name_to_findex: None,
@@ -924,7 +955,7 @@ impl<'ctx> JITModule<'ctx> {
         t = std::time::Instant::now();
 
         let native_function_resolver = NativeFunctionResolver::new();
-        let types_ = bytecode.types.clone();
+        let types_ = TypeTable::Shared(std::sync::Arc::clone(&bytecode));
 
         let mut module = JITModule {
             context,
@@ -2328,5 +2359,29 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.build_store(alloca, struct_value);
 
         Ok(alloca)
+    }
+}
+
+#[cfg(test)]
+mod type_table_tests {
+    use super::*;
+
+    #[test]
+    fn type_view_shares_until_native_conversion_needs_a_change() {
+        let bc = std::sync::Arc::new(DecodedBytecode {
+            types: vec![HLType::default()],
+            ..DecodedBytecode::default()
+        });
+        let mut table = TypeTable::Shared(std::sync::Arc::clone(&bc));
+        let snapshot = table.clone();
+        assert_eq!(table.as_ptr(), bc.types.as_ptr());
+        assert_eq!(snapshot.as_ptr(), table.as_ptr());
+        table[0].abs_name = Some("native".into());
+        assert!(bc.types[0].abs_name.is_none());
+        assert!(snapshot[0].abs_name.is_none());
+        let second = table.clone();
+        table[0].abs_name = Some("changed".into());
+        assert_eq!(second[0].abs_name.as_deref(), Some("native"));
+        assert_eq!(table[0].abs_name.as_deref(), Some("changed"));
     }
 }

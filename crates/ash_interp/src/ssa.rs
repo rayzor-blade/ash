@@ -334,39 +334,37 @@ impl Cache {
                             .collect();
                         // Construct a type view directly: cloning raw would
                         // copy its opcodes/debug table only to discard them.
-                        let shim = HLFunction {
-                            type_: raw.type_.clone(),
-                            findex: raw.findex,
-                            ref_: raw.ref_,
-                            field_name: raw.field_name.clone(),
-                            regs: ir
-                                .values
-                                .iter()
-                                .map(|v| TypeRef(v.ty.0 as usize))
-                                .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
-                                .collect(),
-                            // Positions are emitted directly from the canonical IR.
-                            // A source-free body needs no duplicate debug table.
-                            debug: if positions.iter().any(|p| p.file >= 0) {
-                                positions.iter().flat_map(|p| [p.file, p.line]).collect()
-                            } else if !raw.debug.is_empty() {
-                                // Escape-hatch runs without IR markers still
-                                // need the legacy source alignment for traces.
-                                match optimized.serialized() {
-                                    Ok(ser) => crate::air::optimized_debug(raw, &ser.ops),
-                                    Err(_) => Vec::new(),
-                                }
-                            } else {
-                                Vec::new()
-                            },
-                            ..HLFunction::default()
+                        // Positions are emitted directly from the canonical IR.
+                        // A source-free body needs no duplicate debug table.
+                        let debug = if positions.iter().any(|p| p.file >= 0) {
+                            positions.iter().flat_map(|p| [p.file, p.line]).collect()
+                        } else if !raw.debug().is_empty() {
+                            // Escape-hatch runs without IR markers still
+                            // need the legacy source alignment for traces.
+                            match optimized.serialized() {
+                                Ok(ser) => crate::air::optimized_debug(raw, &ser.ops),
+                                Err(_) => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
                         };
+                        let mut shim = HLFunction::with_body(Vec::new(), debug);
+                        shim.type_ = raw.type_.clone();
+                        shim.findex = raw.findex;
+                        shim.ref_ = raw.ref_;
+                        shim.field_name = raw.field_name.clone();
+                        shim.regs = ir
+                            .values
+                            .iter()
+                            .map(|v| TypeRef(v.ty.0 as usize))
+                            .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
+                            .collect();
                         if logging() {
                             eprintln!(
                                 "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",
                                 raw.findex,
                                 raw.name(),
-                                raw.ops.len(),
+                                raw.ops().len(),
                                 ir.values.len(),
                                 ir.cells.len(),
                                 ir.blocks.len()

@@ -4119,7 +4119,7 @@ impl<'ctx> JITModule<'ctx> {
         for (findex, fv) in cache {
             let has_trap = match self.findexes.get(findex) {
                 Some(FuncPtr::Fun(i)) => self.bytecode.functions[*i]
-                    .ops
+                    .ops()
                     .iter()
                     .any(|op| matches!(op, Opcode::Trap { .. } | Opcode::EndTrap { .. })),
                 _ => false,

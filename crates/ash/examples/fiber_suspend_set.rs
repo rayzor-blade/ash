@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
     let mut virtual_slots: Vec<HashSet<i32>> = vec![HashSet::new(); bc.functions.len()];
     let mut calls_closure = vec![false; bc.functions.len()];
     for (i, f) in bc.functions.iter().enumerate() {
-        for op in &f.ops {
+        for op in f.ops() {
             match op {
                 Opcode::Call0 { fun, .. }
                 | Opcode::Call1 { fun, .. }

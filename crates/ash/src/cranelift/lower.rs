@@ -65,7 +65,7 @@ pub fn lowering_reject_reason(
     bytecode: &crate::bytecode::DecodedBytecode,
     func: &HLFunction,
 ) -> Option<String> {
-    reject_reason_for_ops(bytecode, func, &func.ops)
+    reject_reason_for_ops(bytecode, func, func.ops())
 }
 
 /// [`lowering_reject_reason`] against an opcode array that is not the

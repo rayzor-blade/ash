@@ -31,10 +31,10 @@ fn main() -> anyhow::Result<()> {
         for f in &bc.functions {
             if air_pipeline::interpreter_config_for(f) == AirConfigKey::standard() {
                 loops += 1;
-                loop_ops += f.ops.len();
+                loop_ops += f.ops().len();
             } else {
                 flat += 1;
-                flat_ops += f.ops.len();
+                flat_ops += f.ops().len();
             }
         }
         let total = loops + flat;

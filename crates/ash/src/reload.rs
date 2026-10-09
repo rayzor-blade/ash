@@ -490,7 +490,7 @@ fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(),
         at: &dyn Fn(usize) -> usize,
         rebase: &dyn Fn(&mut u32),
     ) {
-        for op in &mut f.ops {
+        for op in f.ops_mut() {
             match op {
                 crate::opcodes::Opcode::GetGlobal { global, .. }
                 | crate::opcodes::Opcode::SetGlobal { global, .. } => global.0 = at(global.0),
@@ -757,10 +757,9 @@ mod tests {
             });
             next += 1;
         }
-        bc.functions = vec![HLFunction {
-            ops,
-            ..Default::default()
-        }];
+        let mut function = HLFunction::default();
+        function.set_ops(ops);
+        bc.functions = vec![function];
         bc
     }
 
@@ -771,7 +770,7 @@ mod tests {
 
     fn reads(bc: &DecodedBytecode) -> Vec<usize> {
         bc.functions[0]
-            .ops
+            .ops()
             .iter()
             .map(|op| match op {
                 Opcode::GetGlobal { global, .. } => global.0,

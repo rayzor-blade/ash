@@ -103,7 +103,7 @@ impl<'ctx> JITModule<'ctx> {
             .map(|v| TypeRef(v.ty.0 as usize))
             .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
             .collect();
-        lowering.ops.clear();
+        lowering.ops_mut().clear();
         lowering
     }
 

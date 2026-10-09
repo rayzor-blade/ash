@@ -35,13 +35,13 @@ fn retype_narrow_reads(bc: &mut DecodedBytecode) -> usize {
         kind == hl_type_kind_HBOOL || kind == hl_type_kind_HUI8 || kind == hl_type_kind_HUI16
     };
     for f in &mut bc.functions {
-        for i in 0..f.ops.len().saturating_sub(1) {
-            let read_dst = match &f.ops[i] {
+        for i in 0..f.ops().len().saturating_sub(1) {
+            let read_dst = match &f.ops()[i] {
                 Opcode::DynGet { dst, .. } => *dst,
                 Opcode::GetI8 { dst, .. } | Opcode::GetI16 { dst, .. } => *dst,
                 _ => continue,
             };
-            let narrow = match &f.ops[i + 1] {
+            let narrow = match &f.ops()[i + 1] {
                 Opcode::SafeCast { dst, src } | Opcode::ToInt { dst, src } if *src == read_dst => {
                     *dst
                 }
@@ -52,13 +52,13 @@ fn retype_narrow_reads(bc: &mut DecodedBytecode) -> usize {
             }
             // Haxe reuses registers, so the wide one keeps its type and its
             // other uses; the read simply targets the narrow register.
-            match &mut f.ops[i] {
+            match &mut f.ops_mut()[i] {
                 Opcode::DynGet { dst, .. }
                 | Opcode::GetI8 { dst, .. }
                 | Opcode::GetI16 { dst, .. } => *dst = narrow,
                 _ => unreachable!(),
             }
-            f.ops[i + 1] = Opcode::Nop;
+            f.ops_mut()[i + 1] = Opcode::Nop;
             changed += 1;
         }
     }
@@ -71,12 +71,12 @@ fn retype_narrow_reads(bc: &mut DecodedBytecode) -> usize {
 fn retype_int_into_i64(bc: &mut DecodedBytecode) -> usize {
     let mut changed = 0;
     for f in &mut bc.functions {
-        for i in 0..f.ops.len().saturating_sub(1) {
-            let Opcode::Int { dst: int_dst, .. } = &f.ops[i] else {
+        for i in 0..f.ops().len().saturating_sub(1) {
+            let Opcode::Int { dst: int_dst, .. } = &f.ops()[i] else {
                 continue;
             };
             let int_dst = *int_dst;
-            let Opcode::ToInt { dst: wide, src } = &f.ops[i + 1] else {
+            let Opcode::ToInt { dst: wide, src } = &f.ops()[i + 1] else {
                 continue;
             };
             let (wide, src) = (*wide, *src);
@@ -86,10 +86,10 @@ fn retype_int_into_i64(bc: &mut DecodedBytecode) -> usize {
             if bc.types[f.regs[wide.0 as usize].0].kind != hl_type_kind_HI64 {
                 continue;
             }
-            if let Opcode::Int { dst, .. } = &mut f.ops[i] {
+            if let Opcode::Int { dst, .. } = &mut f.ops_mut()[i] {
                 *dst = wide;
             }
-            f.ops[i + 1] = Opcode::Nop;
+            f.ops_mut()[i + 1] = Opcode::Nop;
             changed += 1;
         }
     }

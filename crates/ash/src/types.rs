@@ -261,15 +261,48 @@ pub struct HLNative {
 pub struct HLFunction {
     pub type_: TypeRef,
     pub findex: i32,
-    pub ops: Vec<Opcode>,
+    /// Reached through [`HLFunction::ops`], so a body can be decoded on first
+    /// use.
+    ops: Vec<Opcode>,
     pub regs: Vec<TypeRef>,
-    pub debug: Vec<i32>,
+    /// `(file, line)` per op, flattened. Reached through
+    /// [`HLFunction::debug`].
+    debug: Vec<i32>,
     pub ref_: i32,
     pub obj: Option<HLTypeObj>,
     pub field_name: Option<String>,
     pub field_ref: Option<Box<HLFunction>>,
 }
 impl HLFunction {
+    /// A function with this body and every other field at its default.
+    pub fn with_body(ops: Vec<Opcode>, debug: Vec<i32>) -> Self {
+        HLFunction {
+            ops,
+            debug,
+            ..HLFunction::default()
+        }
+    }
+
+    pub fn ops(&self) -> &[Opcode] {
+        &self.ops
+    }
+
+    pub fn ops_mut(&mut self) -> &mut Vec<Opcode> {
+        &mut self.ops
+    }
+
+    pub fn set_ops(&mut self, ops: Vec<Opcode>) {
+        self.ops = ops;
+    }
+
+    pub fn debug(&self) -> &[i32] {
+        &self.debug
+    }
+
+    pub fn set_debug(&mut self, debug: Vec<i32>) {
+        self.debug = debug;
+    }
+
     pub fn name(&self) -> String {
         self.field_name
             .clone()

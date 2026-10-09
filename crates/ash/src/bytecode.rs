@@ -598,10 +598,10 @@ impl BytecodeDecoder {
                 let opcode = self.read_opcode(r)?;
                 ops.insert(i, opcode);
             }
-            fun.ops = ops;
+            fun.set_ops(ops);
 
             if (self.has_debug) {
-                fun.debug = self.read_debug_infos(r, nops as usize)?;
+                fun.set_debug(self.read_debug_infos(r, nops as usize)?);
 
                 if self.version >= 3 {
                     // skip assigns (no need here)
@@ -1325,7 +1325,7 @@ impl DecodedBytecode {
             .iter()
             .map(|f| {
                 let mut h = f.compute_hash();
-                for op in &f.ops {
+                for op in f.ops() {
                     match op {
                         Opcode::Int { ptr, .. } => {
                             if let Some(v) = self.ints.get(ptr.0) {

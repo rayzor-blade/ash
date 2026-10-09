@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     let needle = format!("RefFun({want})");
     for f in &bc.functions {
-        for (pc, op) in f.ops.iter().enumerate() {
+        for (pc, op) in f.ops().iter().enumerate() {
             let s = format!("{op:?}");
             if s.contains(&needle) {
                 println!("caller findex={} {} pc={pc}: {s}", f.findex, f.name());

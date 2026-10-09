@@ -176,7 +176,7 @@ pub fn analyze(bc: &DecodedBytecode) -> Reachability {
                 }
             };
 
-            for op in &f.ops {
+            for op in f.ops() {
                 match op {
                     Opcode::Call0 { fun, .. }
                     | Opcode::Call1 { fun, .. }
@@ -350,7 +350,7 @@ fn dispatch(
 pub fn why(bc: &DecodedBytecode, target: i32) -> Vec<String> {
     let mut out = Vec::new();
     for f in &bc.functions {
-        for (i, op) in f.ops.iter().enumerate() {
+        for (i, op) in f.ops().iter().enumerate() {
             let named = match op {
                 Opcode::Call0 { fun, .. }
                 | Opcode::Call1 { fun, .. }

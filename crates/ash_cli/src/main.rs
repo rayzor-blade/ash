@@ -1656,7 +1656,7 @@ fn emit_optimized(
                                 let Ok(ser) = o.serialized() else {
                                     return Outcome::Refused;
                                 };
-                                if f.ops.iter().any(takes_ref) {
+                                if f.ops().iter().any(takes_ref) {
                                     Outcome::Pinned
                                 } else if ser.ops.iter().any(backward_switch) {
                                     Outcome::Unencodable
@@ -1707,11 +1707,11 @@ fn emit_optimized(
                         }
                     }
                 }
-                f.ops = ops;
+                f.set_ops(ops);
                 f.regs = regs;
                 // The mapping the old body carried does not describe the new
                 // one, and the encoder writes no debug section regardless.
-                f.debug.clear();
+                f.set_debug(Vec::new());
                 done += 1;
             }
             Outcome::Refused => refused += 1,

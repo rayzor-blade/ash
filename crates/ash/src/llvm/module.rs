@@ -683,7 +683,7 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .find(|function| function.findex as usize == findex)
         {
-            for op in &function.ops {
+            for op in function.ops() {
                 match op {
                     Opcode::Int { ptr, .. } => {
                         ints.insert(ptr.0);
@@ -1282,7 +1282,7 @@ impl<'ctx> JITModule<'ctx> {
             .collect();
 
         for func in &self.bytecode.functions {
-            for op in &func.ops {
+            for op in func.ops() {
                 // Extract referenced findex from call opcodes
                 let findex = match op {
                     Opcode::Call0 { fun, .. } => Some(fun.0),

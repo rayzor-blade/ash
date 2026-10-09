@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
         for (x, y) in a.functions.iter().zip(b.functions.iter()) {
             if x.findex != y.findex
                 || x.regs.len() != y.regs.len()
-                || format!("{:?}", x.ops) != format!("{:?}", y.ops)
+                || format!("{:?}", x.ops()) != format!("{:?}", y.ops())
             {
                 opdiff += 1;
             }

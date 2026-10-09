@@ -207,11 +207,11 @@ impl<'b> Encoder<'b> {
             self.type_ref(&f.type_);
             self.var_u(f.findex as u32);
             self.var_u(f.regs.len() as u32);
-            self.var_u(f.ops.len() as u32);
+            self.var_u(f.ops().len() as u32);
             for r in &f.regs {
                 self.type_ref(r);
             }
-            for op in &f.ops {
+            for op in f.ops() {
                 self.opcode(op)?;
             }
             // No debug infos and no assigns: see the module comment.

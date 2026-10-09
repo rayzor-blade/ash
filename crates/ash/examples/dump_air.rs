@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         let bc = ash_core::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
         for f in &bc.functions {
             let mut locations = Vec::new();
-            for pair in f.debug.as_chunks::<2>().0 {
+            for pair in f.debug().as_chunks::<2>().0 {
                 let file = bc
                     .debug_files
                     .get(pair[0] as usize)
@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         println!("signature type[{}] = {:#?}", f.type_.0, bc.types[f.type_.0]);
         if with_debug {
             let mut locations = Vec::new();
-            for pair in f.debug.as_chunks::<2>().0 {
+            for pair in f.debug().as_chunks::<2>().0 {
                 let file = bc
                     .debug_files
                     .get(pair[0] as usize)

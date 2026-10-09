@@ -84,8 +84,8 @@ impl<'ctx> JITModule<'ctx> {
         }
         let entry = crate::jit_map::intern_chain(vec![SourceFrame {
             findex: f.findex as u32,
-            file: f.debug.first().copied().map_or(u32::MAX, |v| v as u32),
-            line: f.debug.get(1).copied().map_or(0, |v| v as u32),
+            file: f.debug().first().copied().map_or(u32::MAX, |v| v as u32),
+            line: f.debug().get(1).copied().map_or(0, |v| v as u32),
         }]);
         let lines = self.lines.as_mut().expect("lines just created");
         let ty = lines

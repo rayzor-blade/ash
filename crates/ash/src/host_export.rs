@@ -174,7 +174,7 @@ impl DecodedBytecode {
                 .functions
                 .iter()
                 .find(|f| f.findex as usize == e.findex)
-                .map(|stub| (stub.type_.clone(), stub.regs.clone(), stub.ops.clone()))
+                .map(|stub| (stub.type_.clone(), stub.regs.clone(), stub.ops().to_vec()))
                 .expect("an instance export has a bytecode stub");
             if !matches!(ops.first(), Some(Opcode::NullCheck { reg: Reg(0) })) {
                 continue;
@@ -752,17 +752,13 @@ impl DecodedBytecode {
         } else {
             Vec::new()
         };
-        self.functions.push(HLFunction {
-            type_,
-            findex,
-            ops,
-            regs,
-            debug,
-            ref_: 0,
-            obj: None,
-            field_name: None,
-            field_ref: None,
-        });
+        let mut function = HLFunction::default();
+        function.type_ = type_;
+        function.findex = findex;
+        function.regs = regs;
+        function.set_ops(ops);
+        function.set_debug(debug);
+        self.functions.push(function);
         findex as usize
     }
 }

@@ -1304,7 +1304,7 @@ impl<'ctx> JITModule<'ctx> {
             // lets Reflect.fields name a field that only ever existed on a
             // Dynamic (haxe.rtti.Meta's objects, JSON-parsed objects).
             for f in &self.bytecode.functions {
-                for op in &f.ops {
+                for op in f.ops() {
                     match op {
                         crate::opcodes::Opcode::DynGet { field, .. }
                         | crate::opcodes::Opcode::DynSet { field, .. } => {
@@ -1389,7 +1389,7 @@ impl<'ctx> JITModule<'ctx> {
                 // function reported a line in ArrayBase.hx, which the renderer
                 // then anchored a report on. A body that opens without a
                 // position gets none, and its frame stays unlocated.
-                let Some(found) = f.debug.get(..2).filter(|e| e[0] >= 0 && e[1] > 0) else {
+                let Some(found) = f.debug().get(..2).filter(|e| e[0] >= 0 && e[1] > 0) else {
                     continue;
                 };
                 // `file + 1`, so that a packed position is never 0 for a body

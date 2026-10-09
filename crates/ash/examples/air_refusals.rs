@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
             refused += 1;
 
             let (mut r, mut inc, mut dec, mut trap) = (false, false, false, false);
-            for op in &f.ops {
+            for op in f.ops() {
                 match op {
                     Opcode::Ref { .. } => r = true,
                     Opcode::Incr { .. } => inc = true,
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
                 "REFUSED f{} {} ops={} stage={} [ref={} incr={} decr={} trap={}] {}",
                 e.findex,
                 e.name,
-                f.ops.len(),
+                f.ops().len(),
                 e.stage,
                 r,
                 inc,

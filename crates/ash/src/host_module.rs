@@ -499,7 +499,7 @@ impl DecodedBytecode {
             return;
         };
         let Some(call_at) = self.functions[entry]
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, Opcode::Call0 { fun, .. } if fun.0 == init))
         else {
@@ -560,18 +560,14 @@ impl DecodedBytecode {
         } else {
             Vec::new()
         };
-        self.functions.push(HLFunction {
-            type_: TypeRef(fun_t),
-            findex,
-            ops,
-            regs,
-            debug,
-            ref_: 0,
-            obj: None,
-            field_name: None,
-            field_ref: None,
-        });
-        if let Opcode::Call0 { fun, .. } = &mut self.functions[entry].ops[call_at] {
+        let mut function = HLFunction::default();
+        function.type_ = TypeRef(fun_t);
+        function.findex = findex;
+        function.regs = regs;
+        function.set_ops(ops);
+        function.set_debug(debug);
+        self.functions.push(function);
+        if let Opcode::Call0 { fun, .. } = &mut self.functions[entry].ops_mut()[call_at] {
             *fun = RefFun(findex as usize);
         }
     }

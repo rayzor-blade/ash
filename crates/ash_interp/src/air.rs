@@ -144,7 +144,7 @@ pub(crate) fn optimized_debug_from(
 
 pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
     let before: Vec<(usize, StackEvent)> = raw
-        .ops
+        .ops()
         .iter()
         .enumerate()
         .filter_map(|(pc, op)| stack_event(op).map(|event| (pc, event)))
@@ -174,9 +174,9 @@ pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
     while i < before.len() && j < after.len() {
         if before[i].1 == after[j].1 {
             let (raw_pc, opt_pc) = (before[i].0, after[j].0);
-            if raw_pc * 2 + 1 < raw.debug.len() {
-                debug[opt_pc * 2] = raw.debug[raw_pc * 2];
-                debug[opt_pc * 2 + 1] = raw.debug[raw_pc * 2 + 1];
+            if raw_pc * 2 + 1 < raw.debug().len() {
+                debug[opt_pc * 2] = raw.debug()[raw_pc * 2];
+                debug[opt_pc * 2 + 1] = raw.debug()[raw_pc * 2 + 1];
             }
             i += 1;
             j += 1;
@@ -207,9 +207,9 @@ pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
             continue;
         }
         for (&raw_pc, &opt_pc) in raw_pcs.iter().zip(opt_pcs) {
-            if raw_pc * 2 + 1 < raw.debug.len() {
-                debug[opt_pc * 2] = raw.debug[raw_pc * 2];
-                debug[opt_pc * 2 + 1] = raw.debug[raw_pc * 2 + 1];
+            if raw_pc * 2 + 1 < raw.debug().len() {
+                debug[opt_pc * 2] = raw.debug()[raw_pc * 2];
+                debug[opt_pc * 2 + 1] = raw.debug()[raw_pc * 2 + 1];
             }
         }
     }
@@ -289,7 +289,7 @@ pub(crate) fn skip_loop_free() -> bool {
 /// could differ in the last bit.
 pub(crate) fn may_fuse(bc: &DecodedBytecode, f: &HLFunction) -> bool {
     ash_core::air_pipeline::fma()
-        && f.ops.iter().any(|op| match op {
+        && f.ops().iter().any(|op| match op {
             Opcode::Mul { dst, .. } => f
                 .regs
                 .get(dst.0 as usize)
@@ -303,7 +303,7 @@ pub(crate) fn may_fuse(bc: &DecodedBytecode, f: &HLFunction) -> bool {
 }
 
 pub(crate) fn has_back_edge(f: &HLFunction) -> bool {
-    f.ops.iter().any(|op| match op {
+    f.ops().iter().any(|op| match op {
         Opcode::Switch { offsets, end, .. } => *end < 0 || offsets.iter().any(|offset| *offset < 0),
         _ => air::opcode_info::jump_offset(op).is_some_and(|offset| offset < 0),
     })
@@ -432,28 +432,28 @@ impl Cache {
             Ok((ser, debug, info)) => {
                 let minted: Box<[i32]> = ser.new_ints.clone().into_boxed_slice();
                 let mut opt = raw.clone();
-                opt.ops = ser.ops;
+                opt.set_ops(ser.ops);
                 // air numbers types with u32, ash with usize; same indices.
                 opt.regs = ser
                     .reg_types
                     .iter()
                     .map(|t| TypeRef(t.0 as usize))
                     .collect();
-                opt.debug = debug;
+                opt.set_debug(debug);
                 if logging() {
                     eprintln!(
                         "[air] findex={} {} ops {} -> {} regs {} -> {}",
                         raw.findex,
                         raw.name(),
-                        raw.ops.len(),
-                        opt.ops.len(),
+                        raw.ops().len(),
+                        opt.ops().len(),
                         raw.regs.len(),
                         opt.regs.len()
                     );
                 }
                 if dump_findex() == Some(raw.findex) {
                     eprintln!("[air] === findex={} {} raw ===", raw.findex, raw.name());
-                    for (i, op) in raw.ops.iter().enumerate() {
+                    for (i, op) in raw.ops().iter().enumerate() {
                         eprintln!("[air] raw {i:4}  {op:?}");
                     }
                     eprintln!(
@@ -461,9 +461,9 @@ impl Cache {
                         raw.findex,
                         raw.name()
                     );
-                    for (i, op) in opt.ops.iter().enumerate() {
-                        let file = opt.debug.get(i * 2).copied().unwrap_or(-1);
-                        let line = opt.debug.get(i * 2 + 1).copied().unwrap_or(0);
+                    for (i, op) in opt.ops().iter().enumerate() {
+                        let file = opt.debug().get(i * 2).copied().unwrap_or(-1);
+                        let line = opt.debug().get(i * 2 + 1).copied().unwrap_or(0);
                         eprintln!("[air] opt {i:4}  debug={file}:{line}  {op:?}");
                     }
                 }
@@ -563,10 +563,7 @@ mod tests {
 
     #[test]
     fn preparation_keeps_backward_conditional_and_switch_edges() {
-        let body = |op| HLFunction {
-            ops: vec![op],
-            ..HLFunction::default()
-        };
+        let body = |op| HLFunction::with_body(vec![op], Vec::new());
         assert!(!has_back_edge(&body(Opcode::JAlways { offset: 0 })));
         assert!(!has_back_edge(&body(Opcode::JFalse {
             cond: Reg(0),
@@ -596,8 +593,8 @@ mod tests {
 
     #[test]
     fn stack_event_debug_survives_block_reordering() {
-        let raw = HLFunction {
-            ops: vec![
+        let raw = HLFunction::with_body(
+            vec![
                 Opcode::Call0 {
                     dst: Reg(0),
                     fun: RefFun(10),
@@ -609,9 +606,8 @@ mod tests {
                     fun: RefFun(11),
                 },
             ],
-            debug: vec![1, 10, 1, 20, 1, 21, 1, 30],
-            ..HLFunction::default()
-        };
+            vec![1, 10, 1, 20, 1, 21, 1, 30],
+        );
         let optimized = vec![
             Opcode::Throw { exc: Reg(0) },
             Opcode::Throw { exc: Reg(0) },

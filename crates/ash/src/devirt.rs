@@ -23,7 +23,7 @@ impl ReachableTargets {
         let n = bc.types.len();
         let mut instantiated = vec![false; n];
         for f in &bc.functions {
-            for op in &f.ops {
+            for op in f.ops() {
                 if let Opcode::New { dst } = op {
                     if let Some(&TypeRef(t)) = f.regs.get(dst.0 as usize) {
                         if t < n {

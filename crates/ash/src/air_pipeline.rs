@@ -371,7 +371,7 @@ impl AshModule<'_> {
         let f = self.function(findex)?;
         let bare = self.without_callees_view();
         let mut body =
-            air::v2::lower::lower_with_positions(&f.ops, &reg_types_of(f), &bare, positions_of(f))
+            air::v2::lower::lower_with_positions(f.ops(), &reg_types_of(f), &bare, positions_of(f))
                 .ok()?;
         body.shrink_to_fit();
         let bytes = body.allocated_bytes();
@@ -596,7 +596,7 @@ pub fn trace_positions() -> bool {
 /// The per-op positions `f` lowers with: its debug table when something will
 /// read them, nothing otherwise.
 fn positions_of(f: &HLFunction) -> Option<&[i32]> {
-    trace_positions().then(|| f.debug.as_slice())
+    trace_positions().then(|| f.debug())
 }
 
 /// The one optimization level, from `ASH_AIR_LEVEL`.
@@ -882,7 +882,7 @@ pub fn note_osr_demand(findex: i32) -> bool {
 }
 
 fn has_opcode(f: &HLFunction, pred: impl Fn(&air::opcodes::Opcode) -> bool) -> bool {
-    f.ops.iter().any(pred)
+    f.ops().iter().any(pred)
 }
 
 /// The configuration the interpreter walks `f` under, and the one every OSR
@@ -908,7 +908,7 @@ pub fn interpreter_config_for(f: &HLFunction) -> AirConfigKey {
         return AirConfigKey::interpreter();
     }
     let has_back_edge = f
-        .ops
+        .ops()
         .iter()
         .any(|op| air::opcode_info::jump_offset(op).is_some_and(|d| d < 0));
     let shared = match interp_policy() {
@@ -1148,7 +1148,7 @@ pub fn optimize_full(
 
     let mut ir = stage!(
         Stage::Lower,
-        lower_with_positions(&f.ops, &reg_types_of(f), m, positions_of(f))
+        lower_with_positions(f.ops(), &reg_types_of(f), m, positions_of(f))
     )
     .with_findex(f.findex as usize);
 
@@ -1202,7 +1202,7 @@ pub fn prepare_ir(
 
     let mut ir = stage!(
         Stage::Lower,
-        lower_with_positions(&f.ops, &reg_types_of(f), m, positions_of(f))
+        lower_with_positions(f.ops(), &reg_types_of(f), m, positions_of(f))
     )
     .with_findex(f.findex as usize);
 
@@ -1337,7 +1337,7 @@ pub fn trip(m: &AshModule, f: &HLFunction, level: OptLevel, opts: &PassOptions) 
     let mut t = Trip {
         findex: f.findex,
         name: f.name(),
-        ops_in: f.ops.len(),
+        ops_in: f.ops().len(),
         regs_in: f.regs.len(),
         identity: None,
         optimized: None,
@@ -1354,7 +1354,7 @@ pub fn trip(m: &AshModule, f: &HLFunction, level: OptLevel, opts: &PassOptions) 
     };
 
     // 1. lower
-    let lowered = match guard(|| lower_with_positions(&f.ops, &reg_types_of(f), m, positions_of(f)))
+    let lowered = match guard(|| lower_with_positions(f.ops(), &reg_types_of(f), m, positions_of(f)))
     {
         Ok(Ok(ir)) => ir.with_findex(f.findex as usize),
         Ok(Err(e)) => {
@@ -1385,8 +1385,8 @@ pub fn trip(m: &AshModule, f: &HLFunction, level: OptLevel, opts: &PassOptions) 
     match guard(|| serialize(&lowered)) {
         Ok(Ok(s)) => {
             t.identity = Some((s.ops.len(), s.num_regs));
-            if s.ops.len() < f.ops.len() {
-                t.identity_kind_delta = kind_delta(&f.ops, &s.ops);
+            if s.ops.len() < f.ops().len() {
+                t.identity_kind_delta = kind_delta(f.ops(), &s.ops);
             }
         }
         Ok(Err(e)) => {
@@ -1752,10 +1752,10 @@ pub fn dump(bc: &DecodedBytecode, findex: i32, level: OptLevel, opts: &PassOptio
         "findex={} {} ops={} regs={}",
         f.findex,
         f.name(),
-        f.ops.len(),
+        f.ops().len(),
         f.regs.len()
     )];
-    for (i, op) in f.ops.iter().enumerate() {
+    for (i, op) in f.ops().iter().enumerate() {
         out.push(format!("  in {i:>4}  {op:?}"));
     }
 

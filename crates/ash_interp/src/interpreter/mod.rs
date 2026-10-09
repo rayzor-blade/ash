@@ -4772,7 +4772,7 @@ impl HLInterpreter {
         // prepares again. Loop bodies keep their canonical OSR coordinates.
         let f = &bytecode.functions[func_idx];
         if !self.osr_attached.contains_key(&findex)
-            && !f.ops.iter().any(|op| {
+            && !f.ops().iter().any(|op| {
                 air::opcode_info::jump_offset(op).is_some_and(|d| d < 0)
             })
         {
@@ -5025,11 +5025,11 @@ impl HLInterpreter {
         {
             return Err("name_blacklisted".to_string());
         }
-        if config.min_ops_for_promotion > 0 && func.ops.len() < config.min_ops_for_promotion {
+        if config.min_ops_for_promotion > 0 && func.ops().len() < config.min_ops_for_promotion {
             return Err("op_count_below_min".to_string());
         }
         if !config.compiled_only
-            && let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op))
+            && let Some(bad) = func.ops().iter().find(|op| !Self::is_v1_tierable_opcode(op))
         {
             return Err(format!("unsupported_opcode op={:?}", bad));
         }
@@ -5571,7 +5571,7 @@ impl HLInterpreter {
                 "[reload-exec] func_idx={} name={} nops={} using=reloaded",
                 func_idx,
                 func.name(),
-                func.ops.len()
+                func.ops().len()
             );
         }
 
@@ -5637,10 +5637,11 @@ impl HLInterpreter {
             self.report_stall_if_asked(bytecode);
             self.fiber_safe_point(1);
             let func = self.frame_body(bytecode, func_idx);
+            let ops = func.ops();
             let frame = self.stack.last().unwrap();
             let pc = frame.pc;
 
-            if pc >= func.ops.len() {
+            if pc >= ops.len() {
                 return Ok(NanBoxedValue::void());
             }
 
@@ -5650,7 +5651,7 @@ impl HLInterpreter {
             // CallMethod, CallThis, CallClosure and Switch variants, so the
             // copy was a heap allocation per dispatch on exactly those. The
             // sampler charged 2% of a whole nbody run to `Opcode::clone`.
-            let op = &func.ops[pc];
+            let op = &ops[pc];
             if let Opcode::Throw { exc } = op {
                 self.capture_exception_stack(bytecode);
                 if let Some(thrown) = self.stack.last().map(|f| f.registers.get(exc.0)) {

@@ -130,7 +130,7 @@ pub struct Body<'a> {
 impl<'a> Body<'a> {
     fn bytecode(func: &'a HLFunction) -> Self {
         Body {
-            ops: Cow::Borrowed(&func.ops),
+            ops: Cow::Borrowed(func.ops()),
             regs: Cow::Borrowed(&func.regs),
             optimized: false,
         }
@@ -200,7 +200,7 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
         eprintln!(
             "[air] findex={} air: ops {} -> {} regs {} -> {}",
             func.findex,
-            func.ops.len(),
+            func.ops().len(),
             s.ops.len(),
             func.regs.len(),
             s.reg_types.len()

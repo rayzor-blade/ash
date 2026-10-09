@@ -260,9 +260,9 @@ impl HLInterpreter {
         // leaves `ops` empty, and clamping by `ops.len()` pinned every frame
         // the walker symbolicated to entry zero. The two are the same length
         // for a body that has its opcodes.
-        let debug_pc = pc.min((func.debug.len() / 2).saturating_sub(1));
-        let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
-        let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
+        let debug_pc = pc.min((func.debug().len() / 2).saturating_sub(1));
+        let file_idx = func.debug().get(debug_pc * 2).copied().unwrap_or(-1);
+        let line = func.debug().get(debug_pc * 2 + 1).copied().unwrap_or(0);
         (func.findex as usize, file_idx, line)
     }
 
@@ -280,7 +280,7 @@ impl HLInterpreter {
             return Some(Self::stack_symbol_key(func, site.pc));
         }
         Some(match self.ssa.body(site.function_index) {
-            Some(prep) if !prep.shim.debug.is_empty() => Self::stack_symbol_key(&prep.shim, site.pc),
+            Some(prep) if !prep.shim.debug().is_empty() => Self::stack_symbol_key(&prep.shim, site.pc),
             _ => Self::stack_symbol_key(self.air.body(bytecode, site.function_index), site.pc),
         })
     }

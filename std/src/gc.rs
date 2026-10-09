@@ -27,6 +27,7 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
+const RESIDENT_FREE_BLOCKS: usize = 16; // Keep 512 KiB warm between idle bursts.
 const LINE_SIZE: usize = 128; // 128 bytes
 const ALLOC_QUANTUM: usize = 16;
 const OBJECT_MARK: u8 = 0x80;
@@ -3307,6 +3308,10 @@ struct ImmixHeap {
     /// Blocks currently madvised MADV_FREE_REUSABLE; must be MADV_FREE_REUSE'd
     /// before reuse so live data can't be discarded under memory pressure.
     reusable_blocks: HashSet<usize>,
+    /// Previously used blocks that sweep freed during a busy period. Keep
+    /// them until reuse or successful idle handback; unlike `free_blocks`,
+    /// this set contains no untouched reservation pages.
+    pending_handback: HashSet<usize>,
     /// The block the mutator's bump region currently lives in. `sweep` never
     /// frees it: the cursor points into it, and the youngest objects there
     /// may be live with their only references in mutator registers.
@@ -3960,6 +3965,7 @@ impl ImmixAllocator {
             last_collect: Instant::now(),
             last_pressure_relief: Instant::now(),
             reusable_blocks: HashSet::new(),
+            pending_handback: HashSet::new(),
             tlab_blocks: HashMap::new(),
             noptr_tlab_blocks: HashMap::new(),
             safepoint_mode: false,
@@ -4178,6 +4184,7 @@ impl ImmixAllocator {
     /// MADV_FREE_REUSABLE — without this, the kernel may discard the pages
     /// under memory pressure AFTER we've written live data into them.
     fn reclaim_block_pages(&mut self, addr: usize) {
+        self.heap.pending_handback.remove(&addr);
         if self.heap.reusable_blocks.remove(&addr) {
             if trace_map() {
                 let base = self.heap.memory.as_ptr() as usize;
@@ -6514,6 +6521,9 @@ impl ImmixAllocator {
                 }
                 if !quarantine_freed() {
                     self.heap.free_blocks.push(block_addr);
+                    if handback_enabled() {
+                        self.heap.pending_handback.insert(block_addr);
+                    }
                 }
                 // Clear alloc_sizes for all lines in this freed block
                 let base_line = block_index * LINES_PER_BLOCK;
@@ -6583,17 +6593,14 @@ impl ImmixAllocator {
         // every mutator has been waiting.
         let quiet = self.heap.last_collect.elapsed() >= HEARTBEAT
             || COLLECT_ORIGIN.load(Ordering::Relaxed) == 8;
-        if quiet && !freed.is_empty() {
-            let resident_target = 16;
-            let surplus = self.heap.free_blocks.len().saturating_sub(resident_target);
-            let mut hand_back: Vec<usize> = freed
-                .iter()
-                .copied()
-                .take(surplus)
-                .filter(|a| !self.heap.reusable_blocks.contains(a))
-                .collect();
-            if !hand_back.is_empty() && handback_enabled() {
-                hand_back.sort_unstable();
+        if quiet && handback_enabled() {
+            // A quiet sweep may free nothing: the burst's earlier sweeps
+            // already did so. Drain their resident free pages too. Reuse
+            // removes a candidate on both small and large allocation paths.
+            let mut hand_back: Vec<usize> = self.heap.pending_handback.iter().copied().collect();
+            hand_back.sort_unstable();
+            hand_back.truncate(hand_back.len().saturating_sub(RESIDENT_FREE_BLOCKS));
+            if !hand_back.is_empty() {
                 let base = self.heap.memory.as_mut_ptr();
                 let mut run_start = hand_back[0];
                 let mut run_len = BLOCK_SIZE;
@@ -6656,6 +6663,7 @@ impl ImmixAllocator {
                     let mut addr = start;
                     while addr < start + len {
                         self.heap.reusable_blocks.insert(addr);
+                        self.heap.pending_handback.remove(&addr);
                         addr += BLOCK_SIZE;
                     }
                 }
@@ -7310,8 +7318,15 @@ fn idle_collector() {
         }
         let mut gc = gc_locked_init();
         let pressure = gc.heap.bytes_since_gc + gc.heap.external_since_gc;
+        let resident_free = gc
+            .heap
+            .pending_handback
+            .len()
+            .saturating_sub(RESIDENT_FREE_BLOCKS)
+            * BLOCK_SIZE;
         let worth = pressure >= IDLE_MIN_BYTES
-            || (pressure > 0 && gc.heap.last_collect.elapsed() >= HEARTBEAT);
+            || resident_free >= IDLE_MIN_BYTES
+            || ((pressure > 0 || resident_free > 0) && gc.heap.last_collect.elapsed() >= HEARTBEAT);
         if !worth || !GC_ENABLED.load(Ordering::Relaxed) || !world_idle() {
             continue;
         }
@@ -7529,6 +7544,7 @@ pub(crate) unsafe extern "C" fn gc_dump_memory(filename: *mut hl::vbyte) {
         w(format!("blocks-used {}", gc.heap.used_blocks.len()));
         w(format!("blocks-free {}", gc.heap.free_blocks.len()));
         w(format!("blocks-reusable {}", gc.heap.reusable_blocks.len()));
+        w(format!("blocks-pending-handback {}", gc.heap.pending_handback.len()));
         if gc.heap.tlab_blocks.is_empty() && gc.heap.noptr_tlab_blocks.is_empty() {
             w("tlab-blocks none".into());
         } else {
@@ -7945,6 +7961,60 @@ mod tests {
                 .sum::<usize>()
         });
         assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn idle_handback_drains_busy_sweep_pages_and_reuse_removes_candidates() {
+        if !handback_enabled() || no_reclaim() || quarantine_freed() {
+            return; // These diagnostic modes deliberately retain freed pages.
+        }
+        for large in [false, true] {
+            let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 64);
+            for _ in 0..32 {
+                let b = gc.acquire_free_block(false).unwrap();
+                unsafe { ptr::write_bytes(gc.heap.memory.as_mut_ptr().add(b), 0x5a, BLOCK_SIZE) };
+            }
+            let active = gc.acquire_free_block(false).unwrap();
+            gc.heap.tlab_blocks.insert(1234, active);
+            unsafe { ptr::write_bytes(gc.heap.memory.as_mut_ptr().add(active), 0xab, BLOCK_SIZE) };
+            set_collect_origin(6);
+            assert_eq!(gc.sweep(&[], false, 0), 32);
+            assert_eq!(gc.heap.pending_handback.len(), 32);
+            assert!(
+                gc.heap.reusable_blocks.is_empty(),
+                "busy sweep must not madvise"
+            );
+            assert!(!gc.heap.pending_handback.contains(&active));
+            // No newly freed blocks or allocation pressure: old free pages
+            // must still be returned by a later quiet sweep.
+            gc.heap.last_collect = Instant::now() - HEARTBEAT;
+            assert_eq!(gc.sweep(&[], false, 0), 0);
+            assert_eq!(gc.heap.pending_handback.len(), RESIDENT_FREE_BLOCKS);
+            assert_eq!(gc.heap.reusable_blocks.len(), 32 - RESIDENT_FREE_BLOCKS);
+            assert!(!gc.heap.reusable_blocks.contains(&active));
+            unsafe { assert_eq!(*gc.heap.memory.as_ptr().add(active), 0xab) };
+            if large {
+                let p = gc.allocate_large(BLOCK_SIZE * 32, true).unwrap();
+                unsafe {
+                    assert_eq!(*p.as_ptr(), 0);
+                    assert_eq!(*p.as_ptr().add(BLOCK_SIZE * 32 - 1), 0);
+                    ptr::write_bytes(p.as_ptr(), 0x7c, BLOCK_SIZE * 32);
+                }
+            } else {
+                for _ in 0..32 {
+                    let b = gc.acquire_free_block(false).unwrap();
+                    assert!(!gc.heap.pending_handback.contains(&b));
+                    assert!(!gc.heap.reusable_blocks.contains(&b));
+                    unsafe {
+                        ptr::write_bytes(gc.heap.memory.as_mut_ptr().add(b), 0x7c, BLOCK_SIZE)
+                    };
+                }
+            }
+            assert!(gc.heap.pending_handback.is_empty());
+            assert!(gc.heap.reusable_blocks.is_empty());
+            assert_eq!(gc.heap.used_blocks.len(), 33);
+            unsafe { assert_eq!(*gc.heap.memory.as_ptr().add(active), 0xab) };
+        }
     }
 
     /// The bump allocator and the sweep must agree where a line begins.

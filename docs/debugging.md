@@ -105,6 +105,14 @@ These counters describe GC-owned handles, not Rust compiler caches or GPU
 textures. The external allocation total includes a 4 KiB pressure charge per
 finalizable handle, so it is not a census of the native bytes those handles own.
 
+During allocation bursts, sweep keeps freed blocks resident to avoid repeated
+page faults. It remembers those blocks across collections and returns their
+pages once the mutators are idle, keeping 512 KiB warm. Reusing a block cancels
+its pending return; on macOS, reusable pages are reclaimed before writing live
+data. `hl.Gc.dumpMemory()` reports `blocks-pending-handback` and
+`blocks-reusable` separately from live blocks. Reserved heap capacity is not
+resident memory.
+
 ### AIR storage
 
 AIR caches belong to Rust, outside the GC. Optimized bodies share an 8 MiB

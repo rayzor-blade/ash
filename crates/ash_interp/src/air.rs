@@ -282,6 +282,26 @@ pub(crate) fn skip_loop_free() -> bool {
     *CELL.get_or_init(|| !std::env::var_os("ASH_AIR_ALL").is_some())
 }
 
+/// Whether the optimizer could fuse a multiply-add in `f`: fusion is on and
+/// `f` has a float multiply. Such a body is prepared even without a loop, so
+/// the interpreter rounds it as the compiled tiers do. Run from bytecode
+/// instead, a call made before the function is compiled and one made after
+/// could differ in the last bit.
+pub(crate) fn may_fuse(bc: &DecodedBytecode, f: &HLFunction) -> bool {
+    ash_core::air_pipeline::fma()
+        && f.ops.iter().any(|op| match op {
+            Opcode::Mul { dst, .. } => f
+                .regs
+                .get(dst.0 as usize)
+                .and_then(|t| bc.types.get(t.0))
+                .is_some_and(|t| {
+                    t.kind == ash_core::hl_bindings::hl_type_kind_HF64
+                        || t.kind == ash_core::hl_bindings::hl_type_kind_HF32
+                }),
+            _ => false,
+        })
+}
+
 pub(crate) fn has_back_edge(f: &HLFunction) -> bool {
     f.ops.iter().any(|op| match op {
         Opcode::Switch { offsets, end, .. } => *end < 0 || offsets.iter().any(|offset| *offset < 0),
@@ -373,7 +393,7 @@ impl Cache {
         // the register layout under that frame. test_stdlib died with
         // "Sub: incompatible types". Whatever is chosen for a function has to
         // hold for the whole process.
-        if skip_loop_free() && !has_back_edge(raw) {
+        if skip_loop_free() && !has_back_edge(raw) && !may_fuse(bc, raw) {
             self.bodies[func_idx] = Body::Raw;
             return;
         }

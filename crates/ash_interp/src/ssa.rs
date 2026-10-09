@@ -269,8 +269,13 @@ impl Cache {
         // bounded by call count, so prepare no SSA just to execute it a few
         // times. Hot entries are optimized by the JIT; back-edge bodies
         // always prepare SSA so a single long call can still transfer by OSR.
-        // ASH_AIR_ALL retains an explicit full-SSA comparison mode.
-        if crate::air::skip_loop_free() && !crate::air::has_back_edge(raw) {
+        // ASH_AIR_ALL retains an explicit full-SSA comparison mode. A body
+        // the optimizer could fuse a multiply-add in is prepared regardless;
+        // see `may_fuse`.
+        if crate::air::skip_loop_free()
+            && !crate::air::has_back_edge(raw)
+            && !crate::air::may_fuse(bc, raw)
+        {
             self.bodies[func_idx] = Body::Raw;
             return;
         }

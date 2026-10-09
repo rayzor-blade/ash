@@ -2586,6 +2586,45 @@ unsafe extern "C" {
     /// Asks all malloc zones to release free pages back to the OS
     /// (forces MADV_FREE_REUSABLE internally — wren_lift gc.rs:1493-1515).
     fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
+    fn malloc_zone_statistics(zone: *mut c_void, stats: *mut MallocStatistics);
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct MallocStatistics {
+    blocks_in_use: u32,
+    size_in_use: usize,
+    max_size_in_use: usize,
+    size_allocated: usize,
+}
+
+/// Bytes malloc holds for the program, across every zone or arena.
+#[cfg(target_os = "macos")]
+fn malloc_in_use() -> usize {
+    let mut stats = MallocStatistics::default();
+    unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut stats) };
+    stats.size_in_use
+}
+
+/// `mallinfo` rather than `mallinfo2`, which needs glibc 2.33. Its counts are
+/// `int`s, so they are only compared with each other, never summed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn malloc_in_use() -> usize {
+    #[allow(deprecated)]
+    let info = unsafe { libc::mallinfo() };
+    (info.uordblks as u32 as usize) + (info.hblkhd as u32 as usize)
+}
+
+/// Return the pages of memory malloc holds free to the OS.
+#[cfg(target_os = "macos")]
+fn release_malloc_pages() {
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_malloc_pages() {
+    unsafe { libc::malloc_trim(0) };
 }
 
 // ── Write-fault dirty tracking (`ASH_GC_PROTECT=1`) ─────────────────────────
@@ -7221,6 +7260,10 @@ const IDLE_TICK: Duration = Duration::from_millis(250);
 /// Garbage worth an idle collection. Fixed rather than the trigger's floor,
 /// which `ASH_GC_TRIGGER_MB` raises to make the busy program collect less.
 const IDLE_MIN_BYTES: usize = 8 * 1024 * 1024;
+/// How far malloc's use must fall from its peak before an idle world hands
+/// the freed pages back.
+#[cfg_attr(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))), allow(dead_code))]
+const IDLE_MALLOC_RELEASE_BYTES: usize = 4 * 1024 * 1024;
 
 /// `ASH_GC_IDLE=0` turns idle collection off; safe either way.
 fn idle_collection_enabled() -> bool {
@@ -7292,8 +7335,24 @@ fn idle_holdouts() -> Option<Vec<String>> {
 
 fn idle_collector() {
     let mut reported = Instant::now();
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    let mut malloc_peak = 0usize;
     loop {
         std::thread::sleep(IDLE_TICK);
+        // Compile threads and native libraries free their scratch after the
+        // last collection, and a program that has gone idle does not collect
+        // again, so malloc would keep those pages. Track how far malloc's use
+        // has fallen from its peak, and once the world is idle and enough
+        // has been freed, hand the free pages back.
+        #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+        {
+            let in_use = malloc_in_use();
+            malloc_peak = malloc_peak.max(in_use);
+            if malloc_peak - in_use >= IDLE_MALLOC_RELEASE_BYTES && world_idle() {
+                release_malloc_pages();
+                malloc_peak = malloc_in_use();
+            }
+        }
         if !world_idle() {
             // Under ASH_GC_STATS, say what an idle collection is waiting on
             // while there is garbage for it, at most every two seconds.

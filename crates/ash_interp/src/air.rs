@@ -277,15 +277,16 @@ pub struct Cache {
 /// pipeline to walk a body a few times costs more than walking it. A function
 /// WITH a back edge is always optimized: its cost is unbounded by call count,
 /// and dropping the pipeline there costs mandelbrot 3.5x.
-fn skip_loop_free() -> bool {
+pub(crate) fn skip_loop_free() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| !std::env::var_os("ASH_AIR_ALL").is_some())
 }
 
-fn has_back_edge(f: &HLFunction) -> bool {
-    f.ops
-        .iter()
-        .any(|op| air::opcode_info::jump_offset(op).is_some_and(|d| d < 0))
+pub(crate) fn has_back_edge(f: &HLFunction) -> bool {
+    f.ops.iter().any(|op| match op {
+        Opcode::Switch { offsets, end, .. } => *end < 0 || offsets.iter().any(|offset| *offset < 0),
+        _ => air::opcode_info::jump_offset(op).is_some_and(|offset| offset < 0),
+    })
 }
 
 impl Cache {
@@ -539,6 +540,39 @@ impl Cache {
 mod tests {
     use super::*;
     use air::opcodes::{RefFun, Reg};
+
+    #[test]
+    fn preparation_keeps_backward_conditional_and_switch_edges() {
+        let body = |op| HLFunction {
+            ops: vec![op],
+            ..HLFunction::default()
+        };
+        assert!(!has_back_edge(&body(Opcode::JAlways { offset: 0 })));
+        assert!(!has_back_edge(&body(Opcode::JFalse {
+            cond: Reg(0),
+            offset: 1
+        })));
+        assert!(has_back_edge(&body(Opcode::JAlways { offset: -1 })));
+        assert!(has_back_edge(&body(Opcode::JFalse {
+            cond: Reg(0),
+            offset: -2
+        })));
+        assert!(!has_back_edge(&body(Opcode::Switch {
+            reg: Reg(0),
+            offsets: vec![0, 2],
+            end: 4
+        })));
+        assert!(has_back_edge(&body(Opcode::Switch {
+            reg: Reg(0),
+            offsets: vec![0, -2],
+            end: 4
+        })));
+        assert!(has_back_edge(&body(Opcode::Switch {
+            reg: Reg(0),
+            offsets: vec![0, 2],
+            end: -2
+        })));
+    }
 
     #[test]
     fn stack_event_debug_survives_block_reordering() {

@@ -127,6 +127,12 @@ Use an allocation profiler or physical-footprint measurement for those.
 
 LLVM reads an immutable view of the same decoded type table. Reverse native
 type conversion detaches that view only when it needs to fill missing metadata.
+Both interpreter walkers execute loop-free functions directly from decoded
+bytecode until the JIT handles hot entries. A body with a backward jump or
+switch target still prepares SSA, allowing a single long call to transfer by
+OSR. `ASH_AIR_ALL=1` opts into preparation of every interpreted body for
+comparison. This avoids retaining prepared IR for startup-only helpers.
+
 An entry-only function's prepared interpreter body is retired after compiled
 code lands; active calls keep their own owner and loop bodies retain their OSR
 coordinates. `ASH_AIR_CACHE_STATS` reports the retained layout bytes separately

@@ -265,6 +265,15 @@ impl Cache {
             .1
             .as_ref();
         let raw = &bc.functions[func_idx];
+        // Reuse the flat walker's preparation policy: a loop-free body is
+        // bounded by call count, so prepare no SSA just to execute it a few
+        // times. Hot entries are optimized by the JIT; back-edge bodies
+        // always prepare SSA so a single long call can still transfer by OSR.
+        // ASH_AIR_ALL retains an explicit full-SSA comparison mode.
+        if crate::air::skip_loop_free() && !crate::air::has_back_edge(raw) {
+            self.bodies[func_idx] = Body::Raw;
+            return;
+        }
         // The configuration every OSR site lowers this function under, which
         // is the whole point: the transfer is by position through
         // `ser.block_pcs`, so preparing separately produced a different body

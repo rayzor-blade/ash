@@ -927,6 +927,13 @@ impl TieredSharedCtx {
             .lock()
             .expect("worker_beads mutex poisoned")
             .clear();
+        // The closures a body hands to native code were scanned in the bodies
+        // before the reload.
+        self.worker_closure_deps
+            .lock()
+            .expect("worker closure dependency mutex poisoned")
+            .clear();
+        self.worker_closure_deps_changed.notify_all();
         forget_refusals();
     }
 }

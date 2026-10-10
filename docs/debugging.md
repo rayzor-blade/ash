@@ -224,7 +224,8 @@ returns, every call after the swap runs the new one, and what objects and
 statics hold is kept.
 
 A reload can change function bodies and literals, add, remove, move and edit
-closures, and add string constants, function types and classes. A closure
+closures, add and remove the methods of a class that is running, and add
+string constants, function types and classes. A closure
 that is in both programs keeps its place, so one made before the reload runs
 the new body; one the new program drops stays callable for the closures that
 still name it, with its old body, though a later reload can give the string
@@ -235,12 +236,25 @@ throws, a warning says so and the next reload sets the classes up again. A
 class the new program drops stays in the running one, so a later reload that
 adds it back finds the class that was running, with the values of its statics.
 
+A method keeps the vtable slot it has, and one that gains a slot (the first
+override of a method gives it one) or is new and virtual takes a slot above the
+class's and its subclasses'. A call that began before the reload therefore
+reaches the same method, and an override the reload adds or removes is seen by
+every call that goes through the vtable. A call the compiler made direct,
+because nothing overrode the method, stays direct in a frame that began before
+the reload, so such a frame does not see an override the reload adds. A removed
+override leaves its slot to the method it overrode; a removed method that
+introduced a slot stays in the class, with its old body, for the calls that
+name the slot.
+
 What live objects and compiled code are laid out by cannot change. The reload
 is refused, on stderr, and the program goes on as it was:
 
 | Message | Why |
 |---------|-----|
-| `a method was added`, `a method was removed` | the vtable of a class that was running would move |
+| `Class.method is new and Sub already declares a method of that name` | the new method and the subclass's would have to share a slot |
+| `Class.method moves from slot a to b, the slot of the method it now overrides` | frames that began before the reload call the old slot |
+| `Class binds different statics; a static function was added or removed` | statics are fields of the `$Class` object, which is laid out like any |
 | `a type's field layout changed (Name)` | live objects have the old layout. A class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, names that object |
 | `the constructors of enum Name changed` | enum values are laid out by their constructors |
 | `the setup of the new classes has control flow in it` | what a new class needs from the entry function is not a straight run of ops: a static whose first value is picked by a test written into the entry function, such as `static var on = env != null` |

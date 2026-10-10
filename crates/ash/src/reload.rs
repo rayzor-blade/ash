@@ -24,7 +24,8 @@ pub struct ReloadDiff {
     /// True if any HOBJ/HSTRUCT type changed its field layout.
     /// When set, the reload must be aborted (existing heap objects would be corrupted).
     pub type_layout_changed: bool,
-    /// True if the number of globals changed (globals array is fixed-size).
+    /// True if the new program has fewer globals than the running one,
+    /// which `remap_globals` leaves no way to be: every running slot stays.
     pub globals_count_changed: bool,
 }
 
@@ -58,7 +59,7 @@ pub fn diff_bytecode(old: &DecodedBytecode, new: &DecodedBytecode) -> ReloadDiff
     let removed: Vec<usize> = old_findexes.difference(&new_findexes).copied().collect();
 
     let type_layout_changed = check_type_layout_compatibility(&old.types, &new.types);
-    let globals_count_changed = old.globals.len() != new.globals.len();
+    let globals_count_changed = new.globals.len() < old.globals.len();
 
     ReloadDiff {
         changed,
@@ -348,9 +349,14 @@ fn global_keys(bc: &DecodedBytecode) -> Vec<GlobalKey> {
 /// statics) is the one the new code reads. A constant `old` does not have
 /// takes the slot of one of the same type that `new` dropped; the reload
 /// writes every constant into its slot again, so a frame still running the
-/// old body reads the new constant there until it returns. Anything else
-/// `old` does not have cannot be placed, and `Err` says which.
-fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(), String> {
+/// old body reads the new constant there until it returns. Any other global
+/// `old` does not have, and a constant with no slot to take, goes after the
+/// running program's, which has room for `slots` globals in all.
+fn remap_globals(
+    old: &DecodedBytecode,
+    new: &mut DecodedBytecode,
+    slots: usize,
+) -> Result<(), String> {
     let (old_keys, new_keys) = (global_keys(old), global_keys(new));
     if old_keys == new_keys {
         return Ok(());
@@ -362,29 +368,32 @@ fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(),
     for &slot in map.iter().flatten() {
         taken[slot] = true;
     }
+    let mut next = old_keys.len();
     for g in 0..map.len() {
         if map[g].is_some() {
             continue;
         }
-        let GlobalKey::Constant(ty, ..) = &new_keys[g] else {
-            let what = match &new_keys[g] {
-                GlobalKey::Descriptor(t) => format!("the descriptor of {t}"),
-                GlobalKey::Other(t, n) => format!("a {t} global (#{n} of its type)"),
-                GlobalKey::Constant(..) => unreachable!(),
-            };
-            return Err(format!(
-                "the new program has {what}, which the running one does not; a class or a static was added"
-            ));
+        let free = match &new_keys[g] {
+            GlobalKey::Constant(ty, ..) => (0..old_keys.len()).find(|&s| {
+                !taken[s] && matches!(&old_keys[s], GlobalKey::Constant(t, ..) if t == ty)
+            }),
+            _ => None,
         };
-        let free = (0..old_keys.len())
-            .find(|&s| !taken[s] && matches!(&old_keys[s], GlobalKey::Constant(t, ..) if t == ty));
-        let Some(slot) = free else {
-            return Err(format!(
-                "the new program has more {ty} constants than the running one has slots for"
-            ));
-        };
-        taken[slot] = true;
-        map[g] = Some(slot);
+        map[g] = Some(match free {
+            Some(slot) => {
+                taken[slot] = true;
+                slot
+            }
+            None => {
+                next += 1;
+                next - 1
+            }
+        });
+    }
+    if next > slots {
+        return Err(format!(
+            "the new program needs {next} globals and the running one has room for {slots}; restart it"
+        ));
     }
     let map: Vec<usize> = map
         .into_iter()
@@ -392,6 +401,7 @@ fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(),
         .collect();
 
     let mut globals = old.globals.clone();
+    globals.resize(next, crate::types::TypeRef::default());
     for (g, &slot) in map.iter().enumerate() {
         globals[slot] = new.globals[g].clone();
     }
@@ -459,20 +469,20 @@ fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(),
 
 /// The program at `path`, read as the next version of `running`: with
 /// the host registrations `running` took, its globals on `running`'s
-/// slots and its functions on `running`'s numbering. `slots` is how many
-/// findexes the running tables have room for. `Err` says why it cannot be,
-/// or that it did not read.
+/// slots and its functions on `running`'s numbering. `room` says how many
+/// globals and findexes the running tables have room for. `Err` says why
+/// it cannot be, or that it did not read.
 fn decode_next(
     path: &std::path::Path,
     running: &DecodedBytecode,
-    slots: usize,
+    room: &SharedRuntimeHandles,
 ) -> Result<DecodedBytecode, String> {
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
-    remap_globals(running, &mut bc)
+    remap_globals(running, &mut bc, room.global_slots)
         .map_err(|why| format!("the program cannot reload in place: {why}"))?;
-    functions::remap_functions(running, &mut bc, slots)
+    functions::remap_functions(running, &mut bc, room.function_slots)
         .map_err(|why| format!("the program cannot reload in place: {why}"))?;
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         eprintln!(
@@ -496,8 +506,7 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
-    let slots = ctx.shared_runtime.function_slots;
-    let new_bytecode = decode_next(&ctx.bytecode_path, &ctx.old_bytecode, slots)?;
+    let new_bytecode = decode_next(&ctx.bytecode_path, &ctx.old_bytecode, &ctx.shared_runtime)?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
     if let Some(why) = refusal(&ctx.old_bytecode, &new_bytecode, &diff) {
         return Err(format!("the program cannot reload in place: {why}"));
@@ -548,12 +557,8 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
     match ctx.staged.take() {
         Some(bc) => Ok(bc),
-        None => decode_next(
-            &ctx.bytecode_path,
-            &ctx.old_bytecode,
-            ctx.shared_runtime.function_slots,
-        )
-        .map_err(anyhow::Error::msg),
+        None => decode_next(&ctx.bytecode_path, &ctx.old_bytecode, &ctx.shared_runtime)
+            .map_err(anyhow::Error::msg),
     }
 }
 
@@ -646,7 +651,9 @@ fn add_function_slots(ctx: &mut ReloadContext, new: &DecodedBytecode) {
 /// interpreter runs it by. Constants are not patched in place: the
 /// interpreter allocates them again from the new program and stores them
 /// in their globals.
-pub fn do_reload() -> Option<DecodedBytecode> {
+pub fn do_reload(
+    grow: impl FnOnce(&DecodedBytecode) -> SharedRuntimeHandles,
+) -> Option<DecodedBytecode> {
     let mut guard = RELOAD_CTX.lock().ok()?;
     let ctx = guard.as_mut()?;
     let new_bytecode = match next_program(ctx) {
@@ -672,6 +679,17 @@ pub fn do_reload() -> Option<DecodedBytecode> {
         );
         return None;
     }
+    if new_bytecode.globals.len() > ctx.shared_runtime.global_slots {
+        eprintln!(
+            "[hot-reload] reload failed: the new program needs {} globals and the running one has room for {}",
+            new_bytecode.globals.len(),
+            ctx.shared_runtime.global_slots
+        );
+        return None;
+    }
+    // The runtime tables the new program names: its globals' slots, and its
+    // types.
+    ctx.shared_runtime = grow(&new_bytecode);
     let mut stale = inline_dependents(&diff.changed);
     stale.extend_from_slice(&diff.changed);
     // The optimized-AIR cache and the LLVM gate's ceilings are keyed by
@@ -830,7 +848,7 @@ mod tests {
     fn shifted_globals_go_back_to_their_slots() {
         let old = program(&["same", "gone", "end"], 2);
         let mut new = program(&["fresh", "same", "gone"], 3);
-        remap_globals(&old, &mut new).expect("remaps");
+        remap_globals(&old, &mut new, usize::MAX).expect("remaps");
 
         assert_eq!(new.globals.len(), old.globals.len());
         assert_eq!(new.types[MAIN].obj.as_ref().unwrap().global_value, 3);
@@ -847,16 +865,29 @@ mod tests {
     fn unchanged_globals_stay() {
         let old = program(&["a", "b"], 1);
         let mut new = program(&["a", "b"], 1);
-        remap_globals(&old, &mut new).expect("remaps");
+        remap_globals(&old, &mut new, usize::MAX).expect("remaps");
         assert_eq!(reads(&new), reads(&old));
     }
 
-    /// A literal with no dropped one to replace has no slot.
+    /// A literal with no dropped one to replace goes after the running
+    /// program's globals, which keep their slots.
     #[test]
-    fn a_literal_too_many_is_refused() {
+    fn a_literal_with_no_slot_to_take_goes_after_the_others() {
         let old = program(&["a"], 1);
         let mut new = program(&["a", "b"], 2);
-        let why = remap_globals(&old, &mut new).unwrap_err();
-        assert!(why.contains("String constants"), "{why}");
+        remap_globals(&old, &mut new, usize::MAX).expect("remaps");
+        assert_eq!(new.globals.len(), old.globals.len() + 1);
+        assert_eq!(literal_at(&new, 0), Some("a"));
+        assert_eq!(literal_at(&new, old.globals.len()), Some("b"));
+        assert_eq!(new.types[MAIN].obj.as_ref().unwrap().global_value, 2);
+    }
+
+    /// The running tables have room for only so many globals.
+    #[test]
+    fn globals_past_the_room_are_refused() {
+        let old = program(&["a"], 1);
+        let mut new = program(&["a", "b"], 2);
+        let why = remap_globals(&old, &mut new, old.globals.len()).unwrap_err();
+        assert!(why.contains("room for"), "{why}");
     }
 }

@@ -14,6 +14,8 @@ pub struct SharedRuntimeHandles {
     /// code reads them in place, so a reload that adds functions fills spare
     /// slots instead of growing them.
     pub function_slots: usize,
+    /// How many globals `globals_data_ptr` has room for.
+    pub global_slots: usize,
 }
 
 // SharedRuntimeHandles carries runtime pointers that are process-global for an HL module

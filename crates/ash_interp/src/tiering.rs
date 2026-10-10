@@ -527,13 +527,26 @@ pub(crate) fn late_entry_sync() -> bool {
 #[derive(Clone)]
 pub(crate) struct SharedArrayHandles {
     pub(crate) globals_data: usize,
-    pub(crate) nglobals: usize,
     pub(crate) functions_ptrs: usize,
-    /// Runtime `hl_type*` per bytecode type index, copied out of
-    /// `SharedRuntimeHandles::c_types` so the Cranelift tier can hand a type
-    /// identity to an allocator without borrowing the interpreter's tables
-    /// across threads.
+}
+
+/// What a reload can grow of the runtime tables the tiers read: how many
+/// globals the program has, and the runtime `hl_type*` of every type, copied
+/// out of `SharedRuntimeHandles::c_types` so the Cranelift tier can hand a
+/// type identity to an allocator without borrowing the interpreter's tables
+/// across threads.
+pub(crate) struct RuntimeTables {
+    pub(crate) nglobals: usize,
     pub(crate) c_types: Vec<usize>,
+}
+
+impl RuntimeTables {
+    pub(crate) fn of(shared: &ash_core::runtime_handles::SharedRuntimeHandles) -> Arc<Self> {
+        Arc::new(RuntimeTables {
+            nglobals: shared.nglobals,
+            c_types: shared.c_types.iter().map(|p| *p as usize).collect(),
+        })
+    }
 }
 
 /// State shared between the interpreter thread and beadie's tier brokers.
@@ -557,6 +570,8 @@ pub(crate) struct TieredSharedCtx {
     /// construction has been tried and failed.
     pub(crate) cranelift: Mutex<Option<Option<Arc<CraneliftTier>>>>,
     pub(crate) arrays: SharedArrayHandles,
+    /// The globals count and the C types as of the last reload.
+    pub(crate) tables: Mutex<Arc<RuntimeTables>>,
     /// The decoded bytecode the brokers lower from — OWNED, not borrowed.
     ///
     /// This was an AtomicUsize holding a raw pointer published by the CLI,
@@ -579,7 +594,7 @@ pub(crate) struct TieredSharedCtx {
     pub(crate) reload_generation: std::sync::atomic::AtomicU64,
     /// What a reload rebuilds the top tier's module from.
     #[cfg(feature = "llvm")]
-    pub(crate) llvm_seed: Option<LlvmSeed>,
+    pub(crate) llvm_seed: Mutex<Option<LlvmSeed>>,
     /// Set by a reload that found the top tier's lock held: the module was
     /// built from the program before it, and the lock's next holder puts it
     /// back to `Deferred` (`take_reloaded_module`).
@@ -784,7 +799,14 @@ pub(crate) fn take_reloaded_module(ctx: &TieredSharedCtx, state: &mut LlvmState)
     {
         return;
     }
-    let Some(seed) = &ctx.llvm_seed else { return };
+    let Some(seed) = ctx
+        .llvm_seed
+        .lock()
+        .expect("llvm_seed mutex poisoned")
+        .clone()
+    else {
+        return;
+    };
     // A build still running is left to finish on its own thread and its
     // module is leaked, like a replaced one: old code may be on a stack.
     *state = LlvmState::Deferred(seed.clone());
@@ -796,6 +818,11 @@ impl TieredSharedCtx {
     /// the context's copy and not the one being read.
     pub(crate) fn bytecode(&self) -> Arc<DecodedBytecode> {
         Arc::clone(&self.bytecode.lock().expect("bytecode mutex poisoned"))
+    }
+
+    /// The globals count and the C types as of the last reload.
+    pub(crate) fn tables(&self) -> Arc<RuntimeTables> {
+        Arc::clone(&self.tables.lock().expect("tables mutex poisoned"))
     }
 
     pub(crate) fn reload_generation(&self) -> u64 {
@@ -813,7 +840,22 @@ impl TieredSharedCtx {
     /// stack. Every memo keyed by findex is dropped, because a findex may
     /// name a different function now.
     #[cfg_attr(not(feature = "llvm"), allow(unused_variables))]
-    pub(crate) fn reload(&self, llvm: Option<&mut LlvmState>, new_bytecode: Arc<DecodedBytecode>) {
+    pub(crate) fn reload(
+        &self,
+        llvm: Option<&mut LlvmState>,
+        new_bytecode: Arc<DecodedBytecode>,
+        shared: &ash_core::runtime_handles::SharedRuntimeHandles,
+    ) {
+        *self.tables.lock().expect("tables mutex poisoned") = RuntimeTables::of(shared);
+        #[cfg(feature = "llvm")]
+        if let Some(seed) = self
+            .llvm_seed
+            .lock()
+            .expect("llvm_seed mutex poisoned")
+            .as_mut()
+        {
+            seed.shared = shared.clone();
+        }
         let old_bytecode = std::mem::replace(
             &mut *self.bytecode.lock().expect("bytecode mutex poisoned"),
             Arc::clone(&new_bytecode),
@@ -1476,15 +1518,16 @@ pub(crate) fn compile_with_cranelift(
                 // SAFETY: `bytecode` is the process-lifetime decoded bytecode
                 // published by `enable_tiered`; the arrays are the shared
                 // runtime tables that outlive every tier.
+                let tables = ctx.tables();
                 let cl_ctx = unsafe {
                     ash_core::cranelift::CraneliftTierContext::new(
                         &backend,
                         &bytecode,
                         ctx.arrays.globals_data as *mut c_void as *mut *mut c_void,
-                        ctx.arrays.nglobals,
+                        tables.nglobals,
                         ctx.arrays.functions_ptrs as *mut c_void as *mut *mut c_void,
                         ctx.max_findex.load(Ordering::Acquire),
-                        &ctx.arrays.c_types,
+                        &tables.c_types,
                     )?
                 };
                 if ctx.log_promotions {
@@ -1924,7 +1967,7 @@ pub(crate) fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mu
         return;
     };
     for &(tidx, slot) in sites {
-        let Some(&tp) = ctx.arrays.c_types.get(tidx) else {
+        let Some(&tp) = ctx.tables().c_types.get(tidx) else {
             continue;
         };
         if tp == 0 {

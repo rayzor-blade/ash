@@ -213,9 +213,28 @@ fn a_closure_edited_in_place() {
     );
 }
 
+/// A closure that reads a string literal the running program does not have:
+/// the literal gets a global of its own.
+#[test]
+fn a_closure_with_a_new_literal() {
+    check(
+        "v1",
+        "v6",
+        &[
+            "reloaded",
+            "old 6,10",
+            "new 6,10,8",
+            "reflect 6,10,8",
+            "apply 60,100,80",
+            "done",
+        ],
+        "1 added",
+    );
+}
+
 #[test]
 fn the_fixtures_are_where_the_test_expects() {
-    for v in ["v1", "v2", "v3", "v4", "v5"] {
+    for v in ["v1", "v2", "v3", "v4", "v5", "v6"] {
         assert!(Path::new(&fixtures().join(v).join("TestHotReloadClosures.hx")).exists());
     }
 }

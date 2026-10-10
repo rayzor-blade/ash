@@ -15,6 +15,10 @@ fn str_to_utf16_ptr(s: &str) -> *const u16 {
     ptr
 }
 
+/// Slots the globals array has beyond the program's own, for the globals a
+/// reload adds. They are zeroed pages until used.
+const GLOBAL_SPARE: usize = 4096;
+
 /// Factory for creating C-level `hl_type` structures from decoded bytecode.
 /// These are needed by native stdlib functions that expect `*mut hl_type` pointers.
 pub struct CTypeFactory {
@@ -27,6 +31,8 @@ pub struct CTypeFactory {
     globals_data: *mut *mut std::ffi::c_void,
     /// Number of globals
     nglobals: usize,
+    /// How many globals `globals_data` has room for.
+    global_slots: usize,
     /// How many findexes the module context's two tables have room for.
     function_slots: usize,
 }
@@ -37,8 +43,9 @@ impl CTypeFactory {
         let nglobals = bytecode.globals.len();
 
         // Allocate shared globals_data array (leaked, never freed)
+        let global_slots = nglobals + GLOBAL_SPARE;
         let globals_data = {
-            let mut data: Vec<*mut std::ffi::c_void> = vec![ptr::null_mut(); nglobals];
+            let mut data: Vec<*mut std::ffi::c_void> = vec![ptr::null_mut(); global_slots];
             let ptr = data.as_mut_ptr();
             std::mem::forget(data);
             ptr
@@ -49,6 +56,7 @@ impl CTypeFactory {
             module_ctx: ptr::null_mut(),
             globals_data,
             nglobals,
+            global_slots,
             function_slots: 0,
         };
 
@@ -134,6 +142,18 @@ impl CTypeFactory {
     /// Native stdlib writes to global_value slots which point into this array.
     pub fn globals_data(&self) -> (*mut *mut std::ffi::c_void, usize) {
         (self.globals_data, self.nglobals)
+    }
+
+    /// How many globals the array has room for, whatever the program uses.
+    pub fn global_slots(&self) -> usize {
+        self.global_slots
+    }
+
+    /// Count `n` globals as the program's, which a reload that adds some
+    /// does before it adds the types that point at them. Their slots are in
+    /// the array already; the count is capped at its room.
+    pub fn grow_globals(&mut self, n: usize) {
+        self.nglobals = self.nglobals.max(n.min(self.global_slots));
     }
 
     unsafe fn fill_type_data(&mut self, index: usize, rust_type: &HLType) {

@@ -1159,14 +1159,8 @@ impl HLInterpreter {
         // context's tables in place, so they are sized now and never move.
         self.c_type_factory
             .reserve_function_slots(max_findex.max(RELOAD_SPARE_SLOTS));
-        let module_ctx = self.c_type_factory.module_ctx();
-        let shared = SharedRuntimeHandles {
-            globals_data_ptr: self.c_type_factory.globals_data().0,
-            nglobals: self.c_type_factory.globals_data().1,
-            c_types: self.c_type_factory.as_slice().to_vec(),
-            module_ctx,
-            function_slots: self.c_type_factory.function_slots(),
-        };
+        let shared = self.shared_handles();
+        let module_ctx = shared.module_ctx;
         let fptrs: Vec<*mut std::ffi::c_void> = (0..max_findex)
             .map(|i| unsafe {
                 if !module_ctx.is_null() && !(*module_ctx).functions_ptrs.is_null() {
@@ -1211,14 +1205,8 @@ impl HLInterpreter {
         let hot_reload = config.hot_reload;
         let hl_path = hl_path.to_path_buf();
 
-        let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
-        let shared = SharedRuntimeHandles {
-            globals_data_ptr,
-            nglobals,
-            c_types: self.c_type_factory.as_slice().to_vec(),
-            module_ctx: self.c_type_factory.module_ctx(),
-            function_slots: self.c_type_factory.function_slots(),
-        };
+        let shared = self.shared_handles();
+        let globals_data_ptr = shared.globals_data_ptr;
         // Pre-warm the tiered JIT module ON THE MAIN THREAD, before any
         // bytecode runs. Module init GC-allocates (constants via
         // hlp_alloc_obj + hlp_gc_register_root, obj runtimes via
@@ -1373,10 +1361,9 @@ impl HLInterpreter {
                 LlvmState::Unavailable
             }),
             cranelift: Mutex::new(None),
+            tables: Mutex::new(crate::tiering::RuntimeTables::of(&shared)),
             arrays: SharedArrayHandles {
                 globals_data: globals_data_ptr as usize,
-                nglobals,
-                c_types: shared.c_types.iter().map(|p| *p as usize).collect(),
                 functions_ptrs: unsafe {
                     if shared.module_ctx.is_null() {
                         0
@@ -1388,12 +1375,14 @@ impl HLInterpreter {
             bytecode: Mutex::new(published_bytecode),
             reload_generation: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "llvm")]
-            llvm_seed: (hot_reload && !llvm_unreachable).then(|| crate::tiering::LlvmSeed {
-                path: hl_path.clone(),
-                shared: shared.clone(),
-                hot_reload: true,
-                compiled_only: config.compiled_only,
-            }),
+            llvm_seed: Mutex::new((hot_reload && !llvm_unreachable).then(|| {
+                crate::tiering::LlvmSeed {
+                    path: hl_path.clone(),
+                    shared: shared.clone(),
+                    hot_reload: true,
+                    compiled_only: config.compiled_only,
+                }
+            })),
             #[cfg(feature = "llvm")]
             llvm_stale: std::sync::atomic::AtomicBool::new(false),
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
@@ -1573,7 +1562,9 @@ impl HLInterpreter {
         if self.fn_gc_set_globals.is_null() || self.fn_gc_set_stack_top.is_null() {
             return;
         }
-        let (globals_ptr, globals_len) = self.c_type_factory.globals_data();
+        // The whole array, spare slots included: a reload fills them.
+        let (globals_ptr, _) = self.c_type_factory.globals_data();
+        let globals_len = self.c_type_factory.global_slots();
         if globals_ptr.is_null() {
             return;
         }
@@ -5924,6 +5915,31 @@ impl HLInterpreter {
         self.apply_pending_reload(native_resolver);
     }
 
+    /// The runtime tables the tiers and the reload context share: where the
+    /// globals and the module context's function tables are, how much room
+    /// they have, and the C types.
+    fn shared_handles(&self) -> SharedRuntimeHandles {
+        let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
+        SharedRuntimeHandles {
+            globals_data_ptr,
+            nglobals,
+            c_types: self.c_type_factory.as_slice().to_vec(),
+            module_ctx: self.c_type_factory.module_ctx(),
+            function_slots: self.c_type_factory.function_slots(),
+            global_slots: self.c_type_factory.global_slots(),
+        }
+    }
+
+    /// Make room in the runtime tables for what a reload added, and return
+    /// them as they are now: the globals the new program counts.
+    fn grow_runtime(&mut self, bc: &DecodedBytecode) -> SharedRuntimeHandles {
+        self.c_type_factory.grow_globals(bc.globals.len());
+        if self.globals.len() < bc.globals.len() {
+            self.globals.resize(bc.globals.len(), NanBoxedValue::null());
+        }
+        self.shared_handles()
+    }
+
     /// The program frames start on now: the reloaded one once there is one.
     /// Code that was handed a program before a reload reads the functions it
     /// calls through this, since one a reload added is only in the new
@@ -5975,9 +5991,14 @@ impl HLInterpreter {
             .as_ref()
             .map(|t| Arc::clone(&t.shared_ctx));
         let mut llvm = ctx.as_ref().and_then(|c| c.llvm.try_lock().ok());
-        if let Some(new_bc) = ash_core::reload::do_reload() {
-            if let Some(ctx) = ctx.as_ref() {
-                ctx.reload(llvm.as_deref_mut(), Arc::new(new_bc.clone()));
+        let mut shared = None;
+        if let Some(new_bc) = ash_core::reload::do_reload(|bc| {
+            let handles = self.grow_runtime(bc);
+            shared = Some(handles.clone());
+            handles
+        }) {
+            if let (Some(ctx), Some(shared)) = (ctx.as_ref(), shared.as_ref()) {
+                ctx.reload(llvm.as_deref_mut(), Arc::new(new_bc.clone()), shared);
             }
             // Leak the old utf16_strings cache — live NanBoxed registers
             // in the current (old) frame hold raw pointers into those

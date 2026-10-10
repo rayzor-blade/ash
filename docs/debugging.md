@@ -223,20 +223,26 @@ interpreter takes the new code. A frame that is running keeps its body until it
 returns, every call after the swap runs the new one, and what objects and
 statics hold is kept.
 
-A reload can change function bodies and literals, and add, remove, move and
-edit closures. A closure that is in both programs keeps its place, so one made
-before the reload runs the new body; one the new program drops stays callable
-for the closures that still name it, with its old body.
+A reload can change function bodies and literals, add, remove, move and edit
+closures, and add string constants, function types and classes. A closure
+that is in both programs keeps its place, so one made before the reload runs
+the new body; one the new program drops stays callable for the closures that
+still name it, with its old body. A class the new program adds is set up once,
+after the reload, by the part of the new program's entry function that
+registers it and gives its statics their first values, as at start. A class
+the new program drops stays in the running one, so a later reload that adds it
+back finds the class that was running, with the values of its statics.
 
 What live objects and compiled code are laid out by cannot change. The reload
 is refused, on stderr, and the program goes on as it was:
 
 | Message | Why |
 |---------|-----|
-| `a method was added`, `a method was removed` | the vtable of its class would move |
-| `a type's field layout changed` | live objects have the old layout |
-| `the globals count changed`, `a class or a static was added` | the globals array is fixed |
-| `needs N function slots and the running one has M` | the program reserved room for as many added functions as it started with, at least 8192; restart it |
+| `a method was added`, `a method was removed` | the vtable of a class that was running would move |
+| `a type's field layout changed (Name)` | live objects have the old layout. A class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, names that object |
+| `the constructors of enum Name changed` | enum values are laid out by their constructors |
+| `the setup of the new classes has control flow in it` | what a new class needs from the entry function is not a straight run of ops |
+| `needs N globals`, `needs N function slots` | the program reserved room for as many added globals and functions as it started with, at least 4096 and 8192; restart it |
 
 `--mode jit` does not apply a reload. `ASH_RELOAD_LOG=1` lists, by name, the
 functions each reload recompiled and added.

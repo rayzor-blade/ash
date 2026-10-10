@@ -1101,6 +1101,12 @@ impl AirCodegen<'_, '_> {
                     self.vals[v] = Some(c);
                     continue;
                 }
+                // A pointer to a cell names the cell of the frame it is read
+                // in, and the buffer holds the interpreter's.
+                if let Some(c) = self.emit_cell_ref_def(vid)? {
+                    self.vals[v] = Some(c);
+                    continue;
+                }
                 let ty = self.value_clif_ty(vid)?;
                 let reg = self.f.value_reg(vid);
                 let loaded = self.load_osr_slot(buf, reg, ty)?;
@@ -3205,6 +3211,25 @@ impl AirCodegen<'_, '_> {
             }
         };
         self.def_from(dst, a, r)
+    }
+
+    /// `v` as the address of its cell in this frame when a `CellRef` defines
+    /// it, else None.
+    fn emit_cell_ref_def(&mut self, v: ValueId) -> Result<Option<Value>> {
+        let cell = self
+            .f
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .find_map(|i| match i {
+                Instr::CellRef { dst, cell } if *dst == v => Some(*cell),
+                _ => None,
+            });
+        let Some(cell) = cell else {
+            return Ok(None);
+        };
+        let slot = self.cell_slot(cell)?;
+        Ok(Some(self.b.ins().stack_addr(types::I64, slot, 0)))
     }
 
     /// `v` as a fresh constant when an `Int`, `Float`, `Bool` or `Null`

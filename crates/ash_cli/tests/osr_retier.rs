@@ -18,6 +18,7 @@ fn fixture(main: &str) -> PathBuf {
         let name = match main {
             "TestOsrRetier" => "test_osr_retier.hl",
             "TestRetierSnapshot" => "test_retier_snapshot.hl",
+            "TestOsrRefBeforeLoop" => "test_osr_ref_before_loop.hl",
             "TestOsrF32" => "test_osr_f32.hl",
             _ => panic!("unknown fixture"),
         };
@@ -147,6 +148,37 @@ fn forced_snapshots_from_ordinary_and_osr_entries_preserve_live_state() {
             );
         }
     }
+}
+
+/// A pointer passed to a call is held by the frame alone, so a loop behind it
+/// can be entered mid-flight; a loop with two back edges refuses only itself.
+/// `carried` writes through a ref on every iteration, so the entry has to
+/// point it at its own cell.
+#[test]
+fn a_loop_behind_a_ref_is_entered_mid_flight() {
+    let hl = fixture("TestOsrRefBeforeLoop");
+    let (interp, _) = run_for(&hl, &["--mode", "interp"], &[], "total=");
+    // An LLVM entry takes long enough to build that a short loop can be over
+    // before it arrives, so only the Cranelift tier is held to a count.
+    for (tier, at_least) in [("cranelift", 2), ("llvm", 0)] {
+        let (answer, log) = run_for(
+            &hl,
+            &["--mode", "hybrid", "--jit-tier", tier, "--jit-threshold", "1"],
+            &[("ASH_OSR_LOG", "1"), ("ASH_OSR_ENTRY_SYNC", "1")],
+            "total=",
+        );
+        assert_eq!(answer, interp, "{tier}\n{log}");
+        let entered = log
+            .lines()
+            .filter(|l| l.starts_with("[osr] entering findex="))
+            .count();
+        assert!(
+            entered >= at_least,
+            "{tier} entered compiled code {entered} times\n{log}"
+        );
+    }
+    let (answer, log) = run_for(&hl, &["--mode", "jit"], &[], "total=");
+    assert_eq!(answer, interp, "{log}");
 }
 
 /// The interpreter holds an f32 register as the f64 it widens to; both

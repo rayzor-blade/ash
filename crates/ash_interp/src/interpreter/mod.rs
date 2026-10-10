@@ -4090,14 +4090,16 @@ impl HLInterpreter {
             let raw = &bytecode.functions[func_idx];
             let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
             let m = ash_core::air_pipeline::AshModule::new(bytecode).with_callees(cfg.callees);
-            let plan = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg)
-                .ok()
-                .map(|o| ash_core::osr::analyze(&o.ir));
-            match &plan {
-                Some(p) if p.eligible() => {
+            let opt = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg).ok();
+            match opt.as_ref().map(|o| (o, ash_core::osr::analyze(&o.ir))) {
+                Some((o, p))
+                    if p.entry_headers
+                        .iter()
+                        .any(|&h| o.ser.block_pcs.get(h as usize) == Some(&header_pc)) =>
+                {
                     eprintln!("[osr] hot loop findex={findex} pc={header_pc} ELIGIBLE")
                 }
-                Some(p) => eprintln!(
+                Some((_, p)) => eprintln!(
                     "[osr] hot loop findex={findex} pc={header_pc} refused: {:?}",
                     p.refusals
                 ),

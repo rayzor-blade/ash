@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 
 use air::v2::ir::{
-    BinOp as AirBinOp, BlockId as AirBlockId, CastKind as AirCastKind, CondKind as AirCondKind,
-    Function as AirFunction, Instr as AirInstr, MemAccess as AirMemAccess,
+    BinOp as AirBinOp, BlockId as AirBlockId, CastKind as AirCastKind, CellId as AirCellId,
+    CondKind as AirCondKind, Function as AirFunction, Instr as AirInstr, MemAccess as AirMemAccess,
     Terminator as AirTerminator, UnOp as AirUnOp, ValueId,
 };
 use ash_macro::to_llvm;
@@ -1785,6 +1785,9 @@ impl<'ctx> JITModule<'ctx> {
         // and `x * 31` as the shifts LLVM makes of them, where a value loaded
         // from the buffer is an opaque divisor.
         let constants = Self::air_constant_definitions(air);
+        // A pointer to a cell names the cell of the frame it is read in, so it
+        // is rebuilt from this entry's own cell rather than loaded.
+        let cell_refs = Self::air_cell_ref_definitions(air);
         if let Some(layout) = snapshot {
             for (offset, input) in layout.slots.iter().enumerate() {
                 let index = match input.input {
@@ -1793,6 +1796,17 @@ impl<'ctx> JITModule<'ctx> {
                 };
                 if let Some(instr) = constants.get(&index) {
                     self.emit_air_constant(&registers, &reg_types, instr)?;
+                    continue;
+                }
+                if let Some(&cell) = cell_refs.get(&index) {
+                    self.emit_air_cell_ref(
+                        &lowering,
+                        &registers,
+                        &reg_types,
+                        cell_base,
+                        ValueId(index as u32),
+                        cell,
+                    )?;
                     continue;
                 }
                 let restored =
@@ -1805,6 +1819,17 @@ impl<'ctx> JITModule<'ctx> {
             for (i, value) in air.values.iter().enumerate() {
                 if let Some(instr) = constants.get(&i) {
                     self.emit_air_constant(&registers, &reg_types, instr)?;
+                    continue;
+                }
+                if let Some(&cell) = cell_refs.get(&i) {
+                    self.emit_air_cell_ref(
+                        &lowering,
+                        &registers,
+                        &reg_types,
+                        cell_base,
+                        ValueId(i as u32),
+                        cell,
+                    )?;
                     continue;
                 }
                 let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i], true)?;
@@ -1985,6 +2010,19 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Load one typed AIR value from Cranelift's 64-bit de-SSA transfer slot.
+    /// The cell each value that a `CellRef` defines points at, by value index.
+    fn air_cell_ref_definitions(air: &AirFunction) -> std::collections::HashMap<usize, AirCellId> {
+        let mut out = std::collections::HashMap::new();
+        for block in &air.blocks {
+            for instr in &block.instrs {
+                if let AirInstr::CellRef { dst, cell } = instr {
+                    out.insert(dst.idx(), *cell);
+                }
+            }
+        }
+        out
+    }
+
     /// Every value a constant instruction defines, by value index.
     fn air_constant_definitions(air: &AirFunction) -> std::collections::HashMap<usize, &AirInstr> {
         let mut out = std::collections::HashMap::new();

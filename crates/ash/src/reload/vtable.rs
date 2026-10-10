@@ -92,6 +92,19 @@ fn slot_count(bc: &DecodedBytecode, t: usize) -> i32 {
         .max(0)
 }
 
+/// Whether an ancestor of `t` has a method in `slot`, which makes a method of
+/// `t` in that slot an override. A slot below the parent's count is not enough
+/// to say so: a method given a slot above its subclasses' leaves their own
+/// slots below it.
+fn inherited_slot(bc: &DecodedBytecode, t: usize, slot: i32) -> bool {
+    slot >= 0
+        && chain(bc, t)
+            .into_iter()
+            .skip(1)
+            .filter_map(|a| class(bc, a))
+            .any(|o| o.proto.iter().any(|p| p.pindex == slot))
+}
+
 fn super_of(bc: &DecodedBytecode, t: usize) -> Option<usize> {
     class(bc, t)?.super_.as_ref().map(|s| s.0)
 }
@@ -136,7 +149,6 @@ pub fn plan(old: &DecodedBytecode, new: &DecodedBytecode, dropped: &[usize]) -> 
         let parent_map = parent.and_then(|p| plan.slots.get(&p)).cloned().unwrap_or_default();
         let parent_occupied = parent.and_then(|p| occupied.get(&p)).copied().unwrap_or(0);
         let parent_slots_new = parent.map_or(0, |p| slot_count(new, p));
-        let parent_slots_running = parent.filter(|&p| kept(p)).map_or(0, |p| running_count[p]);
         let is_kept = kept(t);
         let r = if is_kept { class(old, t) } else { None };
         let running_entry = |name: &str| r.and_then(|r| r.proto.iter().find(|p| p.name == name));
@@ -210,7 +222,7 @@ pub fn plan(old: &DecodedBytecode, new: &DecodedBytecode, dropped: &[usize]) -> 
                     }
                     None => {
                         plan.removed.insert(old_entry.findex.max(0) as usize);
-                        if old_entry.pindex >= parent_slots_running {
+                        if old_entry.pindex >= 0 && !inherited_slot(old, t, old_entry.pindex) {
                             kept_back.push(old_entry.clone());
                         }
                     }
@@ -504,6 +516,45 @@ mod tests {
         let new = program(&[("A", None, &[("f", 1, 0), ("g", 3, 1)]), ("B", Some(0), &[("g", 2, 1)])]);
         let why = plan(&old, &new, &[]).unwrap_err();
         assert!(why.contains("already declares") || why.contains("moves"), "{why}");
+    }
+
+    /// A slot a method was given above those of a subclass leaves the
+    /// subclass's own slots below the parent's count; a later removal of such
+    /// a method must still keep its entry, as the slot it introduced.
+    #[test]
+    fn a_slot_below_the_parents_count_that_no_ancestor_has_is_the_classs_own() {
+        let old = program(&[
+            ("A", None, &[("f", 1, 0)]),
+            ("B", Some(0), &[("f", 2, 0), ("h", 3, 1)]),
+            ("C", Some(1), &[("h", 4, 1)]),
+        ]);
+        // A gains a virtual g that B overrides: it takes slot 2, above h.
+        let mut grown = program(&[
+            ("A", None, &[("f", 1, 0), ("g", 5, 1)]),
+            ("B", Some(0), &[("f", 2, 0), ("g", 6, 1), ("h", 3, 2)]),
+            ("C", Some(1), &[("h", 4, 2)]),
+        ]);
+        let first = plan(&old, &grown, &[]).unwrap();
+        apply(&mut grown, &first);
+        restore(&mut grown, &first);
+        assert_eq!(slot(&grown, 0, "g"), Some(2));
+        assert_eq!(slot(&grown, 1, "h"), Some(1));
+        // Then B.h and C.h are removed. B.h introduced slot 1 though A now
+        // has three slots, and no ancestor has a method in it.
+        let gone = program(&[
+            ("A", None, &[("f", 1, 0), ("g", 5, 1)]),
+            ("B", Some(0), &[("f", 2, 0), ("g", 6, 1)]),
+            ("C", Some(1), &[]),
+        ]);
+        let second = plan(&grown, &gone, &[]).unwrap();
+        assert_eq!(second.kept[&1].len(), 1);
+        assert_eq!(second.kept[&1][0].name, "h");
+        // C.h overrode it, and the slot is B's to keep.
+        assert!(!second.kept.contains_key(&2));
+    }
+
+    fn slot(bc: &DecodedBytecode, t: usize, name: &str) -> Option<i32> {
+        class(bc, t)?.proto.iter().find(|p| p.name == name).map(|p| p.pindex)
     }
 
     fn call(field: usize, receiver: u32) -> Opcode {

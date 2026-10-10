@@ -57,15 +57,25 @@ pub(crate) unsafe fn set_class_protos(c_type: *mut hl_type, protos: &[HLObjProto
             c_protos.as_mut_ptr()
         };
         std::mem::forget(c_protos);
-        (*obj).proto = list;
-        (*obj).nproto = protos.len() as i32;
+        // A reader that walks the list without a lock sees a count that fits
+        // the array it has: the count after the array when it grows, before
+        // it when it shrinks.
+        if protos.len() as i32 >= (*obj).nproto {
+            (*obj).proto = list;
+            (*obj).nproto = protos.len() as i32;
+        } else {
+            (*obj).nproto = protos.len() as i32;
+            (*obj).proto = list;
+        }
         true
     }
 }
 
 /// Slots the globals array has beyond the program's own, for the globals a
-/// reload adds. They are zeroed pages until used.
-const GLOBAL_SPARE: usize = 4096;
+/// reload adds. They are zeroed pages until used. A reload adds a slot for
+/// each literal and constant it has that no earlier program had, and none is
+/// taken back, since a function a reload drops may still read it.
+const GLOBAL_SPARE: usize = 65536;
 
 /// Factory for creating C-level `hl_type` structures from decoded bytecode.
 /// These are needed by native stdlib functions that expect `*mut hl_type` pointers.

@@ -857,6 +857,35 @@ pub(crate) unsafe fn obj_resolve_field(o: *const hl_type_obj, hfield: i32) -> *m
     }
 }
 
+/// Whether an ancestor of the class `o` has a method in vtable slot `pindex`,
+/// which makes a method of `o` in that slot an override.
+///
+/// A program the compiler wrote numbers its slots without gaps, so a slot
+/// below the parent's count was always an ancestor's. A hot reload gives a
+/// method a slot above the slots its subclasses use, which leaves the
+/// subclasses' own slots below the parent's count.
+unsafe fn overrides_inherited(o: *mut hl_type_obj, pindex: i32) -> bool {
+    unsafe {
+        if pindex < 0 {
+            return false;
+        }
+        let mut sup = (*o).super_;
+        while !sup.is_null() {
+            let so = (*sup).__bindgen_anon_1.obj;
+            if so.is_null() {
+                break;
+            }
+            for i in 0..(*so).nproto as usize {
+                if (*(*so).proto.add(i)).pindex == pindex {
+                    return true;
+                }
+            }
+            sup = (*so).super_;
+        }
+        false
+    }
+}
+
 /// The runtime object of the class `ot` with its method table built. An
 /// object made before a hot reload reaches here with the table dropped, since
 /// nothing has made an object of the class since.
@@ -891,11 +920,25 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         // caller can already hold the GC lock when it gets here (hlp_dyn_castp
         // runs a class's __cast under it), so this is the only order in which
         // two threads building types cannot each hold the lock the other wants.
-        let _gc = crate::gc::gc_guard();
-        let _lock = HL_GLOBAL_LOCK
+        let gc = crate::gc::gc_guard();
+        let lock = HL_GLOBAL_LOCK
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
             .unwrap();
+
+        // A reload that rebuilds the class while this waited for the locks
+        // has replaced its runtime object, and its parent's: build from the
+        // current ones.
+        let parent_now = if (*o).super_.is_null() {
+            ptr::null_mut()
+        } else {
+            (*(*(*o).super_).__bindgen_anon_1.obj).rt
+        };
+        if (*o).rt != t || (!p.is_null() && p != parent_now) {
+            drop(lock);
+            drop(gc);
+            return hl_get_obj_proto(ot);
+        }
 
         if !(*ot).vobj_proto.is_null() {
             return t;
@@ -955,7 +998,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         for i in 0..(*o).nproto as usize {
             let pr = (*o).proto.add(i);
             let method_index = if !p.is_null() {
-                if (*pr).pindex >= 0 && (*pr).pindex < (*p).nproto {
+                if overrides_inherited(o, (*pr).pindex) {
                     let super_obj = (*(*o).super_).__bindgen_anon_1.obj;
                     let lookup = obj_resolve_field(super_obj, (*pr).hashed_name);
                     if lookup.is_null() {
@@ -1305,7 +1348,7 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
         } else {
             for i in 0..(*o).nproto as usize {
                 let pr = (*o).proto.add(i);
-                if (*pr).pindex >= 0 && (*pr).pindex < (*p).nproto {
+                if overrides_inherited(o, (*pr).pindex) {
                     continue;
                 }
                 (*t).nlookup += 1;
@@ -1454,7 +1497,7 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
         for i in 0..(*o).nproto as usize {
             let pr = (*o).proto.add(i);
             let method_index = if !p.is_null() {
-                if (*pr).pindex >= 0 && (*pr).pindex < (*p).nproto {
+                if overrides_inherited(o, (*pr).pindex) {
                     continue;
                 }
                 let index = (*t).nmethods;
@@ -3626,18 +3669,12 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
         let total = mcount + (*rt).nproto + (*rt).nfields;
         let a = hlp_alloc_array(hlt_bytes(), total);
         let mut out = 0usize;
-        let mut current_rt = rt;
 
         o = (*t).__bindgen_anon_1.obj;
         loop {
-            let pproto = if !(*current_rt).parent.is_null() {
-                (*(*current_rt).parent).nproto
-            } else {
-                0
-            };
             for i in 0..(*o).nproto as usize {
                 let p = (*o).proto.add(i);
-                if (*p).pindex < 0 || (*p).pindex >= pproto {
+                if !overrides_inherited(o, (*p).pindex) {
                     *(hl_aptr::<*const uchar>(a)).add(out) = (*p).name;
                     out += 1;
                 }
@@ -3652,7 +3689,6 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
                 break;
             }
             o = (*sup).__bindgen_anon_1.obj;
-            current_rt = (*o).rt;
         }
 
         a

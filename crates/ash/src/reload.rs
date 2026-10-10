@@ -30,6 +30,9 @@ pub struct ReloadDiff {
     /// True if the new program has fewer globals than the running one,
     /// which `remap_globals` leaves no way to be: every running slot stays.
     pub globals_count_changed: bool,
+    /// True if a class both programs have declares other methods, or gives
+    /// them other slots, though no function changed: a removed override is one.
+    pub methods_changed: bool,
 }
 
 impl ReloadDiff {
@@ -40,7 +43,10 @@ impl ReloadDiff {
 
     /// Returns true if there are any actual changes to apply.
     pub fn has_changes(&self) -> bool {
-        !self.changed.is_empty() || !self.added.is_empty() || !self.removed.is_empty()
+        !self.changed.is_empty()
+            || !self.added.is_empty()
+            || !self.removed.is_empty()
+            || self.methods_changed
     }
 }
 
@@ -63,6 +69,16 @@ pub fn diff_bytecode(old: &DecodedBytecode, new: &DecodedBytecode) -> ReloadDiff
 
     let type_layout_changed = check_type_layout_compatibility(&old.types, &new.types);
     let globals_count_changed = new.globals.len() < old.globals.len();
+    let methods_changed = old.types.iter().zip(&new.types).any(|(o, n)| {
+        let (Some(o), Some(n)) = (&o.obj, &n.obj) else {
+            return false;
+        };
+        o.proto.len() != n.proto.len()
+            || o.proto
+                .iter()
+                .zip(&n.proto)
+                .any(|(a, b)| a.name != b.name || a.pindex != b.pindex)
+    });
 
     ReloadDiff {
         changed,
@@ -70,6 +86,7 @@ pub fn diff_bytecode(old: &DecodedBytecode, new: &DecodedBytecode) -> ReloadDiff
         removed,
         type_layout_changed,
         globals_count_changed,
+        methods_changed,
     }
 }
 
@@ -185,6 +202,38 @@ fn sync_class_methods(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
         let built = unsafe { !(*(*c).__bindgen_anon_1.obj).rt.is_null() };
         if built {
             unsafe { rebuild(c) };
+        }
+    }
+}
+
+/// Build the vtable of every class that has a runtime object. The flush drops
+/// them all, and compiled code loads `vobj_proto` of an object's class
+/// without a test for its being built, so an object made before the reload,
+/// of a class nothing has made an object of since, would be called through a
+/// null table.
+fn rebuild_vtables(shared: &SharedRuntimeHandles) {
+    let Some(build) = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hl_get_obj_proto")
+        .ok()
+    else {
+        return;
+    };
+    type FnProto = unsafe extern "C" fn(*mut hl::hl_type) -> *mut hl::hl_runtime_obj;
+    let build: FnProto = unsafe { std::mem::transmute(build) };
+    for &c in &shared.c_types {
+        if c.is_null() {
+            continue;
+        }
+        unsafe {
+            let kind = (*c).kind;
+            if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
+                continue;
+            }
+            let obj = (*c).__bindgen_anon_1.obj;
+            if obj.is_null() || (*obj).rt.is_null() || !(*c).vobj_proto.is_null() {
+                continue;
+            }
+            build(c);
         }
     }
 }
@@ -454,12 +503,10 @@ fn rehome_constant(
 ///
 /// A global keeps the slot that holds the same thing in `old`, so the
 /// value the running program keeps there (a class's descriptor and its
-/// statics) is the one the new code reads. A constant `old` does not have
-/// takes the slot of one of the same type that `new` dropped; the reload
-/// writes every constant into its slot again, so a frame still running the
-/// old body reads the new constant there until it returns. Any other global
-/// `old` does not have, and a constant with no slot to take, goes after the
-/// running program's, which has room for `slots` globals in all.
+/// statics) is the one the new code reads. A global `old` does not have goes
+/// after the running program's, which has room for `slots` globals in all. A
+/// constant the new program drops keeps its slot, because a function it drops
+/// may still read it, and a later program that has it again finds it there.
 fn remap_globals(
     old: &DecodedBytecode,
     new: &mut DecodedBytecode,
@@ -471,32 +518,11 @@ fn remap_globals(
     }
     let slot_of: HashMap<&GlobalKey, usize> =
         old_keys.iter().enumerate().map(|(g, k)| (k, g)).collect();
-    let mut taken = vec![false; old_keys.len()];
     let mut map: Vec<Option<usize>> = new_keys.iter().map(|k| slot_of.get(k).copied()).collect();
-    for &slot in map.iter().flatten() {
-        taken[slot] = true;
-    }
     let mut next = old_keys.len();
-    for g in 0..map.len() {
-        if map[g].is_some() {
-            continue;
-        }
-        let free = match &new_keys[g] {
-            GlobalKey::Constant(ty, ..) => (0..old_keys.len()).find(|&s| {
-                !taken[s] && matches!(&old_keys[s], GlobalKey::Constant(t, ..) if t == ty)
-            }),
-            _ => None,
-        };
-        map[g] = Some(match free {
-            Some(slot) => {
-                taken[slot] = true;
-                slot
-            }
-            None => {
-                next += 1;
-                next - 1
-            }
-        });
+    for slot in map.iter_mut().filter(|slot| slot.is_none()) {
+        *slot = Some(next);
+        next += 1;
     }
     if next > slots {
         return Err(format!(
@@ -515,7 +541,7 @@ fn remap_globals(
     }
     let at = |g: usize| map.get(g).copied().unwrap_or(g);
     // A constant the new program no longer has stays in its slot, for the
-    // functions it dropped and so that the next reload finds the slot free.
+    // functions it dropped and for a later program that has it again.
     let used: std::collections::HashSet<usize> = map.iter().copied().collect();
     let dropped: Vec<crate::types::HLConstant> = old
         .constants
@@ -878,6 +904,7 @@ pub fn do_reload(
     // builds anew keep theirs.
     flush_affected_protos(&ctx.shared_runtime, &stale);
     sync_class_methods(&ctx.shared_runtime, &new_bytecode);
+    rebuild_vtables(&ctx.shared_runtime);
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         let names = crate::types::function_keys(&new_bytecode.types, &new_bytecode.functions);
         let named = |findexes: &[usize]| -> Vec<String> {
@@ -1019,23 +1046,24 @@ mod tests {
     }
 
     /// A new literal ahead of the descriptor shifts it; every global goes
-    /// back to the slot that held it, and the new literal takes the slot
-    /// of the one dropped.
+    /// back to the slot that held it, and the new literal goes after them,
+    /// beside the one the new program dropped, which keeps its slot.
     #[test]
     fn shifted_globals_go_back_to_their_slots() {
         let old = program(&["same", "gone", "end"], 2);
         let mut new = program(&["fresh", "same", "gone"], 3);
         remap_globals(&old, &mut new, usize::MAX).expect("remaps");
 
-        assert_eq!(new.globals.len(), old.globals.len());
+        assert_eq!(new.globals.len(), old.globals.len() + 1);
         assert_eq!(new.types[MAIN].obj.as_ref().unwrap().global_value, 3);
         assert_eq!(new.globals[2].0, MAIN_STATICS);
         assert_eq!(literal_at(&new, 0), Some("same"));
         assert_eq!(literal_at(&new, 1), Some("gone"));
-        assert_eq!(literal_at(&new, 3), Some("fresh"));
+        assert_eq!(literal_at(&new, 3), Some("end"));
+        assert_eq!(literal_at(&new, 4), Some("fresh"));
         // Main's descriptor, then "fresh", "same", "gone" as the new code
         // reads them.
-        assert_eq!(reads(&new), vec![2, 3, 0, 1]);
+        assert_eq!(reads(&new), vec![2, 4, 0, 1]);
     }
 
     #[test]
@@ -1118,6 +1146,63 @@ mod tests {
             }
             running = bc;
         }
+    }
+
+    /// A program of the ladder fixtures, as the compiler wrote it.
+    fn ladder_fixture(v: &str) -> DecodedBytecode {
+        crate::native_lib::init_std_library();
+        let path = format!(
+            "{}/test/hot_reload/ladder/{v}.hl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        crate::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path)).unwrap()
+    }
+
+    /// The prototype list of a class: name, findex, slot.
+    fn protos_of(bc: &DecodedBytecode, class: &str) -> Vec<(String, i32, i32)> {
+        bc.types
+            .iter()
+            .filter_map(|t| t.obj.as_ref())
+            .find(|o| o.name == class)
+            .map(|o| {
+                o.proto
+                    .iter()
+                    .map(|p| (p.name.clone(), p.findex, p.pindex))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The global a function reads its literal from.
+    fn literal_global(bc: &DecodedBytecode, findex: i32) -> usize {
+        let f = bc.functions.iter().find(|f| f.findex == findex).unwrap();
+        match &f.ops()[0] {
+            Opcode::GetGlobal { global, .. } => global.0,
+            op => panic!("{op:?}"),
+        }
+    }
+
+    /// A method the new program drops stays callable for the frames that
+    /// began before the reload, and keeps the constant it reads: a literal
+    /// the new program adds does not take the slot.
+    #[test]
+    fn a_dropped_method_keeps_its_literal() {
+        let room = unbounded_room();
+        let running = ladder_fixture("v1");
+        let mut v3 = ladder_fixture("v3");
+        renumber(&running, &mut v3, &room, None).unwrap();
+        let kept = protos_of(&running, "B")
+            .into_iter()
+            .find(|p| p.0 == "h")
+            .unwrap()
+            .1;
+        let added = protos_of(&v3, "B")
+            .into_iter()
+            .find(|p| p.0 == "describe")
+            .unwrap()
+            .1;
+        assert_ne!(literal_global(&v3, kept), literal_global(&v3, added));
+        assert_eq!(literal_global(&v3, kept), literal_global(&running, kept));
     }
 
     /// Tables with room for anything a test adds.

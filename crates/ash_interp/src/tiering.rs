@@ -660,9 +660,10 @@ pub(crate) struct TieredSharedCtx {
     /// stub sentinels forever — which made every virtual dispatch from
     /// compiled code take a malloc-per-call bridge through the interpreter.
     /// Measured: 100M dispatches in 26.6s, 77% of it interpreter samples.
-    /// A reload drops it: the next install builds it from the new program's
+    /// It is kept with the reload generation it was built for, and a reload
+    /// drops it: the next install builds it from the new program's
     /// prototypes.
-    pub(crate) vtable_slots: Mutex<Option<Arc<HashMap<usize, Vec<(usize, usize)>>>>>,
+    pub(crate) vtable_slots: Mutex<Option<(u64, Arc<HashMap<usize, Vec<(usize, usize)>>>)>>,
     /// OSR entries an LLVM promote has compiled but not yet attached,
     /// `findex -> entries`. The broker cannot attach them itself: beadie's
     /// adapter installs the main code pointer only after the compile closure
@@ -1937,11 +1938,14 @@ pub(crate) fn prepare_worker_closure_dependencies(
 /// The store is a word write racing readers the same way `functions_ptrs`
 /// updates already do.
 pub(crate) fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mut c_void) {
+    let generation = ctx.reload_generation();
     let known = ctx
         .vtable_slots
         .lock()
         .expect("vtable_slots mutex poisoned")
-        .clone();
+        .clone()
+        .filter(|(built_for, _)| *built_for == generation)
+        .map(|(_, map)| map);
     let map = known.unwrap_or_else(|| {
         let mut m: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
         let bytecode = ctx.bytecode();
@@ -1980,7 +1984,11 @@ pub(crate) fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mu
             }
         }
         let built = Arc::new(m);
-        *ctx.vtable_slots.lock().expect("vtable_slots mutex poisoned") = Some(Arc::clone(&built));
+        // Not kept if a reload came while it was built from the old program.
+        if ctx.reload_generation() == generation {
+            *ctx.vtable_slots.lock().expect("vtable_slots mutex poisoned") =
+                Some((generation, Arc::clone(&built)));
+        }
         built
     });
     let Some(sites) = map.get(&findex) else {

@@ -53,6 +53,7 @@ being taken:
 | `ASH_CL_VERIFIER` | `1` runs Cranelift's IR verifier on every tier-0 compile (a debug build's default), `0` skips it (a release build's default) |
 | `ASH_STUB_COMPILE` | `1` makes compiled code that reaches an uncompiled callee compile it on the mutator instead of running it in the interpreter until the ladder promotes it; safe, for measuring |
 | `ASH_OSR_ENTRY_SYNC` | `1` builds a late Cranelift OSR entry on the interpreter thread instead of the `ash-osr-entry` worker; safe, for measuring the stall |
+| `ASH_RELOAD_LOG` | `1` names, at each hot reload, the functions it recompiled and the ones it added |
 | `ASH_TRACE_LINES` | `0` drops the source-position markers compiled code carries; a compiled frame then reports its function's entry line and inlined code is not named. On by default |
 | `ASH_PROFILE` | `phases`, `sample` or `all` — see below |
 | `ASH_PROFILE_HZ` | sampling rate (default 997) |
@@ -213,6 +214,32 @@ TLAB enabled as above. Collections stop the world only at safepoints —
 `hlp_fiber_poll` at loop back edges, `gc_set_blocking(true)`, the worker
 loop head. The TLAB bump path polls nothing, and wasm AOT emits no safepoint
 of its own, so a thread in a tight compiled loop on wasm cannot be stopped.
+
+## Hot reload
+
+`ash --mode hybrid --hot-reload program.hl` watches `program.hl`. When the file
+is replaced, the program's next `hl.Api.checkReload()` returns true and the
+interpreter takes the new code. A frame that is running keeps its body until it
+returns, every call after the swap runs the new one, and what objects and
+statics hold is kept.
+
+A reload can change function bodies and literals, and add, remove, move and
+edit closures. A closure that is in both programs keeps its place, so one made
+before the reload runs the new body; one the new program drops stays callable
+for the closures that still name it, with its old body.
+
+What live objects and compiled code are laid out by cannot change. The reload
+is refused, on stderr, and the program goes on as it was:
+
+| Message | Why |
+|---------|-----|
+| `a method was added`, `a method was removed` | the vtable of its class would move |
+| `a type's field layout changed` | live objects have the old layout |
+| `the globals count changed`, `a class or a static was added` | the globals array is fixed |
+| `needs N function slots and the running one has M` | the program reserved room for as many added functions as it started with, at least 8192; restart it |
+
+`--mode jit` does not apply a reload. `ASH_RELOAD_LOG=1` lists, by name, the
+functions each reload recompiled and added.
 
 ## Escape hatches
 

@@ -333,7 +333,8 @@ fn the_fixtures_are_where_the_test_expects() {
 
 /// A class the running program does not have, with a static and a method,
 /// is made by the new `render`, and is a class like any other: its static
-/// counts and an object of it is a `View`.
+/// counts and an object of it is a `View`. `main`, which began before the
+/// reload, also calls its method through a structural type.
 #[test]
 fn a_class_added() {
     check(
@@ -344,6 +345,7 @@ fn a_class_added() {
             "reloaded",
             "render child 5,extra x #1,total 1",
             "again child 5,extra x #2,total 2",
+            "source e:x",
             "done",
         ],
         "added",
@@ -362,6 +364,7 @@ fn a_class_with_statics_to_compute() {
             "reloaded",
             "render child 5,t:3abc",
             "again child 5,t:3abc",
+            "source t:3",
             "done",
         ],
         "added",
@@ -380,14 +383,17 @@ fn a_class_dropped_and_added_again() {
             "reloaded",
             "render child 5,extra x #1,total 1",
             "again child 5,extra x #2,total 2",
+            "source e:x",
             "next",
             "reloaded",
             "render child 5,t:3abc",
             "again child 5,t:3abc",
+            "source t:3",
             "next",
             "reloaded",
-            "render child 5,extra x #3,total 3",
-            "again child 5,extra x #4,total 4",
+            "render child 5,extra x #4,total 4",
+            "again child 5,extra x #5,total 5",
+            "source e:x",
             "done",
         ],
         "added",

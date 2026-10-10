@@ -1406,6 +1406,9 @@ impl HLInterpreter {
         obj: u32,
         field: u32,
     ) -> Result<StepResult> {
+        // The method is found through the object, so it may belong to a class
+        // a reload added, which a frame that began before it does not know.
+        let bytecode = self.current(bytecode);
         let frame = self.stack.last_mut().unwrap();
         // Resolve the virtual method findex from the object's proto chain,
         // then create a vclosure with the object as bound value.
@@ -1859,6 +1862,10 @@ impl HLInterpreter {
         field: usize,
         args: &[Reg],
     ) -> Result<StepResult> {
+        // The method is found through the receiver, so it may belong to a
+        // class a reload added, which a frame that began before it does not
+        // know.
+        let bytecode = self.current(bytecode);
         // CallMethod: args[0] is 'this'. CallThis: the receiver is
         // IMPLICITLY register 0 (HashLink OCallThis semantics) and
         // args hold only the real arguments, else method resolution runs
@@ -2025,7 +2032,7 @@ impl HLInterpreter {
                                 // which marshals both directions.
                                 let ret_compatible = func_of(&self.targets, fi)
                                     .and_then(|f_idx| {
-                                        let ft = &self.current(bytecode).functions[f_idx];
+                                        let ft = &bytecode.functions[f_idx];
                                         bytecode.types[ft.type_.0]
                                             .fun
                                             .as_ref()
@@ -2163,7 +2170,7 @@ impl HLInterpreter {
                             let needs_boxed_dispatch = needs_boxed_dispatch
                                 || found.is_some_and(|fi| {
                                     func_of(&self.targets, fi).is_some_and(|f_idx| {
-                                        let ft = &self.current(bytecode).functions[f_idx];
+                                        let ft = &bytecode.functions[f_idx];
                                         bytecode.types[ft.type_.0].fun.as_ref().is_some_and(|f| {
                                             let ret_kind = bytecode.types[f.ret.0].kind;
                                             let dst_kind =

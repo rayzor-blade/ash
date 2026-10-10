@@ -1,6 +1,8 @@
 // Classes a reload adds: the program is built as v1, reloads as a later
 // version once it says `ready`, and then renders its panel. With ROUNDS set it
 // takes that many reloads, saying `next` after each but the last.
+typedef Tagged = {function tag():String;}
+
 class View {
     public var id:Int;
 
@@ -22,6 +24,9 @@ class Child extends View {
 
     override public function name():String
         return "child " + n;
+
+    public function tag():String
+        return "c" + n;
 }
 
 class Extra extends View {
@@ -39,6 +44,9 @@ class Extra extends View {
 
     public static function total():Int
         return made;
+
+    public function tag():String
+        return "e:" + label;
 }
 
 class Panel extends View {
@@ -48,6 +56,9 @@ class Panel extends View {
         super();
         this.count = count;
     }
+
+    public function source():Tagged
+        return new Extra("x");
 
     public function render():Array<String> {
         var out = [new Child(count).name()];
@@ -61,6 +72,7 @@ class Panel extends View {
 class TestHotReloadClasses {
     static function main() {
         var panel = new Panel(5);
+        var source = panel.source();
         var rounds = Std.parseInt(Sys.getEnv("ROUNDS") ?? "1") ?? 1;
         Sys.println("ready");
         for (round in 0...rounds) {
@@ -76,6 +88,8 @@ class TestHotReloadClasses {
             Sys.println(reloaded ? "reloaded" : "no-reload");
             Sys.println("render " + panel.render().join(","));
             Sys.println("again " + panel.render().join(","));
+            source = panel.source();
+            Sys.println("source " + source.tag());
             Sys.println(round + 1 < rounds ? "next" : "done");
         }
     }

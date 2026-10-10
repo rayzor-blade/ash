@@ -38,9 +38,12 @@ class Other extends Base {
 }
 
 class Show {
-    public static function render(leaf:Leaf, base:Base):Array<String> {
+    public static function hot(o:Base):Int
+        return o.name().length;
+
+    public static function render(leaf:Leaf, base:Base, other:Base):Array<String> {
         var virtual:HasBonus = leaf;
-        return ["virtual " + virtual.bonus(1), "field " + (Reflect.field(leaf, "bonus") != null), "name " + leaf.name(), "describe " + base.describe(), "value " + leaf.value(), "bonus " + leaf.bonus(10)];
+        return ["virtual " + virtual.bonus(1), "field " + (Reflect.field(leaf, "bonus") != null), "name " + leaf.name(), "describe " + base.describe(), "value " + leaf.value(), "bonus " + leaf.bonus(10), "sibling " + other.name()];
     }
 }
 
@@ -63,8 +66,16 @@ class TestHotReloadMethods {
                 Sys.sleep(0.02);
             }
             Sys.println(reloaded ? "reloaded" : "no-reload");
-            Sys.println("render " + Show.render(leaf, base).join(","));
+            Sys.println("render " + Show.render(leaf, base, other).join(","));
             Sys.println("other " + other.name());
+            // Calls a virtual method of an object made before the reload, over and
+            // over, long enough for the callee to be compiled.
+            var total = 0;
+            for (i in 0...200) {
+                total += Show.hot(other);
+                Sys.sleep(0.002);
+            }
+            Sys.println("hot " + total);
             Sys.println(round + 1 < rounds ? "next" : "done");
         }
     }

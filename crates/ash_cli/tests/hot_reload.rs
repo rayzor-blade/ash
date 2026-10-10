@@ -48,6 +48,11 @@ const METHODS: Family = Family {
     main: "TestHotReloadMethods",
 };
 
+const LADDER: Family = Family {
+    dir: "ladder",
+    main: "TestHotReloadLadder",
+};
+
 impl Family {
     fn fixtures(self) -> PathBuf {
         repo_root().join("crates/ash/test/hot_reload").join(self.dir)
@@ -329,6 +334,7 @@ fn the_fixtures_are_where_the_test_expects() {
         (CLOSURES, &["v1", "v2", "v3", "v4", "v5", "v6", "v7"][..]),
         (CLASSES, &["v1", "v2", "v3"][..]),
         (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
+        (LADDER, &["v1", "v2", "v3", "v4"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -417,8 +423,9 @@ fn a_helper_method_added() {
         "v2",
         &[
             "reloaded",
-            "render virtual 6,field true,name leaf5,describe [leaf5],value 16,bonus 15",
+            "render virtual 6,field true,name leaf5,describe [leaf5],value 16,bonus 15,sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "added",
@@ -435,8 +442,9 @@ fn an_override_added_to_a_method_nothing_overrode() {
         "v3",
         &[
             "reloaded",
-            "render name leaf5,describe <leaf5>,value 10",
+            "render name leaf5,describe <leaf5>,value 10,sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "1 added",
@@ -451,8 +459,9 @@ fn a_method_removed() {
         "v4",
         &[
             "reloaded",
-            "render name leaf5,describe [leaf5]",
+            "render name leaf5,describe [leaf5],sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "reloaded",
@@ -468,8 +477,9 @@ fn an_override_removed() {
         "v5",
         &[
             "reloaded",
-            "render name base,describe [base],value 10",
+            "render name base,describe [base],value 10,sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "reloaded",
@@ -487,8 +497,9 @@ fn a_virtual_method_declared_before_the_others() {
         "v6",
         &[
             "reloaded",
-            "render name leaf5,describe [leaf5],value 10,tag T5",
+            "render name leaf5,describe [leaf5],value 10,tag T5,sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "added",
@@ -505,20 +516,24 @@ fn methods_added_removed_and_added_again() {
         &["v3", "v5", "v6", "v1"],
         &[
             "reloaded",
-            "render name leaf5,describe <leaf5>,value 10",
+            "render name leaf5,describe <leaf5>,value 10,sibling other",
             "other other",
+            "hot 1000",
             "next",
             "reloaded",
-            "render name base,describe [base],value 10",
+            "render name base,describe [base],value 10,sibling other",
             "other other",
+            "hot 1000",
             "next",
             "reloaded",
-            "render name leaf5,describe [leaf5],value 10,tag T5",
+            "render name leaf5,describe [leaf5],value 10,tag T5,sibling other",
             "other other",
+            "hot 1000",
             "next",
             "reloaded",
-            "render name leaf5,describe [leaf5],value 10",
+            "render name leaf5,describe [leaf5],value 10,sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "reloaded",
@@ -536,8 +551,9 @@ fn a_class_added_below_a_class_with_methods() {
         "v7",
         &[
             "reloaded",
-            "render third third{third}6,name leaf5,describe [leaf5],value 10",
+            "render third third{third}6,name leaf5,describe [leaf5],value 10,sibling other",
             "other other",
+            "hot 1000",
             "done",
         ],
         "added",
@@ -554,8 +570,98 @@ fn a_to_string_method_added() {
         "v8",
         &[
             "reloaded",
-            "render name leaf5,describe [leaf5],value 10,str Leaf(5)",
+            "render name leaf5,describe [leaf5],value 10,str Leaf(5),sibling other",
             "other other",
+            "hot 1000",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// `B` has a virtual method of its own (`h`, which `C` overrides) in slot 1.
+/// `A` gains a virtual method, which takes slot 2, above `h`: the slots of the
+/// subclasses are not the slots the parent counts, and a lookup by name,
+/// `toString` and a call by slot must all still find their methods.
+#[test]
+fn a_root_gains_a_slot_above_the_slots_of_its_subclasses() {
+    check(
+        LADDER,
+        "v1",
+        "v2",
+        &[
+            "reloaded",
+            "render f b.f,h c.h,helper b.helper,byname b.helper,describe B,str B!",
+            "oldh c.h",
+            "d d.h",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// `h` is removed from `B` and `C`, though a frame that began before the
+/// reload calls its slot: the class keeps it.
+#[test]
+fn a_removed_method_whose_slot_an_older_frame_calls() {
+    check(
+        LADDER,
+        "v1",
+        "v3",
+        &[
+            "reloaded",
+            "render f b.f,helper b.helper,byname b.helper,describe B,str B!",
+            "oldh b.h",
+            "d b.h",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// The same two edits one after the other: the slot `describe` took above
+/// `h` is the running program's by the time `h` is removed.
+#[test]
+fn a_slot_taken_above_a_subclass_and_the_subclass_method_removed() {
+    check_through(
+        LADDER,
+        "v1",
+        &["v2", "v3"],
+        &[
+            "reloaded",
+            "render f b.f,h c.h,helper b.helper,byname b.helper,describe B,str B!",
+            "oldh c.h",
+            "d d.h",
+            "next",
+            "reloaded",
+            "render f b.f,helper b.helper,byname b.helper,describe B,str B!",
+            "oldh b.h",
+            "d b.h",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// The only change is that `C` stops overriding `h`, which `D` still
+/// overrides: no function body changes, only the class's methods. The reload
+/// still happens, and `C` has `B`'s.
+#[test]
+fn a_reload_that_only_removes_an_override() {
+    check_through(
+        LADDER,
+        "v1",
+        &["v2", "v4"],
+        &[
+            "reloaded",
+            "render f b.f,h c.h,helper b.helper,byname b.helper,describe B,str B!",
+            "oldh c.h",
+            "d d.h",
+            "next",
+            "reloaded",
+            "render f b.f,h b.h,helper b.helper,byname b.helper,describe B,str B!",
+            "oldh b.h",
+            "d d.h",
             "done",
         ],
         "reloaded",

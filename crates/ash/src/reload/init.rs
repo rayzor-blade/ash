@@ -10,7 +10,7 @@
 use crate::bytecode::DecodedBytecode;
 use crate::opcodes::Opcode;
 use crate::types::HLFunction;
-use air::opcode_info::{is_pure, jump_offset, reads, writes};
+use air::opcode_info::{is_pure, jump_offset, reads, successors, writes};
 use std::collections::HashSet;
 
 /// Whether `op` decides which op runs next, or ends the function.
@@ -26,6 +26,35 @@ fn is_control(op: &Opcode) -> bool {
                 | Opcode::Throw { .. }
                 | Opcode::Rethrow { .. }
         )
+}
+
+/// Which ops lie inside a jump: from a forward jump to the op before its
+/// target, and from a backward jump's target to the jump. Branches and
+/// loops, which pick what runs or how often, are made of these.
+fn inside_a_jump(ops: &[Opcode]) -> Vec<bool> {
+    let mut starts = vec![0i32; ops.len() + 1];
+    for (i, op) in ops.iter().enumerate() {
+        for target in successors(op, i, ops.len()) {
+            if target == i + 1 {
+                continue;
+            }
+            let (from, to) = if target > i {
+                (i, (target - 1).min(ops.len() - 1))
+            } else {
+                (target, i)
+            };
+            starts[from] += 1;
+            starts[to + 1] -= 1;
+        }
+    }
+    let mut open = 0;
+    starts[..ops.len()]
+        .iter()
+        .map(|d| {
+            open += d;
+            open > 0
+        })
+        .collect()
 }
 
 /// Make the function that sets up the types from `types_from` on, which the
@@ -98,10 +127,14 @@ pub fn attach_init(
             }
         }
     }
+    // The slice is a straight run of ops: one inside a branch or a loop would
+    // run without the test that guards it, and a value some branch picks
+    // would be whichever write came last.
+    let branched = inside_a_jump(ops);
     let mut setup: Vec<Opcode> = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         if keep[i] {
-            if is_control(op) {
+            if is_control(op) || branched[i] {
                 return Err("the setup of the new classes has control flow in it".into());
             }
             setup.push(op.clone());
@@ -331,6 +364,89 @@ mod tests {
         let mut bc = program(ops);
         let why = attach_init(&mut bc, 2, 100).unwrap_err();
         assert!(why.contains("control flow"), "{why}");
+    }
+
+    /// The ops that make a bool of a comparison, as the entry function has
+    /// them: `r5 = (r1 == null)`.
+    fn bool_of_comparison() -> Vec<Opcode> {
+        vec![
+            Opcode::Null { dst: Reg(0) },
+            Opcode::JEq {
+                a: Reg(1),
+                b: Reg(0),
+                offset: 2,
+            },
+            Opcode::Bool {
+                dst: Reg(5),
+                value: false,
+            },
+            Opcode::JAlways { offset: 1 },
+            Opcode::Bool {
+                dst: Reg(5),
+                value: true,
+            },
+        ]
+    }
+
+    fn store_r5_in_static() -> Vec<Opcode> {
+        vec![
+            Opcode::GetGlobal {
+                dst: Reg(6),
+                global: RefGlobal(1),
+            },
+            Opcode::SetField {
+                obj: Reg(6),
+                field: RefField(0),
+                src: Reg(5),
+            },
+        ]
+    }
+
+    /// A static that a comparison decides has two writes behind a jump, and
+    /// a straight run of the ops that write it would keep one of them.
+    #[test]
+    fn a_static_chosen_by_a_branch_is_refused() {
+        let mut ops = register(2);
+        ops.extend(bool_of_comparison());
+        ops.extend(store_r5_in_static());
+        ops.push(ret());
+        let mut bc = program(ops);
+        let why = attach_init(&mut bc, 2, 100).unwrap_err();
+        assert!(why.contains("control flow"), "{why}");
+    }
+
+    /// A store the entry function makes only when some test holds is not
+    /// made without the test.
+    #[test]
+    fn a_store_under_a_test_is_refused() {
+        let mut ops = register(2);
+        let store = set_static(1, 3);
+        ops.push(Opcode::JTrue {
+            cond: Reg(0),
+            offset: store.len() as i32,
+        });
+        ops.extend(store);
+        ops.push(ret());
+        let mut bc = program(ops);
+        let why = attach_init(&mut bc, 2, 100).unwrap_err();
+        assert!(why.contains("control flow"), "{why}");
+    }
+
+    /// A branch that belongs to something else, between the ops the setup
+    /// takes, is left where it is.
+    #[test]
+    fn a_branch_between_the_ops_of_the_setup_is_left_out() {
+        let mut ops = register(2);
+        ops.extend(bool_of_comparison());
+        ops.extend(set_static(1, 3));
+        ops.push(ret());
+        let mut bc = program(ops);
+        attach_init(&mut bc, 2, 100).unwrap();
+        let init = bc.functions.last().unwrap();
+        let mut expected = register(2);
+        expected.extend(set_static(1, 3));
+        expected.push(ret());
+        assert_eq!(format!("{:?}", init.ops()), format!("{expected:?}"));
     }
 
     /// A jump the setup does not depend on is left behind with the rest of

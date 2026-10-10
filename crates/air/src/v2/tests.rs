@@ -8215,6 +8215,51 @@ fn stripmine_skips_a_loop_with_a_variable_step() {
     assert!(f.strip_tests.is_empty(), "no constant step, no test");
 }
 
+/// `fix_loop` with `Call1 fun(i)` in the body.
+fn counted_loop_calling(fun: usize) -> (Vec<Opcode>, Vec<TypeRef>) {
+    let (mut ops, mut tys) = fix_loop();
+    ops.insert(
+        5,
+        Opcode::Call1 {
+            dst: Reg(4),
+            fun: RefFun(fun),
+            arg0: Reg(2),
+        },
+    );
+    ops[4] = Opcode::JSGte {
+        a: Reg(2),
+        b: Reg(0),
+        offset: 4,
+    };
+    ops[8] = Opcode::JAlways { offset: -6 };
+    tys.push(t(2));
+    (ops, tys)
+}
+
+fn strip_tests_of(ops: &[Opcode], tys: &[TypeRef]) -> usize {
+    use super::passes::stripmine::StripMine;
+    let mut f = lower_with(ops, tys, &demo_module()).expect("lower");
+    PassManager::with_passes(vec![Box::new(StripMine)])
+        .run(&mut f)
+        .expect("stripmine");
+    f.strip_tests.len()
+}
+
+#[test]
+fn stripmine_skips_a_loop_that_calls_a_native() {
+    // findex 5 is a native: it can run for as long as it likes, so a strip of
+    // iterations would hold off a world stop for the strip times that.
+    let (ops, tys) = counted_loop_calling(5);
+    assert_eq!(strip_tests_of(&ops, &tys), 0);
+}
+
+#[test]
+fn stripmine_keeps_a_loop_that_calls_bytecode() {
+    // findex 6 is a bytecode function, which polls in its own loops.
+    let (ops, tys) = counted_loop_calling(6);
+    assert_eq!(strip_tests_of(&ops, &tys), 1);
+}
+
 #[test]
 fn barrier_free_stores_are_fresh_targets_and_null_sources() {
     let ops = vec![

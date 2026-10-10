@@ -22,7 +22,10 @@
 //!
 //! Innermost loops with one latch and an induction variable; a loop
 //! stepping by a variable amount is not bounded this way and keeps its poll
-//! on every iteration.
+//! on every iteration. So does a loop that calls a native: the native runs
+//! as long as it likes, and a strip of them would hold a world stop off for
+//! the strip times that. A call to a bytecode function does not, since the
+//! callee polls in its own loops.
 
 use super::{Pass, PassOptions, PassStats};
 use crate::v2::analysis::{CfgInfo, LoopForest};
@@ -80,12 +83,25 @@ impl Pass for StripMine {
             let Some(test) = induction(f, &defs, &constants, lp.header, latch) else {
                 continue;
             };
+            if lp.blocks.iter().any(|b| calls_native(f, *b)) {
+                continue;
+            }
             found.push(test);
         }
         stats.added += found.len();
         f.strip_tests.extend(found);
         Ok(stats)
     }
+}
+
+/// Whether `block` makes a call to a native. A native the IR expresses
+/// directly (an intrinsic, a vector operation) is no longer a `Call` here.
+fn calls_native(f: &Function, block: BlockId) -> bool {
+    !f.natives.is_empty()
+        && f.blocks[block.idx()]
+            .instrs
+            .iter()
+            .any(|i| matches!(i, Instr::Call { fun, .. } if f.natives.contains(*fun)))
 }
 
 /// The header phi the loop advances by a constant each iteration, with the

@@ -4,6 +4,7 @@
 //! which were added/removed, and whether type layouts are compatible.
 
 mod functions;
+mod types;
 
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
@@ -468,10 +469,10 @@ fn remap_globals(
 }
 
 /// The program at `path`, read as the next version of `running`: with
-/// the host registrations `running` took, its globals on `running`'s
-/// slots and its functions on `running`'s numbering. `room` says how many
-/// globals and findexes the running tables have room for. `Err` says why
-/// it cannot be, or that it did not read.
+/// the host registrations `running` took, and its types, globals and
+/// functions on `running`'s numbering. `room` says how many globals and
+/// findexes the running tables have room for. `Err` says why it cannot be,
+/// or that it did not read.
 fn decode_next(
     path: &std::path::Path,
     running: &DecodedBytecode,
@@ -480,10 +481,11 @@ fn decode_next(
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
-    remap_globals(running, &mut bc, room.global_slots)
-        .map_err(|why| format!("the program cannot reload in place: {why}"))?;
-    functions::remap_functions(running, &mut bc, room.function_slots)
-        .map_err(|why| format!("the program cannot reload in place: {why}"))?;
+    let refuse = |why: String| format!("the program cannot reload in place: {why}");
+    let retyped = types::remap_types(running, &mut bc).map_err(refuse)?;
+    remap_globals(running, &mut bc, room.global_slots).map_err(refuse)?;
+    functions::remap_functions(running, &mut bc, room.function_slots).map_err(refuse)?;
+    types::restore_dropped(running, &mut bc, &retyped);
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         eprintln!(
             "[hot-reload] read in {decoded:?}, put on the running numbering in {:?}",

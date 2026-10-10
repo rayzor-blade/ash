@@ -60,26 +60,7 @@ impl CTypeFactory {
             function_slots: 0,
         };
 
-        // First pass: create placeholder types with correct `kind`
-        for hl_type_rust in &bytecode.types {
-            let c_type = Box::into_raw(Box::new(hl_type {
-                kind: hl_type_rust.kind,
-                __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                    abs_name: ptr::null(),
-                },
-                vobj_proto: ptr::null_mut(),
-                mark_bits: ptr::null_mut(),
-            }));
-            factory.c_types.push(c_type);
-        }
-
-        // Second pass: fill in type-specific data with cross-references.
-        // Wire global_value pointers into the shared globals_data array.
-        for (i, hl_type_rust) in bytecode.types.iter().enumerate() {
-            unsafe {
-                factory.fill_type_data(i, hl_type_rust);
-            }
-        }
+        factory.add_types(&bytecode.types);
 
         // Third pass: create module context with stub function pointers
         // and assign it to all obj/struct types so that bindings work.
@@ -88,6 +69,53 @@ impl CTypeFactory {
         }
 
         factory
+    }
+
+    /// Create the C types of `types`, which go after the ones made already.
+    fn add_types(&mut self, types: &[HLType]) {
+        let from = self.c_types.len();
+        // First pass: create placeholder types with correct `kind`
+        for hl_type_rust in types {
+            let c_type = Box::into_raw(Box::new(hl_type {
+                kind: hl_type_rust.kind,
+                __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                    abs_name: ptr::null(),
+                },
+                vobj_proto: ptr::null_mut(),
+                mark_bits: ptr::null_mut(),
+            }));
+            self.c_types.push(c_type);
+        }
+
+        // Second pass: fill in type-specific data with cross-references.
+        // Wire global_value pointers into the shared globals_data array.
+        for (i, hl_type_rust) in types.iter().enumerate() {
+            unsafe {
+                self.fill_type_data(from + i, hl_type_rust);
+            }
+        }
+    }
+
+    /// Create the C types for the types a reload added, which come after the
+    /// running program's, and give the classes among them the module context.
+    /// The globals they name are counted already (`grow_globals`).
+    pub fn append_types(&mut self, types: &[HLType]) {
+        let from = self.c_types.len();
+        self.add_types(types);
+        if self.module_ctx.is_null() {
+            return;
+        }
+        for c_type_ptr in &self.c_types[from..] {
+            unsafe {
+                let kind = (**c_type_ptr).kind;
+                if kind == hl_type_kind_HOBJ || kind == hl_type_kind_HSTRUCT {
+                    let obj = (**c_type_ptr).__bindgen_anon_1.obj;
+                    if !obj.is_null() {
+                        (*obj).m = self.module_ctx;
+                    }
+                }
+            }
+        }
     }
 
     /// Get the C-level type pointer for a given type index.

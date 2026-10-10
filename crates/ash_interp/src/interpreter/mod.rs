@@ -5931,11 +5931,16 @@ impl HLInterpreter {
     }
 
     /// Make room in the runtime tables for what a reload added, and return
-    /// them as they are now: the globals the new program counts.
+    /// them as they are now: the globals the new program counts, and the C
+    /// types of its types after the running ones.
     fn grow_runtime(&mut self, bc: &DecodedBytecode) -> SharedRuntimeHandles {
         self.c_type_factory.grow_globals(bc.globals.len());
         if self.globals.len() < bc.globals.len() {
             self.globals.resize(bc.globals.len(), NanBoxedValue::null());
+        }
+        let have = self.c_type_factory.as_slice().len();
+        if bc.types.len() > have {
+            self.c_type_factory.append_types(&bc.types[have..]);
         }
         self.shared_handles()
     }

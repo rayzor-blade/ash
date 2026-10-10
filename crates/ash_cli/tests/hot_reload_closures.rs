@@ -232,9 +232,29 @@ fn a_closure_with_a_new_literal() {
     );
 }
 
+/// A closure whose function type no running closure has: the type goes
+/// after the running types, and the ones that were after it in the new
+/// program's table are found where they were.
+#[test]
+fn a_closure_of_a_new_function_type() {
+    check(
+        "v1",
+        "v7",
+        &[
+            "reloaded",
+            "old 6,10",
+            "new 6,10,7",
+            "reflect 6,10,7",
+            "apply 60,100,70",
+            "done",
+        ],
+        "2 added",
+    );
+}
+
 #[test]
 fn the_fixtures_are_where_the_test_expects() {
-    for v in ["v1", "v2", "v3", "v4", "v5", "v6"] {
+    for v in ["v1", "v2", "v3", "v4", "v5", "v6", "v7"] {
         assert!(Path::new(&fixtures().join(v).join("TestHotReloadClosures.hx")).exists());
     }
 }

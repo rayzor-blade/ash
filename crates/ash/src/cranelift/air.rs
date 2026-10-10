@@ -260,10 +260,18 @@ pub(super) fn retier_state_for(
     if !retier_enabled() {
         return HashMap::new();
     }
-    let plan = crate::osr::analyze(&opt.ir);
+    if crate::osr::has_trap(&opt.ir) {
+        return HashMap::new();
+    }
+    let cfg = air::v2::CfgInfo::build(&opt.ir);
+    let forest = air::v2::LoopForest::analyze(&opt.ir, &cfg);
+    let plan = crate::osr::analyze_loops(&opt.ir, &cfg, &forest);
     if !plan.eligible() {
         return HashMap::new();
     }
+    // The same for every header of the function, and worth computing only
+    // once a header needs a layout.
+    let mut liveness = None;
     let mut guard = RETIER.lock().expect("retier mutex poisoned");
     let sites = guard
         .get_or_insert_with(Default::default)
@@ -271,7 +279,7 @@ pub(super) fn retier_state_for(
         .or_default();
     let mut exits = HashMap::new();
     for h in plan.entry_headers {
-        if !retier_worth_polling(&opt.ir, h) {
+        if !retier_worth_polling(&forest, h) {
             continue;
         }
         let existing = sites
@@ -280,7 +288,15 @@ pub(super) fn retier_state_for(
         let site = if let Some(site) = existing {
             site.clone()
         } else {
-            match crate::retier::Layout::new(findex, opt.clone(), air::v2::ir::BlockId(h)) {
+            let live = liveness.get_or_insert_with(|| {
+                air::v2::liveness::Liveness::analyze(&opt.ir, &cfg)
+            });
+            match crate::retier::Layout::with_liveness(
+                findex,
+                opt.clone(),
+                air::v2::ir::BlockId(h),
+                live,
+            ) {
                 Ok(layout) => {
                     let site = Arc::new(crate::retier::Site::new(layout, poll_epoch));
                     sites.push(site.clone());
@@ -311,9 +327,7 @@ pub(super) fn retier_state_for(
 /// Body size was tried first and is the wrong measure: this IR splits a
 /// loop across many small blocks, so mandelbrot's ~10-instruction escape
 /// loop sums well past any threshold and kept its poll.
-fn retier_worth_polling(f: &air::v2::ir::Function, header: u32) -> bool {
-    let cfg = air::v2::CfgInfo::build(f);
-    let forest = air::v2::LoopForest::analyze(f, &cfg);
+fn retier_worth_polling(forest: &air::v2::LoopForest, header: u32) -> bool {
     let Some(l) = forest
         .innermost_first()
         .into_iter()

@@ -167,21 +167,34 @@ fn ref_hazard(f: &Function, cfg: &CfgInfo) -> Vec<bool> {
 /// Collects every refusal rather than stopping at the first, so a report can
 /// say why a function was rejected instead of only that it was.
 pub fn analyze(f: &Function) -> OsrPlan {
-    let mut refusals = Vec::new();
-
-    if f.blocks
-        .iter()
-        .any(|b| b.handler.is_some() || matches!(b.term, Terminator::Trap { .. }))
-    {
-        // A live catch region is a property of the whole function.
-        return OsrPlan {
-            refusals: vec![OsrRefusal::Trap],
-            entry_headers: Vec::new(),
-        };
+    if has_trap(f) {
+        return trap_plan();
     }
-
     let cfg = CfgInfo::build(f);
     let forest = LoopForest::analyze(f, &cfg);
+    analyze_loops(f, &cfg, &forest)
+}
+
+/// Whether a catch region is live anywhere in `f`: a property of the whole
+/// function, which no loop's entry can work around.
+pub fn has_trap(f: &Function) -> bool {
+    f.blocks
+        .iter()
+        .any(|b| b.handler.is_some() || matches!(b.term, Terminator::Trap { .. }))
+}
+
+/// The plan for a function [`has_trap`] says is out of reach.
+pub fn trap_plan() -> OsrPlan {
+    OsrPlan {
+        refusals: vec![OsrRefusal::Trap],
+        entry_headers: Vec::new(),
+    }
+}
+
+/// [`analyze`] over a CFG and loop forest the caller has already built, for a
+/// function with no trap region.
+pub fn analyze_loops(f: &Function, cfg: &CfgInfo, forest: &LoopForest) -> OsrPlan {
+    let mut refusals = Vec::new();
     // A loopless function stopped here. That was scope, not capability:
     // compile_osr_entry asks only that a site be a block start, and the hazards
     // guarded below -- an escaping frame pointer, a live catch region, several
@@ -197,7 +210,7 @@ pub fn analyze(f: &Function) -> OsrPlan {
     // costs about a fifth of all loop-bearing functions, nbody's `main` among
     // them, whose single `Ref` sits past the end of every loop it would
     // disqualify.
-    let ref_held = ref_hazard(f, &cfg);
+    let ref_held = ref_hazard(f, cfg);
 
     let mut entry_headers = Vec::new();
     if loopless {

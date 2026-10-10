@@ -38,13 +38,24 @@ pub struct Layout {
 
 impl Layout {
     pub fn new(findex: usize, air: Arc<Optimized>, header: BlockId) -> Result<Self> {
+        let cfg = CfgInfo::build(&air.ir);
+        let liveness = Liveness::analyze(&air.ir, &cfg);
+        Self::with_liveness(findex, air, header, &liveness)
+    }
+
+    /// [`Layout::new`] over liveness the caller has already computed for
+    /// `air`, which is the same for every header of a function.
+    pub fn with_liveness(
+        findex: usize,
+        air: Arc<Optimized>,
+        header: BlockId,
+        liveness: &Liveness,
+    ) -> Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let f = &air.ir;
         let Some(block) = f.blocks.get(header.idx()) else {
             bail!("invalid re-tier header")
         };
-        let cfg = CfgInfo::build(f);
-        let liveness = Liveness::analyze(f, &cfg);
         let mut values: BTreeSet<ValueId> = liveness.live_in(header).clone();
         values.extend(block.phis.iter().map(|phi| phi.dst));
         let mut slots = Vec::new();

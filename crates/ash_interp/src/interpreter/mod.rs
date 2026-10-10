@@ -462,6 +462,9 @@ pub struct HLInterpreter {
     osr_attached: std::collections::HashMap<usize, Vec<OsrEntry>>,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
+    /// Hot headers whose late OSR entry waits for the function's compiled code
+    /// to reach `entries`, which only a tick observes.
+    late_pending: std::collections::HashSet<(usize, usize)>,
     /// Compiled-only functions whose AIR V2 closure dependencies have been
     /// installed. A closure can escape immediately into a native (sorting is
     /// the canonical case), where a stub sentinel is not a callable address;
@@ -1019,6 +1022,7 @@ impl HLInterpreter {
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
             hot_loops: std::collections::HashSet::new(),
+            late_pending: std::collections::HashSet::new(),
             compiled_only_deps_ready: std::collections::HashSet::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
@@ -3804,6 +3808,20 @@ impl HLInterpreter {
                 self.air.forget(func_idx);
             }
             self.report_hot_loop(bytecode, func_idx, findex, header_pc);
+            self.late_pending.insert((findex, header_pc));
+        }
+        // The compiled code reaches `entries` when a tick observes it, and the
+        // tick below can come after a header's first notification. The entry
+        // is attempted once the code has been seen, not just once.
+        if !self.late_pending.is_empty()
+            && self.late_pending.contains(&(findex, header_pc))
+            && self
+                .tiered_runtime
+                .as_ref()
+                .and_then(|t| t.entries.get(findex))
+                .is_some_and(|e| e.is_some())
+        {
+            self.late_pending.remove(&(findex, header_pc));
             self.late_osr_entry(bytecode, func_idx, findex, header_pc);
         }
 

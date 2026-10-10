@@ -27,6 +27,35 @@ pub struct Renumbered {
     pub kept: usize,
 }
 
+/// What the type table of the new program has that the running one does not,
+/// as `types::remap_types` found it.
+#[derive(Debug, Default)]
+pub struct TypeChanges {
+    /// Types from this index on are new.
+    pub added_from: usize,
+    /// Positions of running types the new program no longer has.
+    pub dropped: Vec<usize>,
+}
+
+/// The functions that the types `owners` declare: their methods and bound
+/// statics.
+fn declared_by(bc: &DecodedBytecode, owners: impl Iterator<Item = usize>) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for t in owners {
+        let Some(obj) = bc.types.get(t).and_then(|t| t.obj.as_ref()) else {
+            continue;
+        };
+        out.extend(obj.proto.iter().filter(|p| p.findex >= 0).map(|p| p.findex as usize));
+        out.extend(
+            obj.bindings
+                .chunks_exact(2)
+                .filter(|b| b[1] >= 0)
+                .map(|b| b[1] as usize),
+        );
+    }
+    out
+}
+
 /// The findex of the function an op calls or makes a closure of.
 fn fun_ref(op: &Opcode) -> Option<usize> {
     match op {
@@ -190,10 +219,20 @@ struct Matcher<'a> {
     /// New findex to running findex.
     to_old: HashMap<usize, usize>,
     taken: HashSet<usize>,
+    /// Methods of the classes the new program adds, which no running
+    /// function matches; and those of the classes it drops, which no new
+    /// function matches.
+    added: HashSet<usize>,
+    dropped: HashSet<usize>,
 }
 
 impl<'a> Matcher<'a> {
-    fn new(old: &'a Side<'a>, new: &'a Side<'a>) -> Self {
+    fn new(
+        old: &'a Side<'a>,
+        new: &'a Side<'a>,
+        added: HashSet<usize>,
+        dropped: HashSet<usize>,
+    ) -> Self {
         Matcher {
             old_shapes: old.unnamed().map(|f| (f, old.shape(f))).collect(),
             new_shapes: new.unnamed().map(|f| (f, new.shape(f))).collect(),
@@ -201,6 +240,8 @@ impl<'a> Matcher<'a> {
             new,
             to_old: HashMap::new(),
             taken: HashSet::new(),
+            added,
+            dropped,
         }
     }
 
@@ -216,7 +257,8 @@ impl<'a> Matcher<'a> {
     }
 
     /// Methods and bound statics, by name. A name only one program has is a
-    /// method added or removed, which moves vtable slots and is not handled.
+    /// method added or removed, which moves vtable slots and is not handled,
+    /// unless its class is added or dropped with it.
     fn pair_named(&mut self) -> Result<(), String> {
         fn by_name(names: &HashMap<usize, String>) -> HashMap<&str, Vec<usize>> {
             let mut out: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -232,8 +274,12 @@ impl<'a> Matcher<'a> {
         let (old, new) = (by_name(&old_side.names), by_name(&new_side.names));
         let mut order: Vec<&str> = new.keys().copied().collect();
         order.sort_unstable();
+        let mut shared: Vec<&str> = Vec::new();
         for name in &order {
             let Some(olds) = old.get(name) else {
+                if new[name].iter().all(|f| self.added.contains(f)) {
+                    continue;
+                }
                 return Err(format!(
                     "{name} is in the new program and not in the running one; a method was added"
                 ));
@@ -245,14 +291,20 @@ impl<'a> Matcher<'a> {
                     olds.len()
                 ));
             }
+            shared.push(name);
         }
-        if let Some(name) = old.keys().filter(|n| !new.contains_key(*n)).min() {
+        let mut gone: Vec<&str> = old.keys().filter(|n| !new.contains_key(*n)).copied().collect();
+        gone.sort_unstable();
+        if let Some(name) = gone
+            .iter()
+            .find(|n| !old[*n].iter().all(|f| self.dropped.contains(f)))
+        {
             return Err(format!(
                 "{name} is in the running program and not in the new one; a method was removed"
             ));
         }
         let mut pairs = Vec::new();
-        for name in &order {
+        for name in &shared {
             for (&n, &o) in new[name].iter().zip(&old[name]) {
                 self.pair(n, o);
                 pairs.push((o, n));
@@ -364,9 +416,19 @@ struct Numbering {
     added: usize,
 }
 
-fn plan(old: &DecodedBytecode, new: &DecodedBytecode, slots: usize) -> Result<Numbering, String> {
+fn plan(
+    old: &DecodedBytecode,
+    new: &DecodedBytecode,
+    slots: usize,
+    changes: &TypeChanges,
+) -> Result<Numbering, String> {
     let (old_side, new_side) = (Side::new(old), Side::new(new));
-    let mut m = Matcher::new(&old_side, &new_side);
+    let mut m = Matcher::new(
+        &old_side,
+        &new_side,
+        declared_by(new, changes.added_from..new.types.len()),
+        declared_by(old, changes.dropped.iter().copied()),
+    );
     m.pair_named()?;
     m.pair_entry();
     m.pair_by_shape();
@@ -422,7 +484,7 @@ fn plan(old: &DecodedBytecode, new: &DecodedBytecode, slots: usize) -> Result<Nu
 
 /// The index of the entry of `pool` that `same` accepts, adding `value` if
 /// none does.
-fn pool_index<T>(pool: &mut Vec<T>, same: impl Fn(&T) -> bool, value: T) -> usize {
+pub(super) fn pool_index<T>(pool: &mut Vec<T>, same: impl Fn(&T) -> bool, value: T) -> usize {
     pool.iter().position(same).unwrap_or_else(|| {
         pool.push(value);
         pool.len() - 1
@@ -591,8 +653,9 @@ pub fn remap_functions(
     old: &DecodedBytecode,
     new: &mut DecodedBytecode,
     slots: usize,
+    changes: &TypeChanges,
 ) -> Result<Renumbered, String> {
-    let numbering = plan(old, new, slots)?;
+    let numbering = plan(old, new, slots, changes)?;
     Ok(apply(old, new, &numbering))
 }
 
@@ -727,6 +790,14 @@ mod tests {
 
     const ROOM: usize = usize::MAX;
 
+    /// No type is new or gone.
+    fn none() -> TypeChanges {
+        TypeChanges {
+            added_from: usize::MAX,
+            dropped: Vec::new(),
+        }
+    }
+
     /// A closure added in the middle of a method's closures takes a findex
     /// of its own, and the ones after it keep theirs.
     #[test]
@@ -758,7 +829,7 @@ mod tests {
             ),
             &[11, 22, 99],
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered { added: 1, kept: 0 });
         assert_eq!(findexes(&new), vec![0, 1, 2, 3]);
         assert_eq!(made(&new.functions[0]), vec![1, 3, 2]);
@@ -797,7 +868,7 @@ mod tests {
             ),
             &["stay"],
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered { added: 0, kept: 1 });
         assert_eq!(findexes(&new), vec![0, 1, 2]);
         assert_eq!(made(&new.functions[0]), vec![2]);
@@ -837,7 +908,7 @@ mod tests {
             ),
             &[12],
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered::default());
         assert_eq!(diff_bytecode(&old, &new).changed, vec![1]);
     }
@@ -873,7 +944,7 @@ mod tests {
             ),
             &[5],
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered { added: 1, kept: 0 });
         assert_eq!(sorted(made(&new.functions[0])), vec![1, 2, 3]);
     }
@@ -909,7 +980,7 @@ mod tests {
             ),
             &[7, 8],
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered { added: 1, kept: 0 });
         // The new closure takes findex 3; the old pair keep 1 and 2.
         assert_eq!(made(&new.functions[0]), vec![3, 1]);
@@ -947,7 +1018,7 @@ mod tests {
             ),
             &[3],
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered::default());
         assert_eq!(made(&new.functions[1]), vec![2]);
     }
@@ -967,7 +1038,7 @@ mod tests {
             &[],
             1,
         );
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered::default());
         assert_eq!(new.entrypoint, 1);
         assert_eq!(diff_bytecode(&old, &new).changed, vec![1]);
@@ -990,7 +1061,7 @@ mod tests {
         let old = build();
         let mut new = build();
         assert_eq!(
-            remap_functions(&old, &mut new, ROOM).unwrap(),
+            remap_functions(&old, &mut new, ROOM, &none()).unwrap(),
             Renumbered::default()
         );
         assert!(!diff_bytecode(&old, &new).has_changes());
@@ -1007,9 +1078,9 @@ mod tests {
                 0,
             )
         };
-        let why = remap_functions(&one(), &mut two(), ROOM).unwrap_err();
+        let why = remap_functions(&one(), &mut two(), ROOM, &none()).unwrap_err();
         assert!(why.contains("Main.extra") && why.contains("a method was added"), "{why}");
-        let why = remap_functions(&two(), &mut one(), ROOM).unwrap_err();
+        let why = remap_functions(&two(), &mut one(), ROOM, &none()).unwrap_err();
         assert!(why.contains("Main.extra") && why.contains("a method was removed"), "{why}");
     }
 
@@ -1030,7 +1101,7 @@ mod tests {
             0,
         );
         // `new` also has an unnamed function at 1; it is a closure nobody makes.
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done.added, 2);
         let sin = new.natives.iter().find(|n| n.name == "sin").unwrap();
         let cos = new.natives.iter().find(|n| n.name == "cos").unwrap();
@@ -1059,7 +1130,7 @@ mod tests {
             &[("std", "alloc", 5), ("std", "alloc", 6)],
             0,
         );
-        remap_functions(&old, &mut new, ROOM).unwrap();
+        remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(made(&new.functions[0]), vec![1, 2]);
         assert_eq!(
             new.natives.iter().map(|n| n.findex).collect::<Vec<_>>(),
@@ -1092,7 +1163,7 @@ mod tests {
             program(&[("main", 0)], vec![function(0, vec![])], &[], 0),
             &["", "other"],
         );
-        remap_functions(&old, &mut new, ROOM).unwrap();
+        remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         let Opcode::DynGet { field, .. } = &new.functions[1].ops()[0] else {
             panic!()
         };
@@ -1141,7 +1212,7 @@ mod tests {
             main.fields = vec![stat.clone()];
             main.bindings = vec![0, findex];
         }
-        let done = remap_functions(&old, &mut new, ROOM).unwrap();
+        let done = remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(done, Renumbered { added: 1, kept: 0 });
         let main = new.types[1].obj.as_ref().unwrap();
         assert_eq!(main.proto[1].findex, 2);
@@ -1177,7 +1248,7 @@ mod tests {
         new.floats = vec![9.0];
         new.bytes_pos = vec![0];
         new.bytes_data = vec![7, 7];
-        remap_functions(&old, &mut new, ROOM).unwrap();
+        remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         let ops = new.functions[1].ops();
         let Opcode::Float { ptr, .. } = &ops[0] else {
             panic!()
@@ -1207,7 +1278,7 @@ mod tests {
         let mut sizes = Vec::new();
         for next in ["v2", "v3", "v2", "v4", "v1"] {
             let mut bc = load(next);
-            remap_functions(&running, &mut bc, ROOM).unwrap();
+            remap_functions(&running, &mut bc, ROOM, &none()).unwrap();
             for (at, f) in running.functions.iter().enumerate() {
                 assert_eq!(bc.functions[at].findex, f.findex, "{next}");
             }
@@ -1219,6 +1290,83 @@ mod tests {
         assert!(sizes.windows(2).all(|w| w[0] == w[1]), "{sizes:?}");
     }
 
+    /// A class the new program adds brings its methods, which are not a
+    /// method added to a class that was running.
+    #[test]
+    fn the_methods_of_a_class_the_new_program_adds_are_added_with_it() {
+        let old = program(&[("main", 0)], vec![function(0, vec![])], &[], 0);
+        let mut new = program(
+            &[("main", 0)],
+            vec![function(0, vec![]), function(7, vec![])],
+            &[],
+            0,
+        );
+        new.types.push(HLType {
+            kind: hl::hl_type_kind_HOBJ,
+            obj: Some(HLTypeObj {
+                name: "Fresh".into(),
+                proto: vec![HLObjProto {
+                    name: "run".into(),
+                    findex: 7,
+                    pindex: 0,
+                    hashed_name: 0,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let changes = TypeChanges {
+            added_from: 2,
+            dropped: Vec::new(),
+        };
+        let done = remap_functions(&old, &mut new, ROOM, &changes).unwrap();
+        assert_eq!(done, Renumbered { added: 1, kept: 0 });
+        assert_eq!(new.types[2].obj.as_ref().unwrap().proto[0].findex, 1);
+        assert_eq!(findexes(&new), vec![0, 1]);
+        // The same method on a class that was running is a method added.
+        let mut on_main = program(
+            &[("main", 0), ("run", 7)],
+            vec![function(0, vec![]), function(7, vec![])],
+            &[],
+            0,
+        );
+        let why = remap_functions(&old, &mut on_main, ROOM, &changes).unwrap_err();
+        assert!(why.contains("a method was added"), "{why}");
+    }
+
+    /// The methods of a class the new program drops stay, with the class.
+    #[test]
+    fn the_methods_of_a_dropped_class_stay_with_it() {
+        let mut old = program(
+            &[("main", 0)],
+            vec![function(0, vec![]), function(1, vec![])],
+            &[],
+            0,
+        );
+        old.types.push(HLType {
+            kind: hl::hl_type_kind_HOBJ,
+            obj: Some(HLTypeObj {
+                name: "Gone".into(),
+                proto: vec![HLObjProto {
+                    name: "run".into(),
+                    findex: 1,
+                    pindex: 0,
+                    hashed_name: 0,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut new = program(&[("main", 0)], vec![function(0, vec![])], &[], 0);
+        let changes = TypeChanges {
+            added_from: 3,
+            dropped: vec![2],
+        };
+        let done = remap_functions(&old, &mut new, ROOM, &changes).unwrap();
+        assert_eq!(done, Renumbered { added: 0, kept: 1 });
+        assert_eq!(findexes(&new), vec![0, 1]);
+    }
+
     #[test]
     fn a_program_too_big_for_the_running_tables_is_refused() {
         let old = program(&[("main", 0)], vec![function(0, vec![make(1)]), function(1, vec![])], &[], 0);
@@ -1228,7 +1376,7 @@ mod tests {
             &[],
             0,
         );
-        let why = remap_functions(&old, &mut new, 2).unwrap_err();
+        let why = remap_functions(&old, &mut new, 2, &none()).unwrap_err();
         assert!(why.contains("function slots"), "{why}");
     }
 
@@ -1246,7 +1394,7 @@ mod tests {
         old.functions[1].set_debug(vec![0, 5]);
         let mut new = program(&[("main", 0)], vec![function(0, vec![])], &[], 0);
         new.debug_files = vec!["New.hx".into()];
-        remap_functions(&old, &mut new, ROOM).unwrap();
+        remap_functions(&old, &mut new, ROOM, &none()).unwrap();
         assert_eq!(new.debug_files, vec!["New.hx", "Old.hx"]);
         assert_eq!(new.functions[1].debug(), &[1, 5]);
     }

@@ -32,6 +32,13 @@ pub struct Retyped {
     dropped: Vec<usize>,
 }
 
+impl Retyped {
+    /// Positions of the running types the new program no longer has.
+    pub fn dropped(&self) -> Vec<usize> {
+        self.dropped.clone()
+    }
+}
+
 /// The kind and name of a type, without anything it is made of.
 fn label(t: &HLType) -> String {
     match t.kind {
@@ -170,9 +177,10 @@ fn incompatible(old: &HLType, new: &HLType) -> Option<String> {
         if o.super_.as_ref().map(|s| s.0) != n.super_.as_ref().map(|s| s.0)
             || fields(o) != fields(n)
         {
-            return Some(
-                "a type's field layout changed; live objects are laid out by the old one".into(),
-            );
+            return Some(format!(
+                "a type's field layout changed ({}); live objects are laid out by the old one",
+                o.name
+            ));
         }
         let methods = |o: &crate::types::HLTypeObj| -> Vec<(String, i32)> {
             o.proto.iter().map(|p| (p.name.clone(), p.pindex)).collect()

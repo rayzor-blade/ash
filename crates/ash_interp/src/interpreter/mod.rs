@@ -5997,6 +5997,7 @@ impl HLInterpreter {
             .map(|t| Arc::clone(&t.shared_ctx));
         let mut llvm = ctx.as_ref().and_then(|c| c.llvm.try_lock().ok());
         let mut shared = None;
+        let mut setup = None;
         if let Some(new_bc) = ash_core::reload::do_reload(|bc| {
             let handles = self.grow_runtime(bc);
             shared = Some(handles.clone());
@@ -6069,8 +6070,18 @@ impl HLInterpreter {
             self.air.invalidate();
             self.ssa.invalidate();
 
-            let leaked: &'static _ = Box::leak(Box::new(new_bc));
+            let leaked: &'static DecodedBytecode = Box::leak(Box::new(new_bc));
             self.reloaded_bytecode = Some(leaked);
+            setup = leaked.reload_init.map(|findex| (leaked, findex));
+        }
+        // Set up the classes the new program adds, which its entry function
+        // does at start and a reload does not run. Not under the top tier's
+        // lock: the call may promote.
+        drop(llvm);
+        if let Some((bc, findex)) = setup
+            && let Err(e) = self.call_function(bc, native_resolver, findex, &[])
+        {
+            eprintln!("[hot-reload] warning: setting up the new classes failed: {e}");
         }
     }
 

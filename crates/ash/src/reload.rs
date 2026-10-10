@@ -4,6 +4,7 @@
 //! which were added/removed, and whether type layouts are compatible.
 
 mod functions;
+mod init;
 mod types;
 
 use crate::bytecode::DecodedBytecode;
@@ -343,6 +344,45 @@ fn global_keys(bc: &DecodedBytecode) -> Vec<GlobalKey> {
         .collect()
 }
 
+/// A constant of the running program with its fields named in the tables of
+/// `new`: the ints, floats and strings it holds are looked up there and
+/// added when they are not. Its globals and types are on the running
+/// numbering already.
+fn rehome_constant(
+    c: &crate::types::HLConstant,
+    old: &DecodedBytecode,
+    new: &mut DecodedBytecode,
+) -> crate::types::HLConstant {
+    use functions::pool_index;
+    let mut fields = c.fields.clone();
+    for (j, kind) in constant_fields(old, c).collect::<Vec<_>>() {
+        let v = c.fields[j];
+        fields[j] = match kind {
+            hl::hl_type_kind_HI32
+            | hl::hl_type_kind_HBOOL
+            | hl::hl_type_kind_HUI8
+            | hl::hl_type_kind_HUI16
+            | hl::hl_type_kind_HI64 => {
+                let n = old.ints.get(v as usize).copied().unwrap_or(v);
+                pool_index(&mut new.ints, |x| *x == n, n) as i32
+            }
+            hl::hl_type_kind_HF64 | hl::hl_type_kind_HF32 => {
+                let n = old.floats.get(v as usize).copied().unwrap_or(0.0);
+                pool_index(&mut new.floats, |x| x.to_bits() == n.to_bits(), n) as i32
+            }
+            hl::hl_type_kind_HBYTES => match old.strings.get(v as usize) {
+                Some(text) => pool_index(&mut new.strings, |x| x == text, text.clone()) as i32,
+                None => v,
+            },
+            _ => v,
+        };
+    }
+    crate::types::HLConstant {
+        global: c.global,
+        fields,
+    }
+}
+
 /// Renumber `new`'s globals onto the slots of the running program `old`.
 ///
 /// A global keeps the slot that holds the same thing in `old`, so the
@@ -407,6 +447,19 @@ fn remap_globals(
         globals[slot] = new.globals[g].clone();
     }
     let at = |g: usize| map.get(g).copied().unwrap_or(g);
+    // A constant the new program no longer has stays in its slot, for the
+    // functions it dropped and so that the next reload finds the slot free.
+    let used: std::collections::HashSet<usize> = map.iter().copied().collect();
+    let dropped: Vec<crate::types::HLConstant> = old
+        .constants
+        .iter()
+        .filter(|c| !used.contains(&(c.global as usize)))
+        .cloned()
+        .collect();
+    let dropped: Vec<crate::types::HLConstant> = dropped
+        .iter()
+        .map(|c| rehome_constant(c, old, new))
+        .collect();
     // A constant's nullable field reads 0 as null, so no global it names
     // may land on slot 0.
     let mut constants = std::mem::take(&mut new.constants);
@@ -428,6 +481,7 @@ fn remap_globals(
         }
         c.global = at(c.global as usize) as u32;
     }
+    constants.extend(dropped);
     new.constants = constants;
     let rebase = |gv: &mut u32| {
         if *gv > 0 {
@@ -481,11 +535,7 @@ fn decode_next(
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
-    let refuse = |why: String| format!("the program cannot reload in place: {why}");
-    let retyped = types::remap_types(running, &mut bc).map_err(refuse)?;
-    remap_globals(running, &mut bc, room.global_slots).map_err(refuse)?;
-    functions::remap_functions(running, &mut bc, room.function_slots).map_err(refuse)?;
-    types::restore_dropped(running, &mut bc, &retyped);
+    renumber(running, &mut bc, room)?;
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         eprintln!(
             "[hot-reload] read in {decoded:?}, put on the running numbering in {:?}",
@@ -493,6 +543,27 @@ fn decode_next(
         );
     }
     Ok(bc)
+}
+
+/// Put `bc`, a program just read, on the numbering of the types, globals and
+/// functions of `running`, and add the function that sets up the classes it
+/// adds. `Err` says why it cannot be.
+fn renumber(
+    running: &DecodedBytecode,
+    bc: &mut DecodedBytecode,
+    room: &SharedRuntimeHandles,
+) -> Result<(), String> {
+    let refuse = |why: String| format!("the program cannot reload in place: {why}");
+    let retyped = types::remap_types(running, bc).map_err(refuse)?;
+    remap_globals(running, bc, room.global_slots).map_err(refuse)?;
+    let changes = functions::TypeChanges {
+        added_from: running.types.len(),
+        dropped: retyped.dropped(),
+    };
+    functions::remap_functions(running, bc, room.function_slots, &changes).map_err(refuse)?;
+    init::attach_init(bc, running.types.len(), room.function_slots).map_err(refuse)?;
+    types::restore_dropped(running, bc, &retyped);
+    Ok(())
 }
 
 /// Read the program at the registered path again and check it against
@@ -869,6 +940,55 @@ mod tests {
         let mut new = program(&["a", "b"], 1);
         remap_globals(&old, &mut new, usize::MAX).expect("remaps");
         assert_eq!(reads(&new), reads(&old));
+    }
+
+    /// Reloads follow one another through classes added, dropped and added
+    /// again: each program is put on the numbering of the one running, so
+    /// what the running program has is where it was.
+    #[test]
+    fn successive_class_reloads_keep_what_is_running_where_it_is() {
+        crate::native_lib::init_std_library();
+        let load = |v: &str| {
+            let path = format!(
+                "{}/test/hot_reload/classes/{v}.hl",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            crate::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path)).unwrap()
+        };
+        let room = SharedRuntimeHandles {
+            globals_data_ptr: std::ptr::null_mut(),
+            nglobals: 0,
+            c_types: Vec::new(),
+            module_ctx: std::ptr::null_mut(),
+            function_slots: usize::MAX,
+            global_slots: usize::MAX,
+        };
+        let name = |t: &crate::types::HLType| {
+            t.obj
+                .as_ref()
+                .map(|o| o.name.clone())
+                .or_else(|| t.tenum.as_ref().map(|e| e.name.clone()))
+        };
+        let mut running = load("v1");
+        let mut sizes = Vec::new();
+        for next in ["v2", "v3", "v2", "v1", "v3"] {
+            let mut bc = load(next);
+            renumber(&running, &mut bc, &room).unwrap();
+            for (i, f) in running.functions.iter().enumerate() {
+                assert_eq!(bc.functions[i].findex, f.findex, "{next}");
+            }
+            for (i, t) in running.types.iter().enumerate() {
+                assert_eq!((t.kind, name(t)), (bc.types[i].kind, name(&bc.types[i])), "{next}");
+            }
+            for (i, g) in running.globals.iter().enumerate() {
+                assert_eq!(bc.globals[i].0, g.0, "{next}");
+            }
+            sizes.push((bc.functions.len(), bc.types.len(), bc.globals.len()));
+            running = bc;
+        }
+        // A class one program drops and a later one has again is the class
+        // that was running: the tables stop growing once each has been seen.
+        assert!(sizes[1..].windows(2).all(|w| w[0] == w[1]), "{sizes:?}");
     }
 
     /// A literal with no dropped one to replace goes after the running

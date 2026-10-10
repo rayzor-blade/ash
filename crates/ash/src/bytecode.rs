@@ -1433,6 +1433,9 @@ pub struct DecodedBytecode {
     pub host_modules: Vec<crate::host_module::RegisteredModule>,
     /// See [`DecodedBytecode::body_facts`].
     pub(crate) body_facts: std::sync::OnceLock<BodyFacts>,
+    /// The function that sets up the classes a reload adds, which the
+    /// interpreter runs once after the reload (`reload::init`).
+    pub reload_init: Option<usize>,
 }
 
 /// What every function body says that a whole-program question needs,

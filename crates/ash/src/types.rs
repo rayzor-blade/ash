@@ -556,7 +556,12 @@ impl HLFunction {
     /// Debug info is excluded so recompilations that only change line numbers
     /// don't trigger a reload.
     pub fn compute_hash(&self) -> u32 {
-        use crate::bytecode::{H, H32};
+        self.compute_hash_skipping(HashSkips::default())
+    }
+
+    /// [`Self::compute_hash`] without the indices `skip` names.
+    pub fn compute_hash_skipping(&self, skip: HashSkips) -> u32 {
+        use crate::bytecode::H32;
         let mut h: u32 = 0;
 
         // Hash function type signature
@@ -569,15 +574,28 @@ impl HLFunction {
 
         // Hash opcode stream (discriminant + numeric fields)
         for op in self.ops() {
-            h = hash_opcode(h, op);
+            h = hash_opcode(h, op, skip);
         }
 
         h
     }
 }
 
+/// Which indices a body hash leaves out. An index is a position in a table
+/// that moves when the table grows, so a caller that compares two programs
+/// leaves out the ones it compares by what they name.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HashSkips {
+    /// The pool entry an `Int`, `Float`, `String` or `Bytes` names.
+    pub pools: bool,
+    /// The function a call or a closure names.
+    pub funs: bool,
+    /// The global a `GetGlobal` or a `SetGlobal` names.
+    pub globals: bool,
+}
+
 /// Hash a single opcode into a running CRC32 accumulator.
-fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
+fn hash_opcode(mut h: u32, op: &Opcode, skip: HashSkips) -> u32 {
     use crate::bytecode::{H, H32};
 
     // Hash the discriminant index as a tag byte
@@ -592,6 +610,27 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
     macro_rules! hi {
         ($i:expr) => {
             h = H32(h, *$i as u32);
+        };
+    }
+    macro_rules! hpool {
+        ($i:expr) => {
+            if !skip.pools {
+                hi!($i);
+            }
+        };
+    }
+    macro_rules! hfun {
+        ($i:expr) => {
+            if !skip.funs {
+                hi!($i);
+            }
+        };
+    }
+    macro_rules! hglobal {
+        ($i:expr) => {
+            if !skip.globals {
+                hi!($i);
+            }
         };
     }
     macro_rules! hargs {
@@ -609,11 +648,11 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
         }
         Opcode::Int { dst, ptr } => {
             hr!(dst);
-            hi!(&ptr.0);
+            hpool!(&ptr.0);
         }
         Opcode::Float { dst, ptr } => {
             hr!(dst);
-            hi!(&ptr.0);
+            hpool!(&ptr.0);
         }
         Opcode::Bool { dst, value } => {
             hr!(dst);
@@ -621,11 +660,11 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
         }
         Opcode::Bytes { dst, ptr } => {
             hr!(dst);
-            hi!(&ptr.0);
+            hpool!(&ptr.0);
         }
         Opcode::String { dst, ptr } => {
             hr!(dst);
-            hi!(&ptr.0);
+            hpool!(&ptr.0);
         }
         Opcode::Null { dst } => {
             hr!(dst);
@@ -659,11 +698,11 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
 
         Opcode::Call0 { dst, fun } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
         }
         Opcode::Call1 { dst, fun, arg0 } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hr!(arg0);
         }
         Opcode::Call2 {
@@ -673,7 +712,7 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
             arg1,
         } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hr!(arg0);
             hr!(arg1);
         }
@@ -685,7 +724,7 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
             arg2,
         } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hr!(arg0);
             hr!(arg1);
             hr!(arg2);
@@ -699,7 +738,7 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
             arg3,
         } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hr!(arg0);
             hr!(arg1);
             hr!(arg2);
@@ -707,7 +746,7 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
         }
         Opcode::CallN { dst, fun, args } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hargs!(args);
         }
         Opcode::CallMethod { dst, field, args } => {
@@ -727,17 +766,17 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
         }
         Opcode::IndirectCall { dst, fun, args } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hargs!(args);
         }
 
         Opcode::StaticClosure { dst, fun } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
         }
         Opcode::InstanceClosure { dst, fun, obj } => {
             hr!(dst);
-            hi!(&fun.0);
+            hfun!(&fun.0);
             hr!(obj);
         }
         Opcode::VirtualClosure { dst, obj, field } => {
@@ -748,10 +787,10 @@ fn hash_opcode(mut h: u32, op: &Opcode) -> u32 {
 
         Opcode::GetGlobal { dst, global } => {
             hr!(dst);
-            hi!(&global.0);
+            hglobal!(&global.0);
         }
         Opcode::SetGlobal { global, src } => {
-            hi!(&global.0);
+            hglobal!(&global.0);
             hr!(src);
         }
 

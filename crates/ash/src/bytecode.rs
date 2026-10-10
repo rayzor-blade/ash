@@ -1549,8 +1549,15 @@ impl DecodedBytecode {
     /// strings and bytes, and the constant object a global is pre-initialised
     /// with. A change that only edits a pool entry leaves the opcode stream
     /// byte-identical, and this is what still tells the two versions apart.
+    /// The pool indices themselves are left out: a pool that grows ahead of
+    /// an entry moves its index and not what it names.
     pub fn compute_function_hashes(&self) -> std::collections::HashMap<usize, u32> {
         use crate::opcodes::Opcode;
+        use crate::types::HashSkips;
+        let skip = HashSkips {
+            pools: true,
+            ..HashSkips::default()
+        };
 
         let mut global_hashes: std::collections::HashMap<usize, u32> =
             std::collections::HashMap::new();
@@ -1563,7 +1570,7 @@ impl DecodedBytecode {
         self.functions
             .iter()
             .map(|f| {
-                let mut h = f.compute_hash();
+                let mut h = f.compute_hash_skipping(skip);
                 for op in f.ops() {
                     match op {
                         Opcode::Int { ptr, .. } => {
@@ -1926,6 +1933,44 @@ mod test {
             Vec::new(),
         ));
         assert!(bc.body_facts().called.contains(&11));
+    }
+
+    /// The hash of a function that loads string `at` of `strings` and
+    /// returns it.
+    fn hash_of_string_load(strings: &[&str], at: usize) -> u32 {
+        use super::DecodedBytecode;
+        use crate::opcodes::{Opcode, RefString, Reg};
+        use crate::types::HLFunction;
+
+        let bc = DecodedBytecode {
+            strings: strings.iter().map(|s| s.to_string()).collect(),
+            functions: vec![HLFunction::with_body(
+                vec![
+                    Opcode::String {
+                        dst: Reg(0),
+                        ptr: RefString(at),
+                    },
+                    Opcode::Ret { ret: Reg(0) },
+                ],
+                Vec::new(),
+            )],
+            ..DecodedBytecode::default()
+        };
+        bc.compute_function_hashes()[&0]
+    }
+
+    /// A string added ahead of the one a function loads moves its index and
+    /// not the string, so the function is the same function.
+    #[test]
+    fn a_pool_that_grows_ahead_of_an_entry_leaves_the_function_unchanged() {
+        assert_eq!(
+            hash_of_string_load(&["a", "b"], 1),
+            hash_of_string_load(&["a", "new", "b"], 2)
+        );
+        assert_ne!(
+            hash_of_string_load(&["a", "b"], 1),
+            hash_of_string_load(&["a", "c"], 1)
+        );
     }
 }
 

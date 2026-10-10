@@ -43,6 +43,11 @@ const CLASSES: Family = Family {
     main: "TestHotReloadClasses",
 };
 
+const METHODS: Family = Family {
+    dir: "methods",
+    main: "TestHotReloadMethods",
+};
+
 impl Family {
     fn fixtures(self) -> PathBuf {
         repo_root().join("crates/ash/test/hot_reload").join(self.dir)
@@ -323,6 +328,7 @@ fn the_fixtures_are_where_the_test_expects() {
     for (family, versions) in [
         (CLOSURES, &["v1", "v2", "v3", "v4", "v5", "v6", "v7"][..]),
         (CLASSES, &["v1", "v2", "v3"][..]),
+        (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -394,6 +400,144 @@ fn a_class_dropped_and_added_again() {
             "render child 5,extra x #4,total 4",
             "again child 5,extra x #5,total 5",
             "source e:x",
+            "done",
+        ],
+        "added",
+    );
+}
+
+/// A helper the leaf's own `value` calls and the program shows: a method
+/// nothing overrides has no slot, only a function. It is reached through a
+/// structural type and by name too, which look a method up in the class.
+#[test]
+fn a_helper_method_added() {
+    check(
+        METHODS,
+        "v1",
+        "v2",
+        &[
+            "reloaded",
+            "render virtual 6,field true,name leaf5,describe [leaf5],value 16,bonus 15",
+            "other other",
+            "done",
+        ],
+        "added",
+    );
+}
+
+/// `describe` had no override, so it was no virtual method; the leaf's
+/// override gives it a slot, and `base.describe()` reaches the override.
+#[test]
+fn an_override_added_to_a_method_nothing_overrode() {
+    check(
+        METHODS,
+        "v1",
+        "v3",
+        &[
+            "reloaded",
+            "render name leaf5,describe <leaf5>,value 10",
+            "other other",
+            "done",
+        ],
+        "1 added",
+    );
+}
+
+#[test]
+fn a_method_removed() {
+    check(
+        METHODS,
+        "v1",
+        "v4",
+        &[
+            "reloaded",
+            "render name leaf5,describe [leaf5]",
+            "other other",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// The leaf drops its `name`: it has the base class's, in its vtable too.
+#[test]
+fn an_override_removed() {
+    check(
+        METHODS,
+        "v1",
+        "v5",
+        &[
+            "reloaded",
+            "render name base,describe [base],value 10",
+            "other other",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// The compiler numbers `tag` before `name`, which moves `name` to slot 1.
+/// `main`, which began before the reload, still calls `other.name()` by
+/// slot 0.
+#[test]
+fn a_virtual_method_declared_before_the_others() {
+    check(
+        METHODS,
+        "v1",
+        "v6",
+        &[
+            "reloaded",
+            "render name leaf5,describe [leaf5],value 10,tag T5",
+            "other other",
+            "done",
+        ],
+        "added",
+    );
+}
+
+/// Methods come and go over several reloads, and a method that was removed
+/// comes back.
+#[test]
+fn methods_added_removed_and_added_again() {
+    check_through(
+        METHODS,
+        "v1",
+        &["v3", "v5", "v6", "v1"],
+        &[
+            "reloaded",
+            "render name leaf5,describe <leaf5>,value 10",
+            "other other",
+            "next",
+            "reloaded",
+            "render name base,describe [base],value 10",
+            "other other",
+            "next",
+            "reloaded",
+            "render name leaf5,describe [leaf5],value 10,tag T5",
+            "other other",
+            "next",
+            "reloaded",
+            "render name leaf5,describe [leaf5],value 10",
+            "other other",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// A class the program did not have, below one it did: its overrides share the
+/// slots of the methods they override, and `describe`, which nothing overrode,
+/// gains a slot from its override.
+#[test]
+fn a_class_added_below_a_class_with_methods() {
+    check(
+        METHODS,
+        "v1",
+        "v7",
+        &[
+            "reloaded",
+            "render third third{third}6,name leaf5,describe [leaf5],value 10",
+            "other other",
             "done",
         ],
         "added",

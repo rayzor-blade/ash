@@ -260,13 +260,23 @@ pub(super) fn retier_state_for(
     if !retier_enabled() {
         return HashMap::new();
     }
+    let log = std::env::var_os("ASH_OSR_LOG").is_some();
     if crate::osr::has_trap(&opt.ir) {
+        if log {
+            eprintln!("[retier] findex={findex}: no exits, the function catches");
+        }
         return HashMap::new();
     }
     let cfg = air::v2::CfgInfo::build(&opt.ir);
     let forest = air::v2::LoopForest::analyze(&opt.ir, &cfg);
     let plan = crate::osr::analyze_loops(&opt.ir, &cfg, &forest);
     if !plan.eligible() {
+        if log && !forest.is_empty() {
+            eprintln!(
+                "[retier] findex={findex}: no exits, no loop can be entered: {:?}",
+                plan.refusals
+            );
+        }
         return HashMap::new();
     }
     // The same for every header of the function, and worth computing only
@@ -280,6 +290,10 @@ pub(super) fn retier_state_for(
     let mut exits = HashMap::new();
     for h in plan.entry_headers {
         if !retier_worth_polling(&forest, h) {
+            // A straight-line entry has no loop to name.
+            if log && forest.loops.iter().any(|l| l.header.0 == h) {
+                eprintln!("[retier] findex={findex} header={h}: no exit, not an un-nested leaf loop");
+            }
             continue;
         }
         let existing = sites
@@ -298,12 +312,19 @@ pub(super) fn retier_state_for(
                 live,
             ) {
                 Ok(layout) => {
+                    if log {
+                        eprintln!(
+                            "[retier] findex={findex} header={h}: exit at pc={} with {} inputs",
+                            layout.pc,
+                            layout.slots.len()
+                        );
+                    }
                     let site = Arc::new(crate::retier::Site::new(layout, poll_epoch));
                     sites.push(site.clone());
                     site
                 }
                 Err(e) => {
-                    if std::env::var_os("ASH_OSR_LOG").is_some() {
+                    if log {
                         eprintln!("[retier] declined findex={findex} header={h}: {e}");
                     }
                     continue;

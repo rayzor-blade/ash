@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1790414232,"nonce":"Dc9NDSbQCJ+LDzJugTi+LiM/r3Y=","added":["perf","area:gc"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1791620125,"nonce":"3xrkOqnK1UINVaXd++NThBLm10k=","message":"Fixed in 312b4a4f0da6cf3f26807aa3d3d6b2dd01da3f56: trace_from runs the first 4096 objects on the collecting thread and wakes the pool only for the rest. Present on main at 3d5ab48.","files":null}]}

@@ -1590,6 +1590,11 @@ impl DecodedBytecode {
                                 h = hash_bytes(h, s.as_bytes());
                             }
                         }
+                        Opcode::DynGet { field, .. } | Opcode::DynSet { field, .. } => {
+                            if let Some(s) = self.strings.get(field.0) {
+                                h = hash_bytes(h, s.as_bytes());
+                            }
+                        }
                         Opcode::Bytes { ptr, .. } => {
                             h = hash_bytes(h, self.bytes_entry(ptr.0));
                         }
@@ -1608,7 +1613,7 @@ impl DecodedBytecode {
 
     /// The bytes-pool entry at `idx`: from its start offset to the next
     /// entry's, or to the end of the pool for the last one.
-    fn bytes_entry(&self, idx: usize) -> &[u8] {
+    pub(crate) fn bytes_entry(&self, idx: usize) -> &[u8] {
         let Some(&start) = self.bytes_pos.get(idx) else {
             return &[];
         };
@@ -1682,7 +1687,7 @@ impl DecodedBytecode {
     }
 }
 
-fn hash_bytes(mut h: u32, bytes: &[u8]) -> u32 {
+pub(crate) fn hash_bytes(mut h: u32, bytes: &[u8]) -> u32 {
     for b in bytes {
         h = H(h, *b);
     }
@@ -1957,6 +1962,44 @@ mod test {
             ..DecodedBytecode::default()
         };
         bc.compute_function_hashes()[&0]
+    }
+
+    /// The hash of a function that reads field `at` of `strings` by name.
+    fn hash_of_field_read(strings: &[&str], at: usize) -> u32 {
+        use super::DecodedBytecode;
+        use crate::opcodes::{Opcode, RefString, Reg};
+        use crate::types::HLFunction;
+
+        let bc = DecodedBytecode {
+            strings: strings.iter().map(|s| s.to_string()).collect(),
+            functions: vec![HLFunction::with_body(
+                vec![
+                    Opcode::DynGet {
+                        dst: Reg(0),
+                        obj: Reg(1),
+                        field: RefString(at),
+                    },
+                    Opcode::Ret { ret: Reg(0) },
+                ],
+                Vec::new(),
+            )],
+            ..DecodedBytecode::default()
+        };
+        bc.compute_function_hashes()[&0]
+    }
+
+    /// A field named by a string is hashed by the string, whichever index it
+    /// has: a rename is a change even where the index stays.
+    #[test]
+    fn a_field_read_by_name_is_hashed_by_the_name() {
+        assert_eq!(
+            hash_of_field_read(&["a", "b"], 1),
+            hash_of_field_read(&["a", "new", "b"], 2)
+        );
+        assert_ne!(
+            hash_of_field_read(&["a", "b"], 1),
+            hash_of_field_read(&["a", "c"], 1)
+        );
     }
 
     /// A string added ahead of the one a function loads moves its index and

@@ -586,7 +586,8 @@ impl HLFunction {
 /// leaves out the ones it compares by what they name.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HashSkips {
-    /// The pool entry an `Int`, `Float`, `String` or `Bytes` names.
+    /// The pool entry an `Int`, `Float`, `String` or `Bytes` names, or the
+    /// string a `DynGet` or a `DynSet` names a field by.
     pub pools: bool,
     /// The function a call or a closure names.
     pub funs: bool,
@@ -816,11 +817,11 @@ fn hash_opcode(mut h: u32, op: &Opcode, skip: HashSkips) -> u32 {
         Opcode::DynGet { dst, obj, field } => {
             hr!(dst);
             hr!(obj);
-            hi!(&field.0);
+            hpool!(&field.0);
         }
         Opcode::DynSet { obj, field, src } => {
             hr!(obj);
-            hi!(&field.0);
+            hpool!(&field.0);
             hr!(src);
         }
 

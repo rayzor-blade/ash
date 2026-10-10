@@ -1249,6 +1249,10 @@ impl HLInterpreter {
         // which allocates through the GC or touches process-global state.
         // Doing it concurrently BEFORE that split raced the global runtime
         // init and truncated programs with no crash to point at.
+        // A ladder with only Cranelift on it never compiles with LLVM, so
+        // nothing builds the module and a reload has none to rebuild.
+        #[cfg(feature = "llvm")]
+        let llvm_unreachable = !config.compiled_only && config.tier_mode == TierMode::Cranelift;
         #[cfg(feature = "llvm")]
         let llvm_state = {
             let seed = crate::tiering::LlvmSeed {
@@ -1259,6 +1263,8 @@ impl HLInterpreter {
             };
             if config.compiled_only || config.tier_mode == TierMode::Llvm {
                 crate::tiering::build_llvm_module(&seed, Arc::clone(bytecode), "ash-jit-prewarm")
+            } else if llvm_unreachable {
+                LlvmState::Unavailable
             } else {
                 LlvmState::Deferred(seed)
             }
@@ -1367,7 +1373,7 @@ impl HLInterpreter {
             bytecode: Mutex::new(published_bytecode),
             reload_generation: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "llvm")]
-            llvm_seed: hot_reload.then(|| crate::tiering::LlvmSeed {
+            llvm_seed: (hot_reload && !llvm_unreachable).then(|| crate::tiering::LlvmSeed {
                 path: hl_path.clone(),
                 shared: shared.clone(),
                 hot_reload: true,

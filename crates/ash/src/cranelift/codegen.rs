@@ -333,14 +333,6 @@ pub fn compile_osr_entry(
     if let Some(reason) = reject_reason(air) {
         bail!("{reason}");
     }
-    // The transfer buffer holds f64 bits for float registers; an f32
-    // register would need a narrowing rule nothing else exercises.
-    for tr in &air.reg_types {
-        if ctx.type_kind(tr.0 as usize)? == hl::hl_type_kind_HF32 {
-            bail!("f32 register in an OSR frame");
-        }
-    }
-
     let bytecode = ctx.bytecode();
     let func_idx = ctx
         .func_index(findex)
@@ -1244,7 +1236,13 @@ impl AirCodegen<'_, '_> {
                 .load(types::F64, MemFlagsData::trusted(), buf, off));
         }
         if ty == types::F32 {
-            bail!("f32 register in an OSR frame");
+            // The buffer holds an f32 register as the f64 it widens to, which
+            // the interpreter has already rounded to f32: narrowing is exact.
+            let wide = self
+                .b
+                .ins()
+                .load(types::F64, MemFlagsData::trusted(), buf, off);
+            return Ok(self.b.ins().fdemote(types::F32, wide));
         }
         let wide = self
             .b

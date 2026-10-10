@@ -18,6 +18,7 @@ fn fixture(main: &str) -> PathBuf {
         let name = match main {
             "TestOsrRetier" => "test_osr_retier.hl",
             "TestRetierSnapshot" => "test_retier_snapshot.hl",
+            "TestOsrF32" => "test_osr_f32.hl",
             _ => panic!("unknown fixture"),
         };
         let path = tests_dir().join(name);
@@ -45,6 +46,16 @@ fn fixture(main: &str) -> PathBuf {
 }
 
 fn run(hl: &Path, mode: &[&str], extra: &[(&str, &str)]) -> (String, String) {
+    run_for(hl, mode, extra, "iters=")
+}
+
+/// Runs `hl` and returns its first stdout line starting with `result`, and the log.
+fn run_for(
+    hl: &Path,
+    mode: &[&str],
+    extra: &[(&str, &str)],
+    result: &str,
+) -> (String, String) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let stdout = scratch().join(format!("{id}.stdout"));
@@ -81,7 +92,7 @@ fn run(hl: &Path, mode: &[&str], extra: &[(&str, &str)]) -> (String, String) {
     let out = std::fs::read_to_string(stdout).unwrap();
     let line = out
         .lines()
-        .find(|l| l.starts_with("iters="))
+        .find(|l| l.starts_with(result))
         .unwrap_or_else(|| panic!("missing result line: {out}\n{log}"))
         .to_owned();
     (line, log)
@@ -133,6 +144,29 @@ fn forced_snapshots_from_ordinary_and_osr_entries_preserve_live_state() {
                 log.lines().any(|l| l.starts_with("[retier] taken ")
                     && l.ends_with(&format!("source={source}"))),
                 "{mode}, plain={plain} never took the intended compiled hand-off\n{log}"
+            );
+        }
+    }
+}
+
+/// The interpreter holds an f32 register as the f64 it widens to; both
+/// compiled entries have to narrow it again.
+#[test]
+fn an_f32_loop_is_entered_mid_flight() {
+    let hl = fixture("TestOsrF32");
+    let (interp, _) = run_for(&hl, &["--mode", "interp"], &[], "f32=");
+    for tier in ["cranelift", "llvm"] {
+        let (answer, log) = run_for(
+            &hl,
+            &["--mode", "hybrid", "--jit-tier", tier, "--jit-threshold", "1"],
+            &[("ASH_OSR_LOG", "1"), ("ASH_OSR_ENTRY_SYNC", "1")],
+            "f32=",
+        );
+        assert_eq!(answer, interp, "{tier}\n{log}");
+        if tier == "cranelift" {
+            assert!(
+                log.lines().any(|l| l.starts_with("[osr] entering findex=")),
+                "{tier} never entered compiled code mid-loop\n{log}"
             );
         }
     }

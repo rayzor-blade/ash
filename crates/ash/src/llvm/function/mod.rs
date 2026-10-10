@@ -1795,7 +1795,8 @@ impl<'ctx> JITModule<'ctx> {
                     self.emit_air_constant(&registers, &reg_types, instr)?;
                     continue;
                 }
-                let restored = self.load_air_osr_slot(buf, offset as u32, reg_types[index])?;
+                let restored =
+                    self.load_air_osr_slot(buf, offset as u32, reg_types[index], false)?;
                 self.builder.build_store(registers[index], restored)?;
             }
         } else {
@@ -1806,12 +1807,12 @@ impl<'ctx> JITModule<'ctx> {
                     self.emit_air_constant(&registers, &reg_types, instr)?;
                     continue;
                 }
-                let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i])?;
+                let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i], true)?;
                 self.builder.build_store(registers[i], restored)?;
             }
             for (ci, cell) in air.cells.iter().enumerate() {
                 let slot = cell_base + ci;
-                let restored = self.load_air_osr_slot(buf, cell.reg, reg_types[slot])?;
+                let restored = self.load_air_osr_slot(buf, cell.reg, reg_types[slot], true)?;
                 self.builder.build_store(registers[slot], restored)?;
             }
         }
@@ -2062,6 +2063,7 @@ impl<'ctx> JITModule<'ctx> {
         buf: PointerValue<'ctx>,
         reg: u32,
         ty: BasicTypeEnum<'ctx>,
+        interpreter_abi: bool,
     ) -> Result<BasicValueEnum<'ctx>> {
         let i64_ty = self.context.i64_type();
         let slot = unsafe {
@@ -2084,6 +2086,15 @@ impl<'ctx> JITModule<'ctx> {
             BasicTypeEnum::IntType(_) => raw.into(),
             BasicTypeEnum::FloatType(t) if t == self.context.f64_type() => {
                 self.builder.build_bit_cast(raw, t, "air_osr_f64")?
+            }
+            // The interpreter hands an f32 register over as the f64 it widens
+            // to; a compiled snapshot hands over the f32's own bits.
+            BasicTypeEnum::FloatType(t) if interpreter_abi => {
+                let wide = self
+                    .builder
+                    .build_bit_cast(raw, self.context.f64_type(), "air_osr_f32_wide")?
+                    .into_float_value();
+                self.builder.build_float_trunc(wide, t, "air_osr_f32")?.into()
             }
             BasicTypeEnum::FloatType(t) => {
                 let bits = self.builder.build_int_truncate(

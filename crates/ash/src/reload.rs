@@ -6,6 +6,7 @@
 mod functions;
 mod init;
 mod types;
+mod vtable;
 
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
@@ -126,6 +127,68 @@ pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
 }
 
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
+/// Give the C types of the classes of `new` the methods it declares. A class
+/// whose methods changed gets the new list, and its runtime object is built
+/// again, with those of the classes that extend it, whose method counts and
+/// vtables are made from its own.
+fn sync_class_methods(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
+    let mut changed: Vec<*mut hl::hl_type> = Vec::new();
+    for (i, t) in new.types.iter().enumerate() {
+        let (Some(c), Some(obj)) = (shared.c_types.get(i).copied(), t.obj.as_ref()) else {
+            continue;
+        };
+        if unsafe { crate::c_types::set_class_protos(c, &obj.proto) } {
+            changed.push(c);
+        }
+    }
+    if changed.is_empty() {
+        return;
+    }
+    let Some(rebuild) = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_rebuild_obj_proto")
+        .ok()
+    else {
+        return;
+    };
+    type FnRebuild = unsafe extern "C" fn(*mut hl::hl_type) -> *mut hl::hl_runtime_obj;
+    let rebuild: FnRebuild = unsafe { std::mem::transmute(rebuild) };
+
+    // The changed classes and the classes below them, nearest the root first.
+    let mut affected: Vec<(usize, *mut hl::hl_type)> = Vec::new();
+    for &c in &shared.c_types {
+        let mut length = 0usize;
+        let mut hit = false;
+        let mut at = c;
+        while !at.is_null() && length < 64 {
+            unsafe {
+                let kind = (*at).kind;
+                if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
+                    break;
+                }
+                let obj = (*at).__bindgen_anon_1.obj;
+                if obj.is_null() {
+                    break;
+                }
+                hit |= changed.contains(&at);
+                length += 1;
+                at = (*obj).super_;
+            }
+        }
+        if hit {
+            affected.push((length, c));
+        }
+    }
+    affected.sort_by_key(|(length, _)| *length);
+    for (_, c) in affected {
+        // A class nothing has made an object of has no runtime object to
+        // replace; it is built from the new list when it is first used.
+        let built = unsafe { !(*(*c).__bindgen_anon_1.obj).rt.is_null() };
+        if built {
+            unsafe { rebuild(c) };
+        }
+    }
+}
+
 fn flush_affected_protos(shared: &SharedRuntimeHandles, _changed_findexes: &[usize]) {
     // Resolve hlp_flush_proto dynamically from the std library
     let flush_fn = crate::native_lib::NativeFunctionResolver::new()
@@ -563,14 +626,19 @@ fn renumber(
 ) -> Result<(), String> {
     let refuse = |why: String| format!("the program cannot reload in place: {why}");
     let retyped = types::remap_types(running, bc).map_err(refuse)?;
+    let slots = vtable::plan(running, bc, &retyped.dropped()).map_err(refuse)?;
+    vtable::apply(bc, &slots);
     remap_globals(running, bc, room.global_slots).map_err(refuse)?;
     let changes = functions::TypeChanges {
         added_from: running.types.len(),
         dropped: retyped.dropped(),
+        methods_added: slots.added.clone(),
+        methods_removed: slots.removed.clone(),
     };
     functions::remap_functions(running, bc, room.function_slots, &changes).map_err(refuse)?;
     let set_up = unset_from.map_or(running.types.len(), |t| t.min(running.types.len()));
     init::attach_init(bc, set_up, room.function_slots).map_err(refuse)?;
+    vtable::restore(bc, &slots);
     types::restore_dropped(running, bc, &retyped);
     Ok(())
 }
@@ -806,6 +874,7 @@ pub fn do_reload(
             }
         }
     }
+    sync_class_methods(&ctx.shared_runtime, &new_bytecode);
     flush_affected_protos(&ctx.shared_runtime, &stale);
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         let names = crate::types::function_keys(&new_bytecode.types, &new_bytecode.functions);
@@ -983,6 +1052,70 @@ mod tests {
             env!("CARGO_MANIFEST_DIR")
         );
         crate::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path)).unwrap()
+    }
+
+    /// A program of the method fixtures, as the compiler wrote it.
+    fn method_fixture(v: &str) -> DecodedBytecode {
+        crate::native_lib::init_std_library();
+        let path = format!(
+            "{}/test/hot_reload/methods/{v}.hl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        crate::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path)).unwrap()
+    }
+
+    /// The slot a class's own prototype entry `method` has, if it has one.
+    fn slot_of(bc: &DecodedBytecode, class: &str, method: &str) -> Option<i32> {
+        bc.types
+            .iter()
+            .filter_map(|t| t.obj.as_ref())
+            .find(|o| o.name == class)?
+            .proto
+            .iter()
+            .find(|p| p.name == method)
+            .map(|p| p.pindex)
+    }
+
+    /// Methods come and go over several reloads, and a method that has a slot
+    /// keeps it: a call that began before a reload names the slot it knew.
+    #[test]
+    fn successive_method_reloads_keep_the_slots_they_gave() {
+        let room = unbounded_room();
+        let mut running = method_fixture("v1");
+        assert_eq!(slot_of(&running, "Base", "name"), Some(0));
+        assert_eq!(slot_of(&running, "Base", "describe"), Some(-1));
+        for next in ["v3", "v5", "v6", "v1"] {
+            let mut bc = method_fixture(next);
+            renumber(&running, &mut bc, &room, None).unwrap();
+            // Base.name was slot 0 and no program moves it.
+            assert_eq!(slot_of(&bc, "Base", "name"), Some(0), "{next}");
+            if next == "v3" {
+                // The first override gave describe a slot, which the leaf shares.
+                assert_eq!(slot_of(&bc, "Base", "describe"), Some(1));
+                assert_eq!(slot_of(&bc, "Leaf", "describe"), Some(1));
+            }
+            if next == "v5" {
+                // The leaf's overrides are gone, and describe keeps its slot
+                // though nothing overrides it now.
+                assert_eq!(slot_of(&bc, "Leaf", "name"), None);
+                assert_eq!(slot_of(&bc, "Leaf", "describe"), None);
+                assert_eq!(slot_of(&bc, "Base", "describe"), Some(1));
+            }
+            if next == "v6" {
+                // tag is new and virtual, and goes after the slots taken.
+                let tag = slot_of(&bc, "Base", "tag").unwrap();
+                assert!(tag >= 2, "{tag}");
+                assert_eq!(slot_of(&bc, "Leaf", "tag"), Some(tag));
+                assert_eq!(slot_of(&bc, "Leaf", "name"), Some(0));
+            }
+            if next == "v1" {
+                // tag is gone from the program and stays in the class, as the
+                // slot it introduced.
+                assert!(slot_of(&bc, "Base", "tag").is_some());
+                assert_eq!(slot_of(&bc, "Leaf", "name"), Some(0));
+            }
+            running = bc;
+        }
     }
 
     /// Tables with room for anything a test adds.

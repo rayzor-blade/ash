@@ -182,15 +182,14 @@ fn incompatible(old: &HLType, new: &HLType) -> Option<String> {
                 o.name
             ));
         }
-        let methods = |o: &crate::types::HLTypeObj| -> Vec<(String, i32)> {
-            o.proto.iter().map(|p| (p.name.clone(), p.pindex)).collect()
-        };
+        // The methods of a class are the slot pass's to match; the statics a
+        // class binds are fields of its `$` object, which is laid out like any.
         let statics = |o: &crate::types::HLTypeObj| -> Vec<i32> {
             o.bindings.iter().step_by(2).copied().collect()
         };
-        if methods(o) != methods(n) || statics(o) != statics(n) {
+        if statics(o) != statics(n) {
             return Some(format!(
-                "{} declares different methods; a method was added or removed",
+                "{} binds different statics; a static function was added or removed",
                 o.name
             ));
         }

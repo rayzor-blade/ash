@@ -35,6 +35,12 @@ pub struct TypeChanges {
     pub added_from: usize,
     /// Positions of running types the new program no longer has.
     pub dropped: Vec<usize>,
+    /// Functions, as the new program numbers them, of methods a class both
+    /// programs have gained.
+    pub methods_added: HashSet<usize>,
+    /// Functions, as the running program numbers them, of methods such a class
+    /// has lost.
+    pub methods_removed: HashSet<usize>,
 }
 
 /// The functions that the types `owners` declare: their methods and bound
@@ -257,8 +263,9 @@ impl<'a> Matcher<'a> {
     }
 
     /// Methods and bound statics, by name. A name only one program has is a
-    /// method added or removed, which moves vtable slots and is not handled,
-    /// unless its class is added or dropped with it.
+    /// method added or removed, which the type pass has to have accounted
+    /// for, as it does for a class added or dropped and for the methods of a
+    /// class both programs have.
     fn pair_named(&mut self) -> Result<(), String> {
         fn by_name(names: &HashMap<usize, String>) -> HashMap<&str, Vec<usize>> {
             let mut out: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -426,8 +433,14 @@ fn plan(
     let mut m = Matcher::new(
         &old_side,
         &new_side,
-        declared_by(new, changes.added_from..new.types.len()),
-        declared_by(old, changes.dropped.iter().copied()),
+        declared_by(new, changes.added_from..new.types.len())
+            .into_iter()
+            .chain(changes.methods_added.iter().copied())
+            .collect(),
+        declared_by(old, changes.dropped.iter().copied())
+            .into_iter()
+            .chain(changes.methods_removed.iter().copied())
+            .collect(),
     );
     m.pair_named()?;
     m.pair_entry();
@@ -794,7 +807,7 @@ mod tests {
     fn none() -> TypeChanges {
         TypeChanges {
             added_from: usize::MAX,
-            dropped: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1317,7 +1330,7 @@ mod tests {
         });
         let changes = TypeChanges {
             added_from: 2,
-            dropped: Vec::new(),
+            ..Default::default()
         };
         let done = remap_functions(&old, &mut new, ROOM, &changes).unwrap();
         assert_eq!(done, Renumbered { added: 1, kept: 0 });
@@ -1361,6 +1374,7 @@ mod tests {
         let changes = TypeChanges {
             added_from: 3,
             dropped: vec![2],
+            ..Default::default()
         };
         let done = remap_functions(&old, &mut new, ROOM, &changes).unwrap();
         assert_eq!(done, Renumbered { added: 0, kept: 1 });

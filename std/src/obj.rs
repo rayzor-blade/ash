@@ -857,6 +857,20 @@ pub(crate) unsafe fn obj_resolve_field(o: *const hl_type_obj, hfield: i32) -> *m
     }
 }
 
+/// The runtime object of the class `ot` with its method table built. An
+/// object made before a hot reload reaches here with the table dropped, since
+/// nothing has made an object of the class since.
+unsafe fn rt_with_methods(ot: *mut hl_type) -> *mut hl_runtime_obj {
+    unsafe {
+        let rt = (*(*ot).__bindgen_anon_1.obj).rt;
+        if rt.is_null() || (*rt).methods.is_null() {
+            hl_get_obj_proto(ot)
+        } else {
+            rt
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_obj {
     unsafe {
@@ -1225,13 +1239,32 @@ pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj {
+    unsafe { build_obj_rt(ot, false) }
+}
+
+/// Build the runtime object of a class again from its type data, make it the
+/// class's, and build its method table. Its parent's is used as it stands,
+/// so a class is rebuilt after its superclass. Used when a hot reload changes
+/// the methods a class has; the old runtime object is left where it is, for
+/// readers that hold it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_rebuild_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_obj {
+    unsafe {
+        build_obj_rt(ot, true);
+        hl_get_obj_proto(ot)
+    }
+}
+
+/// `force` builds even where the class has a runtime object, and publishes
+/// the new one only when it is complete.
+unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
     unsafe {
         let _kind = (*ot).kind;
 
         let o = (*ot).__bindgen_anon_1.obj;
         let m = (*o).m;
 
-        if !(*o).rt.is_null() {
+        if !force && !(*o).rt.is_null() {
             return (*o).rt;
         }
 
@@ -1250,7 +1283,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             .lock()
             .unwrap();
 
-        if !(*o).rt.is_null() {
+        if !force && !(*o).rt.is_null() {
             return (*o).rt;
         }
         // Runtime type structures are immortal and referenced only from type
@@ -1412,7 +1445,9 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             (*o).nproto
         };
         (*t).methods = ptr::null_mut();
-        (*o).rt = t;
+        if !force {
+            (*o).rt = t;
+        }
         (*ot).vobj_proto = ptr::null_mut();
 
         let compare_hash = hlp_hash_gen(USTR_COMPARE.as_ptr(), false);
@@ -1502,6 +1537,9 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             }
         }
 
+        if force {
+            (*o).rt = t;
+        }
         t
     }
 }
@@ -1599,9 +1637,10 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
                     // raw allocate_closure_ptr call here kept the full type and
                     // made `untyped obj.method(...)` chains fail their fun->fun
                     // cast one arg too wide (Issue5082).
+                    let rt = rt_with_methods((*d).t);
                     let closure = crate::fun::hlp_alloc_closure_ptr(
                         (*f).t,
-                        *(*(*obj).rt).methods.offset(-(*f).field_index as isize - 1),
+                        *(*rt).methods.offset(-(*f).field_index as isize - 1),
                         d as *mut std::ffi::c_void,
                     );
                     return closure as *mut vdynamic;
@@ -2227,7 +2266,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                             (*ft).kind == hl::hl_type_kind_HMETHOD && hlp_safe_cast(&mut tmp, ft);
                         if cast_ok {
                             let method_idx = (-(*f).field_index - 1) as usize;
-                            let rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;
+                            let rt = rt_with_methods((*obj).t);
                             *(hl_vfields(v).add(i)) = *(*rt).methods.wrapping_add(method_idx);
                         } else {
                             *(hl_vfields(v).add(i)) = ptr::null_mut();
@@ -2869,13 +2908,13 @@ pub unsafe extern "C" fn hlp_vcall_virtual_0(virt: *mut vvirtual, field: i32) ->
 
         // Resolve the method from the underlying object
         let obj_type = (*obj).t;
-        let rt = (*obj_type).__bindgen_anon_1.obj.as_ref().unwrap().rt;
         let f = obj_resolve_field((*obj_type).__bindgen_anon_1.obj.as_ref().unwrap(), hfield);
         if f.is_null() || (*f).field_index >= 0 {
             return ptr::null_mut();
         }
 
         let method_idx = (-(*f).field_index - 1) as usize;
+        let rt = rt_with_methods(obj_type);
         let method_ptr: *mut std::ffi::c_void = *(*rt).methods.wrapping_add(method_idx);
 
         // Call the method with this=obj, no other args

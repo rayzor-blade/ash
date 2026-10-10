@@ -1,6 +1,6 @@
 use crate::bytecode::DecodedBytecode;
 use crate::hl::*;
-use crate::types::{HLType, TypeRef};
+use crate::types::{HLObjProto, HLType, TypeRef};
 use std::collections::HashMap;
 use std::ptr;
 
@@ -13,6 +13,54 @@ fn str_to_utf16_ptr(s: &str) -> *const u16 {
     let ptr = utf16.as_ptr();
     std::mem::forget(utf16);
     ptr
+}
+
+/// Give the class `c_type` the methods `protos` list, if they are not the ones
+/// it has. The old list is left in place for readers that hold it. Returns
+/// whether the class changed.
+///
+/// # Safety
+/// `c_type` must be a live `hl_type` made by a `CTypeFactory`.
+pub(crate) unsafe fn set_class_protos(c_type: *mut hl_type, protos: &[HLObjProto]) -> bool {
+    unsafe {
+        if c_type.is_null() {
+            return false;
+        }
+        let kind = (*c_type).kind;
+        if kind != hl_type_kind_HOBJ && kind != hl_type_kind_HSTRUCT {
+            return false;
+        }
+        let obj = (*c_type).__bindgen_anon_1.obj;
+        if obj.is_null() {
+            return false;
+        }
+        let same = (*obj).nproto as usize == protos.len()
+            && protos.iter().enumerate().all(|(i, p)| {
+                let c = &*(*obj).proto.add(i);
+                c.findex == p.findex && c.pindex == p.pindex && c.hashed_name == p.hashed_name
+            });
+        if same {
+            return false;
+        }
+        let mut c_protos: Vec<hl_obj_proto> = protos
+            .iter()
+            .map(|p| hl_obj_proto {
+                name: str_to_utf16_ptr(&p.name),
+                findex: p.findex,
+                pindex: p.pindex,
+                hashed_name: p.hashed_name,
+            })
+            .collect();
+        let list = if c_protos.is_empty() {
+            ptr::null_mut()
+        } else {
+            c_protos.as_mut_ptr()
+        };
+        std::mem::forget(c_protos);
+        (*obj).proto = list;
+        (*obj).nproto = protos.len() as i32;
+        true
+    }
 }
 
 /// Slots the globals array has beyond the program's own, for the globals a

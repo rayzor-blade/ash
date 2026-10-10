@@ -1391,7 +1391,7 @@ impl HLInterpreter {
             hot_loop_pcs: Mutex::new(HashMap::new()),
             live_frame: Mutex::new(std::collections::HashSet::new()),
             called_from_loop: Mutex::new(std::collections::HashSet::new()),
-            vtable_slots: OnceLock::new(),
+            vtable_slots: Mutex::new(None),
             pending_osr: Mutex::new(HashMap::new()),
             osr_image_regs: Mutex::new(HashMap::new()),
             uniform_entries: Mutex::new(HashMap::new()),

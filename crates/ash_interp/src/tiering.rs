@@ -832,6 +832,16 @@ impl TieredSharedCtx {
         }
         self.reload_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // A reload can add functions, whose slots are in `functions_ptrs`.
+        let top = new_bytecode
+            .functions
+            .iter()
+            .map(|f| f.findex)
+            .chain(new_bytecode.natives.iter().map(|n| n.findex))
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        self.max_findex
+            .fetch_max(top, std::sync::atomic::Ordering::AcqRel);
         // The module is rebuilt from the new program, by whoever next holds
         // the lock; now, when this caller holds it. A compile holding it
         // finishes on the old module, and `tiered_compile_tier` discards

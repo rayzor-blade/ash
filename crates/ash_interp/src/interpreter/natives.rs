@@ -766,6 +766,7 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         findex: usize,
     ) -> Option<(Vec<usize>, usize)> {
+        let bytecode = self.current(bytecode);
         let t_idx = match func_of(&self.targets, findex) {
             Some(fidx) => bytecode.functions[fidx].type_.0,
             None => bytecode.natives[native_of(&self.targets, findex)?].type_.0,

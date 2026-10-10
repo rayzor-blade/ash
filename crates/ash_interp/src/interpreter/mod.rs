@@ -217,6 +217,11 @@ const _: () = assert!(HOT_LOOP_BACKEDGES.is_power_of_two());
 /// one optimized opcode.
 const FIBER_POLL_WORK: u32 = 16 * 1024;
 
+/// Findexes reserved in the function tables when a program can reload, for
+/// the functions its reloads add. A program with more functions than this
+/// reserves as many again.
+const RELOAD_SPARE_SLOTS: usize = 8192;
+
 /// Demand bits in `HLInterpreter::demand_local`.
 const DEMAND_LIVE_FRAME: u8 = 1;
 const DEMAND_UNDER_LOOP: u8 = 2;
@@ -1137,13 +1142,6 @@ impl HLInterpreter {
                 );
             }
         }
-        let module_ctx = self.c_type_factory.module_ctx();
-        let shared = SharedRuntimeHandles {
-            globals_data_ptr: self.c_type_factory.globals_data().0,
-            nglobals: self.c_type_factory.globals_data().1,
-            c_types: self.c_type_factory.as_slice().to_vec(),
-            module_ctx,
-        };
         // The function table as it is now, sized by the program's highest
         // findex, function or native.
         // With the host's registrations, or the baseline every reload is
@@ -1157,6 +1155,18 @@ impl HLInterpreter {
             .chain(old_bc.natives.iter().map(|n| n.findex as usize))
             .max()
             .map_or(0, |m| m + 1);
+        // Room for the functions reloads add. Compiled code reads the module
+        // context's tables in place, so they are sized now and never move.
+        self.c_type_factory
+            .reserve_function_slots(max_findex.max(RELOAD_SPARE_SLOTS));
+        let module_ctx = self.c_type_factory.module_ctx();
+        let shared = SharedRuntimeHandles {
+            globals_data_ptr: self.c_type_factory.globals_data().0,
+            nglobals: self.c_type_factory.globals_data().1,
+            c_types: self.c_type_factory.as_slice().to_vec(),
+            module_ctx,
+            function_slots: self.c_type_factory.function_slots(),
+        };
         let fptrs: Vec<*mut std::ffi::c_void> = (0..max_findex)
             .map(|i| unsafe {
                 if !module_ctx.is_null() && !(*module_ctx).functions_ptrs.is_null() {
@@ -1207,6 +1217,7 @@ impl HLInterpreter {
             nglobals,
             c_types: self.c_type_factory.as_slice().to_vec(),
             module_ctx: self.c_type_factory.module_ctx(),
+            function_slots: self.c_type_factory.function_slots(),
         };
         // Pre-warm the tiered JIT module ON THE MAIN THREAD, before any
         // bytecode runs. Module init GC-allocates (constants via
@@ -2058,6 +2069,7 @@ impl HLInterpreter {
         ret: NanBoxedValue,
         dst_kind: hl::hl_type_kind,
     ) -> NanBoxedValue {
+        let bytecode = self.current(bytecode);
         let ret = if matches!(dst_kind, hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL) {
             match func_of(&self.targets, findex)
                 .and_then(|i| bytecode.functions.get(i))
@@ -2724,7 +2736,7 @@ impl HLInterpreter {
                     args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
                 }
                 let interp = &mut *ctx.interp;
-                let bytecode = &*ctx.bytecode;
+                let bytecode = interp.current(&*ctx.bytecode);
                 // Marshal the caller's arguments. These were dropped outright
                 // until now — the parameters were literally named `_args` and
                 // `_nargs` — so every stub closure invoked from native code ran
@@ -2996,7 +3008,8 @@ impl HLInterpreter {
                                 std::mem::transmute(address);
                             get_frame()
                         });
-                    let count = interp.prepare_call_stack(&*ctx.bytecode, frame_hint) as i32;
+                    let count =
+                        interp.prepare_call_stack(interp.current(&*ctx.bytecode), frame_hint) as i32;
                     // A throw's trace is also what `exceptionStack()` answers
                     // with, on a walker frame that catches a compiled callee's
                     // throw; the walker's own throws fill it directly.
@@ -3194,7 +3207,7 @@ impl HLInterpreter {
                     }
                 }
                 let interp = &mut *ctx.interp;
-                let bytecode = &*ctx.bytecode;
+                let bytecode = interp.current(&*ctx.bytecode);
                 let resolver = &*ctx.resolver;
                 let findex = findex as usize;
 
@@ -4445,6 +4458,7 @@ impl HLInterpreter {
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
         self.ensure_gc_runtime_initialized();
+        let bytecode = self.current(bytecode);
 
         // Check if it's a bytecode function or native
         if let Some(func_idx) = func_of(&self.targets, findex) {
@@ -5910,6 +5924,45 @@ impl HLInterpreter {
         self.apply_pending_reload(native_resolver);
     }
 
+    /// The program frames start on now: the reloaded one once there is one.
+    /// Code that was handed a program before a reload reads the functions it
+    /// calls through this, since one a reload added is only in the new
+    /// program's tables, and a closure made after the reload can be called
+    /// from a frame that began before it.
+    #[inline]
+    fn current<'a>(&self, bytecode: &'a DecodedBytecode) -> &'a DecodedBytecode {
+        self.reloaded_bytecode.unwrap_or(bytecode)
+    }
+
+    /// Give the findex-indexed tables entries for the functions and natives
+    /// of `bc`, which has more of them after a reload that added some. Those
+    /// it already had are where they were, so their entries are rewritten as
+    /// they stood.
+    fn extend_tables(&mut self, bc: &DecodedBytecode) {
+        let top = bc
+            .functions
+            .iter()
+            .map(|f| f.findex)
+            .chain(bc.natives.iter().map(|n| n.findex))
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        if top > self.targets.len() {
+            self.targets.resize(top, CallTarget::Missing);
+        }
+        for (i, f) in bc.functions.iter().enumerate() {
+            self.targets[f.findex as usize] = CallTarget::Func(i as u32);
+        }
+        for (i, n) in bc.natives.iter().enumerate() {
+            self.targets[n.findex as usize] = CallTarget::Native(i as u32);
+        }
+        let natives = bc.natives.len();
+        if natives > self.native_fn_cache.len() {
+            self.native_fn_cache.resize(natives, std::ptr::null_mut());
+            self.native_ctx_cache.resize(natives, 0);
+            self.native_record_cache.resize(natives, false);
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn apply_reload(&mut self, native_resolver: &NativeFunctionResolver) {
@@ -5942,6 +5995,15 @@ impl HLInterpreter {
             }
 
             self.field_hash_cache.clear();
+
+            self.extend_tables(&new_bc);
+            // Doors, hot-loop marks and closure scans describe the bodies
+            // before the reload; the tiers above start over from the interpreter.
+            self.osr_attached.clear();
+            self.hot_loops.clear();
+            self.late_pending.clear();
+            self.compiled_only_deps_ready.clear();
+            self.demand_local.clear();
 
             // Invalidate tiered JIT cache — compiled functions still
             // point to old code. Forces fallback to interpreter which

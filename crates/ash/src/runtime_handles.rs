@@ -10,6 +10,10 @@ pub struct SharedRuntimeHandles {
     pub nglobals: usize,
     pub c_types: Vec<*mut hl_type>,
     pub module_ctx: *mut hl_module_context,
+    /// How many findexes the module context's tables have room for. Compiled
+    /// code reads them in place, so a reload that adds functions fills spare
+    /// slots instead of growing them.
+    pub function_slots: usize,
 }
 
 // SharedRuntimeHandles carries runtime pointers that are process-global for an HL module

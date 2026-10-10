@@ -27,6 +27,8 @@ pub struct CTypeFactory {
     globals_data: *mut *mut std::ffi::c_void,
     /// Number of globals
     nglobals: usize,
+    /// How many findexes the module context's two tables have room for.
+    function_slots: usize,
 }
 
 impl CTypeFactory {
@@ -47,6 +49,7 @@ impl CTypeFactory {
             module_ctx: ptr::null_mut(),
             globals_data,
             nglobals,
+            function_slots: 0,
         };
 
         // First pass: create placeholder types with correct `kind`
@@ -96,6 +99,35 @@ impl CTypeFactory {
     /// Get the module context pointer (for accessing function pointer stubs).
     pub fn module_ctx(&self) -> *mut hl_module_context {
         self.module_ctx
+    }
+
+    /// How many findexes the module context's tables have room for.
+    pub fn function_slots(&self) -> usize {
+        self.function_slots
+    }
+
+    /// Make room for `extra` more findexes in the module context's tables.
+    /// Compiled code reads the tables in place, so this is for before any is
+    /// built, and the tables never move after it.
+    pub fn reserve_function_slots(&mut self, extra: usize) {
+        if self.module_ctx.is_null() {
+            return;
+        }
+        let len = self.function_slots;
+        let room = len + extra;
+        let mut ptrs: Vec<*mut std::ffi::c_void> = vec![ptr::null_mut(); room];
+        let mut types: Vec<*mut hl_type> = vec![ptr::null_mut(); room];
+        unsafe {
+            let ctx = &mut *self.module_ctx;
+            ptr::copy_nonoverlapping(ctx.functions_ptrs, ptrs.as_mut_ptr(), len);
+            ptr::copy_nonoverlapping(ctx.functions_types, types.as_mut_ptr(), len);
+            ctx.functions_ptrs = ptrs.as_mut_ptr();
+            ctx.functions_types = types.as_mut_ptr();
+        }
+        // The old tables are leaked with the rest of the context.
+        std::mem::forget(ptrs);
+        std::mem::forget(types);
+        self.function_slots = room;
     }
 
     /// Get the shared globals_data array and its size.
@@ -383,6 +415,7 @@ impl CTypeFactory {
             }
         }
 
+        self.function_slots = max_findex;
         let ptrs_ptr = func_ptrs.as_mut_ptr();
         std::mem::forget(func_ptrs);
         let types_ptr = func_types.as_mut_ptr();

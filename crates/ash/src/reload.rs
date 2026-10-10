@@ -3,6 +3,8 @@
 //! Compares old and new `DecodedBytecode` to determine which functions changed,
 //! which were added/removed, and whether type layouts are compatible.
 
+mod functions;
+
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
 use crate::runtime_handles::SharedRuntimeHandles;
@@ -192,50 +194,11 @@ fn decode_as(path: &std::path::Path, like: &DecodedBytecode) -> anyhow::Result<D
     Ok(bc)
 }
 
-/// The name of every function the type table names, by findex:
-/// `Type.proto` for a method, `Type.field` for a bound one.
-fn function_names(bc: &DecodedBytecode) -> HashMap<usize, String> {
-    let mut names = HashMap::new();
-    for t in &bc.types {
-        let Some(obj) = &t.obj else { continue };
-        for p in &obj.proto {
-            names.insert(p.findex as usize, format!("{}.{}", obj.name, p.name));
-        }
-        // A binding names a field by its index over the whole chain.
-        let mut chain = Vec::new();
-        let mut cur = Some(t);
-        while let Some(ct) = cur {
-            chain.push(ct);
-            cur = ct
-                .obj
-                .as_ref()
-                .and_then(|o| o.super_.clone())
-                .and_then(|r| bc.types.get(r.0));
-        }
-        let fields: Vec<&str> = chain
-            .iter()
-            .rev()
-            .flat_map(|ct| ct.obj.iter().flat_map(|o| o.fields.iter()))
-            .map(|f| f.name.as_str())
-            .collect();
-        for pair in obj.bindings.chunks(2) {
-            let [fid, findex] = pair else { continue };
-            if let Some(field) = fields.get(*fid as usize) {
-                names.insert(*findex as usize, format!("{}.{field}", obj.name));
-            }
-        }
-    }
-    names
-}
-
 /// Why `new` cannot replace `old` in place, if it cannot: compiled code
 /// and live objects are laid out by the running program, so a type's
-/// layout, the globals count and the function table's shape must stay.
-/// A function table of a different shape is one where a findex names
-/// another function now, which happens when a method is added or
-/// removed; the diff sees every function after it as changed, and the
-/// vtables built from the old table would call the wrong bodies. The
-/// globals are already on the running program's slots, by `remap_globals`.
+/// layout and the globals count must stay. The globals are already on the
+/// running program's slots, by `remap_globals`, and the functions on its
+/// numbering, by `remap_functions`.
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
     if diff.type_layout_changed {
         return Some(
@@ -247,23 +210,6 @@ fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> O
             "the globals count changed ({} -> {})",
             old.globals.len(),
             new.globals.len()
-        ));
-    }
-    if !diff.added.is_empty() || !diff.removed.is_empty() {
-        return Some(format!(
-            "the function table changed shape ({} added, {} removed); a method was added or removed",
-            diff.added.len(),
-            diff.removed.len()
-        ));
-    }
-    let (old_names, new_names) = (function_names(old), function_names(new));
-    let moved = diff.changed.iter().find(|findex| {
-        matches!((old_names.get(findex), new_names.get(findex)), (Some(a), Some(b)) if a != b)
-    });
-    if let Some(findex) = moved {
-        return Some(format!(
-            "functions moved: findex {findex} was {} and is {}; a method was added or removed",
-            old_names[findex], new_names[findex]
         ));
     }
     None
@@ -512,15 +458,28 @@ fn remap_globals(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<(),
 }
 
 /// The program at `path`, read as the next version of `running`: with
-/// the host registrations `running` took and its globals on `running`'s
-/// slots. `Err` says why it cannot be, or that it did not read.
+/// the host registrations `running` took, its globals on `running`'s
+/// slots and its functions on `running`'s numbering. `slots` is how many
+/// findexes the running tables have room for. `Err` says why it cannot be,
+/// or that it did not read.
 fn decode_next(
     path: &std::path::Path,
     running: &DecodedBytecode,
+    slots: usize,
 ) -> Result<DecodedBytecode, String> {
+    let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
+    let decoded = started.elapsed();
     remap_globals(running, &mut bc)
         .map_err(|why| format!("the program cannot reload in place: {why}"))?;
+    functions::remap_functions(running, &mut bc, slots)
+        .map_err(|why| format!("the program cannot reload in place: {why}"))?;
+    if std::env::var_os("ASH_RELOAD_LOG").is_some() {
+        eprintln!(
+            "[hot-reload] read in {decoded:?}, put on the running numbering in {:?}",
+            started.elapsed() - decoded
+        );
+    }
     Ok(bc)
 }
 
@@ -537,7 +496,8 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
-    let new_bytecode = decode_next(&ctx.bytecode_path, &ctx.old_bytecode)?;
+    let slots = ctx.shared_runtime.function_slots;
+    let new_bytecode = decode_next(&ctx.bytecode_path, &ctx.old_bytecode, slots)?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
     if let Some(why) = refusal(&ctx.old_bytecode, &new_bytecode, &diff) {
         return Err(format!("the program cannot reload in place: {why}"));
@@ -588,7 +548,12 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
     match ctx.staged.take() {
         Some(bc) => Ok(bc),
-        None => decode_next(&ctx.bytecode_path, &ctx.old_bytecode).map_err(anyhow::Error::msg),
+        None => decode_next(
+            &ctx.bytecode_path,
+            &ctx.old_bytecode,
+            ctx.shared_runtime.function_slots,
+        )
+        .map_err(anyhow::Error::msg),
     }
 }
 
@@ -620,6 +585,53 @@ pub fn take_reload_pending() -> bool {
         && RELOAD_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
+/// `max(findex) + 1` over the functions and natives of `bc`: the length
+/// the function tables need.
+fn function_table_len(bc: &DecodedBytecode) -> usize {
+    bc.functions
+        .iter()
+        .map(|f| f.findex)
+        .chain(bc.natives.iter().map(|n| n.findex))
+        .max()
+        .map_or(0, |max| max as usize + 1)
+}
+
+/// Fill the slots of the functions and natives a reload added: the stub the
+/// interpreter runs them by, and their types. The tables have room for
+/// them (`SharedRuntimeHandles::function_slots`).
+fn add_function_slots(ctx: &mut ReloadContext, new: &DecodedBytecode) {
+    let from = ctx.functions_ptrs.len();
+    let top = function_table_len(new);
+    if top <= from {
+        return;
+    }
+    ctx.functions_ptrs.resize(top, std::ptr::null_mut());
+    let module = ctx.shared_runtime.module_ctx;
+    let added = new
+        .functions
+        .iter()
+        .map(|f| (f.findex as usize, f.type_.0))
+        .chain(new.natives.iter().map(|n| (n.findex as usize, n.type_.0)))
+        .filter(|(findex, _)| *findex >= from);
+    for (findex, ty) in added {
+        let stub = (findex + 1) as *mut std::ffi::c_void;
+        ctx.functions_ptrs[findex] = stub;
+        if module.is_null() {
+            continue;
+        }
+        let ty = ctx
+            .shared_runtime
+            .c_types
+            .get(ty)
+            .copied()
+            .unwrap_or(std::ptr::null_mut());
+        unsafe {
+            *(*module).functions_ptrs.add(findex) = stub;
+            *(*module).functions_types.add(findex) = ty;
+        }
+    }
+}
+
 /// Apply the staged program and return it for the interpreter to take.
 /// Runs on the interpreter's thread, outside any native call stack.
 ///
@@ -629,9 +641,11 @@ pub fn take_reload_pending() -> bool {
 /// taken the program returned here; the tiers promote it again from the
 /// new program by the usual hotness rules. A compiled body that inlined a
 /// changed one goes back the same way. Other compiled bodies stay, and the
-/// vtables are flushed so they read the slots again. Constants are not
-/// patched in place: the interpreter allocates them again from the new
-/// program and stores them in their globals.
+/// vtables are flushed so they read the slots again. A function the new
+/// program added takes a spare slot of the tables, holding the stub the
+/// interpreter runs it by. Constants are not patched in place: the
+/// interpreter allocates them again from the new program and stores them
+/// in their globals.
 pub fn do_reload() -> Option<DecodedBytecode> {
     let mut guard = RELOAD_CTX.lock().ok()?;
     let ctx = guard.as_mut()?;
@@ -650,6 +664,14 @@ pub fn do_reload() -> Option<DecodedBytecode> {
     if !diff.has_changes() {
         return None;
     }
+    let top = function_table_len(&new_bytecode);
+    if top > ctx.shared_runtime.function_slots {
+        eprintln!(
+            "[hot-reload] reload failed: the new program needs {top} function slots and the running one has {}",
+            ctx.shared_runtime.function_slots
+        );
+        return None;
+    }
     let mut stale = inline_dependents(&diff.changed);
     stale.extend_from_slice(&diff.changed);
     // The optimized-AIR cache and the LLVM gate's ceilings are keyed by
@@ -664,6 +686,7 @@ pub fn do_reload() -> Option<DecodedBytecode> {
             (*ctx.shared_runtime.module_ctx).functions_ptrs
         }
     };
+    add_function_slots(ctx, &new_bytecode);
     for &findex in &stale {
         let sentinel = (findex + 1) as *mut std::ffi::c_void;
         if findex < ctx.functions_ptrs.len() {
@@ -674,10 +697,31 @@ pub fn do_reload() -> Option<DecodedBytecode> {
         }
     }
     flush_affected_protos(&ctx.shared_runtime, &stale);
-    eprintln!(
-        "[hot-reload] reloaded {} changed function(s)",
-        diff.changed.len()
-    );
+    if std::env::var_os("ASH_RELOAD_LOG").is_some() {
+        let names = crate::types::function_keys(&new_bytecode.types, &new_bytecode.functions);
+        let named = |findexes: &[usize]| -> Vec<String> {
+            let mut out: Vec<String> = findexes
+                .iter()
+                .map(|f| format!("{f}={}", names.get(&(*f as u32)).map_or("?", String::as_str)))
+                .collect();
+            out.sort();
+            out
+        };
+        eprintln!("[hot-reload] changed: {}", named(&diff.changed).join(" "));
+        eprintln!("[hot-reload] added: {}", named(&diff.added).join(" "));
+    }
+    if diff.added.is_empty() {
+        eprintln!(
+            "[hot-reload] reloaded {} changed function(s)",
+            diff.changed.len()
+        );
+    } else {
+        eprintln!(
+            "[hot-reload] reloaded {} changed function(s), {} added",
+            diff.changed.len(),
+            diff.added.len()
+        );
+    }
     ctx.old_bytecode = new_bytecode.clone();
     Some(new_bytecode)
 }

@@ -2025,7 +2025,7 @@ impl HLInterpreter {
                                 // which marshals both directions.
                                 let ret_compatible = func_of(&self.targets, fi)
                                     .and_then(|f_idx| {
-                                        let ft = &bytecode.functions[f_idx];
+                                        let ft = &self.current(bytecode).functions[f_idx];
                                         bytecode.types[ft.type_.0]
                                             .fun
                                             .as_ref()
@@ -2163,7 +2163,7 @@ impl HLInterpreter {
                             let needs_boxed_dispatch = needs_boxed_dispatch
                                 || found.is_some_and(|fi| {
                                     func_of(&self.targets, fi).is_some_and(|f_idx| {
-                                        let ft = &bytecode.functions[f_idx];
+                                        let ft = &self.current(bytecode).functions[f_idx];
                                         bytecode.types[ft.type_.0].fun.as_ref().is_some_and(|f| {
                                             let ret_kind = bytecode.types[f.ret.0].kind;
                                             let dst_kind =

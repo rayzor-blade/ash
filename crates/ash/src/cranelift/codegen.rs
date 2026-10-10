@@ -38,7 +38,7 @@ use cranelift_codegen::ir::{
     SigRef, Signature, SourceLoc, StackSlot, StackSlotData, StackSlotKind, Type, Value, types,
 };
 use cranelift_codegen::isa::CallConv;
-use cranelift_frontend::FunctionBuilder;
+use cranelift_frontend::{FunctionBuilder, Variable};
 
 use air::v2::ir::{
     BinOp, BlockId, CastKind, CellId, CondKind, Function as AirFunction, Instr, MemAccess,
@@ -281,6 +281,8 @@ pub fn lower_air_function(
             fiber_poll_epoch_slot: None,
             pos_chains: Vec::new(),
             pos_index: HashMap::new(),
+            vars: Vec::new(),
+            var_phis: HashMap::new(),
         };
         cg.run()?;
         positions = std::mem::take(&mut cg.pos_chains);
@@ -390,6 +392,8 @@ pub fn compile_osr_entry(
             fiber_poll_epoch_slot: None,
             pos_chains: Vec::new(),
             pos_index: HashMap::new(),
+            vars: Vec::new(),
+            var_phis: HashMap::new(),
         };
         cg.run_osr(header)?;
         chains = std::mem::take(&mut cg.pos_chains);
@@ -618,6 +622,69 @@ struct AirCodegen<'a, 'b> {
     /// Chains already built, so a position the body returns to reuses its
     /// srcloc.
     pos_index: HashMap<(u32, u32, Option<u32>), u32>,
+    /// A variable for each value an OSR entry reaches by two ways (see
+    /// [`AirCodegen::run_osr`]); empty everywhere else. Its CLIF value is
+    /// looked up where it is read, so `vals` holds one only while an
+    /// instruction that reads or defines it is being emitted.
+    vars: Vec<Option<Variable>>,
+    /// The block parameter of each phi whose value is a variable, until its
+    /// block is emitted and records it there.
+    var_phis: HashMap<ValueId, Value>,
+}
+
+/// Immediate dominators over the blocks of `order`, a reverse postorder whose
+/// first block is the root (Cooper, Harvey and Kennedy). Blocks outside it
+/// hold `usize::MAX`; the root holds itself.
+fn region_idoms(f: &AirFunction, order: &[BlockId]) -> Vec<usize> {
+    let n = f.blocks.len();
+    let mut rpo = vec![usize::MAX; n];
+    for (i, b) in order.iter().enumerate() {
+        rpo[b.idx()] = i;
+    }
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &b in order {
+        for s in f.blocks[b.idx()].term.successors() {
+            if rpo[s.idx()] != usize::MAX {
+                preds[s.idx()].push(b.idx());
+            }
+        }
+    }
+    let intersect = |idom: &[usize], mut a: usize, mut b: usize| -> usize {
+        while a != b {
+            while rpo[a] > rpo[b] {
+                a = idom[a];
+            }
+            while rpo[b] > rpo[a] {
+                b = idom[b];
+            }
+        }
+        a
+    };
+    let root = order[0].idx();
+    let mut idom = vec![usize::MAX; n];
+    idom[root] = root;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in order.iter().skip(1) {
+            let mut new = usize::MAX;
+            for &p in &preds[b.idx()] {
+                if idom[p] == usize::MAX {
+                    continue;
+                }
+                new = if new == usize::MAX {
+                    p
+                } else {
+                    intersect(&idom, p, new)
+                };
+            }
+            if new != idom[b.idx()] {
+                idom[b.idx()] = new;
+                changed = true;
+            }
+        }
+    }
+    idom
 }
 
 impl AirCodegen<'_, '_> {
@@ -991,6 +1058,7 @@ impl AirCodegen<'_, '_> {
             let blk = self.b.create_block();
             self.blocks[bid.idx()] = Some(blk);
         }
+        let (live_in, split) = self.osr_value_flow(&order);
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             for pi in 0..self.f.blocks[bid.idx()].phis.len() {
@@ -1000,7 +1068,11 @@ impl AirCodegen<'_, '_> {
                 }
                 let ty = self.value_clif_ty(dst)?;
                 let v = self.b.append_block_param(blk, ty);
-                self.vals[dst.idx()] = Some(v);
+                if split[dst.idx()] {
+                    self.var_phis.insert(dst, v);
+                } else {
+                    self.vals[dst.idx()] = Some(v);
+                }
             }
         }
 
@@ -1029,88 +1101,42 @@ impl AirCodegen<'_, '_> {
             self.b.ins().stack_store(types::I64, v, slot, 0);
         }
 
-        // Live-ins, in EMISSION order: any use not preceded by a definition
-        // in that order loads from the transfer buffer at its de-SSA
-        // register slot. Emission order is the binding constraint (a CLIF
-        // value must exist before its use), and it is also semantically
-        // right: `buf[value_reg(v)]` is what the interpreter's register held
+        // Values the region reads but does not define arrive through the
+        // buffer: `buf[value_reg(v)]` is what the interpreter's register held
         // at the transfer point, which is de-SSA truth for every value whose
-        // definition the header-entry path bypasses. A mere
-        // "defined-anywhere-in-region" rule missed exactly those — a def on
-        // a path the header does not dominate left its uses reading an
-        // unmaterialized value (mandelbrot's kernel, v83).
-        let mut defined = vec![false; self.f.values.len()];
-        let mut live_in = vec![false; self.f.values.len()];
-        {
-            let mut note_use = |u: ValueId, defined: &[bool], live_in: &mut [bool]| {
-                if !defined[u.idx()] {
-                    live_in[u.idx()] = true;
-                }
-            };
-            for &bid in &order {
-                let blk = &self.f.blocks[bid.idx()];
-                for phi in &blk.phis {
-                    defined[phi.dst.idx()] = true;
-                }
-                for i in &blk.instrs {
-                    for u in i.uses() {
-                        note_use(u, &defined, &mut live_in);
-                    }
-                    if let Some(d) = i.dst() {
-                        defined[d.idx()] = true;
-                    }
-                }
-                for u in blk.term.uses() {
-                    note_use(u, &defined, &mut live_in);
-                }
-                for succ in blk.term.successors() {
-                    if succ.idx() < self.blocks.len() && self.blocks[succ.idx()].is_some() {
-                        for phi in &self.f.blocks[succ.idx()].phis {
-                            if let Some((_, v)) = phi.incoming.iter().find(|(p, _)| *p == bid) {
-                                note_use(*v, &defined, &mut live_in);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // definition the header-entry path bypasses.
+        //
+        // A value the region DOES define can be read where that definition
+        // does not dominate, when the header sits in an outer loop whose body
+        // makes it: the first pass through the header has the buffer's value,
+        // later ones the definition's. Such a value is a variable, and the
+        // frontend places the phis.
+        self.vars = vec![None; self.f.values.len()];
         for v in 0..self.f.values.len() {
-            if live_in[v] {
-                let vid = ValueId(v as u32);
-                if !self.has_machine_value(vid) {
-                    continue;
-                }
-                // Used before its in-region definition in emission order:
-                // the header-entry path can bypass the def, and whether the
-                // buffer slot or the (later) definition is the right value
-                // is a dataflow question this entry does not answer. The
-                // first attempt answered it wrong and produced an entry
-                // that looped forever. Decline; the function's ordinary
-                // compiled entry still serves every future CALL, which is
-                // what a frequently-invoked function actually needs.
-                if defined[v] {
-                    bail!(
-                        "OSR entry: v{v} is used before its in-region definition; \
-                         header-relative liveness is ambiguous"
-                    );
-                }
-                // A constant's definition is its value wherever it is read:
-                // materialize it rather than load the buffer's copy, so the
-                // divisor and multiplier peepholes still see a literal.
-                if let Some(c) = self.emit_constant_def(vid)? {
-                    self.vals[v] = Some(c);
-                    continue;
-                }
-                // A pointer to a cell names the cell of the frame it is read
-                // in, and the buffer holds the interpreter's.
-                if let Some(c) = self.emit_cell_ref_def(vid)? {
-                    self.vals[v] = Some(c);
-                    continue;
-                }
+            let vid = ValueId(v as u32);
+            if !(live_in[v] || split[v]) || !self.has_machine_value(vid) {
+                continue;
+            }
+            // A constant's definition is its value wherever it is read:
+            // materialize it rather than load the buffer's copy, so the
+            // divisor and multiplier peepholes still see a literal.
+            let value = if let Some(c) = self.emit_constant_def(vid)? {
+                c
+            // A pointer to a cell names the cell of the frame it is read in,
+            // and the buffer holds the interpreter's.
+            } else if let Some(c) = self.emit_cell_ref_def(vid)? {
+                c
+            } else {
                 let ty = self.value_clif_ty(vid)?;
                 let reg = self.f.value_reg(vid);
-                let loaded = self.load_osr_slot(buf, reg, ty)?;
-                self.vals[v] = Some(loaded);
+                self.load_osr_slot(buf, reg, ty)?
+            };
+            if split[v] {
+                let var = self.b.declare_var(self.value_clif_ty(vid)?);
+                self.b.def_var(var, value);
+                self.vars[v] = Some(var);
+            } else {
+                self.vals[v] = Some(value);
             }
         }
 
@@ -1131,18 +1157,170 @@ impl AirCodegen<'_, '_> {
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             self.b.switch_to_block(blk);
+            for pi in 0..self.f.blocks[bid.idx()].phis.len() {
+                let dst = self.f.blocks[bid.idx()].phis[pi].dst;
+                if let (Some(param), Some(Some(var))) =
+                    (self.var_phis.remove(&dst), self.vars.get(dst.idx()).copied())
+                {
+                    self.b.def_var(var, param);
+                }
+            }
+            let exit_inputs = self.exit_inputs(bid);
+            self.refresh(&exit_inputs);
             self.emit_header_polls(bid, poll_headers[bid.idx()])?;
+            self.forget(&exit_inputs);
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
+                let uses = instr.uses();
+                self.refresh(&uses);
                 self.skip_barrier = self.barrier_free.contains(&(bid.idx(), ii));
                 self.emit(&instr)?;
                 self.skip_barrier = false;
+                if let Some(dst) = instr.dst() {
+                    self.publish(dst);
+                    self.forget(&[dst]);
+                }
+                self.forget(&uses);
             }
             let term = self.f.blocks[bid.idx()].term.clone();
+            let mut uses = term.uses();
+            for succ in term.successors() {
+                if succ.idx() < self.blocks.len() && self.blocks[succ.idx()].is_some() {
+                    for phi in &self.f.blocks[succ.idx()].phis {
+                        if let Some((_, v)) = phi.incoming.iter().find(|(p, _)| *p == bid) {
+                            uses.push(*v);
+                        }
+                    }
+                }
+            }
+            self.refresh(&uses);
             self.emit_term(bid, &term)?;
+            self.forget(&uses);
         }
         self.b.seal_all_blocks();
         Ok(())
+    }
+
+    /// Rebind each of `values` that is a variable to what it holds here.
+    fn refresh(&mut self, values: &[ValueId]) {
+        for v in values {
+            if let Some(Some(var)) = self.vars.get(v.idx()).copied() {
+                self.vals[v.idx()] = Some(self.b.use_var(var));
+            }
+        }
+    }
+
+    /// Unbind each of `values` that is a variable, so a read that was not
+    /// refreshed fails to compile rather than reading a value from another
+    /// block.
+    fn forget(&mut self, values: &[ValueId]) {
+        for v in values {
+            if matches!(self.vars.get(v.idx()), Some(Some(_))) {
+                self.vals[v.idx()] = None;
+            }
+        }
+    }
+
+    /// Record the value just defined for `v` in its variable, when it has one.
+    fn publish(&mut self, v: ValueId) {
+        if let Some(Some(var)) = self.vars.get(v.idx()).copied() {
+            if let Some(value) = self.vals[v.idx()] {
+                self.b.def_var(var, value);
+            }
+            self.vals[v.idx()] = None;
+        }
+    }
+
+    /// The values a re-tier exit at `bid` writes out of the frame.
+    fn exit_inputs(&self, bid: BlockId) -> Vec<ValueId> {
+        use crate::retier::Input;
+        let Some(site) = self.osr_exits.get(&bid.0) else {
+            return Vec::new();
+        };
+        site.layout
+            .slots
+            .iter()
+            .filter_map(|slot| match slot.input {
+                Input::Value(v) => Some(v),
+                Input::Cell(_) => None,
+            })
+            .collect()
+    }
+
+    /// How the values of an OSR region reach their reads, for the blocks of
+    /// `order` (a reverse postorder from the header).
+    ///
+    /// The first vector marks a value defined outside the region and read in
+    /// it. The second marks a value defined inside it and read where that
+    /// definition does not dominate, in the region's own flow graph rooted at
+    /// the header: the entry reaches the read without passing the definition.
+    fn osr_value_flow(&self, order: &[BlockId]) -> (Vec<bool>, Vec<bool>) {
+        let nvals = self.f.values.len();
+        let idom = region_idoms(self.f, order);
+        let dominates = |a: usize, mut b: usize| -> bool {
+            loop {
+                if a == b {
+                    return true;
+                }
+                let up = idom[b];
+                if up == b || up == usize::MAX {
+                    return false;
+                }
+                b = up;
+            }
+        };
+
+        // Where each value is defined: the block, and the instruction index
+        // (-1 for a phi, which is defined on entry to its block).
+        let mut def_at: Vec<Option<(usize, i64)>> = vec![None; nvals];
+        for &bid in order {
+            let blk = &self.f.blocks[bid.idx()];
+            for phi in &blk.phis {
+                def_at[phi.dst.idx()] = Some((bid.idx(), -1));
+            }
+            for (ii, i) in blk.instrs.iter().enumerate() {
+                if let Some(d) = i.dst() {
+                    def_at[d.idx()] = Some((bid.idx(), ii as i64));
+                }
+            }
+        }
+
+        let mut live_in = vec![false; nvals];
+        let mut split = vec![false; nvals];
+        let mut read = |u: ValueId, block: usize, at: i64| match def_at[u.idx()] {
+            None => live_in[u.idx()] = true,
+            Some((db, di)) => {
+                let ok = if db == block {
+                    di < at
+                } else {
+                    dominates(db, block)
+                };
+                if !ok {
+                    split[u.idx()] = true;
+                }
+            }
+        };
+        for &bid in order {
+            let blk = &self.f.blocks[bid.idx()];
+            for (ii, i) in blk.instrs.iter().enumerate() {
+                for u in i.uses() {
+                    read(u, bid.idx(), ii as i64);
+                }
+            }
+            for u in blk.term.uses() {
+                read(u, bid.idx(), i64::MAX);
+            }
+            for succ in blk.term.successors() {
+                if succ.idx() < self.blocks.len() && self.blocks[succ.idx()].is_some() {
+                    for phi in &self.f.blocks[succ.idx()].phis {
+                        if let Some((_, v)) = phi.incoming.iter().find(|(p, _)| *p == bid) {
+                            read(*v, bid.idx(), i64::MAX);
+                        }
+                    }
+                }
+            }
+        }
+        (live_in, split)
     }
 
     /// Mark every natural AIR V2 loop header. Polling all headers, rather

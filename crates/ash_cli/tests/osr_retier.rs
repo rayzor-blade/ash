@@ -20,6 +20,7 @@ fn fixture(main: &str) -> PathBuf {
             "TestRetierSnapshot" => "test_retier_snapshot.hl",
             "TestOsrRefBeforeLoop" => "test_osr_ref_before_loop.hl",
             "TestOsrF32" => "test_osr_f32.hl",
+            "TestOsrNested" => "test_osr_nested.hl",
             _ => panic!("unknown fixture"),
         };
         let path = tests_dir().join(name);
@@ -200,6 +201,35 @@ fn an_f32_loop_is_entered_mid_flight() {
                 log.lines().any(|l| l.starts_with("[osr] entering findex=")),
                 "{tier} never entered compiled code mid-loop\n{log}"
             );
+        }
+    }
+}
+
+/// An inner loop reads values its outer loop defines on every pass: the entry
+/// takes them from the interpreter on the first pass and from the outer body
+/// on the later ones, and no entry is refused over it.
+#[test]
+fn a_loop_inside_a_loop_is_entered_mid_flight() {
+    let hl = fixture("TestOsrNested");
+    let (interp, _) = run_for(&hl, &["--mode", "interp"], &[], "nested=");
+    for tier in ["cranelift", "llvm"] {
+        let (answer, log) = run_for(
+            &hl,
+            &["--mode", "hybrid", "--jit-tier", tier, "--jit-threshold", "1"],
+            &[("ASH_OSR_LOG", "1"), ("ASH_OSR_ENTRY_SYNC", "1")],
+            "nested=",
+        );
+        assert_eq!(answer, interp, "{tier}\n{log}");
+        if tier == "cranelift" {
+            let entered = log
+                .lines()
+                .filter(|l| l.starts_with("[osr] entering findex="))
+                .count();
+            assert!(
+                entered >= 3,
+                "{tier} entered compiled code {entered} times\n{log}"
+            );
+            assert!(!log.contains("declined"), "{tier} refused an entry\n{log}");
         }
     }
 }

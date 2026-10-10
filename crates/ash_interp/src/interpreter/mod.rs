@@ -6078,10 +6078,14 @@ impl HLInterpreter {
         // does at start and a reload does not run. Not under the top tier's
         // lock: the call may promote.
         drop(llvm);
-        if let Some((bc, findex)) = setup
-            && let Err(e) = self.call_function(bc, native_resolver, findex, &[])
-        {
-            eprintln!("[hot-reload] warning: setting up the new classes failed: {e}");
+        if let Some((bc, findex)) = setup {
+            match self.call_function(bc, native_resolver, findex, &[]) {
+                Ok(_) => ash_core::reload::setup_done(),
+                Err(e) => eprintln!(
+                    "[hot-reload] warning: setting up the new classes failed: {e}; \
+                     the next reload sets them up again"
+                ),
+            }
         }
     }
 

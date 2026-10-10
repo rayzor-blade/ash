@@ -164,6 +164,9 @@ struct ReloadContext {
     shared_runtime: SharedRuntimeHandles,
     /// The program `stage_reload` accepted, for `do_reload` to apply.
     staged: Option<DecodedBytecode>,
+    /// The first type whose class setup has not run to its end. The next
+    /// reload sets up the classes from there on again.
+    unset_from: Option<usize>,
 }
 
 // ReloadContext holds raw pointers from SharedRuntimeHandles.
@@ -185,6 +188,7 @@ pub fn init_reload_context(
         functions_ptrs,
         shared_runtime,
         staged: None,
+        unset_from: None,
     });
 }
 
@@ -525,17 +529,19 @@ fn remap_globals(
 /// The program at `path`, read as the next version of `running`: with
 /// the host registrations `running` took, and its types, globals and
 /// functions on `running`'s numbering. `room` says how many globals and
-/// findexes the running tables have room for. `Err` says why it cannot be,
-/// or that it did not read.
+/// findexes the running tables have room for, and `unset_from` is the first
+/// type whose class setup is still to run. `Err` says why it cannot be, or
+/// that it did not read.
 fn decode_next(
     path: &std::path::Path,
     running: &DecodedBytecode,
     room: &SharedRuntimeHandles,
+    unset_from: Option<usize>,
 ) -> Result<DecodedBytecode, String> {
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
-    renumber(running, &mut bc, room)?;
+    renumber(running, &mut bc, room, unset_from)?;
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         eprintln!(
             "[hot-reload] read in {decoded:?}, put on the running numbering in {:?}",
@@ -547,11 +553,13 @@ fn decode_next(
 
 /// Put `bc`, a program just read, on the numbering of the types, globals and
 /// functions of `running`, and add the function that sets up the classes it
-/// adds. `Err` says why it cannot be.
+/// adds, and those from the type `unset_from` on that an earlier setup did not
+/// finish. `Err` says why it cannot be.
 fn renumber(
     running: &DecodedBytecode,
     bc: &mut DecodedBytecode,
     room: &SharedRuntimeHandles,
+    unset_from: Option<usize>,
 ) -> Result<(), String> {
     let refuse = |why: String| format!("the program cannot reload in place: {why}");
     let retyped = types::remap_types(running, bc).map_err(refuse)?;
@@ -561,7 +569,8 @@ fn renumber(
         dropped: retyped.dropped(),
     };
     functions::remap_functions(running, bc, room.function_slots, &changes).map_err(refuse)?;
-    init::attach_init(bc, running.types.len(), room.function_slots).map_err(refuse)?;
+    let set_up = unset_from.map_or(running.types.len(), |t| t.min(running.types.len()));
+    init::attach_init(bc, set_up, room.function_slots).map_err(refuse)?;
     types::restore_dropped(running, bc, &retyped);
     Ok(())
 }
@@ -579,7 +588,12 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
-    let new_bytecode = decode_next(&ctx.bytecode_path, &ctx.old_bytecode, &ctx.shared_runtime)?;
+    let new_bytecode = decode_next(
+        &ctx.bytecode_path,
+        &ctx.old_bytecode,
+        &ctx.shared_runtime,
+        ctx.unset_from,
+    )?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
     if let Some(why) = refusal(&ctx.old_bytecode, &new_bytecode, &diff) {
         return Err(format!("the program cannot reload in place: {why}"));
@@ -630,8 +644,13 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
     match ctx.staged.take() {
         Some(bc) => Ok(bc),
-        None => decode_next(&ctx.bytecode_path, &ctx.old_bytecode, &ctx.shared_runtime)
-            .map_err(anyhow::Error::msg),
+        None => decode_next(
+            &ctx.bytecode_path,
+            &ctx.old_bytecode,
+            &ctx.shared_runtime,
+            ctx.unset_from,
+        )
+        .map_err(anyhow::Error::msg),
     }
 }
 
@@ -813,8 +832,22 @@ pub fn do_reload(
             diff.added.len()
         );
     }
+    // Until the interpreter says the setup ran, the classes it sets up count
+    // as not set up.
+    ctx.unset_from = new_bytecode.reload_init.map(|_| {
+        let from = ctx.old_bytecode.types.len();
+        ctx.unset_from.map_or(from, |t| t.min(from))
+    });
     ctx.old_bytecode = new_bytecode.clone();
     Some(new_bytecode)
+}
+
+/// The interpreter ran the setup of the classes the last reload added to its
+/// end: the next reload need not set them up again.
+pub fn setup_done() {
+    if let Some(ctx) = RELOAD_CTX.lock().ok().as_mut().and_then(|g| g.as_mut()) {
+        ctx.unset_from = None;
+    }
 }
 
 #[cfg(test)]
@@ -942,27 +975,54 @@ mod tests {
         assert_eq!(reads(&new), reads(&old));
     }
 
-    /// Reloads follow one another through classes added, dropped and added
-    /// again: each program is put on the numbering of the one running, so
-    /// what the running program has is where it was.
-    #[test]
-    fn successive_class_reloads_keep_what_is_running_where_it_is() {
+    /// A program of the class fixtures, as the compiler wrote it.
+    fn class_fixture(v: &str) -> DecodedBytecode {
         crate::native_lib::init_std_library();
-        let load = |v: &str| {
-            let path = format!(
-                "{}/test/hot_reload/classes/{v}.hl",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            crate::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path)).unwrap()
-        };
-        let room = SharedRuntimeHandles {
+        let path = format!(
+            "{}/test/hot_reload/classes/{v}.hl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        crate::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path)).unwrap()
+    }
+
+    /// Tables with room for anything a test adds.
+    fn unbounded_room() -> SharedRuntimeHandles {
+        SharedRuntimeHandles {
             globals_data_ptr: std::ptr::null_mut(),
             nglobals: 0,
             c_types: Vec::new(),
             module_ctx: std::ptr::null_mut(),
             function_slots: usize::MAX,
             global_slots: usize::MAX,
-        };
+        }
+    }
+
+    /// A setup that did not run to its end is made again by the next reload:
+    /// the classes it was to set up count as new until one has.
+    #[test]
+    fn a_setup_that_did_not_finish_is_made_again() {
+        let room = unbounded_room();
+        let v1 = class_fixture("v1");
+        let mut v2 = class_fixture("v2");
+        renumber(&v1, &mut v2, &room, None).unwrap();
+        assert!(v2.reload_init.is_some());
+        // The same program again has nothing new to set up ...
+        let mut again = class_fixture("v2");
+        renumber(&v2, &mut again, &room, None).unwrap();
+        assert_eq!(again.reload_init, None);
+        // ... unless the setup of what v2 added never finished.
+        let mut again = class_fixture("v2");
+        renumber(&v2, &mut again, &room, Some(v1.types.len())).unwrap();
+        assert!(again.reload_init.is_some());
+    }
+
+    /// Reloads follow one another through classes added, dropped and added
+    /// again: each program is put on the numbering of the one running, so
+    /// what the running program has is where it was.
+    #[test]
+    fn successive_class_reloads_keep_what_is_running_where_it_is() {
+        let load = class_fixture;
+        let room = unbounded_room();
         let name = |t: &crate::types::HLType| {
             t.obj
                 .as_ref()
@@ -973,7 +1033,7 @@ mod tests {
         let mut sizes = Vec::new();
         for next in ["v2", "v3", "v2", "v1", "v3"] {
             let mut bc = load(next);
-            renumber(&running, &mut bc, &room).unwrap();
+            renumber(&running, &mut bc, &room, None).unwrap();
             for (i, f) in running.functions.iter().enumerate() {
                 assert_eq!(bc.functions[i].findex, f.findex, "{next}");
             }

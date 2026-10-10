@@ -328,7 +328,7 @@ fn the_fixtures_are_where_the_test_expects() {
     for (family, versions) in [
         (CLOSURES, &["v1", "v2", "v3", "v4", "v5", "v6", "v7"][..]),
         (CLASSES, &["v1", "v2", "v3"][..]),
-        (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7"][..]),
+        (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -541,5 +541,23 @@ fn a_class_added_below_a_class_with_methods() {
             "done",
         ],
         "added",
+    );
+}
+
+/// A `toString` the class did not have is called when the object is turned
+/// into a string.
+#[test]
+fn a_to_string_method_added() {
+    check(
+        METHODS,
+        "v1",
+        "v8",
+        &[
+            "reloaded",
+            "render name leaf5,describe [leaf5],value 10,str Leaf(5)",
+            "other other",
+            "done",
+        ],
+        "reloaded",
     );
 }

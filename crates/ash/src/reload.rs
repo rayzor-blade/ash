@@ -874,8 +874,10 @@ pub fn do_reload(
             }
         }
     }
-    sync_class_methods(&ctx.shared_runtime, &new_bytecode);
+    // Every class drops its vtable first, so that the classes the second step
+    // builds anew keep theirs.
     flush_affected_protos(&ctx.shared_runtime, &stale);
+    sync_class_methods(&ctx.shared_runtime, &new_bytecode);
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         let names = crate::types::function_keys(&new_bytecode.types, &new_bytecode.functions);
         let named = |findexes: &[usize]| -> Vec<String> {

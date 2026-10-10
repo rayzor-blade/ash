@@ -48,7 +48,8 @@ being taken:
 | `ASH_TIERED_TIMING` | break down JIT startup cost by phase |
 | `ASH_OSR` | `0` disables mid-loop transfers into compiled code |
 | `ASH_CL_RETIER` | `0` refuses the Cranelift → LLVM hand-off of a running loop |
-| `ASH_OSR_LOG` | log published and taken transfers |
+| `ASH_OSR_LOG` | log published and taken transfers, and for each hot loop header whether an entry can be built (`ELIGIBLE`), what refused it, or why an entry compile declined |
+| `ASH_VERIFY_OSR` | `only` reports without running the program how many functions have a loop an entry can be built for, and what refused the rest |
 | `ASH_CL_VERIFIER` | `1` runs Cranelift's IR verifier on every tier-0 compile (a debug build's default), `0` skips it (a release build's default) |
 | `ASH_STUB_COMPILE` | `1` makes compiled code that reaches an uncompiled callee compile it on the mutator instead of running it in the interpreter until the ladder promotes it; safe, for measuring |
 | `ASH_OSR_ENTRY_SYNC` | `1` builds a late Cranelift OSR entry on the interpreter thread instead of the `ash-osr-entry` worker; safe, for measuring the stall |
@@ -65,7 +66,7 @@ being taken:
 | `ASH_AIR_LEVEL` | `0..3`: how hard the AIR optimiser works |
 | `ASH_AIR_NO_WIDEN` | `1` disables loop widening |
 | `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |
-| `ASH_STRIP_MINE` | `0` makes compiled loops poll on every iteration instead of once per strip of 256 |
+| `ASH_STRIP_MINE` | `0` makes compiled loops poll on every iteration instead of once per strip of 256. A loop that calls a native polls on every iteration either way |
 | `ASH_AIR` | `v2` runs the interpreter over AIR instead of opcodes |
 | `ASH_GC_STATS` | print collections, reclaimed blocks, live bytes, pause times and finalizer registrations / queued / completed / pending counts at exit |
 | `ASH_GC_HEAP_MB` | heap reservation; committed on demand, so a ceiling |
@@ -184,6 +185,16 @@ and says so.
 
 The sampler is Unix-only. On Windows `ASH_PROFILE=sample` prints one error
 and the phase tree still works.
+
+### A hybrid run much slower than `--mode jit`
+
+Run the program under `--mode jit` first. If it is several times faster, hybrid
+is leaving a hot loop in the interpreter: `ASH_PROFILE=sample` names the
+function ("by interpreted function"), `ASH_OSR_LOG=1` says for each of its
+loop headers whether the interpreter could hand the running frame to compiled
+code and, if not, what refused it or declined the entry, and
+`ASH_VERIFY_OSR=only` surveys a whole program's loops the same way without
+running it.
 
 ## Bisecting a wrong answer
 

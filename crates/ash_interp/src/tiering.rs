@@ -549,6 +549,10 @@ impl RuntimeTables {
     }
 }
 
+/// For each function, the vtable slots that hold its address, with the reload
+/// generation they were found for.
+type VtableSlots = (u64, Arc<HashMap<usize, Vec<(usize, usize)>>>);
+
 /// State shared between the interpreter thread and beadie's tier brokers.
 /// Compile closures capture this via `Arc`.
 pub(crate) struct TieredSharedCtx {
@@ -663,7 +667,7 @@ pub(crate) struct TieredSharedCtx {
     /// It is kept with the reload generation it was built for, and a reload
     /// drops it: the next install builds it from the new program's
     /// prototypes.
-    pub(crate) vtable_slots: Mutex<Option<(u64, Arc<HashMap<usize, Vec<(usize, usize)>>>)>>,
+    pub(crate) vtable_slots: Mutex<Option<VtableSlots>>,
     /// OSR entries an LLVM promote has compiled but not yet attached,
     /// `findex -> entries`. The broker cannot attach them itself: beadie's
     /// adapter installs the main code pointer only after the compile closure

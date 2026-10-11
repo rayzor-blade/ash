@@ -260,8 +260,12 @@ is refused, on stderr, and the program goes on as it was:
 | `the setup of the new classes has control flow in it` | what a new class needs from the entry function is not a straight run of ops: a static whose first value is picked by a test written into the entry function, such as `static var on = env != null` |
 | `needs N globals`, `needs N function slots` | the program reserved room for as many added globals and functions as it started with, at least 65536 and 8192; restart it |
 
-`--mode jit` does not apply a reload. `ASH_RELOAD_LOG=1` lists, by name, the
-functions each reload recompiled and added.
+A reload is applied when the program calls `hl.Api.checkReload()` and gets
+`true`, whether the loop that calls it is interpreted or has been compiled, so
+the next call it makes is to the new code. `--mode jit` applies a reload too,
+but code compiled before it keeps the functions it inlined; reload in hybrid
+mode. `ASH_RELOAD_LOG=1` lists, by name, the functions each reload recompiled
+and added.
 
 ## Escape hatches
 

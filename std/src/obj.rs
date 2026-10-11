@@ -1080,9 +1080,10 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             }
         }
 
-        // Interfaces. The count is read once: a reload can replace the field
-        // list between the two passes, and the fields it keeps stay first.
-        let nfields = (*o).nfields;
+        // Interfaces, of the fields the runtime object was built from: a reload
+        // can replace the field list under this, and the fields it keeps stay
+        // first.
+        let nfields = (*t).nfields - if p.is_null() { 0 } else { (*p).nfields };
         (*t).ninterfaces = 0;
         for i in 0..nfields {
             if (*(*o).fields.add(i as usize)).hashed_name == 0 {
@@ -1391,6 +1392,12 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
         if _kind == hl::hl_type_kind_HOBJ {
             CLASS_LAID_OUT.store(true, Ordering::Release);
         }
+        // The class's own fields as they are now. A reload replaces the list
+        // while this holds the locks it does not take, and writes the array
+        // before the count, so the count is read first.
+        let own_nfields = ptr::read_volatile(&(*o).nfields);
+        std::sync::atomic::fence(Ordering::Acquire);
+        let own_fields = ptr::read_volatile(&(*o).fields);
         // Runtime type structures are immortal and referenced only from type
         // memory the GC never scans — alloc_immortal pins them (and, via
         // conservative trace, everything they point to) as persistent roots.
@@ -1398,9 +1405,9 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
             .unwrap_or_else(|| crate::rt::out_of_memory("runtime type metadata"))
             .as_ptr() as *mut hl_runtime_obj;
         (*t).t = ot;
-        (*t).nfields = (*o).nfields + if !p.is_null() { (*p).nfields } else { 0 };
+        (*t).nfields = own_nfields + if !p.is_null() { (*p).nfields } else { 0 };
         (*t).nproto = if !p.is_null() { (*p).nproto } else { 0 };
-        (*t).nlookup = (*o).nfields;
+        (*t).nlookup = own_nfields;
         (*t).nbindings = if !p.is_null() { (*p).nbindings } else { 0 };
         (*t).hasPtr = if !p.is_null() { (*p).hasPtr } else { false };
 
@@ -1489,8 +1496,8 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
             );
         }
 
-        for i in 0..(*o).nfields as usize {
-            let ft = (*(*o).fields.add(i)).t;
+        for i in 0..own_nfields as usize {
+            let ft = (*own_fields.add(i)).t;
             if (*ft).kind == hl::hl_type_kind_HPACKED {
                 let large = (*hlp_get_obj_rt((*ft).__bindgen_anon_1.tparam)).largest_field;
                 let pad = size as u8 % large;
@@ -1504,12 +1511,12 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
                 size += hlp_pad_struct(size, ft);
             }
             *(*t).fields_indexes.add(i + start as usize) = size;
-            if *(*(*o).fields.add(i)).name != 0 {
+            if *(*own_fields.add(i)).name != 0 {
                 hlp_lookup_insert(
                     (*t).lookup,
                     nlookup,
-                    (*(*o).fields.add(i)).hashed_name,
-                    (*(*o).fields.add(i)).t,
+                    (*own_fields.add(i)).hashed_name,
+                    (*own_fields.add(i)).t,
                     size,
                 );
                 nlookup += 1;
@@ -1621,8 +1628,8 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
                     hlp_mark_size((*p).size) as usize / std::mem::size_of::<u32>(),
                 );
             }
-            for i in 0..(*o).nfields as usize {
-                let ft = (*(*o).fields.add(i)).t;
+            for i in 0..own_nfields as usize {
+                let ft = (*own_fields.add(i)).t;
                 if hl_is_ptr(ft) {
                     let pos = *(*t).fields_indexes.add(i + start as usize)
                         / std::mem::size_of::<*mut std::os::raw::c_void>() as i32;

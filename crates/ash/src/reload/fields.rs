@@ -11,7 +11,8 @@
 //! The running order of the fields wins, as the running slots do for
 //! methods. The new program's field list for a class is put in the running
 //! order with the added fields after it, and the bodies that name a field of
-//! the class are rewritten to match.
+//! the class are rewritten to match. A field the new program drops stays in
+//! its place, unused.
 //!
 //! Only a class nothing extends can gain a field: the fields of a subclass
 //! follow its parent's, and would move.
@@ -20,7 +21,7 @@ use crate::bytecode::DecodedBytecode;
 use crate::hl;
 use crate::layout;
 use crate::opcodes::Opcode;
-use crate::types::{HLFunction, HLObjField, HLTypeObj};
+use crate::types::{HLFunction, HLObjField, HLType, HLTypeObj};
 use air::opcode_info::{successors, writes};
 use std::collections::{HashMap, HashSet};
 
@@ -167,6 +168,14 @@ fn constructor(bc: &DecodedBytecode, t: usize) -> Option<&HLFunction> {
     bc.functions.iter().find(|f| f.findex == findex)
 }
 
+/// What a function's ops do to the straight run a value is followed along.
+struct Flow {
+    /// The ops that something jumps to.
+    targets: HashSet<usize>,
+    /// The registers whose address is taken.
+    referenced: HashSet<u32>,
+}
+
 /// The ops that some jump, branch, switch or trap handler lands on.
 fn jump_targets(ops: &[Opcode]) -> HashSet<usize> {
     let mut out = HashSet::new();
@@ -176,23 +185,37 @@ fn jump_targets(ops: &[Opcode]) -> HashSet<usize> {
     out
 }
 
+/// The registers whose address the ops take: a call can write them without
+/// an op naming them.
+fn referenced(ops: &[Opcode]) -> HashSet<u32> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Opcode::Ref { src, .. } => Some(src.0),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether `reg` holds a constant or null at op `at`, found by following it
 /// back to the op that wrote it. Control must run straight from that op to
 /// `at`: if anything jumps to an op between them, as the two ends of an
 /// `if` do, the register may hold what another path wrote.
 fn constant_value(
     ops: &[Opcode],
-    targets: &HashSet<usize>,
+    flow: &Flow,
     constants: &HashSet<usize>,
     at: usize,
     reg: u32,
     copies: usize,
 ) -> bool {
+    if flow.referenced.contains(&reg) {
+        return false;
+    }
     for i in (0..at).rev() {
         if !writes(&ops[i]).iter().any(|r| r.0 == reg) {
             continue;
         }
-        if (i + 1..=at).any(|k| targets.contains(&k)) {
+        if (i + 1..=at).any(|k| flow.targets.contains(&k)) {
             return false;
         }
         return match &ops[i] {
@@ -204,7 +227,7 @@ fn constant_value(
             | Opcode::Null { .. } => true,
             Opcode::GetGlobal { global, .. } => constants.contains(&global.0),
             Opcode::Mov { src, .. } if copies > 0 => {
-                constant_value(ops, targets, constants, i, src.0, copies - 1)
+                constant_value(ops, flow, constants, i, src.0, copies - 1)
             }
             _ => false,
         };
@@ -221,7 +244,10 @@ fn initialised_by_a_computation(
     constants: &HashSet<usize>,
 ) -> bool {
     let ops = constructor.ops();
-    let targets = jump_targets(ops);
+    let flow = Flow {
+        targets: jump_targets(ops),
+        referenced: referenced(ops),
+    };
     ops.iter().enumerate().any(|(at, op)| {
         let (receiver, index, value) = match op {
             Opcode::SetField { obj, field, src } => (obj.0, field.0, src.0),
@@ -230,7 +256,7 @@ fn initialised_by_a_computation(
         };
         index == field
             && constructor.regs.get(receiver as usize).map(|r| r.0) == Some(class)
-            && !constant_value(ops, &targets, constants, at, value, COPIES)
+            && !constant_value(ops, &flow, constants, at, value, COPIES)
     })
 }
 
@@ -238,17 +264,20 @@ fn initialised_by_a_computation(
 /// `old` already, in the running order, and the bodies that name those fields
 /// to match. `floors` holds, for each class that has grown, the smallest
 /// size an object of it was allocated at, and gets the ones this reload
-/// needs; `room` is the spare bytes an object has, and `pinned` the classes
-/// whose objects something lays out one after another at their size.
+/// needs; `room` is the spare bytes an object has, `pinned` the classes whose
+/// objects something lays out one after another at their size (`None` when
+/// that is not known), and `dropped` the types of `old` that `new` has only as
+/// placeholders.
 ///
-/// `Err` says why a class cannot be laid out so: a field removed or of
-/// another type, a class something extends, or no room left.
+/// `Err` says why a class cannot be laid out so: a field of another type, a
+/// class something extends, or no room left.
 pub fn keep_order(
     old: &DecodedBytecode,
     new: &mut DecodedBytecode,
     floors: &mut HashMap<usize, i32>,
     room: usize,
-    pinned: &HashSet<usize>,
+    pinned: Option<&HashSet<usize>>,
+    dropped: &[usize],
 ) -> Result<(), String> {
     let mut moved: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
     let constants: HashSet<usize> = new.constants.iter().map(|c| c.global as usize).collect();
@@ -274,38 +303,52 @@ pub fn keep_order(
         if !unique(&running) || !unique(&wanted) {
             return Err(format!("{name} has two fields of one name"));
         }
+        // A field the new program no longer has stays where it is, unused: the
+        // bodies that began before the reload may read it, and a later reload
+        // that declares it again finds it with the value it had.
+        let mut gone: Vec<String> = Vec::new();
         for (f, id) in o.fields.iter().zip(&running) {
             match wanted.iter().position(|w| w == id) {
-                None => return Err(format!("field {} of {name} was removed", shown(id))),
+                None => gone.push(shown(id)),
                 Some(at) if n.fields[at].type_.0 != f.type_.0 => {
                     return Err(format!("field {} of {name} changed its type", f.name));
                 }
                 Some(_) => {}
             }
         }
-        // The running order, then the fields the new program adds, in its
-        // order.
+        // The running fields in their order, then the fields the new program
+        // adds, in its order.
         let mut perm = Vec::with_capacity(n.fields.len());
         // The added fields, with the place the new program gives each.
         let mut added: Vec<(String, usize)> = Vec::new();
+        let mut list = o.fields.clone();
         for (at, id) in wanted.iter().enumerate() {
             match running.iter().position(|r| r == id) {
-                Some(at_running) => perm.push(at_running),
+                Some(at_running) => {
+                    perm.push(at_running);
+                    list[at_running] = n.fields[at].clone();
+                }
                 None => {
                     perm.push(o.fields.len() + added.len());
                     added.push((shown(id), at));
+                    list.push(n.fields[at].clone());
                 }
             }
         }
-        let mut list = vec![HLObjField::default(); n.fields.len()];
-        for (g, &at) in n.fields.iter().zip(&perm) {
-            list[at] = g.clone();
-        }
-        let what = if added.is_empty() {
-            "has its fields in another order".to_string()
-        } else {
-            let names: Vec<&str> = added.iter().map(|(n, _)| n.as_str()).collect();
-            format!("gained {}", names.join(", "))
+        let what = {
+            let mut parts = Vec::new();
+            if !gone.is_empty() {
+                parts.push(format!("lost {}", gone.join(", ")));
+            }
+            if !added.is_empty() {
+                let names: Vec<&str> = added.iter().map(|(n, _)| n.as_str()).collect();
+                parts.push(format!("gained {}", names.join(", ")));
+            }
+            if parts.is_empty() {
+                "has its fields in another order".to_string()
+            } else {
+                parts.join(" and ")
+            }
         };
         let extended_by = (0..old.types.len().max(new.types.len())).find_map(|x| {
             [old, &*new].into_iter().find_map(|bc| {
@@ -320,11 +363,6 @@ pub fn keep_order(
         }
         if !o.bindings.is_empty() || !n.bindings.is_empty() {
             return Err(format!("{name} {what}, and binds closures into its fields"));
-        }
-        if pinned.contains(&t) {
-            return Err(format!(
-                "{name} {what}, and a CArray of it lays its objects out one after another"
-            ));
         }
         if new
             .host_classes
@@ -344,10 +382,44 @@ pub fn keep_order(
         let before = layout::object_layout(&old.types, t)
             .ok_or_else(|| format!("{name} {what}, and its layout is not one a reload can extend"))?;
         let start = inherited(new, t);
+        // A field the class keeps may be of a type the new program dropped,
+        // which is a placeholder until the types are put back, and has no size.
+        let mut kept_types: Vec<usize> = list
+            .iter()
+            .map(|f| f.type_.0)
+            .filter(|ty| dropped.contains(ty))
+            .collect();
+        kept_types.sort_unstable();
+        kept_types.dedup();
+        let held: Vec<(usize, HLType)> = kept_types
+            .into_iter()
+            .map(|ty| (ty, std::mem::replace(&mut new.types[ty], old.types[ty].clone())))
+            .collect();
         new.types[t].obj.as_mut().unwrap().fields = list;
-        let after = layout::object_layout(&new.types, t)
+        let after = layout::object_layout(&new.types, t);
+        for (ty, placeholder) in held.into_iter().rev() {
+            new.types[ty] = placeholder;
+        }
+        let after = after
             .ok_or_else(|| format!("{name} {what}, and its layout is not one a reload can extend"))?;
         let spare = i32::try_from(room).unwrap_or(i32::MAX);
+        // Objects laid out in a row stay where they are while the class keeps
+        // its size.
+        if after.size != before.size {
+            match pinned {
+                Some(rows) if rows.contains(&t) => {
+                    return Err(format!(
+                        "{name} {what}, and a CArray of it lays its objects out one after another"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{name} {what}, and the runtime cannot say whether a CArray holds it"
+                    ));
+                }
+                _ => {}
+            }
+        }
         let floor = *floors.entry(t).or_insert(before.size.saturating_add(spare));
         if after.size > floor {
             return Err(format!(
@@ -492,7 +564,7 @@ mod tests {
     }
 
     fn keep(old: &DecodedBytecode, new: &mut DecodedBytecode, room: usize) -> Result<(), String> {
-        keep_order(old, new, &mut HashMap::new(), room, &HashSet::new())
+        keep_order(old, new, &mut HashMap::new(), room, Some(&HashSet::new()), &[])
     }
 
     #[test]
@@ -500,7 +572,7 @@ mod tests {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32)])]);
         let floors = &mut HashMap::new();
-        keep_order(&old, &mut new, floors, 64, &HashSet::new()).unwrap();
+        keep_order(&old, &mut new, floors, 64, Some(&HashSet::new()), &[]).unwrap();
         assert!(floors.is_empty());
     }
 
@@ -509,7 +581,7 @@ mod tests {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32), ("p", PTR)])]);
         let floors = &mut HashMap::new();
-        keep_order(&old, &mut new, floors, 64, &HashSet::new()).unwrap();
+        keep_order(&old, &mut new, floors, 64, Some(&HashSet::new()), &[]).unwrap();
         assert_eq!(names(&new, 2), vec!["n", "p"]);
         // An instance is a header, an int and padding, 16 bytes, and 64 spare.
         assert_eq!(floors[&2], 16 + 64);
@@ -587,17 +659,90 @@ mod tests {
     }
 
     #[test]
-    fn a_field_that_is_gone_or_retyped_is_refused() {
+    fn a_retyped_field_is_refused() {
         let old = program(vec![class_type("A", None, &[("a", I32), ("b", PTR)])]);
-        let mut gone = program(vec![class_type("A", None, &[("a", I32)])]);
-        let why = keep(&old, &mut gone, 64).unwrap_err();
-        assert!(why.contains("field b of A was removed"), "{why}");
         let mut retyped = program(vec![class_type("A", None, &[("a", I32), ("b", I32)])]);
         let why = keep(&old, &mut retyped, 64).unwrap_err();
         assert!(why.contains("field b of A changed its type"), "{why}");
-        let mut renamed = program(vec![class_type("A", None, &[("a", I32), ("c", PTR)])]);
-        let why = keep(&old, &mut renamed, 64).unwrap_err();
-        assert!(why.contains("field b of A was removed"), "{why}");
+    }
+
+    /// A field the new program drops stays where it is, and the fields after
+    /// it keep their places in the bodies that began before the reload.
+    #[test]
+    fn a_field_that_is_gone_stays_unused() {
+        let old = program(vec![class_type("A", None, &[("a", I32), ("b", PTR), ("c", I32)])]);
+        let mut new = program(vec![class_type("A", None, &[("a", I32), ("c", I32)])]);
+        // c is index 1 in the new program and 2 in the class.
+        let mut f = HLFunction::with_body(
+            vec![
+                Opcode::GetThis { dst: Reg(1), field: RefField(0) },
+                Opcode::GetThis { dst: Reg(1), field: RefField(1) },
+            ],
+            Vec::new(),
+        );
+        f.regs = vec![TypeRef(2), TypeRef(I32)];
+        new.functions.push(f);
+        keep(&old, &mut new, 64).unwrap();
+        assert_eq!(names(&new, 2), vec!["a", "b", "c"]);
+        assert_eq!(fields_of(new.functions[0].ops()), vec![0, 2]);
+        // The next reload finds the field in the running class: dropping it
+        // again changes nothing, and declaring it again brings it back where
+        // it was.
+        let mut again = program(vec![class_type("A", None, &[("a", I32), ("c", I32)])]);
+        keep(&new, &mut again, 64).unwrap();
+        assert_eq!(names(&again, 2), vec!["a", "b", "c"]);
+        let mut back = program(vec![class_type("A", None, &[("a", I32), ("b", PTR), ("c", I32)])]);
+        keep(&new, &mut back, 64).unwrap();
+        assert_eq!(names(&back, 2), vec!["a", "b", "c"]);
+    }
+
+    /// The type of the field the class keeps is one the new program no longer
+    /// has: the class is still as large as it was.
+    #[test]
+    fn a_kept_field_of_a_dropped_type_still_has_its_size() {
+        let old = program(vec![
+            class_type("Gone", None, &[]),
+            class_type("A", None, &[("n", I32), ("g", 2)]),
+        ]);
+        // Only a placeholder is left at the dropped type's place.
+        let mut new = program(vec![
+            HLType::default(),
+            class_type("A", None, &[("n", I32), ("m", PTR)]),
+        ]);
+        // Without the room the class's 24 bytes do not hold another reference.
+        let why = keep_order(&old, &mut new, &mut HashMap::new(), 0, Some(&HashSet::new()), &[2]).unwrap_err();
+        assert!(why.contains("has 24 bytes where the class now needs 32"), "{why}");
+        assert!(new.types[2].obj.is_none(), "the placeholder is put back");
+        let mut new = program(vec![
+            HLType::default(),
+            class_type("A", None, &[("n", I32), ("m", PTR)]),
+        ]);
+        keep_order(&old, &mut new, &mut HashMap::new(), 8, Some(&HashSet::new()), &[2]).unwrap();
+    }
+
+    #[test]
+    fn a_field_renamed_is_one_dropped_and_one_added() {
+        let old = program(vec![class_type("A", None, &[("a", I32), ("b", PTR)])]);
+        let mut new = program(vec![class_type("A", None, &[("a", I32), ("c", PTR)])]);
+        keep(&old, &mut new, 64).unwrap();
+        assert_eq!(names(&new, 2), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_dropped_field_needs_no_room_but_a_class_something_extends_is_refused() {
+        let old = program(vec![
+            class_type("A", None, &[("a", I32), ("b", I32)]),
+            class_type("B", Some(2), &[]),
+        ]);
+        let mut new = program(vec![
+            class_type("A", None, &[("a", I32)]),
+            class_type("B", Some(2), &[]),
+        ]);
+        let why = keep(&old, &mut new, 0).unwrap_err();
+        assert!(why.contains("A lost b, and B extends it"), "{why}");
+        let old = program(vec![class_type("A", None, &[("a", I32), ("b", I32)])]);
+        let mut new = program(vec![class_type("A", None, &[("a", I32)])]);
+        keep(&old, &mut new, 0).unwrap();
     }
 
     #[test]
@@ -663,15 +808,15 @@ mod tests {
         let fourth = program(vec![class_type("A", None, &fields(7))]);
         // 16 bytes and 16 spare: 32.
         let mut next = second.clone();
-        keep_order(&first, &mut next, &mut floors, 16, &HashSet::new()).unwrap();
+        keep_order(&first, &mut next, &mut floors, 16, Some(&HashSet::new()), &[]).unwrap();
         assert_eq!(floors[&2], 32);
         // The running class is the 24 byte one now, but its objects are 32.
         let mut next = third.clone();
-        keep_order(&second, &mut next, &mut floors, 16, &HashSet::new()).unwrap();
+        keep_order(&second, &mut next, &mut floors, 16, Some(&HashSet::new()), &[]).unwrap();
         assert_eq!(floors[&2], 32);
         // Seven ints end at 36, which is 40 with padding.
         let mut next = fourth.clone();
-        let why = keep_order(&third, &mut next, &mut floors, 16, &HashSet::new()).unwrap_err();
+        let why = keep_order(&third, &mut next, &mut floors, 16, Some(&HashSet::new()), &[]).unwrap_err();
         assert!(why.contains("has 32 bytes where the class now needs 40"), "{why}");
     }
 
@@ -926,8 +1071,8 @@ mod tests {
         keep(&old, &mut new, 64).unwrap();
         // One it drops is a field it loses.
         let mut new = with(&[("n", I32), ("", 2), ("", 3)]);
-        let why = keep(&old, &mut new, 64).unwrap_err();
-        assert!(why.contains("field <interface> of A was removed"), "{why}");
+        keep(&old, &mut new, 64).unwrap();
+        assert_eq!(names(&new, 4).len(), 4);
     }
 
     /// The running order is what the next reload finds, whichever order the
@@ -944,14 +1089,96 @@ mod tests {
     }
 
     #[test]
-    fn a_class_whose_objects_something_lays_out_in_a_row_is_refused() {
+    fn a_class_whose_objects_something_lays_out_in_a_row_cannot_change_size() {
+        let rows = HashSet::from([2]);
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
-        let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", I32)])]);
-        let why = keep_order(&old, &mut new, &mut HashMap::new(), 64, &HashSet::from([2])).unwrap_err();
+        // A reference after an int needs 8 bytes more than the 16 it has.
+        let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", PTR)])]);
+        let why = keep_order(&old, &mut new, &mut HashMap::new(), 64, Some(&rows), &[]).unwrap_err();
         assert!(why.contains("A gained m, and a CArray of it"), "{why}");
-        // Reordering it moves the fields as much as adding one does.
+        // An int fits the padding at the end of the class, and the size stays.
+        let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", I32)])]);
+        keep_order(&old, &mut new, &mut HashMap::new(), 64, Some(&rows), &[]).unwrap();
+        // Reordering moves no object.
         let old = program(vec![class_type("A", None, &[("a", I32), ("b", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("b", I32), ("a", I32)])]);
-        assert!(keep_order(&old, &mut new, &mut HashMap::new(), 64, &HashSet::from([2])).is_err());
+        keep_order(&old, &mut new, &mut HashMap::new(), 64, Some(&rows), &[]).unwrap();
+        // If the runtime cannot say, a change of size is refused.
+        let old = program(vec![class_type("A", None, &[("n", I32)])]);
+        let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", PTR)])]);
+        let why = keep_order(&old, &mut new, &mut HashMap::new(), 64, None, &[]).unwrap_err();
+        assert!(why.contains("cannot say whether a CArray holds it"), "{why}");
+    }
+    /// Whether a reload that adds `m` is accepted when the constructor of the
+    /// new program is `ops`.
+    fn accepts(ops: Vec<Opcode>) -> bool {
+        let old = with_constructor(&[("n", I32)], vec![]);
+        let mut new = with_constructor(&[("n", I32), ("m", PTR)], ops);
+        keep(&old, &mut new, 64).is_ok()
+    }
+
+    #[test]
+    fn where_the_jumps_land_decides_whether_a_value_is_a_constant() {
+        let null = || Opcode::Null { dst: Reg(1) };
+        let call = || Opcode::Call1 { dst: Reg(1), fun: RefFun(9), arg0: Reg(2) };
+        let flag = Reg(2);
+        // 0: jump to the write (a loop back to it); the write runs again before the store
+        assert!(accepts(vec![
+            null(),
+            Opcode::JNotNull { reg: flag, offset: -2 },
+            set_this(1, 1),
+        ]));
+        // 0 JNull -> 2, the op after the write: the call may be what reaches the store
+        assert!(!accepts(vec![
+            call(),
+            Opcode::JNull { reg: flag, offset: 1 },
+            null(),
+            set_this(1, 1),
+        ]));
+        // a copy over a merge: r3 = null on one path and a call on the other, then r1 = r3
+        assert!(!accepts(vec![
+            Opcode::JNull { reg: flag, offset: 2 },
+            Opcode::Call1 { dst: Reg(3), fun: RefFun(9), arg0: flag },
+            Opcode::JAlways { offset: 1 },
+            Opcode::Null { dst: Reg(3) },
+            Opcode::Mov { dst: Reg(1), src: Reg(3) },
+            set_this(1, 1),
+        ]));
+        // a copy with no merge in between
+        assert!(accepts(vec![
+            Opcode::Null { dst: Reg(3) },
+            Opcode::Mov { dst: Reg(1), src: Reg(3) },
+            set_this(1, 1),
+        ]));
+        // a trap whose handler is the store: the write may not have run
+        assert!(!accepts(vec![
+            Opcode::Trap { exc: Reg(4), offset: 2 },
+            null(),
+            Opcode::EndTrap { exc: Reg(4) },
+            set_this(1, 1),
+        ]));
+        // a switch that lands between the write and the store
+        assert!(!accepts(vec![
+            null(),
+            Opcode::Switch { reg: flag, offsets: vec![1], end: 1 },
+            Opcode::Nop,
+            set_this(1, 1),
+        ]));
+    }
+
+    /// A call can write a register whose address was taken.
+    #[test]
+    fn a_register_whose_address_is_taken_is_not_a_constant() {
+        assert!(!accepts(vec![
+            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::Ref { dst: Reg(3), src: Reg(1) },
+            Opcode::Call1 { dst: Reg(4), fun: RefFun(9), arg0: Reg(3) },
+            set_this(1, 1),
+        ]));
+        assert!(accepts(vec![
+            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::Call1 { dst: Reg(4), fun: RefFun(9), arg0: Reg(2) },
+            set_this(1, 1),
+        ]));
     }
 }

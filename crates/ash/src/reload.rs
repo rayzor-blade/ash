@@ -157,11 +157,7 @@ pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
 /// it, whose field and method counts and vtables are made from its own.
 fn sync_classes(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
     // Without this a class would have lists its runtime object does not match.
-    let Some(rebuild) = crate::native_lib::NativeFunctionResolver::new()
-        .resolve_function("std", "hlp_rebuild_obj_proto")
-        .ok()
-    else {
-        eprintln!("[hot-reload] warning: the runtime cannot rebuild a class; its fields and methods are left as they were");
+    let Some(rebuild) = rebuild_symbol() else {
         return;
     };
     let mut changed: Vec<*mut hl::hl_type> = Vec::new();
@@ -178,8 +174,6 @@ fn sync_classes(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
     if changed.is_empty() {
         return;
     }
-    type FnRebuild = unsafe extern "C" fn(*mut hl::hl_type) -> *mut hl::hl_runtime_obj;
-    let rebuild: FnRebuild = unsafe { std::mem::transmute(rebuild) };
 
     // The changed classes and the classes below them, nearest the root first.
     let mut affected: Vec<(usize, *mut hl::hl_type)> = Vec::new();
@@ -310,21 +304,62 @@ struct Staged {
 const OBJECT_ROOM: usize = 64;
 
 /// The types of the classes whose objects the runtime lays out one after
-/// another at the size of the class, by index: they cannot gain a field.
-fn pinned_layouts(handles: &SharedRuntimeHandles) -> HashSet<usize> {
-    let Ok(pinned) =
-        crate::native_lib::NativeFunctionResolver::new().resolve_function("std", "hlp_layout_pinned")
-    else {
-        return HashSet::new();
-    };
+/// another at the size of the class, by index: they cannot change size. `None`
+/// when the runtime cannot say.
+fn pinned_layouts(handles: &SharedRuntimeHandles) -> Option<HashSet<usize>> {
+    let pinned = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_layout_pinned")
+        .ok()?;
     let pinned: extern "C" fn(*mut hl::hl_type) -> bool = unsafe { std::mem::transmute(pinned) };
-    handles
-        .c_types
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| !c.is_null() && pinned(**c))
-        .map(|(i, _)| i)
-        .collect()
+    Some(
+        handles
+            .c_types
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_null() && pinned(**c))
+            .map(|(i, _)| i)
+            .collect(),
+    )
+}
+
+/// Why `new` cannot be applied: a class that gained fields has had a
+/// `hl.CArray` of its objects made since the program was checked.
+fn pinned_since(
+    running: &DecodedBytecode,
+    new: &DecodedBytecode,
+    handles: &SharedRuntimeHandles,
+) -> Option<String> {
+    let size = |bc: &DecodedBytecode, t: usize| crate::layout::object_layout(&bc.types, t).map(|l| l.size);
+    let resized = |t: usize| {
+        let (o, n) = (running.types.get(t)?.obj.as_ref()?, new.types.get(t)?.obj.as_ref()?);
+        (o.fields.len() != n.fields.len() && size(running, t) != size(new, t))
+            .then(|| n.name.clone())
+    };
+    let moved: Vec<(usize, String)> = (0..running.types.len())
+        .filter_map(|t| resized(t).map(|name| (t, name)))
+        .collect();
+    if moved.is_empty() {
+        return None;
+    }
+    let Some(pinned) = pinned_layouts(handles) else {
+        return Some(format!("the runtime cannot say whether a CArray holds {}", moved[0].1));
+    };
+    moved
+        .into_iter()
+        .find(|(t, _)| pinned.contains(t))
+        .map(|(_, name)| {
+            format!("a CArray of {name} was made after the reload was checked, and the reload changes its size")
+        })
+}
+
+type FnRebuild = unsafe extern "C" fn(*mut hl::hl_type) -> *mut hl::hl_runtime_obj;
+
+/// The runtime's rebuild of a class's runtime object from its type data.
+fn rebuild_symbol() -> Option<FnRebuild> {
+    let rebuild = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_rebuild_obj_proto")
+        .ok()?;
+    Some(unsafe { std::mem::transmute::<_, FnRebuild>(rebuild) })
 }
 
 /// Ask the runtime for the spare bytes, and say how many it will give: none
@@ -729,7 +764,15 @@ fn renumber(
 ) -> Result<(), String> {
     let refuse = |why: String| format!("the program cannot reload in place: {why}");
     let retyped = types::remap_types(running, bc).map_err(refuse)?;
-    fields::keep_order(running, bc, floors, object_room, &pinned_layouts(room)).map_err(refuse)?;
+    fields::keep_order(
+        running,
+        bc,
+        floors,
+        object_room,
+        pinned_layouts(room).as_ref(),
+        &retyped.dropped(),
+    )
+    .map_err(refuse)?;
     let slots = vtable::plan(running, bc, &retyped.dropped()).map_err(refuse)?;
     vtable::apply(bc, &slots);
     remap_globals(running, bc, room.global_slots).map_err(refuse)?;
@@ -964,6 +1007,14 @@ pub fn do_reload(
             new_bytecode.globals.len(),
             ctx.shared_runtime.global_slots
         );
+        return None;
+    }
+    if rebuild_symbol().is_none() {
+        eprintln!("[hot-reload] reload failed: the runtime cannot rebuild a class");
+        return None;
+    }
+    if let Some(why) = pinned_since(&ctx.old_bytecode, &new_bytecode, &ctx.shared_runtime) {
+        eprintln!("[hot-reload] reload failed: {why}");
         return None;
     }
     // The runtime tables the new program names: its globals' slots, and its

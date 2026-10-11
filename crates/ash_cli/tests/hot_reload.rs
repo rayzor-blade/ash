@@ -397,7 +397,7 @@ fn the_fixtures_are_where_the_test_expects() {
         (CLASSES, &["v1", "v2", "v3"][..]),
         (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
         (LADDER, &["v1", "v2", "v3", "v4"][..]),
-        (FIELDS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
+        (FIELDS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -848,5 +848,38 @@ fn a_field_a_branch_sets_to_null_or_a_computation_is_refused() {
     assert!(
         said.contains("Widget.cache is set by a constructor with something that is not a constant"),
         "{said}"
+    );
+}
+
+/// A field the next version drops stays in the class, unused: the widget
+/// keeps its value, the bodies of the new version do not read it, and a
+/// version that declares it again finds it as it was.
+#[test]
+fn a_field_dropped_stays_and_comes_back() {
+    check_through(
+        FIELDS,
+        "v1",
+        &["v2", "v9", "v2"],
+        &[
+            "reloaded",
+            "render id 1;label w;hits 1;note null,scale 0;after viaReflect,2.5;reflect viaReflect hits/id/label/note/scale",
+            "hot 800",
+            "many 95700 bad 0",
+            "fresh 2,f,0,null,0",
+            "next",
+            "reloaded",
+            "render id 1;label w;hits 2;note viaReflect;after viaReflect;reflect viaReflect hits/id/label/note/scale",
+            "hot 600",
+            "many 47850 bad 0",
+            "fresh 2,f,0,null",
+            "next",
+            "reloaded",
+            "render id 1;label w;hits 3;note viaReflect,scale 2.5;after viaReflect,2.5;reflect viaReflect hits/id/label/note/scale",
+            "hot 1200",
+            "many 95700 bad 0",
+            "fresh 2,f,0,null,0",
+            "done",
+        ],
+        "reloaded",
     );
 }

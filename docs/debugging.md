@@ -251,13 +251,16 @@ name the slot.
 Under `--hot-reload` every object is allocated with 64 spare bytes at its end
 (`ASH_RELOAD_ROOM=<bytes>` sets how many; with 0 a class can only grow into the
 padding at its end), and a field the new program adds to a class goes after the
-fields the class has, in that room. An object made before the reload holds zero in it: the constructor's
-initialiser has not run for that object. A field declared between the others in
-the new program is still put last in the running class, and the bodies that name
-the fields are renumbered to match. Only a class that nothing extends can gain a
-field, since the fields of a subclass follow its parent's, and a class cannot
-grow past the room its first objects were given, however many reloads add to
-it.
+fields the class has, in that room. An object made before the reload holds zero
+in it: the constructor's initialiser has not run for that object. A field
+declared between the others in the new program is still put last in the running
+class, and the bodies that name the fields are renumbered to match. A field the
+new program no longer has stays in the class, unused: objects keep their value,
+the bodies that began before the reload can still read it, and a reload that
+declares it again finds it as it was. Only a class that nothing extends can
+change its fields, since the fields of a subclass follow its parent's, and a
+class cannot grow past the room its first objects were given, however many
+reloads add to it.
 
 A constructor that sets the new field to a constant or null is accepted. One that
 sets it to anything else is refused, naming the field, because the object made
@@ -276,7 +279,7 @@ is refused, on stderr, and the program goes on as it was:
 | `Class.method moves from slot a to b, the slot of the method it now overrides` | frames that began before the reload call the old slot |
 | `Class binds different statics; a static function was added or removed` | statics are fields of the `$Class` object, which is laid out like any |
 | `the statics of Name changed` | a class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, adds a field to that object, and nothing sets it up |
-| `field f of Name was removed`, `field f of Name changed its type` | live objects have the field where it was |
+| `field f of Name changed its type` | live objects have the field where it was, with the old size |
 | `Name gained f, and Sub extends it, so its fields would move` | the fields of a subclass follow its parent's |
 | `Name gained f, and a CArray of it lays its objects out one after another` | the size of the class is the stride of the array |
 | `Name gained f, and an object made before the reload has N bytes where the class now needs M` | the spare room is used up; restart the program |

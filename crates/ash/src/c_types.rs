@@ -62,9 +62,11 @@ pub(crate) unsafe fn set_class_protos(c_type: *mut hl_type, protos: &[HLObjProto
         // it when it shrinks.
         if protos.len() as i32 >= (*obj).nproto {
             (*obj).proto = list;
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
             (*obj).nproto = protos.len() as i32;
         } else {
             (*obj).nproto = protos.len() as i32;
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
             (*obj).proto = list;
         }
         true

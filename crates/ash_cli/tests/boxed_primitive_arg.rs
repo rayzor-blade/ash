@@ -13,6 +13,8 @@ use std::time::Duration;
 const MODES: &[&[&str]] = &[
     &["--mode", "interp"],
     &["--mode", "jit"],
+    &["--mode", "jit", "--jit-tier", "cranelift"],
+    &["--mode", "jit", "--jit-tier", "llvm"],
     &["--mode", "hybrid"],
 ];
 

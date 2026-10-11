@@ -14,6 +14,8 @@ use std::time::Duration;
 const MODES: &[&[&str]] = &[
     &["--mode", "interp"],
     &["--mode", "jit"],
+    &["--mode", "jit", "--jit-tier", "cranelift"],
+    &["--mode", "jit", "--jit-tier", "llvm"],
     &["--mode", "hybrid"],
     &["--mode", "hybrid", "--jit-threshold", "1"],
 ];
@@ -83,6 +85,16 @@ fn exception_through_generic_interface_reaches_callers_try() {
          IFailInt: caught boom\n\
          IFail<Int>: caught boom\n\
          returned\n",
+    );
+}
+
+#[test]
+fn erased_generic_implementation_uses_its_own_return_abi() {
+    run_section(
+        "generic",
+        "generic Single = 200.500000000\n\
+         generic Int = 200\n\
+         generic: caught boom\n",
     );
 }
 

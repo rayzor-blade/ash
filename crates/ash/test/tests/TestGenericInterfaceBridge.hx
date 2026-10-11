@@ -34,6 +34,12 @@ class GetFloat implements IGet<Float> {
 		return 200.5;
 }
 
+class GenericGet<T> implements IGet<T> {
+	var value:T;
+	public function new(value:T) this.value = value;
+	public function get():T return value;
+}
+
 interface IFail<T> {
 	function fail():T;
 }
@@ -48,6 +54,11 @@ class Fails implements IFail<Int> implements IFailInt {
 	public function fail():Int {
 		throw "boom";
 	}
+}
+
+class GenericFails<T> implements IFail<T> {
+	public function new() {}
+	public function fail():T throw "boom";
 }
 
 class Methods {
@@ -99,6 +110,18 @@ class TestGenericInterfaceBridge {
 					Sys.println("IFail<Int>: caught " + e);
 				}
 				Sys.println("returned");
+
+			case "generic":
+				var single:IGet<Single> = new GenericGet<Single>(200.5);
+				var integer:IGet<Int> = new GenericGet<Int>(200);
+				Sys.println("generic Single = " + single.get());
+				Sys.println("generic Int = " + integer.get());
+				var failing:IFail<Int> = new GenericFails<Int>();
+				try {
+					failing.fail();
+				} catch (e:Dynamic) {
+					Sys.println("generic: caught " + e);
+				}
 
 			case "dynamic":
 				var m = new Methods();

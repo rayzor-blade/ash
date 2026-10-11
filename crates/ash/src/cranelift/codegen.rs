@@ -4438,11 +4438,11 @@ impl AirCodegen<'_, '_> {
         Ok(ret_ty.map(|_| self.b.block_params(merge_bb)[0]))
     }
 
-    /// HVIRTUAL dispatch through the runtime helper that owns the concrete
-    /// method ABI. The interface signature can differ from the implementation
-    /// signature after generic specialization, so calling a resolved pointer
-    /// with AIR's declared types would be an ABI pun. Boxed dispatch is the
-    /// same fallback the LLVM tier uses for this case.
+    /// Call a virtual method through its ABI-checked slot when possible.
+    /// `hl_to_virtual` leaves the slot null if the implementation's method
+    /// type cannot be called through the interface's declared signature.
+    /// Generic specializations and plain objects in virtual-typed registers
+    /// retain the boxed, hash-based dispatch below.
     fn emit_virtual_call(
         &mut self,
         dst: ValueId,
@@ -4451,9 +4451,130 @@ impl AirCodegen<'_, '_> {
         args: &[ValueId],
     ) -> Result<()> {
         let receiver = self.dyn_obj(args[0])?;
+        let tail = &args[1..];
+
+        // A method slot is a raw code pointer only for HMETHOD on an HOBJ
+        // view. HFUN fields hold closures, and self-backed or HDYNOBJ views
+        // store addresses into data. Keep those on the dynamic path. Requiring
+        // the result kind to match the AIR destination also avoids treating a
+        // generic Dynamic result as an unboxed primitive (or vice versa).
+        let direct_abi = {
+            let bc = self.ctx.bytecode();
+            bc.types
+                .get(obj_type_idx)
+                .and_then(|t| t.virt.as_ref())
+                .and_then(|v| v.fields.get(field))
+                .and_then(|f| bc.types.get(f.type_.0))
+                .filter(|t| t.kind == hl::hl_type_kind_HMETHOD)
+                .and_then(|t| t.fun.as_ref())
+                .filter(|fun| {
+                    fun.args.len() == tail.len() && fun.ret.0 == self.f.value_ty(dst).0 as usize
+                })
+                .map(|fun| {
+                    let params: Vec<AbiClass> = fun
+                        .args
+                        .iter()
+                        .map(|a| argument_abi_class(bc.types[a.0].kind))
+                        .collect();
+                    let ret = abi_class(bc.types[fun.ret.0].kind);
+                    (params, ret)
+                })
+                .filter(|(params, _)| params.iter().all(|c| *c != AbiClass::Void))
+        };
+
+        let direct_blocks = if let Some((params, ret_class)) = direct_abi {
+            let nonnull_bb = self.b.create_block();
+            let virtual_bb = self.b.create_block();
+            let object_bb = self.b.create_block();
+            let slot_bb = self.b.create_block();
+            let direct_bb = self.b.create_block();
+            let fallback_bb = self.b.create_block();
+            let merge_bb = self.b.create_block();
+            let result_ty = ret_class.clif_type();
+            if let Some(ty) = result_ty {
+                self.b.append_block_param(merge_bb, ty);
+            }
+
+            self.b
+                .ins()
+                .brif(receiver, nonnull_bb, &[], fallback_bb, &[]);
+            self.b.switch_to_block(nonnull_bb);
+            let header = self
+                .b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), receiver, 0);
+            let kind = self
+                .b
+                .ins()
+                .load(types::I32, MemFlagsData::trusted(), header, 0);
+            let is_virtual =
+                self.b
+                    .ins()
+                    .icmp_imm(IntCC::Equal, kind, hl::hl_type_kind_HVIRTUAL as i64);
+            self.b
+                .ins()
+                .brif(is_virtual, virtual_bb, &[], fallback_bb, &[]);
+
+            self.b.switch_to_block(virtual_bb);
+            let wrapped = self
+                .b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), receiver, 8);
+            self.b.ins().brif(wrapped, object_bb, &[], fallback_bb, &[]);
+
+            self.b.switch_to_block(object_bb);
+            let wrapped_type = self
+                .b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), wrapped, 0);
+            let wrapped_kind =
+                self.b
+                    .ins()
+                    .load(types::I32, MemFlagsData::trusted(), wrapped_type, 0);
+            let is_object =
+                self.b
+                    .ins()
+                    .icmp_imm(IntCC::Equal, wrapped_kind, hl::hl_type_kind_HOBJ as i64);
+            self.b.ins().brif(is_object, slot_bb, &[], fallback_bb, &[]);
+
+            self.b.switch_to_block(slot_bb);
+            let offset = std::mem::size_of::<hl::vvirtual>() + field * std::mem::size_of::<usize>();
+            let method =
+                self.b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), receiver, offset as i32);
+            self.b.ins().brif(method, direct_bb, &[], fallback_bb, &[]);
+
+            self.b.switch_to_block(direct_bb);
+            let mut values = Vec::with_capacity(args.len());
+            let mut classes = Vec::with_capacity(args.len());
+            values.push(wrapped);
+            classes.push(AbiClass::Ptr);
+            for (arg, class) in tail.iter().zip(&params) {
+                let want = class.clif_type().expect("void arguments were excluded");
+                let raw = self.get(*arg)?;
+                values.push(self.coerce(raw, want, self.widen_of_value(*arg)?)?);
+                classes.push(*class);
+            }
+            let result = self.stub_guarded_indirect(method, &values, &classes, ret_class)?;
+            if let Some(value) = result {
+                let value = if ret_class == AbiClass::Bool {
+                    self.b.ins().band_imm(value, 1)
+                } else {
+                    value
+                };
+                self.b.ins().jump(merge_bb, &[BlockArg::Value(value)]);
+            } else {
+                self.b.ins().jump(merge_bb, &[]);
+            }
+            self.b.switch_to_block(fallback_bb);
+            Some((merge_bb, result_ty))
+        } else {
+            None
+        };
+
         let hash = self.ctx.virtual_field_hash(obj_type_idx, field)?;
         let hash = self.b.ins().iconst(types::I32, i64::from(hash));
-        let tail = &args[1..];
 
         let array = if tail.is_empty() {
             self.b.ins().iconst(types::I64, 0)
@@ -4487,6 +4608,10 @@ impl AirCodegen<'_, '_> {
             .call_indirect(sig, helper, &[receiver, hash, array]);
         let boxed = self.b.inst_results(call)[0];
         if self.is_void(dst) {
+            if let Some((merge_bb, _)) = direct_blocks {
+                self.b.ins().jump(merge_bb, &[]);
+                self.b.switch_to_block(merge_bb);
+            }
             self.define_void_word_if_used(dst);
             return Ok(());
         }
@@ -4495,7 +4620,13 @@ impl AirCodegen<'_, '_> {
         let want = self.value_clif_ty(dst)?;
         let widen = self.widen_of_value(dst)?;
         let value = self.coerce(value, want, widen)?;
-        self.def(dst, value)
+        if let Some((merge_bb, _)) = direct_blocks {
+            self.b.ins().jump(merge_bb, &[BlockArg::Value(value)]);
+            self.b.switch_to_block(merge_bb);
+            self.def(dst, self.b.block_params(merge_bb)[0])
+        } else {
+            self.def(dst, value)
+        }
     }
 
     /// Virtual dispatch through the receiver's vtable slot.

@@ -2686,6 +2686,7 @@ impl HLInterpreter {
             compiled_stub_ctx: Option<Arc<TieredSharedCtx>>,
         }
         static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
+        static INTERPRETER_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
         unsafe extern "C" fn fiber_closure_runner(
             c: *mut c_void,
             args: *mut *mut c_void,
@@ -3149,6 +3150,21 @@ impl HLInterpreter {
             }
         }
 
+        /// Apply a staged reload from the native `hl.Api.checkReload` that
+        /// compiled code called. Only on the thread of the interpreter: a
+        /// reload staged by another stays staged until its next poll.
+        unsafe extern "C" fn apply_reload_from_compiled() {
+            unsafe {
+                if INTERPRETER_THREAD.get() != Some(&std::thread::current().id()) {
+                    return;
+                }
+                let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                    return;
+                };
+                (&mut *ctx.interp).poll_reload(&*ctx.resolver);
+            }
+        }
+
         unsafe extern "C" fn jit_thread_root_resolver(findex: i32) -> *mut () {
             unsafe {
                 let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
@@ -3283,6 +3299,12 @@ impl HLInterpreter {
         }
         ash_core::stub_bridge::set_stub_resolver(jit_stub_resolver);
         ash_core::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
+        let _ = INTERPRETER_THREAD.set(std::thread::current().id());
+        if let Ok(set_apply) = native_resolver.resolve_function("std", "hlp_set_reload_apply") {
+            type FnSetApply = unsafe extern "C" fn(unsafe extern "C" fn());
+            let set_apply: FnSetApply = unsafe { std::mem::transmute(set_apply) };
+            unsafe { set_apply(apply_reload_from_compiled) };
+        }
 
         let entry_findex = bytecode.entrypoint as usize;
         let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);

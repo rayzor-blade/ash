@@ -1327,6 +1327,18 @@ pub extern "C" fn hlp_set_reload_callback(cb: ReloadCallback) {
     *RELOAD_CALLBACK.lock().unwrap() = Some(cb);
 }
 
+/// Applies the reload that has been staged, if there is one, on the thread of
+/// the interpreter and not on another. The runtime sets it; without an
+/// interpreter to apply to it stays unset.
+type ReloadApply = unsafe extern "C" fn();
+static RELOAD_APPLY: Mutex<Option<ReloadApply>> = Mutex::new(None);
+
+/// Register the function that applies a staged reload.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_set_reload_apply(apply: ReloadApply) {
+    *RELOAD_APPLY.lock().unwrap() = Some(apply);
+}
+
 /// Register the bytecode file path for reload monitoring.
 /// Called once during runtime initialization.
 #[unsafe(no_mangle)]
@@ -1351,13 +1363,29 @@ pub extern "C" fn hlp_setup_reload_check(path_utf16: *const u16) {
     });
 }
 
-/// Check if the bytecode file has been modified since the last check.
+/// `hl.Api.checkReload()` as compiled code calls it: the reload it stages is
+/// applied before it returns, so that what the program calls next is the new
+/// code. The interpreter calls [`hlp_sys_check_reload_staged`] instead and
+/// applies the reload itself when the native has returned, since it cannot
+/// while one of its own instructions is in progress.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
+    let reloaded = hlp_sys_check_reload_staged(debug_alt_file);
+    let apply = RELOAD_APPLY.lock().ok().and_then(|hook| *hook);
+    if let Some(apply) = apply {
+        unsafe { apply() };
+    }
+    reloaded
+}
+
+/// Check if the bytecode file has been modified since the last check, and
+/// stage the new program if it has.
 ///
 /// Called per-frame by user code via `hl.Api.checkReload()`.
 /// If `debug_alt_file` is non-null, uses that path instead of the registered one.
 /// Returns `true` if the file changed and the runtime accepted it.
 #[unsafe(no_mangle)]
-pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
+pub extern "C" fn hlp_sys_check_reload_staged(debug_alt_file: *const vbyte) -> bool {
     let mut guard = match RELOAD_STATE.lock() {
         Ok(g) => g,
         Err(_) => return false,

@@ -158,8 +158,14 @@ impl HLInterpreter {
             .copied()
             .unwrap_or(std::ptr::null_mut());
         if func_ptr.is_null() {
-            func_ptr =
-                native_resolver.resolve_function(&native.lib, &format!("hlp_{}", native.name))?;
+            // The interpreter applies a staged reload when the native has
+            // returned; compiled code cannot, so it calls the one that does.
+            let symbol = if native.lib == "std" && native.name == "sys_check_reload" {
+                "hlp_sys_check_reload_staged".to_string()
+            } else {
+                format!("hlp_{}", native.name)
+            };
+            func_ptr = native_resolver.resolve_function(&native.lib, &symbol)?;
             if let Some(slot) = self.native_fn_cache.get_mut(native_idx) {
                 *slot = func_ptr;
             }

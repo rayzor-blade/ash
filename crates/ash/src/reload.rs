@@ -3,6 +3,7 @@
 //! Compares old and new `DecodedBytecode` to determine which functions changed,
 //! which were added/removed, and whether type layouts are compatible.
 
+mod fields;
 mod functions;
 mod init;
 mod types;
@@ -24,8 +25,9 @@ pub struct ReloadDiff {
     pub added: Vec<usize>,
     /// Functions present in old but not new bytecode.
     pub removed: Vec<usize>,
-    /// True if any HOBJ/HSTRUCT type changed its field layout.
-    /// When set, the reload must be aborted (existing heap objects would be corrupted).
+    /// True if any HOBJ/HSTRUCT type lost a field or changed one's type, or a
+    /// struct gained one. When set, the reload must be aborted (existing heap
+    /// objects would be corrupted).
     pub type_layout_changed: bool,
     /// True if the new program has fewer globals than the running one,
     /// which `remap_globals` leaves no way to be: every running slot stays.
@@ -113,10 +115,15 @@ fn check_type_layout_compatibility(
             continue;
         }
 
-        // Compare field count and field types
+        // The fields the running class has must come first and be the same.
+        // A class that gained fields has them after, which `renumber` has
+        // already accepted or refused.
         if let (Some(old_obj), Some(new_obj)) = (&old_t.obj, &new_t.obj) {
-            if old_obj.fields.len() != new_obj.fields.len() {
-                return true; // Field count changed
+            if old_obj.fields.len() > new_obj.fields.len()
+                || (old_obj.fields.len() < new_obj.fields.len()
+                    && old_t.kind != hl::hl_type_kind_HOBJ)
+            {
+                return true; // A field was removed, or a struct gained one
             }
             for (old_f, new_f) in old_obj.fields.iter().zip(new_obj.fields.iter()) {
                 if old_f.name != new_f.name || old_f.type_.0 != new_f.type_.0 {
@@ -144,17 +151,19 @@ pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
 }
 
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
-/// Give the C types of the classes of `new` the methods it declares. A class
-/// whose methods changed gets the new list, and its runtime object is built
-/// again, with those of the classes that extend it, whose method counts and
-/// vtables are made from its own.
-fn sync_class_methods(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
+/// Give the C types of the classes of `new` the fields and methods it
+/// declares. A class whose fields or methods changed gets the new lists, and
+/// its runtime object is built again, with those of the classes that extend
+/// it, whose field and method counts and vtables are made from its own.
+fn sync_classes(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
     let mut changed: Vec<*mut hl::hl_type> = Vec::new();
     for (i, t) in new.types.iter().enumerate() {
         let (Some(c), Some(obj)) = (shared.c_types.get(i).copied(), t.obj.as_ref()) else {
             continue;
         };
-        if unsafe { crate::c_types::set_class_protos(c, &obj.proto) } {
+        let fields = unsafe { crate::c_types::set_class_fields(c, &obj.fields, &shared.c_types) };
+        let methods = unsafe { crate::c_types::set_class_protos(c, &obj.proto) };
+        if fields || methods {
             changed.push(c);
         }
     }
@@ -275,10 +284,49 @@ struct ReloadContext {
     functions_ptrs: Vec<*mut std::ffi::c_void>,
     shared_runtime: SharedRuntimeHandles,
     /// The program `stage_reload` accepted, for `do_reload` to apply.
-    staged: Option<DecodedBytecode>,
+    staged: Option<Staged>,
     /// The first type whose class setup has not run to its end. The next
     /// reload sets up the classes from there on again.
     unset_from: Option<usize>,
+    /// For each class that has gained fields, the smallest size an object of
+    /// it was allocated at; a class cannot grow past it.
+    floors: HashMap<usize, i32>,
+    /// The spare bytes every object is allocated with, which is what a class
+    /// can grow into.
+    object_room: usize,
+}
+
+/// A program a reload is to apply, with what it takes the context to.
+struct Staged {
+    bytecode: DecodedBytecode,
+    floors: HashMap<usize, i32>,
+}
+
+/// Spare bytes in every object, for the fields a reload adds to a class.
+/// `ASH_RELOAD_ROOM=<bytes>` sets it, 0 allows no new field; safe to change.
+const OBJECT_ROOM: usize = 64;
+
+/// Ask the runtime for the spare bytes, and say how many it will give: none
+/// when a class was laid out already, since objects of it would not have them.
+fn request_object_room() -> usize {
+    let room = std::env::var("ASH_RELOAD_ROOM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(OBJECT_ROOM);
+    let Ok(set) = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_set_object_room")
+    else {
+        return 0;
+    };
+    let set: unsafe extern "C" fn(usize) -> bool = unsafe { std::mem::transmute(set) };
+    if unsafe { set(room) } {
+        room
+    } else {
+        eprintln!(
+            "[hot-reload] warning: classes were laid out before reload was enabled; a reload cannot add fields to them"
+        );
+        0
+    }
 }
 
 // ReloadContext holds raw pointers from SharedRuntimeHandles.
@@ -294,6 +342,7 @@ pub fn init_reload_context(
     functions_ptrs: Vec<*mut std::ffi::c_void>,
     shared_runtime: SharedRuntimeHandles,
 ) {
+    let object_room = request_object_room();
     *RELOAD_CTX.lock().unwrap() = Some(ReloadContext {
         bytecode_path,
         old_bytecode,
@@ -301,6 +350,8 @@ pub fn init_reload_context(
         shared_runtime,
         staged: None,
         unset_from: None,
+        floors: HashMap::new(),
+        object_room,
     });
 }
 
@@ -321,7 +372,8 @@ fn decode_as(path: &std::path::Path, like: &DecodedBytecode) -> anyhow::Result<D
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
     if diff.type_layout_changed {
         return Some(
-            "a type's field layout changed; live objects are laid out by the old one".into(),
+            "a type lost a field or changed one's type; live objects are laid out by the old one"
+                .into(),
         );
     }
     if diff.globals_count_changed {
@@ -626,11 +678,13 @@ fn decode_next(
     running: &DecodedBytecode,
     room: &SharedRuntimeHandles,
     unset_from: Option<usize>,
+    floors: &mut HashMap<usize, i32>,
+    object_room: usize,
 ) -> Result<DecodedBytecode, String> {
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
-    renumber(running, &mut bc, room, unset_from)?;
+    renumber(running, &mut bc, room, unset_from, floors, object_room)?;
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         eprintln!(
             "[hot-reload] read in {decoded:?}, put on the running numbering in {:?}",
@@ -649,9 +703,12 @@ fn renumber(
     bc: &mut DecodedBytecode,
     room: &SharedRuntimeHandles,
     unset_from: Option<usize>,
+    floors: &mut HashMap<usize, i32>,
+    object_room: usize,
 ) -> Result<(), String> {
     let refuse = |why: String| format!("the program cannot reload in place: {why}");
     let retyped = types::remap_types(running, bc).map_err(refuse)?;
+    fields::keep_order(running, bc, floors, object_room).map_err(refuse)?;
     let slots = vtable::plan(running, bc, &retyped.dropped()).map_err(refuse)?;
     vtable::apply(bc, &slots);
     remap_globals(running, bc, room.global_slots).map_err(refuse)?;
@@ -682,18 +739,24 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
+    let mut floors = ctx.floors.clone();
     let new_bytecode = decode_next(
         &ctx.bytecode_path,
         &ctx.old_bytecode,
         &ctx.shared_runtime,
         ctx.unset_from,
+        &mut floors,
+        ctx.object_room,
     )?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
     if let Some(why) = refusal(&ctx.old_bytecode, &new_bytecode, &diff) {
         return Err(format!("the program cannot reload in place: {why}"));
     }
     if diff.has_changes() {
-        ctx.staged = Some(new_bytecode);
+        ctx.staged = Some(Staged {
+            bytecode: new_bytecode,
+            floors,
+        });
         RELOAD_PENDING.store(true, std::sync::atomic::Ordering::Release);
     }
     Ok(diff)
@@ -734,17 +797,23 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 }
 
 /// The program a reload applies: the staged one, else the file read
-/// again.
-fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<DecodedBytecode> {
+/// again, with the floors it takes the context to.
+fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<Staged> {
     match ctx.staged.take() {
-        Some(bc) => Ok(bc),
-        None => decode_next(
-            &ctx.bytecode_path,
-            &ctx.old_bytecode,
-            &ctx.shared_runtime,
-            ctx.unset_from,
-        )
-        .map_err(anyhow::Error::msg),
+        Some(staged) => Ok(staged),
+        None => {
+            let mut floors = ctx.floors.clone();
+            let bytecode = decode_next(
+                &ctx.bytecode_path,
+                &ctx.old_bytecode,
+                &ctx.shared_runtime,
+                ctx.unset_from,
+                &mut floors,
+                ctx.object_room,
+            )
+            .map_err(anyhow::Error::msg)?;
+            Ok(Staged { bytecode, floors })
+        }
     }
 }
 
@@ -842,8 +911,11 @@ pub fn do_reload(
 ) -> Option<DecodedBytecode> {
     let mut guard = RELOAD_CTX.lock().ok()?;
     let ctx = guard.as_mut()?;
-    let new_bytecode = match next_program(ctx) {
-        Ok(bc) => bc,
+    let Staged {
+        bytecode: new_bytecode,
+        floors,
+    } = match next_program(ctx) {
+        Ok(staged) => staged,
         Err(e) => {
             eprintln!("[hot-reload] reload failed: {e}");
             return None;
@@ -903,7 +975,7 @@ pub fn do_reload(
     // Every class drops its vtable first, so that the classes the second step
     // builds anew keep theirs.
     flush_affected_protos(&ctx.shared_runtime, &stale);
-    sync_class_methods(&ctx.shared_runtime, &new_bytecode);
+    sync_classes(&ctx.shared_runtime, &new_bytecode);
     rebuild_vtables(&ctx.shared_runtime);
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         let names = crate::types::function_keys(&new_bytecode.types, &new_bytecode.functions);
@@ -937,6 +1009,7 @@ pub fn do_reload(
         ctx.unset_from.map_or(from, |t| t.min(from))
     });
     ctx.old_bytecode = new_bytecode.clone();
+    ctx.floors = floors;
     Some(new_bytecode)
 }
 
@@ -1116,7 +1189,7 @@ mod tests {
         assert_eq!(slot_of(&running, "Base", "describe"), Some(-1));
         for next in ["v3", "v5", "v6", "v1"] {
             let mut bc = method_fixture(next);
-            renumber(&running, &mut bc, &room, None).unwrap();
+            renumber(&running, &mut bc, &room, None, &mut HashMap::new(), 0).unwrap();
             // Base.name was slot 0 and no program moves it.
             assert_eq!(slot_of(&bc, "Base", "name"), Some(0), "{next}");
             if next == "v3" {
@@ -1190,7 +1263,7 @@ mod tests {
         let room = unbounded_room();
         let running = ladder_fixture("v1");
         let mut v3 = ladder_fixture("v3");
-        renumber(&running, &mut v3, &room, None).unwrap();
+        renumber(&running, &mut v3, &room, None, &mut HashMap::new(), 0).unwrap();
         let kept = protos_of(&running, "B")
             .into_iter()
             .find(|p| p.0 == "h")
@@ -1224,15 +1297,15 @@ mod tests {
         let room = unbounded_room();
         let v1 = class_fixture("v1");
         let mut v2 = class_fixture("v2");
-        renumber(&v1, &mut v2, &room, None).unwrap();
+        renumber(&v1, &mut v2, &room, None, &mut HashMap::new(), 0).unwrap();
         assert!(v2.reload_init.is_some());
         // The same program again has nothing new to set up ...
         let mut again = class_fixture("v2");
-        renumber(&v2, &mut again, &room, None).unwrap();
+        renumber(&v2, &mut again, &room, None, &mut HashMap::new(), 0).unwrap();
         assert_eq!(again.reload_init, None);
         // ... unless the setup of what v2 added never finished.
         let mut again = class_fixture("v2");
-        renumber(&v2, &mut again, &room, Some(v1.types.len())).unwrap();
+        renumber(&v2, &mut again, &room, Some(v1.types.len()), &mut HashMap::new(), 0).unwrap();
         assert!(again.reload_init.is_some());
     }
 
@@ -1253,7 +1326,7 @@ mod tests {
         let mut sizes = Vec::new();
         for next in ["v2", "v3", "v2", "v1", "v3"] {
             let mut bc = load(next);
-            renumber(&running, &mut bc, &room, None).unwrap();
+            renumber(&running, &mut bc, &room, None, &mut HashMap::new(), 0).unwrap();
             for (i, f) in running.functions.iter().enumerate() {
                 assert_eq!(bc.functions[i].findex, f.findex, "{next}");
             }

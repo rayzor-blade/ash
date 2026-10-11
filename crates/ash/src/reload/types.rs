@@ -171,14 +171,10 @@ fn incompatible(old: &HLType, new: &HLType) -> Option<String> {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0)
     };
     if let (Some(o), Some(n)) = (&old.obj, &new.obj) {
-        let fields = |o: &crate::types::HLTypeObj| -> Vec<(String, usize)> {
-            o.fields.iter().map(|f| (f.name.clone(), f.type_.0)).collect()
-        };
-        if o.super_.as_ref().map(|s| s.0) != n.super_.as_ref().map(|s| s.0)
-            || fields(o) != fields(n)
-        {
+        // The fields of a class are the field pass's to match.
+        if o.super_.as_ref().map(|s| s.0) != n.super_.as_ref().map(|s| s.0) {
             return Some(format!(
-                "a type's field layout changed ({}); live objects are laid out by the old one",
+                "the superclass of {} changed; live objects are laid out by the old one",
                 o.name
             ));
         }
@@ -449,16 +445,33 @@ mod tests {
         assert_eq!((made.args[0].0, made.ret.0), (1, 0));
     }
 
+    /// Which fields a class may have is for the field pass to say.
     #[test]
-    fn a_class_that_gained_a_field_is_refused() {
+    fn a_class_that_gained_a_field_is_matched() {
         let old = program(vec![prim(hl::hl_type_kind_HI32), class("A", &[("n", I32)])], &[1], &[]);
         let mut new = program(
             vec![prim(hl::hl_type_kind_HI32), class("A", &[("n", I32), ("m", I32)])],
             &[1],
             &[],
         );
+        assert_eq!(remap_types(&old, &mut new).unwrap(), Retyped::default());
+        assert_eq!(new.types[1].obj.as_ref().unwrap().fields.len(), 2);
+    }
+
+    #[test]
+    fn a_class_that_changed_its_superclass_is_refused() {
+        let extends = |parent: usize| {
+            let mut b = class("B", &[]);
+            b.obj.as_mut().unwrap().super_ = Some(TypeRef(parent));
+            b
+        };
+        let types = |parent: usize| {
+            vec![prim(hl::hl_type_kind_HI32), class("A", &[]), class("C", &[]), extends(parent)]
+        };
+        let old = program(types(1), &[3], &[]);
+        let mut new = program(types(2), &[3], &[]);
         let why = remap_types(&old, &mut new).unwrap_err();
-        assert!(why.contains("field layout changed"), "{why}");
+        assert!(why.contains("superclass of B changed"), "{why}");
     }
 
     /// A type the new program no longer has stays, so a function that was

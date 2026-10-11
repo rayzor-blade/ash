@@ -1,6 +1,6 @@
 use crate::bytecode::DecodedBytecode;
 use crate::hl::*;
-use crate::types::{HLObjProto, HLType, TypeRef};
+use crate::types::{HLObjField, HLObjProto, HLType, TypeRef};
 use std::collections::HashMap;
 use std::ptr;
 
@@ -66,6 +66,67 @@ pub(crate) unsafe fn set_class_protos(c_type: *mut hl_type, protos: &[HLObjProto
         } else {
             (*obj).nproto = protos.len() as i32;
             (*obj).proto = list;
+        }
+        true
+    }
+}
+
+/// Give the class `c_type` the fields `fields` list, if they are not the ones
+/// it has; `c_types` are the C types of the program, which the types of the
+/// fields name by index. The old list is left in place for readers that hold
+/// it. Returns whether the class changed.
+///
+/// # Safety
+/// `c_type` must be a live `hl_type` made by a `CTypeFactory`.
+pub(crate) unsafe fn set_class_fields(
+    c_type: *mut hl_type,
+    fields: &[HLObjField],
+    c_types: &[*mut hl_type],
+) -> bool {
+    unsafe {
+        if c_type.is_null() {
+            return false;
+        }
+        let kind = (*c_type).kind;
+        if kind != hl_type_kind_HOBJ && kind != hl_type_kind_HSTRUCT {
+            return false;
+        }
+        let obj = (*c_type).__bindgen_anon_1.obj;
+        if obj.is_null() {
+            return false;
+        }
+        let type_of = |f: &HLObjField| c_types.get(f.type_.0).copied().unwrap_or(ptr::null_mut());
+        let same = (*obj).nfields as usize == fields.len()
+            && fields.iter().enumerate().all(|(i, f)| {
+                let c = &*(*obj).fields.add(i);
+                c.hashed_name == f.hashed_name && c.t == type_of(f)
+            });
+        if same {
+            return false;
+        }
+        let mut c_fields: Vec<hl_obj_field> = fields
+            .iter()
+            .map(|f| hl_obj_field {
+                name: str_to_utf16_ptr(&f.name),
+                t: type_of(f),
+                hashed_name: f.hashed_name,
+            })
+            .collect();
+        let list = if c_fields.is_empty() {
+            ptr::null_mut()
+        } else {
+            c_fields.as_mut_ptr()
+        };
+        std::mem::forget(c_fields);
+        // A reader that walks the list without a lock sees a count that fits
+        // the array it has: the count after the array when it grows, before
+        // it when it shrinks.
+        if fields.len() as i32 >= (*obj).nfields {
+            (*obj).fields = list;
+            (*obj).nfields = fields.len() as i32;
+        } else {
+            (*obj).nfields = fields.len() as i32;
+            (*obj).fields = list;
         }
         true
     }

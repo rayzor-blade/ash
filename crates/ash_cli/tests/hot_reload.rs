@@ -53,6 +53,11 @@ const LADDER: Family = Family {
     main: "TestHotReloadLadder",
 };
 
+const FIELDS: Family = Family {
+    dir: "fields",
+    main: "TestHotReloadFields",
+};
+
 impl Family {
     fn fixtures(self) -> PathBuf {
         repo_root().join("crates/ash/test/hot_reload").join(self.dir)
@@ -335,6 +340,7 @@ fn the_fixtures_are_where_the_test_expects() {
         (CLASSES, &["v1", "v2", "v3"][..]),
         (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
         (LADDER, &["v1", "v2", "v3", "v4"][..]),
+        (FIELDS, &["v1", "v2", "v3", "v4", "v5"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -662,6 +668,94 @@ fn a_reload_that_only_removes_an_override() {
             "render f b.f,h b.h,helper b.helper,byname b.helper,describe B,str B!",
             "oldh b.h",
             "d d.h",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// A reference and a float after the fields `Widget` has. The widget made
+/// before the reload has room for them: they read as null and zero, take
+/// writes, and compiled code reads them too. A widget made after the reload
+/// has them as well.
+#[test]
+fn fields_added_to_a_class() {
+    check(
+        FIELDS,
+        "v1",
+        "v2",
+        &[
+            "reloaded",
+            "render id 1;label w;hits 1;note null,scale 0;after set,2.5",
+            "hot 800",
+            "many 95700 bad 0",
+            "fresh 2,f,0,null,0",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// An int declared between two the class has: the bodies of the new program
+/// name `hits` by a number the running class does not give it.
+#[test]
+fn a_field_declared_between_the_others() {
+    check(
+        FIELDS,
+        "v1",
+        "v3",
+        &[
+            "reloaded",
+            "render id 1;label w;hits 1;tag 0;after 7",
+            "hot 1800",
+            "many 95700 bad 0",
+            "fresh 2,f,0,0",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// A constructor sets the field to a constant: a widget made after the
+/// reload has it, and the one made before holds zero.
+#[test]
+fn a_field_a_constructor_sets_to_a_constant() {
+    check(
+        FIELDS,
+        "v1",
+        "v4",
+        &[
+            "reloaded",
+            "render id 1;label w;hits 1;step 0",
+            "hot 400",
+            "many 47850 bad 0",
+            "fresh 2,f,0,3",
+            "done",
+        ],
+        "reloaded",
+    );
+}
+
+/// Fields over two reloads. The second class is larger than the first, and
+/// the widget is still the one made before either.
+#[test]
+fn fields_added_over_two_reloads() {
+    check_through(
+        FIELDS,
+        "v1",
+        &["v2", "v5"],
+        &[
+            "reloaded",
+            "render id 1;label w;hits 1;note null,scale 0;after set,2.5",
+            "hot 800",
+            "many 95700 bad 0",
+            "fresh 2,f,0,null,0",
+            "next",
+            "reloaded",
+            "render id 1;label w;hits 2;note set,scale 2.5;after set,2.5;extra 10",
+            "hot 3000",
+            "many 143550 bad 0",
+            "fresh 2,f,0,null,0",
             "done",
         ],
         "reloaded",

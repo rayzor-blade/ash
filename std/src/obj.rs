@@ -6,7 +6,7 @@
 use std::alloc::alloc;
 use std::sync::{
     RwLock,
-    atomic::{AtomicPtr, Ordering},
+    atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
 };
 use std::{
     alloc::Layout,
@@ -208,6 +208,36 @@ impl std::hash::Hasher for AddressHasher {
 
 type ByAddress = std::hash::BuildHasherDefault<AddressHasher>;
 
+/// Spare bytes `hlp_alloc_obj` leaves at the end of every instance of a class,
+/// for the fields a hot reload adds to the class.
+static OBJECT_ROOM: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a class has been laid out. The room is promised to every instance,
+/// so it can only be asked for before the first.
+static CLASS_LAID_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Leave `room` spare bytes in every instance allocated from now on. `false`,
+/// and no room, when a class has been laid out already: instances made before
+/// the call would not have it.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_set_object_room(room: usize) -> bool {
+    let _lock = HL_GLOBAL_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if CLASS_LAID_OUT.load(Ordering::Acquire) {
+        return false;
+    }
+    OBJECT_ROOM.store(room, Ordering::Release);
+    true
+}
+
+/// The spare bytes at the end of an instance of a class.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_object_room() -> usize {
+    OBJECT_ROOM.load(Ordering::Acquire)
+}
+
 /// Bytes a host reserves after every instance of a class, past the fields
 /// the runtime knows: the runtime allocates them and never reads, writes or
 /// copies them. Keyed by type descriptor, set once by an ahead-of-time
@@ -300,7 +330,12 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
             return ptr::null_mut();
         }
 
-        let size = (*rt).size as usize + object_tail(t);
+        let room = if (*t).kind == hl::hl_type_kind_HOBJ {
+            OBJECT_ROOM.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+        let size = (*rt).size as usize + object_tail(t) + room;
         // let has_ptr = (*rt).hasPtr;
         crate::gc::note_object_type(t);
 
@@ -1328,6 +1363,9 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
 
         if !force && !(*o).rt.is_null() {
             return (*o).rt;
+        }
+        if _kind == hl::hl_type_kind_HOBJ {
+            CLASS_LAID_OUT.store(true, Ordering::Release);
         }
         // Runtime type structures are immortal and referenced only from type
         // memory the GC never scans — alloc_immortal pins them (and, via

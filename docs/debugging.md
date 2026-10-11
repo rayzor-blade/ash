@@ -224,8 +224,9 @@ returns, every call after the swap runs the new one, and what objects and
 statics hold is kept.
 
 A reload can change function bodies and literals, add, remove, move and edit
-closures, add and remove the methods of a class that is running, and add
-string constants, function types and classes. A closure
+closures, add and remove the methods of a class that is running, add fields to
+a class that is running, and add string constants, function types and classes.
+A closure
 that is in both programs keeps its place, so one made before the reload runs
 the new body; one the new program drops stays callable for the closures that
 still name it, with its old body and the constants it reads. A class the
@@ -247,6 +248,24 @@ override leaves its slot to the method it overrode; a removed method that
 introduced a slot stays in the class, with its old body, for the calls that
 name the slot.
 
+Under `--hot-reload` every object is allocated with 64 spare bytes at its end
+(`ASH_RELOAD_ROOM=<bytes>` sets how many; 0 allows no new field), and a field
+the new program adds to a class goes after the fields the class has, in that
+room. An object made before the reload holds zero in it: the constructor's
+initialiser has not run for that object. A field declared between the others in
+the new program is still put last in the running class, and the bodies that name
+the fields are renumbered to match. Only a class that nothing extends can gain a
+field, since the fields of a subclass follow its parent's, and a class cannot
+grow past the room its first objects were given, however many reloads add to
+it.
+
+A constructor that sets the new field to a constant or null is accepted. One that
+sets it to anything else is refused, naming the field, because the object made
+before the reload would never get that value. The exception is the backing
+field of an ashui `@:state`, named `<field>__state`, in a program built with
+`-D ashui_hot_reload`: its accessors make the signal when the field is null,
+and the program says so by having `ashui.ui.HotReload.stateOnFirstUse`.
+
 What live objects and compiled code are laid out by cannot change. The reload
 is refused, on stderr, and the program goes on as it was:
 
@@ -255,7 +274,13 @@ is refused, on stderr, and the program goes on as it was:
 | `Class.method is new and Sub already declares a method of that name` | the new method and the subclass's would have to share a slot |
 | `Class.method moves from slot a to b, the slot of the method it now overrides` | frames that began before the reload call the old slot |
 | `Class binds different statics; a static function was added or removed` | statics are fields of the `$Class` object, which is laid out like any |
-| `a type's field layout changed (Name)` | live objects have the old layout. A class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, names that object |
+| `the statics of Name changed` | a class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, adds a field to that object, and nothing sets it up |
+| `field f of Name was removed`, `field f of Name changed its type` | live objects have the field where it was |
+| `Name gained f, and Sub extends it, so its fields would move` | the fields of a subclass follow its parent's |
+| `Name gained f, and an object made before the reload has N bytes where the class now needs M` | the spare room is used up; restart the program |
+| `Name.f is set by a constructor with something that is not a constant` | an object made before the reload would hold null in it |
+| `Name.f__state is a state field the program does not make on first use` | build with `-D ashui_hot_reload` |
+| `the superclass of Name changed` | live objects are laid out by the old one |
 | `the constructors of enum Name changed` | enum values are laid out by their constructors |
 | `the setup of the new classes has control flow in it` | what a new class needs from the entry function is not a straight run of ops: a static whose first value is picked by a test written into the entry function, such as `static var on = env != null` |
 | `needs N globals`, `needs N function slots` | the program reserved room for as many added globals and functions as it started with, at least 65536 and 8192; restart it |

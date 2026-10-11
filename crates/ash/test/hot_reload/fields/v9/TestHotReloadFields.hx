@@ -30,8 +30,9 @@ class Widget extends Item {
 class Show {
     public static function render(w:Widget):Array<String> {
         var before = "scale " + w.scale;
-        w.scale = 3.5;
-        // The field the class dropped is still there by name.
+        // The field the class dropped is still there by name. Reflect.setField
+        // stays in use so that the program binds the statics it did.
+        Reflect.setField(w, "scale", 3.5);
         var names = Reflect.fields(w);
         names.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
         return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.scale, "reflect " + Reflect.field(w, "note") + " " + names.join("/")];

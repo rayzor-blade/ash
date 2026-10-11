@@ -275,6 +275,47 @@ fn initialised_by_a_computation(
     })
 }
 
+/// Refuse the constructor of the class `t` if it stores something that is not
+/// a constant into one of `fields`, which the objects built before the reload
+/// lack: each is the field's name, its place in the new program's list of the
+/// class's own fields, and whether the class had dropped it. The constructor
+/// still names the fields as the new program numbers them.
+fn check_constructor(
+    new: &DecodedBytecode,
+    t: usize,
+    fields: &[(&String, usize, bool)],
+    lazy_state: bool,
+    constants: &HashSet<usize>,
+) -> Result<(), String> {
+    let Some(ctor) = constructor(new, t) else {
+        return Ok(());
+    };
+    let start = inherited(new, t);
+    let name = class(new, t).map_or("", |o| o.name.as_str());
+    for &(field, at, back) in fields {
+        let state = field.ends_with(LAZY_SUFFIX);
+        if state && lazy_state {
+            continue;
+        }
+        if initialised_by_a_computation(t, start + at, ctor, constants) {
+            return Err(if state {
+                format!(
+                    "{name}.{field} is a state field the program does not make on first use: build with -D ashui_hot_reload so a new @:state field is made on first use"
+                )
+            } else if back {
+                format!(
+                    "{name}.{field} is set by a constructor with something that is not a constant, and an earlier reload dropped the field, so objects built since hold null in it"
+                )
+            } else {
+                format!(
+                    "{name}.{field} is set by a constructor with something that is not a constant, which does not run for objects built before the reload"
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Put the field lists of the classes of `new`, which is on the types of
 /// `old` already, in the running order, and the bodies that name those fields
 /// to match. `kept` holds what the reloads so far left about the classes, and
@@ -284,7 +325,8 @@ fn initialised_by_a_computation(
 /// placeholders.
 ///
 /// `Err` says why a class cannot be laid out so: a field of another type, a
-/// class something extends, or no room left.
+/// class something extends, or no room left. `kept` may have changed by then,
+/// so it is a copy the caller drops.
 pub fn keep_order(
     old: &DecodedBytecode,
     new: &mut DecodedBytecode,
@@ -300,9 +342,23 @@ pub fn keep_order(
         let (Some(o), Some(n)) = (class(old, t), class(new, t)) else {
             continue;
         };
+        let known: HashSet<Identity> = kept.ghosts.get(&t).cloned().unwrap_or_default();
+        let unchanged = same(&o.fields, &n.fields);
+        if unchanged && known.is_empty() {
+            continue;
+        }
         // A class that has dropped a field is looked at even when the lists
-        // match: the new program may declare the field again.
-        if same(&o.fields, &n.fields) && !kept.ghosts.contains_key(&t) {
+        // match: the new program declares it again, and nothing else moves.
+        if unchanged {
+            let wanted = identities(&n.fields);
+            let revived: Vec<(&String, usize, bool)> = wanted
+                .iter()
+                .enumerate()
+                .filter(|(_, id)| known.contains(*id))
+                .map(|(at, _)| (&n.fields[at].name, at, true))
+                .collect();
+            check_constructor(new, t, &revived, lazy_state, &constants)?;
+            kept.ghosts.remove(&t);
             continue;
         }
         let name = o.name.clone();
@@ -322,7 +378,6 @@ pub fn keep_order(
         // A field the new program no longer has stays where it is, unused: the
         // bodies that began before the reload may read it, and a later reload
         // that declares it again finds it with the value it had.
-        let known: HashSet<Identity> = kept.ghosts.get(&t).cloned().unwrap_or_default();
         let mut gone: Vec<Identity> = Vec::new();
         for (f, id) in o.fields.iter().zip(&running) {
             match wanted.iter().position(|w| w == id) {
@@ -460,42 +515,16 @@ pub fn keep_order(
             ));
         }
         // What an object built before the reload lacks cannot be made by a
-        // computation in the constructor, which still names the fields as the
-        // new program numbers them. A field the class had dropped is as
+        // computation in the constructor. A field the class had dropped is as
         // missing from the objects built since.
-        if let Some(ctor) = constructor(new, t) {
-            let checked = added
-                .iter()
-                .map(|(field, at)| (field, *at, false))
-                .chain(revived.iter().map(|(field, at)| (field, *at, true)));
-            for (field, at, back) in checked {
-                let state = field.ends_with(LAZY_SUFFIX);
-                if state && lazy_state {
-                    continue;
-                }
-                if initialised_by_a_computation(t, start + at, ctor, &constants) {
-                    return Err(if state {
-                        format!(
-                            "{name}.{field} is a state field the program does not make on first use: build with -D ashui_hot_reload so a new @:state field is made on first use"
-                        )
-                    } else if back {
-                        format!(
-                            "{name}.{field} is set by a constructor with something that is not a constant, and an earlier reload dropped the field, so objects built since hold null in it"
-                        )
-                    } else {
-                        format!(
-                            "{name}.{field} is set by a constructor with something that is not a constant, which does not run for objects built before the reload"
-                        )
-                    });
-                }
-            }
-        }
+        let checked: Vec<(&String, usize, bool)> = added
+            .iter()
+            .map(|(field, at)| (field, *at, false))
+            .chain(revived.iter().map(|(field, at)| (field, *at, true)))
+            .collect();
+        check_constructor(new, t, &checked, lazy_state, &constants)?;
         // The fields the class now lacks, and has dropped and not got back.
-        let mut ghosts = known;
-        ghosts.extend(gone);
-        for (_, at) in &revived {
-            ghosts.remove(&wanted[*at]);
-        }
+        let ghosts: HashSet<Identity> = gone.into_iter().collect();
         if ghosts.is_empty() {
             kept.ghosts.remove(&t);
         } else {
@@ -1267,5 +1296,31 @@ mod tests {
         outcome.unwrap();
         let mut later = with_constructor(&[("n", I32), ("m", PTR)], vec![call(), set_this(1, 1)]);
         keep_order(&sets, &mut later, &mut kept, 64, Some(&HashSet::new()), &[]).unwrap();
+    }
+    /// What the class dropped is remembered by reloads that leave it alone,
+    /// and a field that comes back with nothing else changing does not hold up
+    /// a new subclass.
+    #[test]
+    fn a_dropped_field_is_remembered_across_reloads_that_leave_it_alone() {
+        let call = || Opcode::Call1 { dst: Reg(1), fun: RefFun(9), arg0: Reg(2) };
+        let running = with_constructor(&[("n", I32), ("m", PTR)], vec![]);
+        let mut kept = Kept::default();
+        let mut dropped = with_constructor(&[("n", I32)], vec![]);
+        keep_order(&running, &mut dropped, &mut kept, 64, Some(&HashSet::new()), &[]).unwrap();
+        // A reload that does not mention the field again.
+        let mut quiet = with_constructor(&[("n", I32)], vec![]);
+        keep_order(&dropped, &mut quiet, &mut kept, 64, Some(&HashSet::new()), &[]).unwrap();
+        assert_eq!(names(&quiet, 2), vec!["n", "m"]);
+        // It comes back, set by a computation.
+        let mut computes = with_constructor(&[("n", I32), ("m", PTR)], vec![call(), set_this(1, 1)]);
+        let why = keep_order(&quiet, &mut computes, &mut kept.clone(), 64, Some(&HashSet::new()), &[])
+            .unwrap_err();
+        assert!(why.contains("an earlier reload dropped the field"), "{why}");
+        // It comes back with nothing to run, and a class that extends the
+        // class arrives in the same reload: the lists are the running ones.
+        let mut back = with_constructor(&[("n", I32), ("m", PTR)], vec![]);
+        back.types.push(class_type("B", Some(2), &[]));
+        keep_order(&quiet, &mut back, &mut kept, 64, Some(&HashSet::new()), &[]).unwrap();
+        assert!(kept.ghosts.is_empty());
     }
 }

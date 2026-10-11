@@ -191,6 +191,13 @@ fn reload_through(
 /// Runs `from`, replaces it with `to` once it says `ready`, and returns what
 /// ash said on stderr when it refused the reload.
 fn refusal(family: Family, from: &str, to: &str) -> String {
+    refusal_after(family, from, &[], to)
+}
+
+/// Runs `from` and swaps in each of `accepted` in turn, the first once the
+/// program says `ready` and each later one once it says `next`, then swaps in
+/// `to` and returns what ash said on stderr when it refused that one.
+fn refusal_after(family: Family, from: &str, accepted: &[&str], to: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = scratch().join(format!(
         "{}-{from}-{to}-refused-{}",
@@ -204,6 +211,7 @@ fn refusal(family: Family, from: &str, to: &str) -> String {
     let mut child = Command::new(ash_cli_bin())
         .args(["--mode", "hybrid", "--hot-reload", "--quiet"])
         .arg(&program)
+        .env("ROUNDS", (accepted.len() + 1).to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
         .spawn()
@@ -217,17 +225,25 @@ fn refusal(family: Family, from: &str, to: &str) -> String {
             }
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let stderr = || std::fs::read_to_string(&stderr_path).unwrap_or_default();
-    loop {
+    let wait_for = |child: &mut Child, wanted: &str| loop {
         match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(line) if line == "ready" => break,
+            Ok(line) if line == wanted => break,
             Ok(_) => {}
             Err(_) => {
                 child.kill().ok();
-                panic!("{from} -> {to}: never said ready\n{}", stderr());
+                panic!("{from} -> {to}: never said {wanted}\n{}", stderr());
             }
         }
+    };
+    wait_for(&mut child, "ready");
+    for step in accepted {
+        std::thread::sleep(Duration::from_millis(1100));
+        let next = dir.join("next.hl");
+        std::fs::copy(family.version(step), &next).unwrap();
+        std::fs::rename(&next, &program).unwrap();
+        wait_for(&mut child, "next");
     }
     std::thread::sleep(Duration::from_millis(1100));
     let next = dir.join("next.hl");
@@ -397,7 +413,7 @@ fn the_fixtures_are_where_the_test_expects() {
         (CLASSES, &["v1", "v2", "v3"][..]),
         (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
         (LADDER, &["v1", "v2", "v3", "v4"][..]),
-        (FIELDS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"][..]),
+        (FIELDS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -882,5 +898,17 @@ fn a_field_dropped_stays_and_comes_back() {
             "done",
         ],
         "reloaded",
+    );
+}
+
+/// The program starts with a field its constructor builds, a reload drops it,
+/// and the next one declares it again: objects built in between hold null in
+/// it, so the reload that brings it back says no.
+#[test]
+fn a_dropped_field_that_comes_back_set_to_a_computation_is_refused() {
+    let said = refusal_after(FIELDS, "v10", &["v1"], "v10");
+    assert!(
+        said.contains("Widget.items is set by a constructor with something that is not a constant, and an earlier reload dropped the field"),
+        "{said}"
     );
 }

@@ -260,8 +260,7 @@ the bodies that began before the reload can still read it, and a reload that
 declares it again finds it as it was. It also stays in the class's reflection
 (`Reflect.fields`, `Type.getInstanceFields`) and keeps its bytes of the spare
 room, so a program that renames a field over and over runs out of room, and a
-class that has dropped a field cannot gain a subclass until the program is
-restarted. Only a class that nothing extends can change its fields, since the
+class cannot gain a subclass while it has such a field. Only a class that nothing extends can change its fields, since the
 fields of a subclass follow its parent's, and a class cannot grow past the room
 its first objects were given, however many reloads add to it.
 

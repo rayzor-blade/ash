@@ -33,7 +33,11 @@ class Show {
         var before = "note " + w.note + ",scale " + w.scale;
         w.note = "set";
         w.scale = 2.5;
-        return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.note + "," + w.scale];
+        // The class is reflected on, and a field it gained is set by name.
+        Reflect.setField(w, "note", "viaReflect");
+        var names = Reflect.fields(w);
+        names.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
+        return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.note + "," + w.scale, "reflect " + Reflect.field(w, "note") + " " + names.join("/")];
     }
 
     public static function hot(w:Widget):Int

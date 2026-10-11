@@ -188,6 +188,63 @@ fn reload_through(
     (printed, rest)
 }
 
+/// Runs `from`, replaces it with `to` once it says `ready`, and returns what
+/// ash said on stderr when it refused the reload.
+fn refusal(family: Family, from: &str, to: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = scratch().join(format!(
+        "{}-{from}-{to}-refused-{}",
+        family.dir,
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("program.hl");
+    std::fs::copy(family.version(from), &program).unwrap();
+    let stderr_path = dir.join("stderr");
+    let mut child = Command::new(ash_cli_bin())
+        .args(["--mode", "hybrid", "--hot-reload", "--quiet"])
+        .arg(&program)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let stderr = || std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    loop {
+        match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line == "ready" => break,
+            Ok(_) => {}
+            Err(_) => {
+                child.kill().ok();
+                panic!("{from} -> {to}: never said ready\n{}", stderr());
+            }
+        }
+    }
+    std::thread::sleep(Duration::from_millis(1100));
+    let next = dir.join("next.hl");
+    std::fs::copy(family.version(to), &next).unwrap();
+    std::fs::rename(&next, &program).unwrap();
+    while !stderr().contains("reload refused") {
+        if Instant::now() > deadline {
+            child.kill().ok();
+            panic!("{from} -> {to}: not refused\n{}", stderr());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.kill().ok();
+    child.wait().ok();
+    stderr()
+}
+
 /// The tier arrangements a reload has to work under: the interpreter alone
 /// until the thresholds are met, then each compiled tier from the first call.
 const ARRANGEMENTS: &[&[&str]] = &[
@@ -340,7 +397,7 @@ fn the_fixtures_are_where_the_test_expects() {
         (CLASSES, &["v1", "v2", "v3"][..]),
         (METHODS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
         (LADDER, &["v1", "v2", "v3", "v4"][..]),
-        (FIELDS, &["v1", "v2", "v3", "v4", "v5"][..]),
+        (FIELDS, &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"][..]),
     ] {
         for v in versions {
             let source = format!("{}.hx", family.main);
@@ -686,7 +743,7 @@ fn fields_added_to_a_class() {
         "v2",
         &[
             "reloaded",
-            "render id 1;label w;hits 1;note null,scale 0;after set,2.5",
+            "render id 1;label w;hits 1;note null,scale 0;after viaReflect,2.5;reflect viaReflect hits/id/label/note/scale",
             "hot 800",
             "many 95700 bad 0",
             "fresh 2,f,0,null,0",
@@ -746,18 +803,50 @@ fn fields_added_over_two_reloads() {
         &["v2", "v5"],
         &[
             "reloaded",
-            "render id 1;label w;hits 1;note null,scale 0;after set,2.5",
+            "render id 1;label w;hits 1;note null,scale 0;after viaReflect,2.5;reflect viaReflect hits/id/label/note/scale",
             "hot 800",
             "many 95700 bad 0",
             "fresh 2,f,0,null,0",
             "next",
             "reloaded",
-            "render id 1;label w;hits 2;note set,scale 2.5;after set,2.5;extra 10",
+            "render id 1;label w;hits 2;note viaReflect,scale 2.5;after viaReflect,2.5;reflect viaReflect extra/hits/id/label/note/scale;extra 10",
             "hot 3000",
             "many 143550 bad 0",
             "fresh 2,f,0,null,0",
             "done",
         ],
         "reloaded",
+    );
+}
+
+/// The constructor of the new program builds an array for the field, which
+/// does not run for the widget made before the reload, so the reload says no.
+#[test]
+fn a_field_set_to_a_computation_is_refused() {
+    let said = refusal(FIELDS, "v1", "v6");
+    assert!(
+        said.contains("Widget.items is set by a constructor with something that is not a constant"),
+        "{said}"
+    );
+}
+
+/// Nine references are 72 bytes, and a widget made before the reload has 64
+/// spare: the reload says so instead of writing past the object.
+#[test]
+fn a_class_that_outgrows_its_room_is_refused() {
+    let said = refusal(FIELDS, "v1", "v7");
+    assert!(
+        said.contains("an object made before the reload has 96 bytes where the class now needs 104"),
+        "{said}"
+    );
+}
+
+/// Null on one path and an array on the other is not a constant.
+#[test]
+fn a_field_a_branch_sets_to_null_or_a_computation_is_refused() {
+    let said = refusal(FIELDS, "v1", "v8");
+    assert!(
+        said.contains("Widget.cache is set by a constructor with something that is not a constant"),
+        "{said}"
     );
 }

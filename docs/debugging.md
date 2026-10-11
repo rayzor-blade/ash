@@ -249,9 +249,9 @@ introduced a slot stays in the class, with its old body, for the calls that
 name the slot.
 
 Under `--hot-reload` every object is allocated with 64 spare bytes at its end
-(`ASH_RELOAD_ROOM=<bytes>` sets how many; 0 allows no new field), and a field
-the new program adds to a class goes after the fields the class has, in that
-room. An object made before the reload holds zero in it: the constructor's
+(`ASH_RELOAD_ROOM=<bytes>` sets how many; with 0 a class can only grow into the
+padding at its end), and a field the new program adds to a class goes after the
+fields the class has, in that room. An object made before the reload holds zero in it: the constructor's
 initialiser has not run for that object. A field declared between the others in
 the new program is still put last in the running class, and the bodies that name
 the fields are renumbered to match. Only a class that nothing extends can gain a
@@ -261,7 +261,8 @@ it.
 
 A constructor that sets the new field to a constant or null is accepted. One that
 sets it to anything else is refused, naming the field, because the object made
-before the reload would never get that value. The exception is the backing
+before the reload would never get that value. Only the constructor's own body is
+read: a field that a method it calls sets is not seen. The exception is the backing
 field of an ashui `@:state`, named `<field>__state`, in a program built with
 `-D ashui_hot_reload`: its accessors make the signal when the field is null,
 and the program says so by having `ashui.ui.HotReload.stateOnFirstUse`.
@@ -277,6 +278,7 @@ is refused, on stderr, and the program goes on as it was:
 | `the statics of Name changed` | a class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, adds a field to that object, and nothing sets it up |
 | `field f of Name was removed`, `field f of Name changed its type` | live objects have the field where it was |
 | `Name gained f, and Sub extends it, so its fields would move` | the fields of a subclass follow its parent's |
+| `Name gained f, and a CArray of it lays its objects out one after another` | the size of the class is the stride of the array |
 | `Name gained f, and an object made before the reload has N bytes where the class now needs M` | the spare room is used up; restart the program |
 | `Name.f is set by a constructor with something that is not a constant` | an object made before the reload would hold null in it |
 | `Name.f__state is a state field the program does not make on first use` | build with `-D ashui_hot_reload` |

@@ -123,9 +123,11 @@ pub(crate) unsafe fn set_class_fields(
         // it when it shrinks.
         if fields.len() as i32 >= (*obj).nfields {
             (*obj).fields = list;
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
             (*obj).nfields = fields.len() as i32;
         } else {
             (*obj).nfields = fields.len() as i32;
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
             (*obj).fields = list;
         }
         true

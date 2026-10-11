@@ -21,7 +21,7 @@ use crate::hl;
 use crate::layout;
 use crate::opcodes::Opcode;
 use crate::types::{HLFunction, HLObjField, HLTypeObj};
-use air::opcode_info::writes;
+use air::opcode_info::{successors, writes};
 use std::collections::{HashMap, HashSet};
 
 /// How far up a class's ancestors are followed, so that a table that names
@@ -124,6 +124,34 @@ fn same(a: &[HLObjField], b: &[HLObjField]) -> bool {
             .all(|(x, y)| x.name == y.name && x.type_.0 == y.type_.0)
 }
 
+/// What each field of a list is called across two programs: its name, or for a
+/// field with none, which the cache of an interface a class implements is, its
+/// type and which of that type's unnamed fields it is.
+fn identities(fields: &[HLObjField]) -> Vec<(String, usize, usize)> {
+    let mut unnamed: HashMap<usize, usize> = HashMap::new();
+    fields
+        .iter()
+        .map(|f| {
+            if f.name.is_empty() {
+                let nth = unnamed.entry(f.type_.0).or_insert(0);
+                *nth += 1;
+                (String::new(), f.type_.0, *nth - 1)
+            } else {
+                (f.name.clone(), 0, 0)
+            }
+        })
+        .collect()
+}
+
+/// A field as a message names it.
+fn shown(identity: &(String, usize, usize)) -> String {
+    if identity.0.is_empty() {
+        "<interface>".to_string()
+    } else {
+        identity.0.clone()
+    }
+}
+
 /// The constructor of the class `t`, which its statics object binds as
 /// `__constructor__`.
 fn constructor(bc: &DecodedBytecode, t: usize) -> Option<&HLFunction> {
@@ -139,23 +167,33 @@ fn constructor(bc: &DecodedBytecode, t: usize) -> Option<&HLFunction> {
     bc.functions.iter().find(|f| f.findex == findex)
 }
 
+/// The ops that some jump, branch, switch or trap handler lands on.
+fn jump_targets(ops: &[Opcode]) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for (i, op) in ops.iter().enumerate() {
+        out.extend(successors(op, i, ops.len()).into_iter().filter(|&s| s != i + 1));
+    }
+    out
+}
+
 /// Whether `reg` holds a constant or null at op `at`, found by following it
-/// back through the straight-line code before it.
+/// back to the op that wrote it. Control must run straight from that op to
+/// `at`: if anything jumps to an op between them, as the two ends of an
+/// `if` do, the register may hold what another path wrote.
 fn constant_value(
     ops: &[Opcode],
+    targets: &HashSet<usize>,
     constants: &HashSet<usize>,
     at: usize,
     reg: u32,
     copies: usize,
 ) -> bool {
     for i in (0..at).rev() {
-        // Control may reach what follows a label from elsewhere, so an op
-        // before it does not say what the register holds.
-        if matches!(ops[i], Opcode::Label) {
-            return false;
-        }
         if !writes(&ops[i]).iter().any(|r| r.0 == reg) {
             continue;
+        }
+        if (i + 1..=at).any(|k| targets.contains(&k)) {
+            return false;
         }
         return match &ops[i] {
             Opcode::Int { .. }
@@ -166,7 +204,7 @@ fn constant_value(
             | Opcode::Null { .. } => true,
             Opcode::GetGlobal { global, .. } => constants.contains(&global.0),
             Opcode::Mov { src, .. } if copies > 0 => {
-                constant_value(ops, constants, i, src.0, copies - 1)
+                constant_value(ops, targets, constants, i, src.0, copies - 1)
             }
             _ => false,
         };
@@ -183,6 +221,7 @@ fn initialised_by_a_computation(
     constants: &HashSet<usize>,
 ) -> bool {
     let ops = constructor.ops();
+    let targets = jump_targets(ops);
     ops.iter().enumerate().any(|(at, op)| {
         let (receiver, index, value) = match op {
             Opcode::SetField { obj, field, src } => (obj.0, field.0, src.0),
@@ -191,7 +230,7 @@ fn initialised_by_a_computation(
         };
         index == field
             && constructor.regs.get(receiver as usize).map(|r| r.0) == Some(class)
-            && !constant_value(ops, constants, at, value, COPIES)
+            && !constant_value(ops, &targets, constants, at, value, COPIES)
     })
 }
 
@@ -199,7 +238,8 @@ fn initialised_by_a_computation(
 /// `old` already, in the running order, and the bodies that name those fields
 /// to match. `floors` holds, for each class that has grown, the smallest
 /// size an object of it was allocated at, and gets the ones this reload
-/// needs; `room` is the spare bytes an object has.
+/// needs; `room` is the spare bytes an object has, and `pinned` the classes
+/// whose objects something lays out one after another at their size.
 ///
 /// `Err` says why a class cannot be laid out so: a field removed or of
 /// another type, a class something extends, or no room left.
@@ -208,6 +248,7 @@ pub fn keep_order(
     new: &mut DecodedBytecode,
     floors: &mut HashMap<usize, i32>,
     room: usize,
+    pinned: &HashSet<usize>,
 ) -> Result<(), String> {
     let mut moved: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
     let constants: HashSet<usize> = new.constants.iter().map(|c| c.global as usize).collect();
@@ -228,16 +269,15 @@ pub fn keep_order(
                 "the statics of {class} changed; a reload does not set up a static of a class that is running"
             ));
         }
-        let unique = |fields: &[HLObjField]| {
-            fields.iter().map(|f| f.name.as_str()).collect::<HashSet<_>>().len() == fields.len()
-        };
-        if !unique(&o.fields) || !unique(&n.fields) {
+        let (running, wanted) = (identities(&o.fields), identities(&n.fields));
+        let unique = |ids: &[(String, usize, usize)]| ids.iter().collect::<HashSet<_>>().len() == ids.len();
+        if !unique(&running) || !unique(&wanted) {
             return Err(format!("{name} has two fields of one name"));
         }
-        for f in &o.fields {
-            match n.fields.iter().find(|g| g.name == f.name) {
-                None => return Err(format!("field {} of {name} was removed", f.name)),
-                Some(g) if g.type_.0 != f.type_.0 => {
+        for (f, id) in o.fields.iter().zip(&running) {
+            match wanted.iter().position(|w| w == id) {
+                None => return Err(format!("field {} of {name} was removed", shown(id))),
+                Some(at) if n.fields[at].type_.0 != f.type_.0 => {
                     return Err(format!("field {} of {name} changed its type", f.name));
                 }
                 Some(_) => {}
@@ -248,12 +288,12 @@ pub fn keep_order(
         let mut perm = Vec::with_capacity(n.fields.len());
         // The added fields, with the place the new program gives each.
         let mut added: Vec<(String, usize)> = Vec::new();
-        for (at, g) in n.fields.iter().enumerate() {
-            match o.fields.iter().position(|f| f.name == g.name) {
-                Some(running) => perm.push(running),
+        for (at, id) in wanted.iter().enumerate() {
+            match running.iter().position(|r| r == id) {
+                Some(at_running) => perm.push(at_running),
                 None => {
                     perm.push(o.fields.len() + added.len());
-                    added.push((g.name.clone(), at));
+                    added.push((shown(id), at));
                 }
             }
         }
@@ -281,6 +321,11 @@ pub fn keep_order(
         if !o.bindings.is_empty() || !n.bindings.is_empty() {
             return Err(format!("{name} {what}, and binds closures into its fields"));
         }
+        if pinned.contains(&t) {
+            return Err(format!(
+                "{name} {what}, and a CArray of it lays its objects out one after another"
+            ));
+        }
         if new
             .host_classes
             .iter()
@@ -302,7 +347,8 @@ pub fn keep_order(
         new.types[t].obj.as_mut().unwrap().fields = list;
         let after = layout::object_layout(&new.types, t)
             .ok_or_else(|| format!("{name} {what}, and its layout is not one a reload can extend"))?;
-        let floor = *floors.entry(t).or_insert(before.size + room as i32);
+        let spare = i32::try_from(room).unwrap_or(i32::MAX);
+        let floor = *floors.entry(t).or_insert(before.size.saturating_add(spare));
         if after.size > floor {
             return Err(format!(
                 "{name} {what}, and an object made before the reload has {floor} bytes where the class now needs {}",
@@ -363,7 +409,6 @@ fn renumber(f: &mut HLFunction, moved: &HashMap<usize, (usize, Vec<usize>)>) {
         Opcode::GetThis { field, .. } | Opcode::SetThis { field, .. } => {
             target(0, field.0).is_some()
         }
-        Opcode::Prefetch { value, field, .. } => target(value.0, field.0).is_some(),
         _ => false,
     };
     if !f.ops().iter().any(needs) {
@@ -375,7 +420,6 @@ fn renumber(f: &mut HLFunction, moved: &HashMap<usize, (usize, Vec<usize>)>) {
                 (obj.0, field)
             }
             Opcode::GetThis { field, .. } | Opcode::SetThis { field, .. } => (0, field),
-            Opcode::Prefetch { value, field, .. } => (value.0, field),
             _ => continue,
         };
         if let Some(to) = target(receiver, field.0) {
@@ -448,7 +492,7 @@ mod tests {
     }
 
     fn keep(old: &DecodedBytecode, new: &mut DecodedBytecode, room: usize) -> Result<(), String> {
-        keep_order(old, new, &mut HashMap::new(), room)
+        keep_order(old, new, &mut HashMap::new(), room, &HashSet::new())
     }
 
     #[test]
@@ -456,7 +500,7 @@ mod tests {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32)])]);
         let floors = &mut HashMap::new();
-        keep_order(&old, &mut new, floors, 64).unwrap();
+        keep_order(&old, &mut new, floors, 64, &HashSet::new()).unwrap();
         assert!(floors.is_empty());
     }
 
@@ -465,7 +509,7 @@ mod tests {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32), ("p", PTR)])]);
         let floors = &mut HashMap::new();
-        keep_order(&old, &mut new, floors, 64).unwrap();
+        keep_order(&old, &mut new, floors, 64, &HashSet::new()).unwrap();
         assert_eq!(names(&new, 2), vec!["n", "p"]);
         // An instance is a header, an int and padding, 16 bytes, and 64 spare.
         assert_eq!(floors[&2], 16 + 64);
@@ -619,15 +663,15 @@ mod tests {
         let fourth = program(vec![class_type("A", None, &fields(7))]);
         // 16 bytes and 16 spare: 32.
         let mut next = second.clone();
-        keep_order(&first, &mut next, &mut floors, 16).unwrap();
+        keep_order(&first, &mut next, &mut floors, 16, &HashSet::new()).unwrap();
         assert_eq!(floors[&2], 32);
         // The running class is the 24 byte one now, but its objects are 32.
         let mut next = third.clone();
-        keep_order(&second, &mut next, &mut floors, 16).unwrap();
+        keep_order(&second, &mut next, &mut floors, 16, &HashSet::new()).unwrap();
         assert_eq!(floors[&2], 32);
         // Seven ints end at 36, which is 40 with padding.
         let mut next = fourth.clone();
-        let why = keep_order(&third, &mut next, &mut floors, 16).unwrap_err();
+        let why = keep_order(&third, &mut next, &mut floors, 16, &HashSet::new()).unwrap_err();
         assert!(why.contains("has 32 bytes where the class now needs 40"), "{why}");
     }
 
@@ -775,16 +819,51 @@ mod tests {
         // A value the constructor was given.
         let mut new = with_constructor(&[("n", I32), ("m", I32)], vec![set_this(1, 2)]);
         assert!(keep(&old, &mut new, 64).is_err());
-        // A value a branch may have set differently.
+    }
+
+    /// The two ends of an `if` meet at the store: the `null` is the last write
+    /// before it in the ops, but the call may have been the one that ran.
+    #[test]
+    fn a_value_a_branch_may_have_set_is_not_a_constant() {
+        let old = with_constructor(&[("n", I32)], vec![]);
+        let call = Opcode::Call1 { dst: Reg(1), fun: RefFun(9), arg0: Reg(2) };
+        let flag = Reg(2);
+        // m = flag != null ? f(flag) : null
         let mut new = with_constructor(
-            &[("n", I32), ("m", I32)],
+            &[("n", I32), ("m", PTR)],
             vec![
-                Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
-                Opcode::Label,
+                Opcode::JNull { reg: flag, offset: 2 },
+                call.clone(),
+                Opcode::JAlways { offset: 1 },
+                Opcode::Null { dst: Reg(1) },
+                set_this(1, 1),
+            ],
+        );
+        let why = keep(&old, &mut new, 64).unwrap_err();
+        assert!(why.contains("A.m is set by a constructor"), "{why}");
+        // m = f(flag); if (flag == null) m = null;
+        let mut new = with_constructor(
+            &[("n", I32), ("m", PTR)],
+            vec![
+                call.clone(),
+                Opcode::JNotNull { reg: flag, offset: 1 },
+                Opcode::Null { dst: Reg(1) },
                 set_this(1, 1),
             ],
         );
         assert!(keep(&old, &mut new, 64).is_err());
+        // A jump that goes past the store, or lands before the write, leaves
+        // the straight run from the write to the store alone.
+        let mut new = with_constructor(
+            &[("n", I32), ("m", PTR)],
+            vec![
+                Opcode::JNull { reg: flag, offset: 2 },
+                Opcode::Null { dst: Reg(1) },
+                set_this(1, 1),
+                Opcode::Ret { ret: Reg(1) },
+            ],
+        );
+        keep(&old, &mut new, 64).unwrap();
     }
 
     /// The static a program built with `-D ashui_hot_reload` has.
@@ -827,5 +906,52 @@ mod tests {
         let old = with_constructor(&[("n", I32)], vec![call.clone(), set_this(0, 1)]);
         let mut new = with_constructor(&[("n", I32), ("m", I32)], vec![call, set_this(0, 1)]);
         keep(&old, &mut new, 64).unwrap();
+    }
+    /// The interfaces a class implements leave a field in it each, with no
+    /// name.
+    #[test]
+    fn unnamed_fields_do_not_stop_a_class_growing() {
+        let interfaces = || vec![class_type("I1", None, &[]), class_type("I2", None, &[])];
+        let with = |fields: &[(&str, usize)]| {
+            let mut types = interfaces();
+            types.push(class_type("A", None, fields));
+            program(types)
+        };
+        let old = with(&[("n", I32), ("", 2), ("", 3), ("", 3)]);
+        let mut new = with(&[("n", I32), ("", 2), ("", 3), ("", 3), ("m", I32)]);
+        keep(&old, &mut new, 64).unwrap();
+        assert_eq!(names(&new, 4), vec!["n", "", "", "", "m"]);
+        // A new interface is a field the class gains.
+        let mut new = with(&[("n", I32), ("", 2), ("", 3), ("", 3), ("", 2)]);
+        keep(&old, &mut new, 64).unwrap();
+        // One it drops is a field it loses.
+        let mut new = with(&[("n", I32), ("", 2), ("", 3)]);
+        let why = keep(&old, &mut new, 64).unwrap_err();
+        assert!(why.contains("field <interface> of A was removed"), "{why}");
+    }
+
+    /// The running order is what the next reload finds, whichever order the
+    /// source declares them in.
+    #[test]
+    fn a_reorder_leaves_the_running_order_for_the_next_reload() {
+        let old = program(vec![class_type("A", None, &[("a", I32), ("b", PTR)])]);
+        let mut first = program(vec![class_type("A", None, &[("b", PTR), ("a", I32)])]);
+        keep(&old, &mut first, 64).unwrap();
+        assert_eq!(names(&first, 2), vec!["a", "b"]);
+        let mut again = program(vec![class_type("A", None, &[("b", PTR), ("a", I32)])]);
+        keep(&first, &mut again, 64).unwrap();
+        assert_eq!(names(&again, 2), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_class_whose_objects_something_lays_out_in_a_row_is_refused() {
+        let old = program(vec![class_type("A", None, &[("n", I32)])]);
+        let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", I32)])]);
+        let why = keep_order(&old, &mut new, &mut HashMap::new(), 64, &HashSet::from([2])).unwrap_err();
+        assert!(why.contains("A gained m, and a CArray of it"), "{why}");
+        // Reordering it moves the fields as much as adding one does.
+        let old = program(vec![class_type("A", None, &[("a", I32), ("b", I32)])]);
+        let mut new = program(vec![class_type("A", None, &[("b", I32), ("a", I32)])]);
+        assert!(keep_order(&old, &mut new, &mut HashMap::new(), 64, &HashSet::from([2])).is_err());
     }
 }

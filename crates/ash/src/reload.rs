@@ -156,6 +156,14 @@ pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
 /// its runtime object is built again, with those of the classes that extend
 /// it, whose field and method counts and vtables are made from its own.
 fn sync_classes(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
+    // Without this a class would have lists its runtime object does not match.
+    let Some(rebuild) = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_rebuild_obj_proto")
+        .ok()
+    else {
+        eprintln!("[hot-reload] warning: the runtime cannot rebuild a class; its fields and methods are left as they were");
+        return;
+    };
     let mut changed: Vec<*mut hl::hl_type> = Vec::new();
     for (i, t) in new.types.iter().enumerate() {
         let (Some(c), Some(obj)) = (shared.c_types.get(i).copied(), t.obj.as_ref()) else {
@@ -170,12 +178,6 @@ fn sync_classes(shared: &SharedRuntimeHandles, new: &DecodedBytecode) {
     if changed.is_empty() {
         return;
     }
-    let Some(rebuild) = crate::native_lib::NativeFunctionResolver::new()
-        .resolve_function("std", "hlp_rebuild_obj_proto")
-        .ok()
-    else {
-        return;
-    };
     type FnRebuild = unsafe extern "C" fn(*mut hl::hl_type) -> *mut hl::hl_runtime_obj;
     let rebuild: FnRebuild = unsafe { std::mem::transmute(rebuild) };
 
@@ -303,8 +305,27 @@ struct Staged {
 }
 
 /// Spare bytes in every object, for the fields a reload adds to a class.
-/// `ASH_RELOAD_ROOM=<bytes>` sets it, 0 allows no new field; safe to change.
+/// `ASH_RELOAD_ROOM=<bytes>` sets it; 0 leaves a class only the padding at its
+/// end to grow into. Safe to change between runs.
 const OBJECT_ROOM: usize = 64;
+
+/// The types of the classes whose objects the runtime lays out one after
+/// another at the size of the class, by index: they cannot gain a field.
+fn pinned_layouts(handles: &SharedRuntimeHandles) -> HashSet<usize> {
+    let Ok(pinned) =
+        crate::native_lib::NativeFunctionResolver::new().resolve_function("std", "hlp_layout_pinned")
+    else {
+        return HashSet::new();
+    };
+    let pinned: extern "C" fn(*mut hl::hl_type) -> bool = unsafe { std::mem::transmute(pinned) };
+    handles
+        .c_types
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.is_null() && pinned(**c))
+        .map(|(i, _)| i)
+        .collect()
+}
 
 /// Ask the runtime for the spare bytes, and say how many it will give: none
 /// when a class was laid out already, since objects of it would not have them.
@@ -708,7 +729,7 @@ fn renumber(
 ) -> Result<(), String> {
     let refuse = |why: String| format!("the program cannot reload in place: {why}");
     let retyped = types::remap_types(running, bc).map_err(refuse)?;
-    fields::keep_order(running, bc, floors, object_room).map_err(refuse)?;
+    fields::keep_order(running, bc, floors, object_room, &pinned_layouts(room)).map_err(refuse)?;
     let slots = vtable::plan(running, bc, &retyped.dropped()).map_err(refuse)?;
     vtable::apply(bc, &slots);
     remap_globals(running, bc, room.global_slots).map_err(refuse)?;

@@ -238,6 +238,28 @@ pub extern "C" fn hlp_object_room() -> usize {
     OBJECT_ROOM.load(Ordering::Acquire)
 }
 
+/// Classes whose instances something lays out one after another at the size
+/// of the class (a `hl.CArray` of them), which a class that gains a field
+/// would change under it.
+static PINNED_LAYOUTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Record that instances of the class `t` are laid out in a row.
+pub(crate) fn pin_layout(t: *mut hl_type) {
+    let mut pinned = PINNED_LAYOUTS.lock().unwrap_or_else(|e| e.into_inner());
+    if !pinned.contains(&(t as usize)) {
+        pinned.push(t as usize);
+    }
+}
+
+/// Whether instances of the class `t` are laid out in a row.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_layout_pinned(t: *mut hl_type) -> bool {
+    PINNED_LAYOUTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&(t as usize))
+}
+
 /// Bytes a host reserves after every instance of a class, past the fields
 /// the runtime knows: the runtime allocates them and never reads, writes or
 /// copies them. Keyed by type descriptor, set once by an ahead-of-time
@@ -1058,9 +1080,11 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             }
         }
 
-        // Interfaces
+        // Interfaces. The count is read once: a reload can replace the field
+        // list between the two passes, and the fields it keeps stay first.
+        let nfields = (*o).nfields;
         (*t).ninterfaces = 0;
-        for i in 0..(*o).nfields {
+        for i in 0..nfields {
             if (*(*o).fields.add(i as usize)).hashed_name == 0 {
                 (*t).ninterfaces += 1;
             }
@@ -1070,7 +1094,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
                 .unwrap_or_else(|| crate::rt::out_of_memory("runtime type metadata"))
                 .as_ptr() as *mut i32;
         (*t).ninterfaces = 0;
-        for i in 0..(*o).nfields as usize {
+        for i in 0..nfields as usize {
             if (*(*o).fields.add(i)).hashed_name == 0 {
                 *(*t).interfaces.add((*t).ninterfaces as usize) = i as i32;
                 (*t).ninterfaces += 1;
@@ -3523,18 +3547,23 @@ pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
                 if rt.is_null() {
                     return ptr::null_mut();
                 }
-                let a = hlp_alloc_array(hlt_bytes(), (*rt).nfields);
+                // A reload can replace the class's field list under this call, so
+                // the array is the size the runtime object gave and no more is
+                // written to it.
+                let room = (*rt).nfields as usize;
+                let a = hlp_alloc_array(hlt_bytes(), room as i32);
                 let mut p = 0usize;
                 loop {
                     for i in 0..(*tobj).nfields as usize {
                         let f = (*tobj).fields.add(i);
                         let name = (*f).name;
                         if name.is_null() || *name == 0 {
-                            (*a).size -= 1;
                             continue;
                         }
-                        *(hl_aptr::<*mut vbyte>(a)).add(p) = name as *mut vbyte;
-                        p += 1;
+                        if p < room {
+                            *(hl_aptr::<*mut vbyte>(a)).add(p) = name as *mut vbyte;
+                            p += 1;
+                        }
                     }
                     let sup = (*tobj).super_;
                     if sup.is_null() {
@@ -3542,6 +3571,7 @@ pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
                     }
                     tobj = (*sup).__bindgen_anon_1.obj;
                 }
+                (*a).size = p as i32;
                 a
             }
             hl_type_kind_HVIRTUAL => {
@@ -3712,15 +3742,17 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
         loop {
             for i in 0..(*o).nproto as usize {
                 let p = (*o).proto.add(i);
-                if !overrides_inherited(o, (*p).pindex) {
+                if !overrides_inherited(o, (*p).pindex) && out < total as usize {
                     *(hl_aptr::<*const uchar>(a)).add(out) = (*p).name;
                     out += 1;
                 }
             }
             for i in 0..(*o).nfields as usize {
                 let f = (*o).fields.add(i);
-                *(hl_aptr::<*const uchar>(a)).add(out) = (*f).name;
-                out += 1;
+                if out < total as usize {
+                    *(hl_aptr::<*const uchar>(a)).add(out) = (*f).name;
+                    out += 1;
+                }
             }
             let sup = (*o).super_;
             if sup.is_null() {

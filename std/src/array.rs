@@ -147,6 +147,9 @@ pub unsafe extern "C" fn hlp_alloc_carray(at: *mut hl_type, size: i32) -> *mut s
             return ptr::null_mut();
         }
 
+        if (*at).kind == hl_type_kind_HOBJ {
+            crate::obj::pin_layout(at);
+        }
         let stride = (*rt).size as usize;
         // Upstream multiplies these as ints and hands the wrapped product to the
         // allocator, so an absurd size buys a small block and then writes past

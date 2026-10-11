@@ -34,8 +34,11 @@ class Show {
         var before = "note " + w.note + ",scale " + w.scale;
         w.note = "set";
         w.scale = 2.5;
+        Reflect.setField(w, "note", "viaReflect");
+        var names = Reflect.fields(w);
+        names.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
         w.extra += 10;
-        return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.note + "," + w.scale, "extra " + w.extra];
+        return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.note + "," + w.scale, "reflect " + Reflect.field(w, "note") + " " + names.join("/"), "extra " + w.extra];
     }
 
     public static function hot(w:Widget):Int

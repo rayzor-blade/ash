@@ -257,15 +257,20 @@ declared between the others in the new program is still put last in the running
 class, and the bodies that name the fields are renumbered to match. A field the
 new program no longer has stays in the class, unused: objects keep their value,
 the bodies that began before the reload can still read it, and a reload that
-declares it again finds it as it was. Only a class that nothing extends can
-change its fields, since the fields of a subclass follow its parent's, and a
-class cannot grow past the room its first objects were given, however many
-reloads add to it.
+declares it again finds it as it was. It also stays in the class's reflection
+(`Reflect.fields`, `Type.getInstanceFields`) and keeps its bytes of the spare
+room, so a program that renames a field over and over runs out of room, and a
+class that has dropped a field cannot gain a subclass until the program is
+restarted. Only a class that nothing extends can change its fields, since the
+fields of a subclass follow its parent's, and a class cannot grow past the room
+its first objects were given, however many reloads add to it.
 
 A constructor that sets the new field to a constant or null is accepted. One that
 sets it to anything else is refused, naming the field, because the object made
-before the reload would never get that value. Only the constructor's own body is
-read: a field that a method it calls sets is not seen. The exception is the backing
+before the reload would never get that value. A field that comes back after a
+reload dropped it is held to the same rule, since the objects built while it was
+gone hold null in it. Only the constructor's own body is read: a field that a
+method it calls sets is not seen. The exception is the backing
 field of an ashui `@:state`, named `<field>__state`, in a program built with
 `-D ashui_hot_reload`: its accessors make the signal when the field is null,
 and the program says so by having `ashui.ui.HotReload.stateOnFirstUse`.
@@ -280,7 +285,7 @@ is refused, on stderr, and the program goes on as it was:
 | `Class binds different statics; a static function was added or removed` | statics are fields of the `$Class` object, which is laid out like any |
 | `the statics of Name changed` | a class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, adds a field to that object, and nothing sets it up |
 | `field f of Name changed its type` | live objects have the field where it was, with the old size |
-| `Name gained f, and Sub extends it, so its fields would move` | the fields of a subclass follow its parent's |
+| `Name gained f, and Sub extends it, so its fields would move` (or `lost f`) | the fields of a subclass follow its parent's |
 | `Name gained f, and a CArray of it lays its objects out one after another` | the size of the class is the stride of the array |
 | `Name gained f, and an object made before the reload has N bytes where the class now needs M` | the spare room is used up; restart the program |
 | `Name.f is set by a constructor with something that is not a constant` | an object made before the reload would hold null in it |

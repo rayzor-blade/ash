@@ -13,7 +13,7 @@ class Item {
 class Widget extends Item {
     public var label:String;
     public var hits:Int;
-    public var note:String;
+    public var scale:Float;
 
     public function new(id:Int, label:String) {
         super(id);
@@ -29,20 +29,19 @@ class Widget extends Item {
 
 class Show {
     public static function render(w:Widget):Array<String> {
-        var before = "note " + w.note;
-        w.note = "set";
-        // The class is reflected on, and a field it gained is set by name.
-        Reflect.setField(w, "note", "viaReflect");
+        var before = "scale " + w.scale;
+        w.scale = 3.5;
+        // The field the class dropped is still there by name.
         var names = Reflect.fields(w);
         names.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
-        return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.note, "reflect " + Reflect.field(w, "note") + " " + names.join("/")];
+        return ["id " + w.id, "label " + w.label, "hits " + w.hit(), before, "after " + w.scale, "reflect " + Reflect.field(w, "note") + " " + names.join("/")];
     }
 
     public static function hot(w:Widget):Int
-        return w.id + w.hits;
+        return w.id + w.hits + Std.int(w.scale);
 
     public static function describe(w:Widget):String
-        return w.id + "," + w.label + "," + w.hits + "," + w.note;
+        return w.id + "," + w.label + "," + w.hits + "," + w.scale;
 
     // Touches every widget, which sit next to each other in memory, and counts
     // those whose neighbours' fields were written over.
@@ -50,10 +49,10 @@ class Show {
         var sum = 0;
         var bad = 0;
         for (m in many) {
-            m.note = "n" + m.id;
+            m.scale = m.id;
             if (m.label != "m" + (m.id - 10))
                 bad++;
-            sum += m.id + m.hits;
+            sum += m.id + m.hits + Std.int(m.scale);
         }
         return sum + " bad " + bad;
     }

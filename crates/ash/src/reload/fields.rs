@@ -125,10 +125,25 @@ fn same(a: &[HLObjField], b: &[HLObjField]) -> bool {
             .all(|(x, y)| x.name == y.name && x.type_.0 == y.type_.0)
 }
 
+/// A field as two programs name it: see [`identities`].
+type Identity = (String, usize, usize);
+
+/// What a reload leaves for the next one to know about the classes whose fields
+/// it changed.
+#[derive(Clone, Debug, Default)]
+pub struct Kept {
+    /// For each class that has grown, the smallest size an object of it was
+    /// allocated at, which it cannot grow past.
+    pub floors: HashMap<usize, i32>,
+    /// For each class, the fields it dropped and has not got back. They stay in
+    /// the class, and objects built since hold nothing in them.
+    ghosts: HashMap<usize, HashSet<Identity>>,
+}
+
 /// What each field of a list is called across two programs: its name, or for a
 /// field with none, which the cache of an interface a class implements is, its
 /// type and which of that type's unnamed fields it is.
-fn identities(fields: &[HLObjField]) -> Vec<(String, usize, usize)> {
+fn identities(fields: &[HLObjField]) -> Vec<Identity> {
     let mut unnamed: HashMap<usize, usize> = HashMap::new();
     fields
         .iter()
@@ -145,7 +160,7 @@ fn identities(fields: &[HLObjField]) -> Vec<(String, usize, usize)> {
 }
 
 /// A field as a message names it.
-fn shown(identity: &(String, usize, usize)) -> String {
+fn shown(identity: &Identity) -> String {
     if identity.0.is_empty() {
         "<interface>".to_string()
     } else {
@@ -262,9 +277,8 @@ fn initialised_by_a_computation(
 
 /// Put the field lists of the classes of `new`, which is on the types of
 /// `old` already, in the running order, and the bodies that name those fields
-/// to match. `floors` holds, for each class that has grown, the smallest
-/// size an object of it was allocated at, and gets the ones this reload
-/// needs; `room` is the spare bytes an object has, `pinned` the classes whose
+/// to match. `kept` holds what the reloads so far left about the classes, and
+/// gets what this one does; `room` is the spare bytes an object has, `pinned` the classes whose
 /// objects something lays out one after another at their size (`None` when
 /// that is not known), and `dropped` the types of `old` that `new` has only as
 /// placeholders.
@@ -274,7 +288,7 @@ fn initialised_by_a_computation(
 pub fn keep_order(
     old: &DecodedBytecode,
     new: &mut DecodedBytecode,
-    floors: &mut HashMap<usize, i32>,
+    kept: &mut Kept,
     room: usize,
     pinned: Option<&HashSet<usize>>,
     dropped: &[usize],
@@ -286,7 +300,9 @@ pub fn keep_order(
         let (Some(o), Some(n)) = (class(old, t), class(new, t)) else {
             continue;
         };
-        if same(&o.fields, &n.fields) {
+        // A class that has dropped a field is looked at even when the lists
+        // match: the new program may declare the field again.
+        if same(&o.fields, &n.fields) && !kept.ghosts.contains_key(&t) {
             continue;
         }
         let name = o.name.clone();
@@ -299,23 +315,38 @@ pub fn keep_order(
             ));
         }
         let (running, wanted) = (identities(&o.fields), identities(&n.fields));
-        let unique = |ids: &[(String, usize, usize)]| ids.iter().collect::<HashSet<_>>().len() == ids.len();
+        let unique = |ids: &[Identity]| ids.iter().collect::<HashSet<_>>().len() == ids.len();
         if !unique(&running) || !unique(&wanted) {
             return Err(format!("{name} has two fields of one name"));
         }
         // A field the new program no longer has stays where it is, unused: the
         // bodies that began before the reload may read it, and a later reload
         // that declares it again finds it with the value it had.
-        let mut gone: Vec<String> = Vec::new();
+        let known: HashSet<Identity> = kept.ghosts.get(&t).cloned().unwrap_or_default();
+        let mut gone: Vec<Identity> = Vec::new();
         for (f, id) in o.fields.iter().zip(&running) {
             match wanted.iter().position(|w| w == id) {
-                None => gone.push(shown(id)),
+                None => gone.push(id.clone()),
                 Some(at) if n.fields[at].type_.0 != f.type_.0 => {
-                    return Err(format!("field {} of {name} changed its type", f.name));
+                    return Err(if known.contains(id) {
+                        format!(
+                            "field {} of {name} changed its type, and the class still has the field it dropped",
+                            f.name
+                        )
+                    } else {
+                        format!("field {} of {name} changed its type", f.name)
+                    });
                 }
                 Some(_) => {}
             }
         }
+        // The fields the class dropped that the new program declares again.
+        let revived: Vec<(String, usize)> = wanted
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| known.contains(*id))
+            .map(|(at, id)| (shown(id), at))
+            .collect();
         // The running fields in their order, then the fields the new program
         // adds, in its order.
         let mut perm = Vec::with_capacity(n.fields.len());
@@ -338,7 +369,8 @@ pub fn keep_order(
         let what = {
             let mut parts = Vec::new();
             if !gone.is_empty() {
-                parts.push(format!("lost {}", gone.join(", ")));
+                let names: Vec<String> = gone.iter().map(shown).collect();
+                parts.push(format!("lost {}", names.join(", ")));
             }
             if !added.is_empty() {
                 let names: Vec<&str> = added.iter().map(|(n, _)| n.as_str()).collect();
@@ -420,7 +452,7 @@ pub fn keep_order(
                 _ => {}
             }
         }
-        let floor = *floors.entry(t).or_insert(before.size.saturating_add(spare));
+        let floor = *kept.floors.entry(t).or_insert(before.size.saturating_add(spare));
         if after.size > floor {
             return Err(format!(
                 "{name} {what}, and an object made before the reload has {floor} bytes where the class now needs {}",
@@ -429,9 +461,14 @@ pub fn keep_order(
         }
         // What an object built before the reload lacks cannot be made by a
         // computation in the constructor, which still names the fields as the
-        // new program numbers them.
+        // new program numbers them. A field the class had dropped is as
+        // missing from the objects built since.
         if let Some(ctor) = constructor(new, t) {
-            for (field, at) in &added {
+            let checked = added
+                .iter()
+                .map(|(field, at)| (field, *at, false))
+                .chain(revived.iter().map(|(field, at)| (field, *at, true)));
+            for (field, at, back) in checked {
                 let state = field.ends_with(LAZY_SUFFIX);
                 if state && lazy_state {
                     continue;
@@ -441,6 +478,10 @@ pub fn keep_order(
                         format!(
                             "{name}.{field} is a state field the program does not make on first use: build with -D ashui_hot_reload so a new @:state field is made on first use"
                         )
+                    } else if back {
+                        format!(
+                            "{name}.{field} is set by a constructor with something that is not a constant, and an earlier reload dropped the field, so objects built since hold null in it"
+                        )
                     } else {
                         format!(
                             "{name}.{field} is set by a constructor with something that is not a constant, which does not run for objects built before the reload"
@@ -448,6 +489,17 @@ pub fn keep_order(
                     });
                 }
             }
+        }
+        // The fields the class now lacks, and has dropped and not got back.
+        let mut ghosts = known;
+        ghosts.extend(gone);
+        for (_, at) in &revived {
+            ghosts.remove(&wanted[*at]);
+        }
+        if ghosts.is_empty() {
+            kept.ghosts.remove(&t);
+        } else {
+            kept.ghosts.insert(t, ghosts);
         }
         if perm.iter().enumerate().any(|(i, &p)| i != p) {
             moved.insert(t, (start, perm));
@@ -564,27 +616,27 @@ mod tests {
     }
 
     fn keep(old: &DecodedBytecode, new: &mut DecodedBytecode, room: usize) -> Result<(), String> {
-        keep_order(old, new, &mut HashMap::new(), room, Some(&HashSet::new()), &[])
+        keep_order(old, new, &mut Kept::default(), room, Some(&HashSet::new()), &[])
     }
 
     #[test]
     fn a_program_with_the_same_fields_is_left_alone() {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32)])]);
-        let floors = &mut HashMap::new();
-        keep_order(&old, &mut new, floors, 64, Some(&HashSet::new()), &[]).unwrap();
-        assert!(floors.is_empty());
+        let kept = &mut Kept::default();
+        keep_order(&old, &mut new, kept, 64, Some(&HashSet::new()), &[]).unwrap();
+        assert!(kept.floors.is_empty());
     }
 
     #[test]
     fn a_field_added_at_the_end_goes_there() {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32), ("p", PTR)])]);
-        let floors = &mut HashMap::new();
-        keep_order(&old, &mut new, floors, 64, Some(&HashSet::new()), &[]).unwrap();
+        let kept = &mut Kept::default();
+        keep_order(&old, &mut new, kept, 64, Some(&HashSet::new()), &[]).unwrap();
         assert_eq!(names(&new, 2), vec!["n", "p"]);
         // An instance is a header, an int and padding, 16 bytes, and 64 spare.
-        assert_eq!(floors[&2], 16 + 64);
+        assert_eq!(kept.floors[&2], 16 + 64);
     }
 
     #[test]
@@ -710,14 +762,14 @@ mod tests {
             class_type("A", None, &[("n", I32), ("m", PTR)]),
         ]);
         // Without the room the class's 24 bytes do not hold another reference.
-        let why = keep_order(&old, &mut new, &mut HashMap::new(), 0, Some(&HashSet::new()), &[2]).unwrap_err();
+        let why = keep_order(&old, &mut new, &mut Kept::default(), 0, Some(&HashSet::new()), &[2]).unwrap_err();
         assert!(why.contains("has 24 bytes where the class now needs 32"), "{why}");
         assert!(new.types[2].obj.is_none(), "the placeholder is put back");
         let mut new = program(vec![
             HLType::default(),
             class_type("A", None, &[("n", I32), ("m", PTR)]),
         ]);
-        keep_order(&old, &mut new, &mut HashMap::new(), 8, Some(&HashSet::new()), &[2]).unwrap();
+        keep_order(&old, &mut new, &mut Kept::default(), 8, Some(&HashSet::new()), &[2]).unwrap();
     }
 
     #[test]
@@ -801,22 +853,22 @@ mod tests {
         let fields = |n: usize| -> Vec<(&'static str, usize)> {
             ["a", "b", "c", "d", "e", "f", "g", "h"][..n].iter().map(|f| (*f, I32)).collect()
         };
-        let mut floors = HashMap::new();
+        let mut kept = Kept::default();
         let first = program(vec![class_type("A", None, &fields(1))]);
         let second = program(vec![class_type("A", None, &fields(3))]);
         let third = program(vec![class_type("A", None, &fields(6))]);
         let fourth = program(vec![class_type("A", None, &fields(7))]);
         // 16 bytes and 16 spare: 32.
         let mut next = second.clone();
-        keep_order(&first, &mut next, &mut floors, 16, Some(&HashSet::new()), &[]).unwrap();
-        assert_eq!(floors[&2], 32);
+        keep_order(&first, &mut next, &mut kept, 16, Some(&HashSet::new()), &[]).unwrap();
+        assert_eq!(kept.floors[&2], 32);
         // The running class is the 24 byte one now, but its objects are 32.
         let mut next = third.clone();
-        keep_order(&second, &mut next, &mut floors, 16, Some(&HashSet::new()), &[]).unwrap();
-        assert_eq!(floors[&2], 32);
+        keep_order(&second, &mut next, &mut kept, 16, Some(&HashSet::new()), &[]).unwrap();
+        assert_eq!(kept.floors[&2], 32);
         // Seven ints end at 36, which is 40 with padding.
         let mut next = fourth.clone();
-        let why = keep_order(&third, &mut next, &mut floors, 16, Some(&HashSet::new()), &[]).unwrap_err();
+        let why = keep_order(&third, &mut next, &mut kept, 16, Some(&HashSet::new()), &[]).unwrap_err();
         assert!(why.contains("has 32 bytes where the class now needs 40"), "{why}");
     }
 
@@ -1094,19 +1146,19 @@ mod tests {
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         // A reference after an int needs 8 bytes more than the 16 it has.
         let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", PTR)])]);
-        let why = keep_order(&old, &mut new, &mut HashMap::new(), 64, Some(&rows), &[]).unwrap_err();
+        let why = keep_order(&old, &mut new, &mut Kept::default(), 64, Some(&rows), &[]).unwrap_err();
         assert!(why.contains("A gained m, and a CArray of it"), "{why}");
         // An int fits the padding at the end of the class, and the size stays.
         let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", I32)])]);
-        keep_order(&old, &mut new, &mut HashMap::new(), 64, Some(&rows), &[]).unwrap();
+        keep_order(&old, &mut new, &mut Kept::default(), 64, Some(&rows), &[]).unwrap();
         // Reordering moves no object.
         let old = program(vec![class_type("A", None, &[("a", I32), ("b", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("b", I32), ("a", I32)])]);
-        keep_order(&old, &mut new, &mut HashMap::new(), 64, Some(&rows), &[]).unwrap();
+        keep_order(&old, &mut new, &mut Kept::default(), 64, Some(&rows), &[]).unwrap();
         // If the runtime cannot say, a change of size is refused.
         let old = program(vec![class_type("A", None, &[("n", I32)])]);
         let mut new = program(vec![class_type("A", None, &[("n", I32), ("m", PTR)])]);
-        let why = keep_order(&old, &mut new, &mut HashMap::new(), 64, None, &[]).unwrap_err();
+        let why = keep_order(&old, &mut new, &mut Kept::default(), 64, None, &[]).unwrap_err();
         assert!(why.contains("cannot say whether a CArray holds it"), "{why}");
     }
     /// Whether a reload that adds `m` is accepted when the constructor of the
@@ -1180,5 +1232,40 @@ mod tests {
             Opcode::Call1 { dst: Reg(4), fun: RefFun(9), arg0: Reg(2) },
             set_this(1, 1),
         ]));
+    }
+    /// A field the class dropped comes back: the objects built since hold
+    /// nothing in it, so the constructor is held to the rule for a new field.
+    #[test]
+    fn a_field_that_comes_back_is_checked_like_an_added_one() {
+        let call = || Opcode::Call1 { dst: Reg(1), fun: RefFun(9), arg0: Reg(2) };
+        let running = with_constructor(&[("n", I32), ("m", PTR)], vec![]);
+        let mut kept = Kept::default();
+        let mut dropped = with_constructor(&[("n", I32)], vec![]);
+        keep_order(&running, &mut dropped, &mut kept, 64, Some(&HashSet::new()), &[]).unwrap();
+        assert_eq!(names(&dropped, 2), vec!["n", "m"]);
+        let after_drop = kept.clone();
+        let try_back = |ctor: Vec<Opcode>, fields: &[(&str, usize)], kept: &mut Kept| {
+            let mut back = with_constructor(fields, ctor);
+            let outcome = keep_order(&dropped, &mut back, kept, 64, Some(&HashSet::new()), &[]);
+            (outcome, back)
+        };
+        // A constructor that builds it is refused.
+        let (outcome, _) = try_back(vec![call(), set_this(1, 1)], &[("n", I32), ("m", PTR)], &mut after_drop.clone());
+        let why = outcome.unwrap_err();
+        assert!(why.contains("A.m is set by a constructor"), "{why}");
+        assert!(why.contains("an earlier reload dropped the field"), "{why}");
+        // It cannot come back as something else.
+        let (outcome, _) = try_back(vec![], &[("n", I32), ("m", I32)], &mut after_drop.clone());
+        let why = outcome.unwrap_err();
+        assert!(why.contains("changed its type, and the class still has the field it dropped"), "{why}");
+        // A constant is fine, and then the field is an ordinary one again.
+        let (outcome, sets) = try_back(
+            vec![Opcode::Null { dst: Reg(1) }, set_this(1, 1)],
+            &[("n", I32), ("m", PTR)],
+            &mut kept,
+        );
+        outcome.unwrap();
+        let mut later = with_constructor(&[("n", I32), ("m", PTR)], vec![call(), set_this(1, 1)]);
+        keep_order(&sets, &mut later, &mut kept, 64, Some(&HashSet::new()), &[]).unwrap();
     }
 }

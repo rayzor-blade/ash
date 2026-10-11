@@ -284,9 +284,9 @@ struct ReloadContext {
     /// The first type whose class setup has not run to its end. The next
     /// reload sets up the classes from there on again.
     unset_from: Option<usize>,
-    /// For each class that has gained fields, the smallest size an object of
-    /// it was allocated at; a class cannot grow past it.
-    floors: HashMap<usize, i32>,
+    /// What the reloads so far left about the classes whose fields changed: the
+    /// size a class cannot grow past, and the fields it dropped.
+    kept: fields::Kept,
     /// The spare bytes every object is allocated with, which is what a class
     /// can grow into.
     object_room: usize,
@@ -295,7 +295,7 @@ struct ReloadContext {
 /// A program a reload is to apply, with what it takes the context to.
 struct Staged {
     bytecode: DecodedBytecode,
-    floors: HashMap<usize, i32>,
+    kept: fields::Kept,
 }
 
 /// Spare bytes in every object, for the fields a reload adds to a class.
@@ -406,7 +406,7 @@ pub fn init_reload_context(
         shared_runtime,
         staged: None,
         unset_from: None,
-        floors: HashMap::new(),
+        kept: fields::Kept::default(),
         object_room,
     });
 }
@@ -734,13 +734,13 @@ fn decode_next(
     running: &DecodedBytecode,
     room: &SharedRuntimeHandles,
     unset_from: Option<usize>,
-    floors: &mut HashMap<usize, i32>,
+    kept: &mut fields::Kept,
     object_room: usize,
 ) -> Result<DecodedBytecode, String> {
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
-    renumber(running, &mut bc, room, unset_from, floors, object_room)?;
+    renumber(running, &mut bc, room, unset_from, kept, object_room)?;
     if std::env::var_os("ASH_RELOAD_LOG").is_some() {
         eprintln!(
             "[hot-reload] read in {decoded:?}, put on the running numbering in {:?}",
@@ -759,7 +759,7 @@ fn renumber(
     bc: &mut DecodedBytecode,
     room: &SharedRuntimeHandles,
     unset_from: Option<usize>,
-    floors: &mut HashMap<usize, i32>,
+    kept: &mut fields::Kept,
     object_room: usize,
 ) -> Result<(), String> {
     let refuse = |why: String| format!("the program cannot reload in place: {why}");
@@ -767,7 +767,7 @@ fn renumber(
     fields::keep_order(
         running,
         bc,
-        floors,
+        kept,
         object_room,
         pinned_layouts(room).as_ref(),
         &retyped.dropped(),
@@ -803,13 +803,13 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     let ctx = guard
         .as_mut()
         .ok_or_else(|| "reload is not enabled for this program".to_string())?;
-    let mut floors = ctx.floors.clone();
+    let mut kept = ctx.kept.clone();
     let new_bytecode = decode_next(
         &ctx.bytecode_path,
         &ctx.old_bytecode,
         &ctx.shared_runtime,
         ctx.unset_from,
-        &mut floors,
+        &mut kept,
         ctx.object_room,
     )?;
     let diff = diff_bytecode(&ctx.old_bytecode, &new_bytecode);
@@ -819,7 +819,7 @@ pub fn stage_reload() -> Result<ReloadDiff, String> {
     if diff.has_changes() {
         ctx.staged = Some(Staged {
             bytecode: new_bytecode,
-            floors,
+            kept,
         });
         RELOAD_PENDING.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -861,22 +861,22 @@ fn inline_dependents(changed: &[usize]) -> Vec<usize> {
 }
 
 /// The program a reload applies: the staged one, else the file read
-/// again, with the floors it takes the context to.
+/// again, with what it takes the context to.
 fn next_program(ctx: &mut ReloadContext) -> anyhow::Result<Staged> {
     match ctx.staged.take() {
         Some(staged) => Ok(staged),
         None => {
-            let mut floors = ctx.floors.clone();
+            let mut kept = ctx.kept.clone();
             let bytecode = decode_next(
                 &ctx.bytecode_path,
                 &ctx.old_bytecode,
                 &ctx.shared_runtime,
                 ctx.unset_from,
-                &mut floors,
+                &mut kept,
                 ctx.object_room,
             )
             .map_err(anyhow::Error::msg)?;
-            Ok(Staged { bytecode, floors })
+            Ok(Staged { bytecode, kept })
         }
     }
 }
@@ -977,7 +977,7 @@ pub fn do_reload(
     let ctx = guard.as_mut()?;
     let Staged {
         bytecode: new_bytecode,
-        floors,
+        kept,
     } = match next_program(ctx) {
         Ok(staged) => staged,
         Err(e) => {
@@ -1081,7 +1081,7 @@ pub fn do_reload(
         ctx.unset_from.map_or(from, |t| t.min(from))
     });
     ctx.old_bytecode = new_bytecode.clone();
-    ctx.floors = floors;
+    ctx.kept = kept;
     Some(new_bytecode)
 }
 
@@ -1261,7 +1261,7 @@ mod tests {
         assert_eq!(slot_of(&running, "Base", "describe"), Some(-1));
         for next in ["v3", "v5", "v6", "v1"] {
             let mut bc = method_fixture(next);
-            renumber(&running, &mut bc, &room, None, &mut HashMap::new(), 0).unwrap();
+            renumber(&running, &mut bc, &room, None, &mut fields::Kept::default(), 0).unwrap();
             // Base.name was slot 0 and no program moves it.
             assert_eq!(slot_of(&bc, "Base", "name"), Some(0), "{next}");
             if next == "v3" {
@@ -1335,7 +1335,7 @@ mod tests {
         let room = unbounded_room();
         let running = ladder_fixture("v1");
         let mut v3 = ladder_fixture("v3");
-        renumber(&running, &mut v3, &room, None, &mut HashMap::new(), 0).unwrap();
+        renumber(&running, &mut v3, &room, None, &mut fields::Kept::default(), 0).unwrap();
         let kept = protos_of(&running, "B")
             .into_iter()
             .find(|p| p.0 == "h")
@@ -1369,15 +1369,15 @@ mod tests {
         let room = unbounded_room();
         let v1 = class_fixture("v1");
         let mut v2 = class_fixture("v2");
-        renumber(&v1, &mut v2, &room, None, &mut HashMap::new(), 0).unwrap();
+        renumber(&v1, &mut v2, &room, None, &mut fields::Kept::default(), 0).unwrap();
         assert!(v2.reload_init.is_some());
         // The same program again has nothing new to set up ...
         let mut again = class_fixture("v2");
-        renumber(&v2, &mut again, &room, None, &mut HashMap::new(), 0).unwrap();
+        renumber(&v2, &mut again, &room, None, &mut fields::Kept::default(), 0).unwrap();
         assert_eq!(again.reload_init, None);
         // ... unless the setup of what v2 added never finished.
         let mut again = class_fixture("v2");
-        renumber(&v2, &mut again, &room, Some(v1.types.len()), &mut HashMap::new(), 0).unwrap();
+        renumber(&v2, &mut again, &room, Some(v1.types.len()), &mut fields::Kept::default(), 0).unwrap();
         assert!(again.reload_init.is_some());
     }
 
@@ -1398,7 +1398,7 @@ mod tests {
         let mut sizes = Vec::new();
         for next in ["v2", "v3", "v2", "v1", "v3"] {
             let mut bc = load(next);
-            renumber(&running, &mut bc, &room, None, &mut HashMap::new(), 0).unwrap();
+            renumber(&running, &mut bc, &room, None, &mut fields::Kept::default(), 0).unwrap();
             for (i, f) in running.functions.iter().enumerate() {
                 assert_eq!(bc.functions[i].findex, f.findex, "{next}");
             }

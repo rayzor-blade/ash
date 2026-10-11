@@ -852,8 +852,9 @@ fn a_field_a_branch_sets_to_null_or_a_computation_is_refused() {
 }
 
 /// A field the next version drops stays in the class, unused: the widget
-/// keeps its value, the bodies of the new version do not read it, and a
-/// version that declares it again finds it as it was.
+/// keeps its value, the field after it is numbered as before in the bodies
+/// that began earlier, and a version that declares it again finds it as it
+/// was.
 #[test]
 fn a_field_dropped_stays_and_comes_back() {
     check_through(
@@ -868,13 +869,13 @@ fn a_field_dropped_stays_and_comes_back() {
             "fresh 2,f,0,null,0",
             "next",
             "reloaded",
-            "render id 1;label w;hits 2;note viaReflect;after viaReflect;reflect viaReflect hits/id/label/note/scale",
-            "hot 600",
-            "many 47850 bad 0",
-            "fresh 2,f,0,null",
+            "render id 1;label w;hits 2;scale 2.5;after 3.5;reflect viaReflect hits/id/label/note/scale",
+            "hot 1200",
+            "many 95700 bad 0",
+            "fresh 2,f,0,0",
             "next",
             "reloaded",
-            "render id 1;label w;hits 3;note viaReflect,scale 2.5;after viaReflect,2.5;reflect viaReflect hits/id/label/note/scale",
+            "render id 1;label w;hits 3;note viaReflect,scale 3.5;after viaReflect,2.5;reflect viaReflect hits/id/label/note/scale",
             "hot 1200",
             "many 95700 bad 0",
             "fresh 2,f,0,null,0",

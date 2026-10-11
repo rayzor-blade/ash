@@ -83,7 +83,7 @@ class TestHotReloadClasses {
                     reloaded = true;
                     break;
                 }
-                Sys.sleep(0.02);
+                Sys.sleep(0.001);
             }
             Sys.println(reloaded ? "reloaded" : "no-reload");
             Sys.println("render " + panel.render().join(","));

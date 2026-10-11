@@ -36,7 +36,7 @@ class TestHotReloadClosures {
                 reloaded = true;
                 break;
             }
-            Sys.sleep(0.02);
+            Sys.sleep(0.001);
         }
         Sys.println(reloaded ? "reloaded" : "no-reload");
         // Called from this frame, which began before the reload.

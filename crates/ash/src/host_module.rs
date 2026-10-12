@@ -239,6 +239,9 @@ impl DecodedBytecode {
     /// registered twice, a program-declared native whose signature disagrees
     /// with the registration, or a type name nothing declares.
     pub fn register_host_module(&mut self, m: &HostModule) -> Result<()> {
+        if !self.generated_helpers.is_empty() {
+            bail!("register host modules before generated helper preparation");
+        }
         let hl_class = self.type_index_of("hl.Class").ok_or_else(|| {
             anyhow!("cannot register host module `{}`: the program has no hl.Class type, which every class companion extends", m.lib)
         })?;

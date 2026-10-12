@@ -75,6 +75,9 @@ const VERSION: &str = env!("ASH_BUILD_VERSION");
         .multiple(true)
 ))]
 struct Cli {
+    /// Development-only generated scalar helper registration/dispatch probe.
+    #[arg(long, hide = true, conflicts_with_all = ["hot_reload", "build", "emit_aot"])]
+    dev_generated_helper: Option<usize>,
     /// Work with a WebAssembly module instead of running bytecode.
     #[command(subcommand)]
     command: Option<Command>,
@@ -1130,7 +1133,13 @@ fn run() -> Result<()> {
     // wrong — see TieredSharedCtx::bytecode.
     let bytecode = {
         let _p = ash_core::profile::scope("decode bytecode");
-        std::sync::Arc::new(BytecodeDecoder::decode(&hl_path)?)
+        let decoded = BytecodeDecoder::decode(&hl_path)?;
+        let decoded = if let Some(source) = cli.dev_generated_helper {
+            ash_core::generated::probe(&decoded, source)?
+        } else {
+            decoded
+        };
+        std::sync::Arc::new(decoded)
     };
 
     if let Some(out) = cli.emit_optimized.clone() {

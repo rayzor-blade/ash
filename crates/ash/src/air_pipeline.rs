@@ -1114,7 +1114,7 @@ pub fn hot_reload() -> bool {
     HOT_RELOAD.load(std::sync::atomic::Ordering::Acquire)
 }
 
-type CacheKey = (usize, i32, AirConfigKey);
+type CacheKey = (usize, u64, i32, AirConfigKey);
 
 static OPTIMIZED: OnceLock<Mutex<crate::air_cache::BodyCache<CacheKey, Optimized>>> = OnceLock::new();
 
@@ -1143,7 +1143,12 @@ pub fn optimized_with_config(
     f: &HLFunction,
     cfg: AirConfigKey,
 ) -> Result<Arc<Optimized>, PipelineError> {
-    let key = (m.bc as *const DecodedBytecode as usize, f.findex, cfg);
+    let key = (
+        m.bc as *const DecodedBytecode as usize,
+        crate::generated::generation(m.bc),
+        f.findex,
+        cfg,
+    );
     if let Some(hit) = optimized_cache()
         .lock()
         .expect("air cache poisoned")

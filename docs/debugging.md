@@ -242,6 +242,63 @@ Skipped bodies and exhausted budgets are reported explicitly; a partial
 survey is not evidence that the remaining module has no candidates. No normal
 compilation path runs this analysis yet.
 
+### Generated helper preparation
+
+Git-bug `8599508` adds `ash_core::generated::prepare`. It prepares a fresh
+`DecodedBytecode` before an interpreter, compiler, function table or AIR cache
+can reference it. This infrastructure does not enable tree fusion.
+
+The lifecycle is: decode and register host modules; declare helpers; reserve
+all helper IDs; build and verify their AIR; serialize and append their bodies;
+publish the module to the runtime. Original function IDs remain unchanged.
+Keys sort by pass name/version, source function IDs and specialization values.
+Identical declarations share one helper; conflicting signatures fail. Every
+builder receives the complete reservation map, so recursive references resolve
+before bodies are installed. Registration failure leaves the input unchanged.
+
+The initial supported bodies have i32 arguments, results and locals, scalar
+arithmetic, branches and direct calls with checked signatures. Reference
+values, natives, exception regions, pinned cells, SIMD scratch and inlined
+debug frames are refused. Limits default to 32 helpers, 2,048 instructions per
+body, 16,384 serialized instructions in total and 16 MiB of AIR. Builders are
+compiler code and must also bound their own construction work. Private integer
+constants are rebased into one shared module pool. Source positions become
+ordinary per-op debug entries; helper names identify the generating pass.
+
+Helpers use ordinary function dispatch, reachability, serialization and the
+shared AIR pipeline. The interpreter and native tiers optimize the same
+registered body under their existing configurations; OSR continues to use the
+interpreter configuration and its canonical PC/register mapping. There is no
+per-tier helper generation. A fresh preparation has a unique generation in
+the AIR cache key, including when a module's memory address is reused.
+Deduplication never crosses module snapshots. After any code, type or host
+metadata change, rebuild from original input. Host registration on a prepared
+module and in-place hot reload are refused; dependency-aware invalidation is
+not implemented. Public module fields must remain immutable after preparation,
+as they must after runtime tables are created.
+
+For development, `--dev-generated-helper INDEX` clones one scalar function
+into a registered helper, redirects its self calls, and leaves a forwarding
+body at its original ID. It tests registration and dispatch; it changes debug
+stack shape and is not an optimization. It is hidden from normal CLI help and
+conflicts with `--hot-reload`, `--build` and `--emit-aot`. To test serialization
+and AOT, first emit the prepared module:
+
+```sh
+ash --dev-generated-helper INDEX --emit-optimized prepared.hl input.hl
+ash --build prepared prepared.hl
+ash --target wasm32-wasip1 --emit-aot prepared.o prepared.hl
+```
+
+AOT decodes separately for its target ABI, so it consumes the emitted helpers
+as ordinary functions. The `.hl` encoder already drops debug information;
+helper IDs, signatures, calls and bodies survive. Registration metadata and
+generation numbers are process-local, and do not enter the file. These helpers
+carry no runtime-dependent specialization assumptions. Future allocation
+elision must establish its policy separately and refuse serialization if that
+policy cannot travel with the program. A structural tree candidate alone is
+still insufficient authorization.
+
 ## Bisecting a wrong answer
 
 Cheapest first:

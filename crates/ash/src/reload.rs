@@ -35,12 +35,14 @@ pub struct ReloadDiff {
     /// True if a class both programs have declares other methods, or gives
     /// them other slots, though no function changed: a removed override is one.
     pub methods_changed: bool,
+    /// Generated helper dependencies cannot yet be invalidated in active frames.
+    pub generated_helpers_present: bool,
 }
 
 impl ReloadDiff {
-    /// Returns true if this diff is safe to apply (no layout changes, no global count changes).
+    /// Whether layouts, global slots and generated dependencies permit reload.
     pub fn is_safe(&self) -> bool {
-        !self.type_layout_changed && !self.globals_count_changed
+        !self.type_layout_changed && !self.globals_count_changed && !self.generated_helpers_present
     }
 
     /// Returns true if there are any actual changes to apply.
@@ -89,6 +91,8 @@ pub fn diff_bytecode(old: &DecodedBytecode, new: &DecodedBytecode) -> ReloadDiff
         type_layout_changed,
         globals_count_changed,
         methods_changed,
+        generated_helpers_present: !old.generated_helpers.is_empty()
+            || !new.generated_helpers.is_empty(),
     }
 }
 
@@ -426,6 +430,9 @@ fn decode_as(path: &std::path::Path, like: &DecodedBytecode) -> anyhow::Result<D
 /// running program's slots, by `remap_globals`, and the functions on its
 /// numbering, by `remap_functions`.
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
+    if diff.generated_helpers_present {
+        return Some("generated helpers require a fresh module; hot reload invalidation is unsupported".into());
+    }
     // LLVM can copy this exact stdlib constructor into an active frame.
     // Entry-point invalidation cannot update that frame, so keep this body
     // fixed for the entire hot-reload session, including during compilation.
@@ -751,6 +758,9 @@ fn decode_next(
     kept: &mut fields::Kept,
     object_room: usize,
 ) -> Result<DecodedBytecode, String> {
+    if !running.generated_helpers.is_empty() {
+        return Err("generated helpers require a fresh module; hot reload invalidation is unsupported".into());
+    }
     let started = std::time::Instant::now();
     let mut bc = decode_as(path, running).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = started.elapsed();
@@ -1472,6 +1482,7 @@ mod tests {
             type_layout_changed: false,
             globals_count_changed: false,
             methods_changed: false,
+            generated_helpers_present: false,
         };
         let why = refusal(&old, &old, &diff).unwrap();
         assert!(why.contains("BytesData constructor"), "{why}");

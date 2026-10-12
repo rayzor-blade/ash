@@ -1409,6 +1409,9 @@ pub fn decode_report(bc: &DecodedBytecode) -> Vec<String> {
 
 #[derive(Default, Clone)]
 pub struct DecodedBytecode {
+    /// Helpers registered before runtime tables/caches are created. Rebuild
+    /// from original input after code, type or host metadata changes.
+    pub generated_helpers: Vec<crate::generated::Registered>,
     pub ints: Vec<i32>,
     pub floats: Vec<f64>,
     pub strings: Vec<String>,

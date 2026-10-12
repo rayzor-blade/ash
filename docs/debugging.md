@@ -60,6 +60,7 @@ being taken:
 | `ASH_PROFILE_OUT` | write the profile to a file instead of stderr |
 | `ASH_INLINE_ALLOC` | `0` makes compiled code call the runtime for every allocation instead of bumping the thread's region inline. Safe, slower |
 | `ASH_SROA_WHY` | `1` reports why each allocation the optimiser looked at was kept in memory, including ash-simd slots |
+| `ASH_TREE_FUSION_SURVEY` | `only` reports recursive tree producer/consumer candidates and blockers, then exits without executing the program |
 | `ASH_AIR_CACHE_STATS` | report live canonical AIR storage, bounded strong-cache residency, hits, misses and evictions at exit (conservative owned-storage bytes, not RSS) |
 | `ASH_DECODE_STATS` | `1` reports at exit how many function bodies the run decoded. The decoder checks every body at load, then leaves it encoded until something reads it: most functions a `.hl` carries never run |
 | `ASH_DECODE_EAGER` | `1` keeps every function body decoded from load instead. Safe to run with; for comparing memory |
@@ -196,6 +197,50 @@ loop headers whether the interpreter could hand the running frame to compiled
 code and, if not, what refused it or declined the entry, and
 `ASH_VERIFY_OSR=only` surveys a whole program's loops the same way without
 running it.
+
+### Recursive tree allocation candidates
+
+```sh
+ASH_TREE_FUSION_SURVEY=only target/debug/ash --quiet \
+  crates/ash/test/tests/bench_binary_trees.hl
+```
+
+This is the analysis checkpoint of git-bug `b002f3f` / `05ec58f`; it does not
+enable fusion or reduce allocations. It inspects pre-inlining AIR so the
+producer and consumer call boundaries are still visible. The unchanged
+binary-trees fixture reports three structural candidates in function 25
+(stretch tree and both inner-loop trees), producer 24 / consumer 23. The
+long-lived tree is refused because its use is delayed.
+
+The first supported pattern has a signed i32 depth guard, self recursion with
+`depth - 1` only when depth is positive, a fresh root initialized exactly once,
+unique recursive children, and a scalar fold visiting every child once.
+Integer add/subtract/multiply and bitwise operations retain wrapping semantics;
+division, shifts, casts, floats, unknown calls, mutation, identity observations,
+traps, and mutual recursion are conservatively refused. Constructors must be
+straight-line initialization helpers. Unused loop phi cycles do not escape;
+observed phis, additional receiver uses, and intervening effects do.
+
+These restrictions address evaluation order: construction originally finishes
+before the fold, while a fused helper would interleave them. The accepted
+scalar operations cannot throw, the depth proof establishes termination, and
+the field/child proof rules out null reads. A future rewrite must preserve the
+scalar computations and their wrapping semantics; allocation, stack exhaustion
+and GC observability still require an explicit runtime contract.
+
+`structural-candidate` is conditional evidence, not rewrite authorization.
+Ash deliberately reports two unresolved contracts: allocation elision and
+code/layout lifetime. A bytecode class declaration cannot certify the absence
+of host tails/drop hooks or custom allocator effects for the lifetime of
+generated code. Future integration must establish those facts or guard them
+and invalidate helpers on code, layout, or host-policy changes. It must also
+define permitted allocation/GC/OOM observability and preserve safepoints and
+rooting for any retained objects. The survey does not cache executable proofs.
+
+The survey bounds body size, symbolic steps, candidate sites and module size.
+Skipped bodies and exhausted budgets are reported explicitly; a partial
+survey is not evidence that the remaining module has no candidates. No normal
+compilation path runs this analysis yet.
 
 ## Bisecting a wrong answer
 

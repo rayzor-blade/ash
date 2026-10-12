@@ -364,6 +364,96 @@ impl<'b> ModuleInfo for AshModule<'b> {
     }
 }
 
+impl air::v2::tree_fusion::TreeModule for AshModule<'_> {
+    fn signature(&self, findex: usize) -> Option<(Vec<TypeRef>, TypeRef)> {
+        let f = self.function(findex)?;
+        self.bc.types.get(f.type_.0)?.fun.as_ref()?;
+        Some(AshModule::signature(self, f.type_.0))
+    }
+
+    fn is_i32(&self, ty: TypeRef) -> bool {
+        self.bc
+            .types
+            .get(ty.0 as usize)
+            .is_some_and(|t| t.kind == crate::hl::hl_type_kind_HI32)
+    }
+
+    fn is_void(&self, ty: TypeRef) -> bool {
+        self.bc
+            .types
+            .get(ty.0 as usize)
+            .is_some_and(|t| t.kind == crate::hl::hl_type_kind_HVOID)
+    }
+
+    fn plain_fields(&self, ty: TypeRef) -> Option<Vec<TypeRef>> {
+        let t = self.bc.types.get(ty.0 as usize)?;
+        if t.kind != crate::hl::hl_type_kind_HOBJ {
+            return None;
+        }
+        let obj = t.obj.as_ref()?;
+        // Inherited slots and bound closures need their own layout and
+        // initialization proofs. Never infer the host's allocation policy
+        // from these bytecode declarations: TreeModule's defaults stay unknown.
+        if obj.super_.is_some() || !obj.bindings.is_empty() || obj.fields.len() > 32 {
+            return None;
+        }
+        Some(
+            obj.fields
+                .iter()
+                .map(|f| TypeRef(f.type_.0 as u32))
+                .collect(),
+        )
+    }
+}
+
+/// Explicit diagnostic only. Raw AIR preserves producer/consumer boundaries
+/// that recursive inlining obscures. The survey never feeds optimization or
+/// caches a rewrite authorization; host/layout lifetime contracts are unknown.
+pub fn tree_fusion_report(bc: &DecodedBytecode) -> Vec<String> {
+    use air::v2::tree_fusion::{Limits, survey};
+    let module = AshModule::new(bc);
+    let limits = Limits::default();
+    let mut out = vec![
+        "analysis only; no executable changes; self recursion supported, mutual recursion refused"
+            .into(),
+    ];
+    let mut scanned = 0;
+    let mut candidates = 0;
+    let mut skipped = 0;
+    let mut truncated_callers = 0;
+    for f in bc.functions.iter().take(4096) {
+        if f.op_count() > limits.body_ops || f.regs.len() > limits.body_ops * 8 {
+            skipped += 1;
+            continue;
+        }
+        let Some(ir) = module.lowered_body(f.findex as usize) else {
+            skipped += 1;
+            continue;
+        };
+        scanned += 1;
+        let result = survey(&module, &ir, limits);
+        if result.truncated {
+            truncated_callers += 1;
+            out.push(format!(
+                "caller={} survey budget exhausted; results incomplete",
+                f.findex
+            ));
+        }
+        for site in result.sites {
+            let state = if site.shape.is_some() {
+                candidates += 1;
+                "structural-candidate"
+            } else {
+                "refused"
+            };
+            out.push(format!("caller={} block={} instruction={} producer={} consumer={:?} {state} shape={:?} blockers={:?}",
+                f.findex, site.block.0, site.instruction, site.producer, site.consumer, site.shape, site.blockers));
+        }
+    }
+    out.push(format!("scanned={scanned} structural_candidates={candidates} skipped_bodies={skipped} truncated_callers={truncated_callers} module_truncated={}", bc.functions.len() > 4096));
+    out
+}
+
 impl AshModule<'_> {
     /// The standard BytesData wrapper's entire constructor is two field
     /// writes. It can be copied into a reloadable LLVM caller only while its

@@ -1234,6 +1234,13 @@ fn run() -> Result<()> {
             }
         }
     }
+    if std::env::var("ASH_TREE_FUSION_SURVEY").as_deref() == Ok("only") {
+        for line in ash_core::air_pipeline::tree_fusion_report(&bytecode) {
+            eprintln!("[tree-fusion] {line}");
+        }
+        return Ok(());
+    }
+
     // `ASH_VERIFY_AIR=only` pushes every function through the AIR v2 pipeline
     // and reports what round-trips; `ASH_VERIFY_AIR=dump:<findex>` prints one
     // function's IR before and after optimization, which is how a pass that

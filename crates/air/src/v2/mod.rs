@@ -111,6 +111,7 @@ pub mod module;
 pub mod passes;
 pub mod positions;
 pub mod serialize;
+pub mod tree_fusion;
 pub mod vectorize;
 pub mod verify;
 

@@ -62,6 +62,83 @@ different bugs.
 
 **`GC`** — collections, with `--gc-stats`. The JSON also carries reclaimed
 blocks, live blocks, allocated MB and pause times from ash's own report.
+The allocation unit is MiB despite the runtime's `MB` suffix. With TLABs
+enabled this counts capacity handed out at region refill, not exact bytes
+allocated per object. Small measurement windows can report zero while
+objects are allocated; see git-bug `7e9d728`. It is cumulative allocation
+pressure, distinct from live memory and peak RSS.
+
+The instrumented process is checked against the same correctness expectation
+as the timed processes. Incorrect, failed, or timed-out diagnostics fail the
+row and supply no GC/RSS counters. `--ash-base` gets its own checked diagnostic
+run under `base.instrumented`; those runs remain outside timed samples.
+`--diagnostics-dir DIR` retains their stdout/stderr, including tier logs.
+CI keeps these files with the benchmark artifacts.
+When present, `tier_installs[].installed_at_run_ms` records the runtime's
+installation timestamp separately from the compilation duration. Installation
+does not prove that the body was entered; use OSR/transfer logs as well.
+
+`--ash PATH` selects an explicit executable. JSON records SHA-256 and size
+for both executables, each bytecode input, and its main Haxe source when
+available. The checkout revision alone does not identify a previously built
+binary or its embedded runtime.
+
+### Binary-tree allocation investigation
+
+Git-bug `b002f3f` tracks generic allocation elimination; `ab70136` tracks the
+baseline. Keep `BenchBinaryTrees.hx` and `bench_binary_trees.hl` unchanged:
+depth 16, the existing iterations, and checksum `-104864`.
+
+```sh
+./scripts/ash_bench.py --ash target/release/ash \
+  --benchmarks binary_trees --modes hybrid-auto --iterations 7 --warmups 1 \
+  --gc-stats --tier-log --diagnostics-dir /tmp/trees-baseline/logs \
+  --out-json /tmp/trees-baseline/hybrid.json
+```
+
+For a later comparison, add `--ash-base PATH --base-commit REV`; the runner
+interleaves clean head/base processes on the same host. Keep each binary's
+build revision, toolchain, and build commands alongside the result. AOT is
+a separate control; hybrid must benefit during the actual workload, including
+startup and promotion. Local Mac results are not comparable to CI timings.
+
+The source constructs `2^(d+1)-1` nodes per depth-d tree, with
+`2 * 2^(20-d)` trees at each even depth from 4 through 16, plus a depth-17
+stretch tree and a depth-16 long-lived tree: 29,578,590 nodes in total.
+At 32 aligned bytes per node on a 64-bit target this is 946,514,880 bytes
+(902.67 MiB) before optimization and other runtime allocations. This is a
+source-level model, not an exact prediction of the region counter: existing
+scalar replacement already removes some objects. The retained depth-16 tree
+alone is 131,071 nodes, approximately 4 MiB.
+
+Capture static allocation evidence separately from execution:
+
+```sh
+ASH_VERIFY_AIR=only target/release/ash --quiet crates/ash/test/tests/bench_binary_trees.hl
+ASH_SROA_WHY=1 ASH_VERIFY_AIR=dump:24 target/release/ash --quiet \
+  crates/ash/test/tests/bench_binary_trees.hl 2>/tmp/trees-builder.air
+ASH_SROA_WHY=1 ASH_VERIFY_AIR=dump:25 target/release/ash --quiet \
+  crates/ash/test/tests/bench_binary_trees.hl 2>/tmp/trees-main.air
+```
+
+Indices 24/25 refer to the current fixture's builder/main; verify them against
+the input and debug positions. These dumps show the diagnostic O3 pipeline,
+not a count of dynamically allocated objects or proof of which body ran in a
+particular tier. Returned roots and child stores currently block local SROA;
+the immediate producer-consumer cases require analysis across those calls.
+
+The [2026-10-12 baseline](baselines/binary-trees-allocation-2026-10-12.json)
+contains input/binary hashes, toolchains, checked hybrid/AOT runs, diagnostic
+controls, static AIR evidence, and the historical CI artifact with its limits.
+Hybrid and AOT report 900.1 MiB; disabling AIR inlining reports 902.7 MiB;
+normal optimization with TLABs disabled reports 900.0 MiB. Every completed
+execution returns `-104864`. The static O3 model removes 87,378 roots (one
+positive-item root per inner iteration, plus stretch and long-lived roots),
+leaving 900.0002 MiB of tree storage before other runtime allocations. These
+controls reconcile the rounded allocation figures without treating them as an
+exact object counter. TLAB-disabled runs change collector behavior and are
+accounting controls only. The local hybrid timings were noisy (16.5% relative
+standard deviation); this checkpoint makes no speedup claim.
 
 **`NOTE`** — which accepted checksum came back, or the failure reason.
 

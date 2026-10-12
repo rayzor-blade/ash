@@ -17,6 +17,7 @@ See bench/README.md for what the metrics mean and why the numbers move.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 
 import os
@@ -106,6 +107,13 @@ def git_info(repo_root: pathlib.Path) -> dict:
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "dirty": bool(git("status", "--porcelain")),
     }
+
+
+def file_identity(path: pathlib.Path) -> dict:
+    """Content identity, independent of checkout revision or build timestamp."""
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest}
 
 
 def system_info() -> dict:
@@ -353,11 +361,13 @@ def parse_tier_installs(stderr: str) -> list[dict]:
     for line in stderr.splitlines():
         m = TIER_INSTALL_RE.match(line.strip())
         if m:
+            installed = re.search(r"\bt=([\d.]+)ms\b", line)
             out.append(
                 {
                     "findex": int(m.group(1)),
                     "tier": m.group(2),
                     "compile_ms": float(m.group(3)) if m.group(3) else None,
+                    "installed_at_run_ms": float(installed.group(1)) if installed else None,
                 }
             )
     return out
@@ -561,6 +571,7 @@ class Bench:
         if not self.hl_name:
             raise SystemExit(f"bench {self.name}: no hl file")
         self.hl_path: pathlib.Path = (tests_dir / self.hl_name).resolve()
+        self.source_path = tests_dir / (raw["main"] + ".hx") if raw.get("main") else None
 
         self.expectation: str = raw.get("expectation") or base.get(
             "expectation", "exact"
@@ -851,7 +862,8 @@ def resolve_reference(
     return Reference("interp", res.stdout, res.returncode)
 
 
-def run_instrumented(mode: Mode, bench: Bench, binaries: dict, args, cwd: pathlib.Path):
+def run_instrumented(mode: Mode, bench: Bench, binaries: dict, args, cwd: pathlib.Path,
+                     ref: Reference | None, variant: str = "head"):
     """One extra run that collects counters and peak RSS.
 
     Separate from the timed runs on purpose. --jit-log and ASH_GC_STATS both
@@ -870,12 +882,37 @@ def run_instrumented(mode: Mode, bench: Bench, binaries: dict, args, cwd: pathli
         build_env(args, instrumented=True, bench=bench, mode=mode),
         bench.timeout_secs * args.timeout_scale,
     )
+    status = status_for(res)
+    checksum = None
+    if status == STATUS_OK:
+        ok, detail, checksum = judge(bench, res, ref)
+        if not ok:
+            status = STATUS_INVALID
+    else:
+        detail = failure_detail(res)
+    logs = None
+    if args.diagnostics_dir:
+        directory = pathlib.Path(args.diagnostics_dir).resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        stem = re.sub(r"[^a-zA-Z0-9_.-]", "_", f"{bench.name}-{mode.name}-{variant}")
+        logs = {}
+        for channel in ("stdout", "stderr"):
+            path = directory / f"{stem}.{channel}"
+            path.write_text(getattr(res, channel), encoding="utf-8")
+            logs[channel] = str(path)
+    accepted = status == STATUS_OK
     return {
-        "peak_rss_bytes": parse_rss_bytes(res.stderr) if wrapper else None,
-        "tiered": parse_tiered(res.stderr),
-        "tier_installs": parse_tier_installs(res.stderr),
-        "gc": parse_gc(res.stderr) if args.gc_stats else None,
-        "instrumented_ok": res.ok,
+        "command": cmd,
+        "status": status,
+        "detail": detail,
+        "checksum": checksum,
+        "logs": logs,
+        # Never publish counters from a fast but wrong instrumented run.
+        "peak_rss_bytes": parse_rss_bytes(res.stderr) if accepted and wrapper else None,
+        "tiered": parse_tiered(res.stderr) if accepted else None,
+        "tier_installs": parse_tier_installs(res.stderr) if accepted else [],
+        "gc": parse_gc(res.stderr) if accepted and args.gc_stats else None,
+        "instrumented_ok": accepted,
     }
 
 
@@ -1036,11 +1073,23 @@ def run_one(
         if not record["output_stable"]:
             record["detail"] += " [WARNING: output varied across runs]"
 
-    inst = run_instrumented(mode, bench, binaries, args, cwd)
+    inst = run_instrumented(mode, bench, binaries, args, cwd, ref)
+    record["instrumented"] = inst
     record["peak_rss_bytes"] = inst["peak_rss_bytes"]
     record["tiered"] = inst["tiered"]
     record["tier_installs"] = inst["tier_installs"]
     record["gc"] = inst["gc"]
+    if not inst["instrumented_ok"] and record["status"] == STATUS_OK:
+        record["status"] = inst["status"]
+        record["detail"] = "instrumented run: " + inst["detail"]
+    if base and base["status"] == STATUS_OK:
+        inst_base = run_instrumented(
+            mode, bench, {**binaries, "ash": binaries["ash-base"]}, args, cwd, ref, "base"
+        )
+        base["instrumented"] = inst_base
+        if not inst_base["instrumented_ok"]:
+            base["status"] = inst_base["status"]
+            base["detail"] = "instrumented run: " + inst_base["detail"]
     return record
 
 
@@ -1424,6 +1473,9 @@ def parse_args(argv=None):
         help="multiply every per-run timeout by this (default 1.0)",
     )
     p.add_argument("--gc-stats", action="store_true", help="ASH_GC_STATS=1")
+    p.add_argument("--ash", default=None, help="explicit ash executable (otherwise newest build)")
+    p.add_argument("--diagnostics-dir", default=None,
+                   help="retain stdout/stderr from each separately checked instrumented run")
     p.add_argument("--tier-log", action="store_true", help="ASH_TIER_LOG=1")
     p.add_argument("--gc-heap-mb", type=int, default=None, help="ASH_GC_HEAP_MB")
     p.add_argument(
@@ -1565,7 +1617,9 @@ def main(argv=None) -> int:
     # One binary serves every mode, including the untimed interp reference
     # run that `exact` benchmarks are judged against.
     binaries: dict[str, pathlib.Path] = {}
-    found = find_binary(repo_root, "ash")
+    found = pathlib.Path(args.ash).resolve() if args.ash else find_binary(repo_root, "ash")
+    if found is not None and not (found.is_file() and os.access(found, os.X_OK)):
+        raise SystemExit(f"--ash {found} is not an executable file")
     if found is not None:
         binaries["ash"] = found
 
@@ -1583,6 +1637,18 @@ def main(argv=None) -> int:
         if not (base.is_file() and os.access(base, os.X_OK)):
             raise SystemExit(f"--ash-base {base} is not an executable file")
         binaries["ash-base"] = base
+
+    # Capture before execution; a checkout commit does not establish which
+    # runtime is embedded in an old locally built binary.
+    binary_identities = {name: file_identity(path) for name, path in binaries.items()}
+    workload_identities = {
+        b.name: {
+            "bytecode": file_identity(b.hl_path),
+            "source": file_identity(b.source_path)
+            if b.source_path and b.source_path.is_file() else None,
+        }
+        for b in benches if b.hl_path.is_file()
+    }
 
     oracle = load_oracle(pathlib.Path(args.oracle).resolve() if args.oracle else None)
 
@@ -1717,6 +1783,8 @@ def main(argv=None) -> int:
             "sequential": True,
         },
         "binaries": {k: str(v) for k, v in binaries.items()},
+        "binary_identities": binary_identities,
+        "workload_identities": workload_identities,
         "results": results,
     }
 
@@ -1765,11 +1833,11 @@ def main(argv=None) -> int:
             for n in notes:
                 print(f"note: {n}")
 
-    # Correctness is always a gate: an INVALID run means a configuration
-    # produced the wrong answer, which no benchmark result can excuse.
-    invalid = [r for r in results if r["status"] == STATUS_INVALID]
-    for r in invalid:
-        regressions.append(f"{r['benchmark']}/{r['mode']}: INVALID — {r['detail']}")
+    # Missing or failed evidence is a gate too. In particular an instrumented
+    # process that fails after clean timings must not leave CI green.
+    failed = [r for r in results if r["status"] in (STATUS_INVALID, STATUS_FAIL, STATUS_TIMEOUT)]
+    for r in failed:
+        regressions.append(f"{r['benchmark']}/{r['mode']}: {r['status']} — {r['detail']}")
 
     if args.min_speedup > 0:
         by_bench: dict[str, dict[str, dict]] = {}
@@ -1800,7 +1868,7 @@ def main(argv=None) -> int:
         for r in regressions:
             print(f"  {r}")
         exit_code = 0 if args.no_gate else 1
-    elif args.baseline or args.min_speedup > 0 or invalid:
+    elif args.baseline or args.min_speedup > 0:
         print()
         print("gate: pass")
 

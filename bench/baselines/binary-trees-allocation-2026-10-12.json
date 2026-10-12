@@ -1,0 +1,1020 @@
+{
+  "schema_version": 1,
+  "issue": "ab701360f683c8f05f218f4e1ef78fa666a656c9a18022addfdbab879254f542",
+  "purpose": "Unchanged-workload baseline; no allocation-elimination change implemented.",
+  "runtime_source_revision": "eed0d01324e859e594fca6eb7050ebdbc8671c54",
+  "runtime_source_note": "Built from this revision; working changes only benchmark tooling, workflow, documentation and tests.",
+  "build_commands": [
+    "cargo build --offline --release -p ash_std",
+    "cargo build --offline --release -p ash"
+  ],
+  "toolchain": {
+    "rustc": "rustc 1.100.0-nightly (e7769602a 2026-08-24)\nbinary: rustc\ncommit-hash: e7769602aca3770e8d8ea55716becb22e839a579\ncommit-date: 2026-08-24\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0\n",
+    "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+    "ash_llvm": "21.1.8"
+  },
+  "runtime_staticlib": {
+    "path": "/Users/amaterasu/Vibranium/ash/target/release/libash_std.a",
+    "bytes": 35881968,
+    "sha256": "aa40aa0d3683832878e1845b2f9323998bb5bd148593fa6d04f276b36f428f1b"
+  },
+  "runtime_dylib": {
+    "path": "/Users/amaterasu/Vibranium/ash/target/release/libash_std.dylib",
+    "bytes": 3567152,
+    "sha256": "a5ac6b43be2eadf79890a4a3288f28f6495cf7eb94fda727812ea7fe0a059658"
+  },
+  "benchmark_inputs_unchanged": true,
+  "source_node_model": {
+    "rows": [
+      {
+        "depth": 4,
+        "tree_count": 131072,
+        "nodes_per_tree": 31
+      },
+      {
+        "depth": 6,
+        "tree_count": 32768,
+        "nodes_per_tree": 127
+      },
+      {
+        "depth": 8,
+        "tree_count": 8192,
+        "nodes_per_tree": 511
+      },
+      {
+        "depth": 10,
+        "tree_count": 2048,
+        "nodes_per_tree": 2047
+      },
+      {
+        "depth": 12,
+        "tree_count": 512,
+        "nodes_per_tree": 8191
+      },
+      {
+        "depth": 14,
+        "tree_count": 128,
+        "nodes_per_tree": 32767
+      },
+      {
+        "depth": 16,
+        "tree_count": 32,
+        "nodes_per_tree": 131071
+      }
+    ],
+    "stretch_nodes": 262143,
+    "long_lived_nodes": 131071,
+    "total_nodes": 29578590,
+    "aligned_node_bytes_64bit": 32,
+    "total_bytes": 946514880,
+    "o3_root_scalarization_model": {
+      "roots_removed": 87378,
+      "remaining_node_bytes": 943718784,
+      "scope": "Static full O3 model: positive-item root per loop iteration plus stretch and long-lived roots; not a dynamic hybrid object count."
+    }
+  },
+  "hybrid": {
+    "base": null,
+    "binaries": {
+      "ash": "/Users/amaterasu/Vibranium/ash/target/release/ash"
+    },
+    "binary_identities": {
+      "ash": {
+        "bytes": 150750288,
+        "path": "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "sha256": "81721a8fdf3b103d5334b42d6cd01e0944fa0338d7f978fd95a07478f0de0b6a"
+      }
+    },
+    "config": {
+      "benchmarks": [
+        "binary_trees"
+      ],
+      "gc_heap_mb": null,
+      "gc_stats": true,
+      "include_slow": false,
+      "include_windowed": false,
+      "iterations": 7,
+      "manifest": "bench/benchmarks.toml",
+      "modes": [
+        "hybrid-auto"
+      ],
+      "oracle": null,
+      "sequential": true,
+      "tier_log": true,
+      "timeout_scale": 1.0,
+      "warmups": 1
+    },
+    "generated_iso": "2026-10-12T17:11:45+0100",
+    "generated_unix": 1791821505,
+    "git": {
+      "branch": "main",
+      "commit": "eed0d01324e859e594fca6eb7050ebdbc8671c54",
+      "dirty": true
+    },
+    "load": {
+      "at_end": {
+        "available": true,
+        "load1": 4.765625,
+        "load15": 13.060546875,
+        "load5": 9.24755859375
+      },
+      "at_start": {
+        "available": true,
+        "load1": 4.765625,
+        "load15": 13.060546875,
+        "load5": 9.24755859375
+      },
+      "threshold": 0.4,
+      "warning_raised": false
+    },
+    "results": [
+      {
+        "base": null,
+        "benchmark": "binary_trees",
+        "binary": "ash",
+        "checksum": {
+          "accepted": true,
+          "label": "reference",
+          "value": "-104864"
+        },
+        "command": "/Users/amaterasu/Vibranium/ash/target/release/ash --mode hybrid --jit-tier auto --preset application --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl",
+        "detail": "checksum -104864 (reference)",
+        "exit_code": 0,
+        "expectation": "checksum",
+        "gc": {
+          "blocks_reclaimed": 25057,
+          "bytes_allocated_mb": 900.1,
+          "collections": 7,
+          "external_bytes_mb": 0.0,
+          "live_blocks": 652,
+          "pause_max_ms": 4.86,
+          "pause_total_ms": 16.9,
+          "pause_total_ns": 16862002
+        },
+        "group": "gc",
+        "hl": "bench_binary_trees.hl",
+        "instrumented": {
+          "checksum": {
+            "accepted": true,
+            "label": "reference",
+            "value": "-104864"
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/amaterasu/Vibranium/ash/target/release/ash",
+            "--mode",
+            "hybrid",
+            "--jit-tier",
+            "auto",
+            "--preset",
+            "application",
+            "--jit-log",
+            "--quiet",
+            "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+          ],
+          "detail": "checksum -104864 (reference)",
+          "gc": {
+            "blocks_reclaimed": 25057,
+            "bytes_allocated_mb": 900.1,
+            "collections": 7,
+            "external_bytes_mb": 0.0,
+            "live_blocks": 652,
+            "pause_max_ms": 4.86,
+            "pause_total_ms": 16.9,
+            "pause_total_ns": 16862002
+          },
+          "instrumented_ok": true,
+          "logs": {
+            "stderr": "/private/tmp/ash-tree-baseline-20261012/logs/binary_trees-hybrid-auto-head.stderr",
+            "stdout": "/private/tmp/ash-tree-baseline-20261012/logs/binary_trees-hybrid-auto-head.stdout"
+          },
+          "peak_rss_bytes": 281460736,
+          "status": "OK",
+          "tier_installs": [
+            {
+              "compile_ms": 0.36,
+              "findex": 22,
+              "installed_at_run_ms": 8.9,
+              "tier": "cranelift"
+            },
+            {
+              "compile_ms": 1.93,
+              "findex": 24,
+              "installed_at_run_ms": 10.5,
+              "tier": "cranelift"
+            },
+            {
+              "compile_ms": 1.14,
+              "findex": 23,
+              "installed_at_run_ms": 16.7,
+              "tier": "cranelift"
+            },
+            {
+              "compile_ms": 3.17,
+              "findex": 25,
+              "installed_at_run_ms": 23.9,
+              "tier": "cranelift"
+            },
+            {
+              "compile_ms": 30.56,
+              "findex": 24,
+              "installed_at_run_ms": 41.1,
+              "tier": "llvm"
+            },
+            {
+              "compile_ms": 7.12,
+              "findex": 23,
+              "installed_at_run_ms": 48.3,
+              "tier": "llvm"
+            },
+            {
+              "compile_ms": 163.63,
+              "findex": 25,
+              "installed_at_run_ms": 212.0,
+              "tier": "llvm"
+            }
+          ],
+          "tiered": {
+            "attempted": 7,
+            "compiled_calls": 32888,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 3,
+            "succeeded": 4
+          }
+        },
+        "mode": "hybrid-auto",
+        "output_stable": true,
+        "peak_rss_bytes": 281460736,
+        "reference_source": "manifest",
+        "sample_tiers": [
+          {
+            "attempted": 8,
+            "compiled_calls": 36587,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 3,
+            "succeeded": 4
+          },
+          {
+            "attempted": 8,
+            "compiled_calls": 33732,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 4,
+            "succeeded": 4
+          },
+          {
+            "attempted": 8,
+            "compiled_calls": 33340,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 3,
+            "succeeded": 4
+          },
+          {
+            "attempted": 7,
+            "compiled_calls": 32416,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 2,
+            "succeeded": 4
+          },
+          {
+            "attempted": 7,
+            "compiled_calls": 33255,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 3,
+            "succeeded": 4
+          },
+          {
+            "attempted": 8,
+            "compiled_calls": 32549,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 4,
+            "succeeded": 4
+          },
+          {
+            "attempted": 7,
+            "compiled_calls": 30938,
+            "cranelift": 4,
+            "failed": 0,
+            "fallbacks": 0,
+            "llvm": 3,
+            "succeeded": 4
+          }
+        ],
+        "samples_ms": [
+          383.7266250047833,
+          318.3286660059821,
+          290.2705419983249,
+          357.0820419990923,
+          275.4656250035623,
+          263.6389999970561,
+          262.0011249964591
+        ],
+        "signal": null,
+        "status": "OK",
+        "tier_installs": [
+          {
+            "compile_ms": 0.36,
+            "findex": 22,
+            "installed_at_run_ms": 8.9,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 1.93,
+            "findex": 24,
+            "installed_at_run_ms": 10.5,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 1.14,
+            "findex": 23,
+            "installed_at_run_ms": 16.7,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 3.17,
+            "findex": 25,
+            "installed_at_run_ms": 23.9,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 30.56,
+            "findex": 24,
+            "installed_at_run_ms": 41.1,
+            "tier": "llvm"
+          },
+          {
+            "compile_ms": 7.12,
+            "findex": 23,
+            "installed_at_run_ms": 48.3,
+            "tier": "llvm"
+          },
+          {
+            "compile_ms": 163.63,
+            "findex": 25,
+            "installed_at_run_ms": 212.0,
+            "tier": "llvm"
+          }
+        ],
+        "tiered": {
+          "attempted": 7,
+          "compiled_calls": 32888,
+          "cranelift": 4,
+          "failed": 0,
+          "fallbacks": 0,
+          "llvm": 3,
+          "succeeded": 4
+        },
+        "timeout_secs": 300.0,
+        "wall_ms": {
+          "max_ms": 383.7266250047833,
+          "mean_ms": 307.2162321436086,
+          "median_ms": 290.2705419983249,
+          "min_ms": 262.0011249964591,
+          "modes": {
+            "fast": {
+              "median_ms": 275.4656250035623,
+              "runs": 5
+            },
+            "slow": {
+              "median_ms": 370.4043335019378,
+              "runs": 2
+            }
+          },
+          "runs": 7,
+          "stddev_ms": 47.788708462014384
+        }
+      }
+    ],
+    "schema_version": 1,
+    "sweep_seconds": 2.77,
+    "system": {
+      "arch": "arm64",
+      "cpu_count": 10,
+      "cpu_model": "Apple M1 Pro",
+      "hostname": "Damilares-MacBook-Pro.local",
+      "os": "darwin",
+      "python": "3.14.3",
+      "ram_mb": 16384
+    },
+    "workload_identities": {
+      "binary_trees": {
+        "bytecode": {
+          "bytes": 40823,
+          "path": "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl",
+          "sha256": "9698cecaf8852fa219acfd3361ea8659543cb7dc5a4033168aa3ff96d01a926d"
+        },
+        "source": {
+          "bytes": 2771,
+          "path": "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/BenchBinaryTrees.hx",
+          "sha256": "d705a3b8c01dd2dcae7a89e27cf814317df8ba50ccbf3ec6d1ea8bfdcfd669b5"
+        }
+      }
+    }
+  },
+  "hybrid_instrumented_stderr": "[tiered] pre-warming JIT module on main thread (one-time startup cost)...\n[tiered] tier0 workers=4\n[tiered] ladder: mode=auto tier0=100 tier1=10000 (llvm)\n[tier] demand findex=24 shape=live-frame\n[tiered] cranelift backend ready in 0.2ms (106 native symbols registered)\n[tier] install findex=22 name=Fun_22 tier=cranelift addr=0x10bc58000 ops=12 in 0.36ms on beadie-broker-2 t=8.9ms\n[tiered] promoted findex=22 addr=0x10bc58000 gen=0\n[tier] install findex=24 name=Fun_24 tier=cranelift addr=0x10bc34000 ops=162 in 1.93ms on beadie-broker-3 t=10.5ms\n[tiered] promoted findex=24 addr=0x10bc34000 gen=0\n[tier] recursive-entry proposes findex=24 tier=llvm\n[tiered] broker adopted pre-warmed JIT module\n[gc-split] stop=0.00ms (prep 0.00ms) mark=1.47ms sweep=0.05ms total=1.52ms protect=0.00ms\n[gc] #1 t=0.00s refill=129 origin=tlab-safepoint pause=1.52ms freed=0 blocks live=130 blocks (4.1MB) next-trigger=24.4MB (x6.0) free=130942 blocks\n[tier] demand findex=23 shape=live-frame\n[tier] install findex=23 name=Fun_23 tier=cranelift addr=0x10bc38000 ops=64 in 1.14ms on beadie-broker-1 t=16.7ms\n[tiered] promoted findex=23 addr=0x10bc38000 gen=0\n[tier] recursive-entry proposes findex=23 tier=llvm\n[tier] demand findex=24 shape=caller-loop\n[tier] demand findex=23 shape=caller-loop\n[tier] install findex=25 name=Fun_25 tier=cranelift addr=0x10bc3c000 ops=379 in 3.17ms on beadie-broker t=23.9ms\n[tiered] promoted findex=25 addr=0x10bc3c000 gen=1\n[tier] osr-transfer proposes findex=25 tier=llvm\n[gc-minor] old root ranges=14 (0.0MB) clean blocks=0 used=910\n[gc-split] stop=0.00ms (prep 0.00ms) mark=3.05ms sweep=0.17ms total=3.22ms protect=0.01ms\n[gc] #2 minor t=0.02s refill=915 origin=tlab-safepoint pause=3.22ms freed=520 blocks live=390 blocks (12.2MB) next-trigger=109.7MB (x9.0) free=130682 blocks\n[tier] body findex=24 tier=llvm addr=0x10bc48000 size=0 (own)\n[tier] line table: 73 runs\n[tier] install findex=24 name=Fun_24 tier=llvm addr=0x10bc48000 in 30.56ms t=41.1ms\n[tier] compile findex=24 tier=1 took 30.6ms on beadie-promoter-1 (0x16dd73000)\n[tier] body findex=23 tier=llvm addr=0x10bc50000 size=0 (own)\n[tier] line table: 21 runs\n[tier] install findex=23 name=Fun_23 tier=llvm addr=0x10bc50000 in 7.12ms t=48.3ms\n[gc-split] stop=0.09ms (prep 0.08ms) mark=3.87ms sweep=0.91ms total=4.86ms protect=0.01ms\n[gc] #3 t=0.06s refill=4427 origin=tlab-safepoint pause=4.86ms freed=3508 blocks live=390 blocks (12.2MB) next-trigger=164.5MB (x13.5) free=130682 blocks\n[gc-minor] old root ranges=5 (0.1MB) clean blocks=0 used=5653\n[gc-split] stop=0.00ms (prep 0.00ms) mark=0.28ms sweep=0.94ms total=1.23ms protect=0.01ms\n[gc] #4 minor t=0.09s refill=9695 origin=tlab-safepoint pause=1.23ms freed=5262 blocks live=391 blocks (12.2MB) next-trigger=165.0MB (x13.5) free=130681 blocks\n[gc-minor] old root ranges=9 (0.1MB) clean blocks=0 used=5667\n[gc-split] stop=0.00ms (prep 0.00ms) mark=0.32ms sweep=0.87ms total=1.19ms protect=0.01ms\n[gc] #5 minor t=0.12s refill=14977 origin=tlab-safepoint pause=1.19ms freed=5272 blocks live=395 blocks (12.3MB) next-trigger=166.6MB (x13.5) free=130677 blocks\n[gc-minor] old root ranges=11 (0.1MB) clean blocks=0 used=5724\n[gc-split] stop=0.00ms (prep 0.00ms) mark=0.37ms sweep=0.97ms total=1.34ms protect=0.01ms\n[gc] #6 minor t=0.15s refill=20314 origin=tlab-safepoint pause=1.34ms freed=5322 blocks live=402 blocks (12.6MB) next-trigger=169.6MB (x13.5) free=130670 blocks\n[gc-minor] old root ranges=12 (0.1MB) clean blocks=0 used=5825\n[gc-split] stop=0.00ms (prep 0.00ms) mark=2.59ms sweep=0.90ms total=3.50ms protect=0.02ms\n[gc] #7 minor t=0.19s refill=25745 origin=tlab-safepoint pause=3.50ms freed=5173 blocks live=652 blocks (20.4MB) next-trigger=326.0MB (x16.0) free=130420 blocks\n[tier] body findex=25 tier=llvm addr=0x10bd10000 size=2972 (shared)\n[tier] body findex=26 tier=llvm addr=0x10bd10b9c size=28 (shared)\n[tier] body findex=28 tier=llvm addr=0x10bd10bb8 size=56 (shared)\n[tier] body findex=20 tier=llvm addr=0x10bd10bf0 size=424 (shared)\n[tier] body findex=27 tier=llvm addr=0x10bd10d98 size=2720 (shared)\n[tier] body findex=36 tier=llvm addr=0x10bd11838 size=200 (shared)\n[tier] body findex=259 tier=llvm addr=0x10bd11900 size=28 (shared)\n[tier] body findex=37 tier=llvm addr=0x10bd1191c size=28 (shared)\n[tier] body findex=39 tier=llvm addr=0x10bd11938 size=28 (shared)\n[tier] body findex=42 tier=llvm addr=0x10bd11954 size=0 (shared)\n[tier] line table: 87 runs\n[tier] line table: 239 runs\n[tier] install findex=25 name=Fun_25 tier=llvm addr=0x10bd10000 in 163.63ms t=212.0ms\n[tier] compile findex=25 tier=1 took 163.8ms on beadie-promoter-1 (0x16dd73000)\n[tier] demand findex=20 shape=caller-loop\n[tier] demand findex=27 shape=caller-loop\n[tiered] attempted=7 succeeded=4 failed=0 compiled_calls=32888 fallbacks=0 cranelift=4 llvm=3\n[tiered] llvm installs, calls at install time (3 functions):\n[tiered]   findex=23     name=Fun_23                       calls_at_install=16476\n[tiered]   findex=24     name=Fun_24                       calls_at_install=26074\n[tiered]   findex=25     name=Fun_25                       calls_at_install=331\n[gc] ---- GC stats ----\n[gc] sizing:           ram 16384.0MB / ceiling 512.0MB / growth x4 (base)\n[gc] collections:      7\n[gc] finalizers:       registered 0, queued 0, completed 0, pending 0\n[gc] blocks reclaimed: 25057 (783.0MB)\n[gc] lines recycled:   4777 (0.6MB)\n[gc] bytes allocated:  900.1MB (+ external 0.0MB)\n[gc] live at last gc:  652 blocks (20.4MB)\n[gc] pause total:      16.9ms, max 4.86ms, total 16862002ns\n[gc] minor collections: 5 of 7\n        0.23 real         0.40 user         0.04 sys\n           281460736  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               17513  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   2  voluntary context switches\n                 841  involuntary context switches\n          4238256631  instructions retired\n          1363242716  cycles elapsed\n           228541136  peak memory footprint\n",
+  "controls": {
+    "no_inline": {
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--mode",
+        "hybrid",
+        "--jit-tier",
+        "auto",
+        "--preset",
+        "application",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {
+        "ASH_AIR_NO_INLINE": "1",
+        "ASH_GC_STATS": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 486.4534999942407,
+      "stdout": "Checksum: -104864\n",
+      "gc": {
+        "collections": 8,
+        "blocks_reclaimed": 24934,
+        "bytes_allocated_mb": 902.7,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 703,
+        "pause_total_ms": 18.5,
+        "pause_max_ms": 4.8,
+        "pause_total_ns": 18480458
+      },
+      "peak_rss_bytes": 273268736,
+      "stderr_sha256": "51eb3b4a8a682f867b8dcd3cae7ad643e60e25926942bbc3ad5d72f5a82d7b9c",
+      "checksum": "-104864"
+    },
+    "no_tlab": {
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--mode",
+        "hybrid",
+        "--jit-tier",
+        "auto",
+        "--preset",
+        "application",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {
+        "ASH_GC_TLAB": "0",
+        "ASH_GC_STATS": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 931.349708000198,
+      "stdout": "Checksum: -104864\n",
+      "gc": {
+        "collections": 1,
+        "blocks_reclaimed": 15994,
+        "bytes_allocated_mb": 900.0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 392,
+        "pause_total_ms": 16.9,
+        "pause_max_ms": 16.93,
+        "pause_total_ns": 16933334
+      },
+      "peak_rss_bytes": 533315584,
+      "stderr_sha256": "d36fa325b24b9d111dbd78c9e57da159e0e937c807a937d45463e0097d1df94a",
+      "checksum": "-104864"
+    },
+    "no_inline_no_tlab": {
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--mode",
+        "hybrid",
+        "--jit-tier",
+        "auto",
+        "--preset",
+        "application",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {
+        "ASH_AIR_NO_INLINE": "1",
+        "ASH_GC_TLAB": "0",
+        "ASH_GC_STATS": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 1024.0901250072056,
+      "stdout": "Checksum: -104864\n",
+      "gc": {
+        "collections": 1,
+        "blocks_reclaimed": 15993,
+        "bytes_allocated_mb": 902.7,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 393,
+        "pause_total_ms": 12.1,
+        "pause_max_ms": 12.12,
+        "pause_total_ns": 12122791
+      },
+      "peak_rss_bytes": 651575296,
+      "stderr_sha256": "6cdab03b14548995f4b1d3ba83e4edfd8ad5ca2cf0257714d25d91c7ec12537f",
+      "checksum": "-104864"
+    }
+  },
+  "air": {
+    "summary": {
+      "command": [
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {
+        "ASH_VERIFY_AIR": "only",
+        "ASH_SROA_WHY": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 51.44716599897947,
+      "stdout": "",
+      "gc": null,
+      "peak_rss_bytes": null,
+      "stderr_sha256": "fcf3007b8803f05864be93aa8cc6de4150f7a6028a82c21f70bc9c468bf4d5a6",
+      "report": [
+        "[air] stages: lowered=335/335 verified-lowered=335 serialize-identity=335 optimized=335 verified=335 serialized=335",
+        "[air] pass inline           inlined=193 added=1933",
+        "[air] pass non-null-branch-elim eliminated=3",
+        "[air] pass sroa             allocs_removed=6 fields_scalarized=9",
+        "[air] pass cellfwd          eliminated=57 replaced=57",
+        "[air] pass celldse          eliminated=30",
+        "[air] pass null-check-elim  eliminated=69",
+        "[air] pass gvn              eliminated=1837 replaced=2489",
+        "[air] pass licm             hoisted=84",
+        "[air] pass dce              eliminated=855",
+        "[air] pass stripmine        added=48",
+        "[air] 335 of 335 functions round-tripped"
+      ],
+      "refusal_examples": [
+        "[sroa] refused v10: terminator operand",
+        "[sroa] refused v24: terminator operand",
+        "[sroa] refused v31: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 0, src: ValueId(120) }",
+        "[sroa] refused v45: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 0, src: ValueId(120) }",
+        "[sroa] refused v58: escapes into an instruction: Call { dst: ValueId(71), fun: 22, args: [ValueId(58), ValueId(65), ValueId(70), ValueId(55)] }",
+        "[sroa] refused v72: escapes into an instruction: Call { dst: ValueId(71), fun: 22, args: [ValueId(58), ValueId(65), ValueId(70), ValueId(55)] }",
+        "[sroa] refused v85: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 1, src: ValueId(121) }",
+        "[sroa] refused v99: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 1, src: ValueId(121) }"
+      ]
+    },
+    "builder": {
+      "command": [
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {
+        "ASH_VERIFY_AIR": "dump:24",
+        "ASH_SROA_WHY": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 19.340874991030432,
+      "stdout": "",
+      "gc": null,
+      "peak_rss_bytes": null,
+      "stderr_sha256": "1327398b41de1037ea571d95ee24289e866f3afec2235109343914959a76c54e",
+      "report": [
+        "[air]   pass inline: PassStats { eliminated: 0, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 14, added: 164, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass gvn: PassStats { eliminated: 104, hoisted: 0, fused: 0, replaced: 134, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass dce: PassStats { eliminated: 10, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }"
+      ],
+      "refusal_examples": [
+        "[sroa] refused v10: terminator operand",
+        "[sroa] refused v24: terminator operand",
+        "[sroa] refused v31: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 0, src: ValueId(120) }",
+        "[sroa] refused v45: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 0, src: ValueId(120) }",
+        "[sroa] refused v58: escapes into an instruction: Call { dst: ValueId(71), fun: 22, args: [ValueId(58), ValueId(65), ValueId(70), ValueId(55)] }",
+        "[sroa] refused v72: escapes into an instruction: Call { dst: ValueId(71), fun: 22, args: [ValueId(58), ValueId(65), ValueId(70), ValueId(55)] }",
+        "[sroa] refused v85: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 1, src: ValueId(121) }",
+        "[sroa] refused v99: escapes into an instruction: FieldSet { obj: ValueId(119), obj_ty: TypeRef(63), field: 1, src: ValueId(121) }"
+      ],
+      "static_new_sites_after_o3": 10,
+      "recursive_builder_calls_after_o3": 6
+    },
+    "main": {
+      "command": [
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {
+        "ASH_VERIFY_AIR": "dump:25",
+        "ASH_SROA_WHY": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 27.259750000666827,
+      "stdout": "",
+      "gc": null,
+      "peak_rss_bytes": null,
+      "stderr_sha256": "57659369d175fc213b728858bc56331153d2744fae188f222ec256e13aa6a617",
+      "report": [
+        "[air]   pass inline: PassStats { eliminated: 0, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 33, added: 398, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass sroa: PassStats { eliminated: 0, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 6, fields_scalarized: 9 }",
+        "[air]   pass cellfwd: PassStats { eliminated: 3, hoisted: 0, fused: 0, replaced: 3, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass celldse: PassStats { eliminated: 2, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass null-check-elim: PassStats { eliminated: 5, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass gvn: PassStats { eliminated: 223, hoisted: 0, fused: 0, replaced: 299, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass licm: PassStats { eliminated: 0, hoisted: 23, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass dce: PassStats { eliminated: 29, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 0, allocs_removed: 0, fields_scalarized: 0 }",
+        "[air]   pass stripmine: PassStats { eliminated: 0, hoisted: 0, fused: 0, replaced: 0, tail_calls: 0, inlined: 0, added: 1, allocs_removed: 0, fields_scalarized: 0 }"
+      ],
+      "refusal_examples": [
+        "[sroa] refused v109: escapes into an instruction: Call { dst: ValueId(65), fun: 23, args: [ValueId(64)] }",
+        "[sroa] refused v123: escapes into an instruction: Call { dst: ValueId(65), fun: 23, args: [ValueId(64)] }",
+        "[sroa] refused v142: phi merges a non-allocation value: Null { dst: ValueId(103) }",
+        "[sroa] refused v156: phi merges a non-allocation value: Null { dst: ValueId(103) }",
+        "[sroa] refused v173: escapes into an instruction: Call { dst: ValueId(186), fun: 22, args: [ValueId(173), ValueId(180), ValueId(185), ValueId(170)] }",
+        "[sroa] refused v187: escapes into an instruction: Call { dst: ValueId(186), fun: 22, args: [ValueId(173), ValueId(180), ValueId(185), ValueId(170)] }",
+        "[sroa] refused v199: escapes into an instruction: Call { dst: ValueId(85), fun: 20, args: [ValueId(79), ValueId(84)] }",
+        "[sroa] refused v75: phi merges a non-allocation value: Null { dst: ValueId(60) }"
+      ],
+      "static_new_sites_after_o3": 13,
+      "recursive_builder_calls_after_o3": 13
+    }
+  },
+  "aot": {
+    "binary": {
+      "path": "/tmp/ash-tree-baseline-20261012/aot/binary_trees",
+      "bytes": 5327696,
+      "sha256": "cb8b98aecfde01882286c085f7fb75c6d4ab426fa5407b5ff610028941fa118e"
+    },
+    "build": {
+      "command": [
+        "/Users/amaterasu/Vibranium/ash/target/release/ash",
+        "--build",
+        "/tmp/ash-tree-baseline-20261012/aot/binary_trees",
+        "--runtime",
+        "/Users/amaterasu/Vibranium/ash/target/release/libash_std.a",
+        "--quiet",
+        "/Users/amaterasu/Vibranium/ash/crates/ash/test/tests/bench_binary_trees.hl"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "elapsed_ms": 723.2115410006372,
+      "stdout": "",
+      "gc": null,
+      "peak_rss_bytes": null,
+      "stderr_sha256": "dd9d3d01f4c1fa9a9cb70722f59b3bda47046526115031360a497e778f008e49"
+    },
+    "runs": [
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 304.54216699581593,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      },
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 290.64966599980835,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      },
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 284.14216700184625,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      },
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 288.8601250015199,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      },
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 293.7255419965368,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      },
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 289.7652909887256,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      },
+      {
+        "command": [
+          "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+        ],
+        "environment": {},
+        "returncode": 0,
+        "elapsed_ms": 289.15733301255386,
+        "stdout": "Checksum: -104864\n",
+        "gc": null,
+        "peak_rss_bytes": null,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksum": "-104864"
+      }
+    ],
+    "wall_ms": {
+      "min_ms": 284.14216700184625,
+      "median_ms": 289.7652909887256,
+      "mean_ms": 291.54889871382954,
+      "max_ms": 304.54216699581593,
+      "stddev_ms": 6.394808282918117,
+      "runs": 7
+    },
+    "instrumented": {
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/tmp/ash-tree-baseline-20261012/aot/binary_trees"
+      ],
+      "environment": {
+        "ASH_GC_STATS": "1"
+      },
+      "returncode": 0,
+      "elapsed_ms": 306.69895799655933,
+      "stdout": "Checksum: -104864\n",
+      "gc": {
+        "collections": 18,
+        "blocks_reclaimed": 24731,
+        "bytes_allocated_mb": 900.1,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 420,
+        "pause_total_ms": 15.0,
+        "pause_max_ms": 3.09,
+        "pause_total_ns": 14967417
+      },
+      "peak_rss_bytes": 153812992,
+      "stderr_sha256": "c83fd797f699b9a92e656f06046425c9559038f9fa5df78786ccadd4955797fb",
+      "checksum": "-104864"
+    }
+  },
+  "historical_ci": {
+    "base": {
+      "binary": "/home/runner/work/ash/ash/target/release/ash-base",
+      "commit": "d74540baf79d85c6d8ee8092db0b3fd7f7086bab"
+    },
+    "binaries": {
+      "ash": "/home/runner/work/ash/ash/target/release/ash",
+      "ash-base": "/home/runner/work/ash/ash/target/release/ash-base"
+    },
+    "config": {
+      "benchmarks": [
+        "binary_trees"
+      ],
+      "gc_heap_mb": null,
+      "gc_stats": true,
+      "include_slow": true,
+      "include_windowed": false,
+      "iterations": 7,
+      "manifest": "bench/benchmarks.toml",
+      "modes": [
+        "hybrid-auto"
+      ],
+      "oracle": null,
+      "sequential": true,
+      "tier_log": false,
+      "timeout_scale": 3.0,
+      "warmups": 1
+    },
+    "generated_iso": "2026-10-12T12:17:03+0000",
+    "generated_unix": 1791807423,
+    "git": {
+      "branch": "main",
+      "commit": "d74540baf79d85c6d8ee8092db0b3fd7f7086bab",
+      "dirty": true
+    },
+    "load": {
+      "at_end": {
+        "available": true,
+        "load1": 1.1044921875,
+        "load15": 0.08544921875,
+        "load5": 0.2587890625
+      },
+      "at_start": {
+        "available": true,
+        "load1": 0.85205078125,
+        "load15": 0.06396484375,
+        "load5": 0.1953125
+      },
+      "threshold": 0.4,
+      "warning_raised": false
+    },
+    "results": [
+      {
+        "base": {
+          "binary": "/home/runner/work/ash/ash/target/release/ash-base",
+          "checksum": {
+            "accepted": true,
+            "label": "reference",
+            "value": "-104864"
+          },
+          "command": "/home/runner/work/ash/ash/target/release/ash-base --mode hybrid --jit-tier auto --preset application --quiet /home/runner/work/ash/ash/crates/ash/test/tests/bench_binary_trees.hl",
+          "commit": "d74540baf79d85c6d8ee8092db0b3fd7f7086bab",
+          "detail": "",
+          "samples_ms": [
+            173.79259199999808,
+            186.6182649999999,
+            175.8480519999992,
+            172.27534599999927,
+            172.62724300000087,
+            172.692210000001,
+            184.15335399999577
+          ],
+          "status": "OK",
+          "wall_ms": {
+            "max_ms": 186.6182649999999,
+            "mean_ms": 176.8581517142849,
+            "median_ms": 173.79259199999808,
+            "min_ms": 172.27534599999927,
+            "runs": 7,
+            "stddev_ms": 5.988259522660346
+          }
+        },
+        "benchmark": "binary_trees",
+        "binary": "ash",
+        "checksum": {
+          "accepted": true,
+          "label": "reference",
+          "value": "-104864"
+        },
+        "command": "/home/runner/work/ash/ash/target/release/ash --mode hybrid --jit-tier auto --preset application --quiet /home/runner/work/ash/ash/crates/ash/test/tests/bench_binary_trees.hl",
+        "detail": "checksum -104864 (reference)",
+        "exit_code": 0,
+        "expectation": "checksum",
+        "gc": {
+          "blocks_reclaimed": 21819,
+          "bytes_allocated_mb": 900.1,
+          "collections": 6,
+          "external_bytes_mb": 0.0,
+          "live_blocks": 430,
+          "pause_max_ms": 9.24,
+          "pause_total_ms": 24.1,
+          "pause_total_ns": 24056936
+        },
+        "group": "gc",
+        "hl": "bench_binary_trees.hl",
+        "mode": "hybrid-auto",
+        "output_stable": true,
+        "peak_rss_bytes": 365314048,
+        "reference_source": "manifest",
+        "samples_ms": [
+          186.69263600000363,
+          181.46827400000376,
+          180.21343999999573,
+          172.15042100000488,
+          177.73817400000524,
+          176.41548900000004,
+          176.4882179999958
+        ],
+        "signal": null,
+        "status": "OK",
+        "tier_installs": [
+          {
+            "compile_ms": 0.47,
+            "findex": 22,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 2.54,
+            "findex": 24,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 1.6,
+            "findex": 23,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 9.28,
+            "findex": 22,
+            "tier": "llvm"
+          },
+          {
+            "compile_ms": 3.77,
+            "findex": 25,
+            "tier": "cranelift"
+          },
+          {
+            "compile_ms": 20.66,
+            "findex": 24,
+            "tier": "llvm"
+          },
+          {
+            "compile_ms": 5.37,
+            "findex": 23,
+            "tier": "llvm"
+          },
+          {
+            "compile_ms": 100.02,
+            "findex": 25,
+            "tier": "llvm"
+          }
+        ],
+        "tiered": {
+          "attempted": 8,
+          "compiled_calls": 36237,
+          "cranelift": 4,
+          "failed": 0,
+          "fallbacks": 0,
+          "llvm": 4,
+          "succeeded": 4
+        },
+        "timeout_secs": 900.0,
+        "wall_ms": {
+          "max_ms": 186.69263600000363,
+          "mean_ms": 178.73809314285842,
+          "median_ms": 177.73817400000524,
+          "min_ms": 172.15042100000488,
+          "runs": 7,
+          "stddev_ms": 4.614451550014989
+        }
+      }
+    ],
+    "schema_version": 1,
+    "sweep_seconds": 3.03,
+    "system": {
+      "arch": "x86_64",
+      "cpu_count": 4,
+      "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+      "hostname": "runnervmmprz5",
+      "os": "linux",
+      "python": "3.12.15",
+      "ram_mb": 15989
+    },
+    "provenance": {
+      "run_url": "https://github.com/rayzor-blade/ash/actions/runs/38246817230/job/114806786783",
+      "artifact": "bench-part-binary_trees/ash-binary_trees.json",
+      "instrumented_checksum_verified": false,
+      "limitation": "Historical runner checked timed samples but did not check the diagnostic checksum. Allocation counters remain historical context, not a verified diagnostic baseline."
+    }
+  },
+  "limitations": [
+    "Local Mac measurements are not comparable to Linux CI timings.",
+    "GC bytes with TLAB enabled count region capacity, printed to 0.1 MiB; not exact logical object bytes.",
+    "No-TLAB controls alter allocator/collector behavior and are not timing comparisons.",
+    "Static O3 dumps do not establish which optimized bodies executed in hybrid.",
+    "Historical CI did not validate the instrumented checksum. Future CI uses the new gate.",
+    "Allocation figures cover the Ash GC domain, not all native/compiler allocation. RSS is separate.",
+    "Local hybrid timed samples had 16.5% relative standard deviation and a bimodal split; do not use them as evidence of a speed improvement."
+  ],
+  "allocation_reconciliation": {
+    "source_model_mib": 902.6669311523438,
+    "static_o3_tree_model_mib": 900.0003662109375,
+    "conclusion": "The approximately 2.67 MiB source-to-O3 difference is consistent with scalarizing one positive-item root per inner iteration and the stretch/long-lived roots. Normal no-TLAB execution reports 900.0 MiB; disabling AIR inlining reports 902.7 MiB. Default TLAB accounting reports 900.1 MiB. Region capacity, other runtime allocations, dynamic tier coverage, and rounding prevent an exact per-object interpretation of the residual."
+  }
+}

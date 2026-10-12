@@ -34,8 +34,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly
+      # The 2026-10-12 nightly makes wasm32-wasip1's TLS setup spin in
+      # wasi-libc 25's pthread_key_delete before the program entrypoint.
+      # Keep the runtime on the last release-tested nightly until that
+      # compiler/libc combination is fixed.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-10-06
           components: rustfmt, rust-src
           targets: wasm32-wasip1, wasm32-wasip1-threads, wasm32-unknown-unknown
 
@@ -209,7 +214,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/web"
           "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/web/basic.wasm" --target wasm32-wasip1 \
             crates/ash/test/tests/test_basic.hl
-          "$RUNNER_TEMP/ash" run "$RUNNER_TEMP/web/basic.wasm"
+          python3 - "$RUNNER_TEMP/ash" "$RUNNER_TEMP/web/basic.wasm" <<'PY'
+          import subprocess
+          import sys
+
+          subprocess.run([sys.argv[1], "run", sys.argv[2]], check=True, timeout=60)
+          PY
           test -s "$RUNNER_TEMP/web/index.html" && test -s "$RUNNER_TEMP/web/ash_browser_bg.wasm"
 
       # What the -dev tarball exists for: an object for a triple the default

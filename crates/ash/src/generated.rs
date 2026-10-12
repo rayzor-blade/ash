@@ -341,7 +341,7 @@ pub fn prepare(
     Ok(result)
 }
 
-fn source_positions(body: &Function, ser: &air::v2::Serialized) -> Vec<i32> {
+pub(crate) fn source_positions(body: &Function, ser: &air::v2::Serialized) -> Vec<i32> {
     let mut debug = vec![-1; ser.ops.len() * 2];
     for (bi, block) in body.blocks.iter().enumerate() {
         let mut position = [-1, 0];

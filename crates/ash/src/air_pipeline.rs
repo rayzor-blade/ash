@@ -57,6 +57,8 @@ pub use air::v2::{OptLevel as AirOptLevel, PassOptions as AirPassOptions};
 /// rebuilding them per function would make a whole-module sweep quadratic.
 pub struct AshModule<'b> {
     bc: &'b DecodedBytecode,
+    // Set only by the standalone fusion preparation after runtime validation.
+    tree_elision: bool,
     /// `findex` -> index into `bc.natives`. Shared, so that deriving a second
     /// view of the same module (see [`AshModule::without_callees_view`]) does
     /// not rebuild the maps this type exists to build once.
@@ -84,6 +86,7 @@ impl<'b> AshModule<'b> {
     pub fn new(bc: &'b DecodedBytecode) -> Self {
         AshModule {
             bc,
+            tree_elision: false,
             native_at: Arc::new(
                 bc.natives
                     .iter()
@@ -102,6 +105,12 @@ impl<'b> AshModule<'b> {
             lowered: Arc::new(Mutex::new(crate::air_cache::BodyCache::new(2 * 1024 * 1024))),
             frameless: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn for_tree_fusion(bc: &'b DecodedBytecode) -> Self {
+        let mut module = Self::new(bc);
+        module.tree_elision = true;
+        module
     }
 
     /// Withhold callee bodies, making [`air::v2::passes::Inlining`] inert even
@@ -128,6 +137,7 @@ impl<'b> AshModule<'b> {
     pub fn view(&self, callees: CalleeView) -> AshModule<'b> {
         AshModule {
             bc: self.bc,
+            tree_elision: self.tree_elision,
             native_at: Arc::clone(&self.native_at),
             function_at: Arc::clone(&self.function_at),
             callees,
@@ -365,6 +375,19 @@ impl<'b> ModuleInfo for AshModule<'b> {
 }
 
 impl air::v2::tree_fusion::TreeModule for AshModule<'_> {
+    fn allocation_elision(&self, _: TypeRef) -> air::v2::tree_fusion::AllocationElision {
+        use air::v2::tree_fusion::AllocationElision;
+        if self.tree_elision {
+            AllocationElision::Permitted
+        } else {
+            AllocationElision::Unknown
+        }
+    }
+
+    fn stable_code_and_layout(&self) -> bool {
+        self.tree_elision
+    }
+
     fn signature(&self, findex: usize) -> Option<(Vec<TypeRef>, TypeRef)> {
         let f = self.function(findex)?;
         self.bc.types.get(f.type_.0)?.fun.as_ref()?;
@@ -393,7 +416,7 @@ impl air::v2::tree_fusion::TreeModule for AshModule<'_> {
         let obj = t.obj.as_ref()?;
         // Inherited slots and bound closures need their own layout and
         // initialization proofs. Never infer the host's allocation policy
-        // from these bytecode declarations: TreeModule's defaults stay unknown.
+        // from these bytecode declarations: ordinary views keep it unknown.
         if obj.super_.is_some() || !obj.bindings.is_empty() || obj.fields.len() > 32 {
             return None;
         }
@@ -519,7 +542,7 @@ impl AshModule<'_> {
     /// same work at every site that asks for it. With its positions, so the
     /// markers the inliner copies still say which line of the callee a frame
     /// is stopped on.
-    fn lowered_body(&self, findex: usize) -> Option<Arc<Function>> {
+    pub(crate) fn lowered_body(&self, findex: usize) -> Option<Arc<Function>> {
         let cached = self
             .lowered
             .lock()

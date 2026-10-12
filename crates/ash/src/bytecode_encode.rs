@@ -33,6 +33,12 @@ use crate::types::{HLType, OP_NARGS};
 
 /// Encode `bc` as HashLink bytecode of `version` (4 or 5).
 pub fn encode(bc: &DecodedBytecode, version: usize) -> io::Result<Vec<u8>> {
+    if bc.tree_fusion_runtime {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "tree fusion's standalone runtime contract cannot be serialized to .hl",
+        ));
+    }
     Encoder::new(bc, version).run()
 }
 

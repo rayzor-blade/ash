@@ -75,6 +75,9 @@ const VERSION: &str = env!("ASH_BUILD_VERSION");
         .multiple(true)
 ))]
 struct Cli {
+    /// Prototype recursive tree allocation elimination for standalone Ash.
+    #[arg(long, hide = true, conflicts_with_all = ["hot_reload", "build", "emit_aot", "emit_optimized", "dev_generated_helper"])]
+    dev_tree_fusion: bool,
     /// Development-only generated scalar helper registration/dispatch probe.
     #[arg(long, hide = true, conflicts_with_all = ["hot_reload", "build", "emit_aot"])]
     dev_generated_helper: Option<usize>,
@@ -1134,7 +1137,13 @@ fn run() -> Result<()> {
     let bytecode = {
         let _p = ash_core::profile::scope("decode bytecode");
         let decoded = BytecodeDecoder::decode(&hl_path)?;
-        let decoded = if let Some(source) = cli.dev_generated_helper {
+        let decoded = if cli.dev_tree_fusion {
+            let (prepared, report) = ash_core::tree_fusion::prepare_standalone(&decoded)?;
+            for line in report {
+                eprintln!("[tree-fusion] {line}");
+            }
+            prepared
+        } else if let Some(source) = cli.dev_generated_helper {
             ash_core::generated::probe(&decoded, source)?
         } else {
             decoded

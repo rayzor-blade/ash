@@ -1,6 +1,6 @@
-//! Bounded, read-only analysis for recursive producer/consumer fusion.
+//! Bounded analysis and opt-in construction for recursive producer/consumer fusion.
 //!
-//! This is not a transformation or a general purity analysis. It symbolically
+//! The analysis is not a general purity analysis. It symbolically
 //! checks both cases of an i32 depth guard, expanding straight-line constructors
 //! and treating self-recursive calls inductively. Only `depth > 0` followed by
 //! `depth - 1` is admitted; mutual recursion and CFG loops are refused. A fold
@@ -9,12 +9,16 @@
 //! The result is conditional on an embedder's allocation-elision and code
 //! lifetime contracts. Unknown contracts remain explicit blockers. In particular
 //! bytecode alone cannot rule out host tails/drop hooks, replacement allocators,
-//! or a later hot reload. Nothing here grants permission to rewrite executable
-//! code, changes roots/safepoints, or synthesizes functions.
+//! or a later hot reload. The read-only survey grants no rewrite permission.
+//! `build_helper` and `rewrite_caller` require both contracts and recheck the
+//! structural proof. The embedder owns registration, rooting and safepoints.
 
 use super::ir::*;
 use super::module::ModuleInfo;
 use std::collections::{BTreeMap, BTreeSet};
+
+mod fuse;
+pub use fuse::{build_helper, rewrite_caller};
 
 /// Facts not encoded in a function's AIR. Default knowledge is conservative.
 pub trait TreeModule: ModuleInfo {

@@ -274,6 +274,15 @@ static OBJECT_DROPS: AtomicPtr<std::collections::HashSet<usize, ByAddress>> =
     AtomicPtr::new(ptr::null_mut());
 static OBJECT_DROPS_WRITE: Mutex<()> = Mutex::new(());
 
+/// Compiler-side standalone preparation must refuse a process with host
+/// attachments or mutable-layout room. Snapshots are append-only and retained.
+pub fn has_host_object_policy() -> bool {
+    let drops = OBJECT_DROPS.load(Ordering::Acquire);
+    OBJECT_TAILS.get().is_some_and(|tails| !tails.is_empty())
+        || (!drops.is_null() && unsafe { !(*drops).is_empty() })
+        || OBJECT_ROOM.load(Ordering::Acquire) != 0
+}
+
 /// One class's tail, as `hlp_set_object_tails` receives it.
 #[repr(C)]
 pub struct ObjectTail {

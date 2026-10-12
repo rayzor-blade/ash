@@ -14,6 +14,7 @@ pub mod callsite_profile;
 pub mod cranelift;
 pub mod devirt;
 pub mod generated;
+pub mod tree_fusion;
 pub mod host_export;
 pub mod host_module;
 pub mod intrinsics;

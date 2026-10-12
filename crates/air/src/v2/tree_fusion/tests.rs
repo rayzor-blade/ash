@@ -704,3 +704,102 @@ fn constructor_loops_and_exceptions_are_not_summarized_as_initialization() {
     ];
     refuse(&m, "exception regions");
 }
+
+#[test]
+fn fusion_builds_scalar_recursion_and_replaces_only_proven_sites() {
+    let m = fixture();
+    let helper = build_helper(&m, BUILD, FOLD, 100, Limits::default()).unwrap();
+    super::super::verify::verify(&helper).unwrap();
+    assert_eq!(helper.findex, Some(100));
+    assert!(helper.reg_types.iter().all(|t| *t == INT));
+    let calls: Vec<_> = helper
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instrs)
+        .filter_map(|i| match i {
+            Instr::Call { fun, .. } => Some(*fun),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![100, 100]);
+    assert!(
+        !helper
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instrs)
+            .any(|i| matches!(
+                i,
+                Instr::New { .. } | Instr::FieldGet { .. } | Instr::FieldSet { .. }
+            ))
+    );
+    let raw = caller(&m, vec![]);
+    let before = raw.dump();
+    let (fused, n) = rewrite_caller(
+        &m,
+        &raw,
+        &BTreeMap::from([((BUILD, FOLD), 100)]),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(before, raw.dump());
+    let calls: Vec<_> = fused
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instrs)
+        .filter_map(|i| match i {
+            Instr::Call { fun, .. } => Some(*fun),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![100]);
+}
+
+#[test]
+fn fusion_rechecks_policy_escape_and_budget() {
+    for policy in [AllocationElision::Unknown, AllocationElision::Observable] {
+        let mut m = fixture();
+        m.policy = policy;
+        assert!(build_helper(&m, BUILD, FOLD, 100, Limits::default()).is_err());
+        assert_eq!(
+            rewrite_caller(
+                &m,
+                &caller(&m, vec![]),
+                &BTreeMap::from([((BUILD, FOLD), 100)]),
+                Limits::default()
+            )
+            .unwrap()
+            .1,
+            0
+        );
+    }
+    let mut m = fixture();
+    m.stable = false;
+    assert!(build_helper(&m, BUILD, FOLD, 100, Limits::default()).is_err());
+    let m = fixture();
+    let raw = caller(&m, vec![Opcode::NullCheck { reg: Reg(2) }]);
+    assert_eq!(
+        rewrite_caller(
+            &m,
+            &raw,
+            &BTreeMap::from([((BUILD, FOLD), 100)]),
+            Limits::default()
+        )
+        .unwrap()
+        .1,
+        0
+    );
+    assert!(
+        build_helper(
+            &m,
+            BUILD,
+            FOLD,
+            100,
+            Limits {
+                steps: 1,
+                ..Limits::default()
+            }
+        )
+        .is_err()
+    );
+}

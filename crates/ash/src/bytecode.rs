@@ -1412,6 +1412,9 @@ pub struct DecodedBytecode {
     /// Helpers registered before runtime tables/caches are created. Rebuild
     /// from original input after code, type or host metadata changes.
     pub generated_helpers: Vec<crate::generated::Registered>,
+    /// Allocation elision tied to the standalone Ash runtime contract. This
+    /// contract cannot be exported in the ordinary HashLink bytecode format.
+    pub(crate) tree_fusion_runtime: bool,
     pub ints: Vec<i32>,
     pub floats: Vec<f64>,
     pub strings: Vec<String>,

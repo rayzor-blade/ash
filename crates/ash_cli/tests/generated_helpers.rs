@@ -65,6 +65,9 @@ fn registered_recursion_runs_on_interpreter_and_native_tiers() {
 fn hybrid_installs_the_same_helper_across_tiers() {
     let (input, source, helper) = input();
     let mut cmd = Command::new(ash_cli_bin());
+    // Keep the caller interpreted so helper entry ticks continue after the
+    // first installation, independently of background compiler scheduling.
+    cmd.env("ASH_TIERED_ONLY_FINDEXES", helper.to_string());
     cmd.args([
         "--mode",
         "hybrid",

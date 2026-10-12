@@ -299,6 +299,62 @@ elision must establish its policy separately and refuse serialization if that
 policy cannot travel with the program. A structural tree candidate alone is
 still insufficient authorization.
 
+### Recursive tree fusion prototype
+
+Git-bug `bfd0a53` adds an explicit development option:
+
+```sh
+ASH_GC_STATS=1 ASH_GC_TLAB=0 target/debug/ash --dev-tree-fusion --quiet \
+  crates/ash/test/tests/bench_binary_trees.hl
+```
+
+Normal runs do not enable it. Before creating runtime tables, preparation
+surveys raw AIR, reserves a helper for each proven producer/fold pair, then
+rechecks and rewrites the callers. Unsupported sites retain their original
+calls. Failed helper construction, serialization, verification or growth
+limits abandon the entire transaction and retain the original module.
+
+The helper is derived from the two proven depth cases. It keeps the signed
+positive-depth guard and producer scalar calculations, replaces each recursive
+child construction with a recursive call returning that child's folded value,
+and substitutes initialized fields into the consumer. The consumer's null
+branches resolve from the proven shape. Existing DCE removes unused values;
+AIR is verified before registration and after caller rewriting. Each scalar
+temporary gets a private register. Neither names nor checksum formulas select
+the transformation. The ordinary tier pipelines perform further optimization.
+
+The runtime contract is deliberately limited to a fresh standalone Ash CLI
+process using the linked runtime. Hosted modules, external native libraries,
+host native overrides, active object tails/drop hooks/layout room, and native
+registration hooks are refused. In-place hot reload is refused. As with
+allocation elimination elsewhere in the compiler, allocation counts, GC and
+unrelated finalizer scheduling, resource exhaustion (including stack/OOM), and
+profiling timing are not barriers under this opt-in contract. Observable value
+results, memory effects and ordinary exceptions must be preserved. The proof
+excludes object identity, escaping references, weak observations, effectful
+constructors and unknown calls. Total wrapping integer operations and the
+well-founded recursion proof justify interleaving construction and consumption.
+
+Helpers use normal calls and the backend's normal safepoint policy. Retained
+objects continue through ordinary liveness/rooting; the prototype introduces
+no arena, hidden allocation counter or alternate collector. The long-lived
+benchmark tree still materializes. Source positions are retained, but helper
+frames can change diagnostic stack shape within the elided computation.
+
+This development flag conflicts with `--hot-reload`, `--dev-generated-helper`,
+`--emit-optimized`, `--build` and `--emit-aot`. The bytecode encoder also refuses
+a fused module: ordinary `.hl` cannot carry this runtime contract. Native AOT
+and wasm activation need explicit policy plumbing in a later checkpoint.
+
+The unchanged depth-16 benchmark produces checksum `-104864`. A local hybrid
+comparison with TLAB disabled on both runs reported **900.0 MiB → 4.0 MiB**
+cumulative allocation: three immediate sites share one 19-op scalar helper,
+while the depth-16 long-lived tree remains. The runtime labels these counters
+`MB` but divides by 1,048,576. This is prototype allocation evidence, not a CI
+timing result or a default rollout. Diagnostics report transformed sites,
+refusals, helper size and skipped/truncated surveys. Inspect the helper with
+`ASH_VERIFY_AIR=dump:INDEX` alongside `--dev-tree-fusion`.
+
 ## Bisecting a wrong answer
 
 Cheapest first:

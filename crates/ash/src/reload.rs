@@ -426,6 +426,20 @@ fn decode_as(path: &std::path::Path, like: &DecodedBytecode) -> anyhow::Result<D
 /// running program's slots, by `remap_globals`, and the functions on its
 /// numbering, by `remap_functions`.
 fn refusal(old: &DecodedBytecode, new: &DecodedBytecode, diff: &ReloadDiff) -> Option<String> {
+    // LLVM can copy this exact stdlib constructor into an active frame.
+    // Entry-point invalidation cannot update that frame, so keep this body
+    // fixed for the entire hot-reload session, including during compilation.
+    let old_module = crate::air_pipeline::AshModule::new(old);
+    if let Some(findex) = diff
+        .changed
+        .iter()
+        .chain(&diff.removed)
+        .find(|findex| old_module.is_bytes_data_constructor(**findex))
+    {
+        return Some(format!(
+            "function {findex} is the BytesData constructor used by LLVM callers"
+        ));
+    }
     if diff.type_layout_changed {
         return Some(
             "a type lost a field or changed one's type; live objects are laid out by the old one"
@@ -1436,5 +1450,30 @@ mod tests {
         let mut new = program(&["a", "b"], 2);
         let why = remap_globals(&old, &mut new, old.globals.len()).unwrap_err();
         assert!(why.contains("room for"), "{why}");
+    }
+
+    #[test]
+    fn changing_the_bytes_data_constructor_is_refused() {
+        crate::native_lib::init_std_library();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tests/test_bytes_data_alloc.hl");
+        let old = crate::bytecode::BytecodeDecoder::decode(&fixture).unwrap();
+        let module = crate::air_pipeline::AshModule::new(&old);
+        let findex = old
+            .functions
+            .iter()
+            .map(|f| f.findex as usize)
+            .find(|&findex| module.is_bytes_data_constructor(findex))
+            .expect("fixture has the BytesData constructor");
+        let diff = ReloadDiff {
+            changed: vec![findex],
+            added: vec![],
+            removed: vec![],
+            type_layout_changed: false,
+            globals_count_changed: false,
+            methods_changed: false,
+        };
+        let why = refusal(&old, &old, &diff).unwrap();
+        assert!(why.contains("BytesData constructor"), "{why}");
     }
 }

@@ -395,6 +395,10 @@ impl Cache {
                 frameless = with_callees.view(cfg.callees);
                 &frameless
             }
+            ash_core::air_pipeline::CalleeView::ReloadStable => {
+                frameless = with_callees.view(cfg.callees);
+                &frameless
+            }
         };
         // The AIR pipeline runs HERE, on the mutator, inside the execute
         // phase -- not on a broker thread like the tiers that consume it. Its

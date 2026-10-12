@@ -25,12 +25,9 @@ pub(crate) fn prepare_llvm(
     hot_reload: bool,
     callees: CalleeView,
 ) -> Result<(air::v2::ir::Function, bool), PipelineError> {
-    let level = match (hot_reload, level()) {
-        (true, AirOptLevel::O3) => AirOptLevel::O2,
-        (_, level) => level,
-    };
+    let level = level();
     let callees = if hot_reload {
-        CalleeView::None
+        CalleeView::ReloadStable
     } else {
         callees
     };
@@ -51,7 +48,9 @@ pub(crate) fn prepare_llvm(
     let opt = air_pipeline::optimized_with_config(&module, f, cfg)?;
     // What this body bound: the callees it copied in, and, with the callees
     // visible, the ones it calls by address rather than through a slot. A
-    // reload of any of them sends this body back to the interpreter.
+    // reload of any of them sends future calls to this body back to the
+    // interpreter. Under hot reload the only offered callee is pinned too,
+    // because an already active LLVM frame cannot be invalidated.
     let inlined = opt.ir.inline_sites.iter().map(|site| site.callee as usize);
     let called = opt.ir.blocks.iter().flat_map(|b| {
         b.instrs.iter().filter_map(|i| match i {
@@ -138,13 +137,10 @@ pub(crate) fn promotion_wants_full_module(
     // interpreter, the Cranelift tier, the OSR sites -- reads for the body
     // lowered WITH it, and whichever caller reached the findex first decided
     // for all of them. Only reachable under --hot-reload, which is the one
-    // configuration that already runs a second level.
-    let level = match (hot_reload, level()) {
-        (true, AirOptLevel::O3) => AirOptLevel::O2,
-        (_, level) => level,
-    };
+    // configuration that uses a restricted callee view.
+    let level = level();
     let callees = if hot_reload {
-        CalleeView::None
+        CalleeView::ReloadStable
     } else {
         CalleeView::All
     };

@@ -346,6 +346,11 @@ impl<'b> ModuleInfo for AshModule<'b> {
         if std::env::var_os("ASH_AIR_NO_INLINE").is_some() {
             return None;
         }
+        if self.callees == CalleeView::ReloadStable {
+            if !self.is_bytes_data_constructor(findex) {
+                return None;
+            }
+        }
         let body = self.lowered_body(findex)?;
         self.offer(findex, (*body).clone())
     }
@@ -360,6 +365,63 @@ impl<'b> ModuleInfo for AshModule<'b> {
 }
 
 impl AshModule<'_> {
+    /// The standard BytesData wrapper's entire constructor is two field
+    /// writes. It can be copied into a reloadable LLVM caller only while its
+    /// bytecode is held fixed for the lifetime of that caller.
+    pub(crate) fn is_bytes_data_constructor(&self, findex: usize) -> bool {
+        use air::opcodes::{Opcode, RefField, Reg};
+        let Some(f) = self.function(findex) else {
+            return false;
+        };
+        let Some(ty) = f.regs.first().and_then(|r| self.bc.types.get(r.0)) else {
+            return false;
+        };
+        let Some(obj) = ty.obj.as_ref() else {
+            return false;
+        };
+        if obj.name != "haxe.io.BytesDataImpl"
+            || obj.fields.len() != 2
+            || obj.fields[0].name != "bytes"
+            || obj.fields[1].name != "length"
+            || f.regs.len() != 4
+            || f.regs[1].0 != obj.fields[0].type_.0
+            || f.regs[2].0 != obj.fields[1].type_.0
+        {
+            return false;
+        }
+        let Some(sig) = self.bc.types.get(f.type_.0).and_then(|t| t.fun.as_ref()) else {
+            return false;
+        };
+        if f.regs[3].0 != sig.ret.0
+            || sig
+            .args
+            .iter()
+            .map(|r| r.0)
+            .ne(f.regs[..3].iter().map(|r| r.0))
+            || self
+                .bc
+                .types
+                .get(sig.ret.0)
+                .is_none_or(|t| t.kind != crate::hl::hl_type_kind_HVOID)
+        {
+            return false;
+        }
+        matches!(
+            f.ops(),
+            [
+                Opcode::SetThis {
+                    field: RefField(0),
+                    src: Reg(1)
+                },
+                Opcode::SetThis {
+                    field: RefField(1),
+                    src: Reg(2)
+                },
+                Opcode::Ret { ret: Reg(3) },
+            ]
+        )
+    }
+
     /// The callee's own body, shared through a bounded reuse cache.
     ///
     /// Lowered against a module that offers no callees: this is the callee's
@@ -699,9 +761,9 @@ impl Optimized {
 /// different pipelines from the same function, and serving one the other's
 /// result is silent and wrong rather than loud:
 ///
-/// * a hot-reload build runs at O2 with callee bodies hidden, deliberately --
-///   inlining across a reload boundary means an edit to a callee stops taking
-///   effect between iterations (`jit::air::run_v2`);
+/// * a hot-reload LLVM build sees only the pinned BytesData constructor:
+///   inlining a mutable callee could leave an active frame running its old
+///   body after a reload;
 /// * `--no-fma` turns off the FMA peephole, which is the one pass whose
 ///   output is observable as a different *number* rather than different code.
 ///
@@ -724,6 +786,9 @@ pub enum CalleeView {
     /// ([`AshModule::is_frameless`]). What a shadow-call-stack target
     /// inlines, since there each Haxe function is one counted frame.
     Frameless,
+    /// Only the verified BytesData constructor, whose body reload rejects
+    /// changing while an LLVM caller may contain a copy.
+    ReloadStable,
     /// None: the inliner is inert.
     None,
 }

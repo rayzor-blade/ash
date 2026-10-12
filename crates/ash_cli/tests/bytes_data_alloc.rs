@@ -1,7 +1,10 @@
 mod common;
 
 use common::{ash_cli_bin, haxe_available, render_output, run_with_timeout, tests_dir};
+use std::io::{BufRead, BufReader};
 use std::process::Command;
+use std::process::Stdio;
+use std::sync::mpsc;
 use std::time::Duration;
 
 fn amount(json: &str, key: &str) -> u64 {
@@ -40,6 +43,7 @@ fn inlined_bytes_data_wrapper_does_not_allocate() {
         &["--mode", "hybrid", "--preset", "game"][..],
         &["--mode", "interp"][..],
         &["--mode", "jit", "--jit-tier", "cranelift", "--hot-reload"][..],
+        &["--mode", "jit", "--jit-tier", "llvm", "--hot-reload"][..],
     ] {
         let mut command = Command::new(ash_cli_bin());
         command.args(mode).arg(&hl).env("ASH_GC_TLAB", "0");
@@ -59,4 +63,96 @@ fn inlined_bytes_data_wrapper_does_not_allocate() {
             assert_eq!(amount(json, key), 0, "{mode:?}: {json}");
         }
     }
+}
+
+#[test]
+fn llvm_reload_keeps_calls_from_an_active_frame_current() {
+    if !haxe_available() {
+        return;
+    }
+    const SOURCE: &str = r#"
+class TestInlineReload {
+    static function helper():Int return HELPER_RESULT;
+    static function work(wait:Bool):Int {
+        if (!wait) return 0;
+        var deadline = Sys.time() + 10.0;
+        while (Sys.time() < deadline) {
+            if (hl.Api.checkReload()) return helper();
+            Sys.sleep(0.001);
+        }
+        return -1;
+    }
+    static function main() {
+        for (i in 0...200) work(false);
+        Sys.println("ready");
+        Sys.println("value " + work(true));
+    }
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("live.hl");
+    let mut versions = Vec::new();
+    for value in [11, 22] {
+        let src = dir.path().join(format!("v{value}"));
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(
+            src.join("TestInlineReload.hx"),
+            SOURCE.replace("HELPER_RESULT", &value.to_string()),
+        )
+        .unwrap();
+        let bytecode = dir.path().join(format!("v{value}.hl"));
+        let out = Command::new("haxe")
+            .arg("-cp")
+            .arg(&src)
+            .args(["-main", "TestInlineReload", "-hl"])
+            .arg(&bytecode)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", render_output(&out));
+        versions.push(bytecode);
+    }
+    std::fs::copy(&versions[0], &live).unwrap();
+    let stderr_path = dir.path().join("stderr");
+    let mut child = Command::new(ash_cli_bin())
+        .args([
+            "--mode",
+            "jit",
+            "--jit-tier",
+            "llvm",
+            "--hot-reload",
+            "--quiet",
+        ])
+        .arg(&live)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
+        .spawn()
+        .unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let ready = receiver.recv_timeout(Duration::from_secs(15)).unwrap();
+    assert_eq!(ready, "ready");
+    std::thread::sleep(Duration::from_millis(1100));
+    let replacement = dir.path().join("replacement.hl");
+    std::fs::copy(&versions[1], &replacement).unwrap();
+    std::fs::rename(&replacement, &live).unwrap();
+    let value = receiver
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap_or_else(|e| {
+            child.kill().ok();
+            panic!("LLVM reload timed out: {e}");
+        });
+    assert_eq!(
+        value,
+        "value 22",
+        "{}",
+        std::fs::read_to_string(&stderr_path).unwrap()
+    );
+    assert!(child.wait().unwrap().success());
 }

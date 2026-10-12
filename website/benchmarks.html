@@ -486,6 +486,17 @@
               bi.title = modesNote.slice(3);
               num.appendChild(bi);
             }
+            var tiersNote = '';
+            if (r.engine === 'ash' && r.sample_tiers && r.sample_tiers.length) {
+              var reached = r.sample_tiers.filter(function (s) { return s.llvm > 0; }).length;
+              var tierTag = el('span', 'aot-tag');
+              tierTag.textContent = 'LLVM ' + reached + '/' + r.sample_tiers.length;
+              tiersNote = ' · timed tiers: ' + r.sample_tiers.map(function (s) {
+                return fmtMs(s.ms) + ' CL' + s.cranelift + '/LLVM' + s.llvm;
+              }).join(', ');
+              tierTag.title = tiersNote.slice(3);
+              num.appendChild(tierTag);
+            }
             if (baseline) {
               var ratio = el('span', 'ratio');
               ratio.textContent = fmtRatio(r.median_ms / baseline);
@@ -506,7 +517,7 @@
               num.appendChild(ab);
             }
             num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
-              modesNote + abNote +
+              modesNote + tiersNote + abNote +
               (r.aot_build_ms ? ' · AOT build excluded' : '') +
               (r.gc && r.gc.collections != null
                 ? ' · GC ' + r.gc.collections + ' collections, ' +

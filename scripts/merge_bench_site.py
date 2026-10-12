@@ -27,10 +27,11 @@ Output is one compact `results.json`:
           base: {commit, median_ms, min_ms, max_ms, runs, modes, delta_pct} when
             -- the sweep timed a base build interleaved with this one on the
             -- same runner (ash_bench.py --ash-base); delta_pct is head against
-            -- base on like modes, the one cross-commit number that is sound,
+            -- base on like modes when both sides have the same mode shape,
           gc: {collections, pause_total_ms, pause_max_ms, bytes_allocated_mb,
                live_blocks} when the sweep ran with --gc-stats,
-          min_ms, max_ms, runs, tiers: {cranelift, llvm}, checksum } ] } ] }
+          min_ms, max_ms, runs, tiers: {cranelift, llvm},
+          sample_tiers: [{ms, cranelift, llvm}], checksum } ] } ] }
 
 The page treats the HashLink JIT row as the 1.00 baseline when present and
 falls back to absolute milliseconds when it is not — so a runner without a
@@ -99,6 +100,19 @@ def wall_fields(wall: dict | None, samples: list | None = None) -> dict:
     return out
 
 
+def timed_tier_fields(record: dict) -> list[dict]:
+    """Keep each timed sample's elapsed time beside its own tier counts."""
+    return [
+        {
+            "ms": round(ms, 2),
+            "cranelift": counts.get("cranelift", 0),
+            "llvm": counts.get("llvm", 0),
+        }
+        for ms, counts in zip(record.get("samples_ms") or [], record.get("sample_tiers") or [])
+        if counts is not None
+    ]
+
+
 def ash_row(docs: list[dict], bench: str) -> dict | None:
     """Best ash row for `bench` across every partial: a stale or failed
     partial must never shadow an OK row in another one."""
@@ -137,6 +151,8 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
             "llvm": tiered.get("llvm", 0),
         },
     }
+    if samples := timed_tier_fields(pick):
+        row["sample_tiers"] = samples
     if checksum:
         row["checksum"] = checksum
     # Collector behaviour, when the sweep asked for it (`--gc-stats`).
@@ -176,6 +192,8 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
             **wall_fields(base.get("wall_ms"), base.get("samples_ms")),
             "delta_pct": round(ab["delta_pct"], 2) if ab else None,
         }
+        if samples := timed_tier_fields(base):
+            row["base"]["sample_tiers"] = samples
     return row
 
 

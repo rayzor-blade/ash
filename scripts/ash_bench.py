@@ -236,9 +236,17 @@ def like_mode_ms(wall: dict | None) -> float | None:
 def ab_delta(rec: dict) -> dict | None:
     """Head against base for one row, both timed interleaved on one machine:
     `{head_ms, base_ms, delta_pct}`, or None when either side has no OK
-    number. Like modes are compared, so a bimodal draw does not count."""
+    number or only one side has a measurable fast cluster. Like modes are
+    compared, so a promotion race does not become a false delta."""
     base = rec.get("base")
     if not base or rec.get("status") != STATUS_OK or base.get("status") != STATUS_OK:
+        return None
+    # A single fast draw does not meet split_modes' minimum cluster size.
+    # Comparing the head's fast cluster to the base's unsplit slow median
+    # would turn a promotion race into a fictitious speed-up.
+    if bool((rec.get("wall_ms") or {}).get("modes")) != bool(
+        (base.get("wall_ms") or {}).get("modes")
+    ):
         return None
     head_ms = like_mode_ms(rec.get("wall_ms"))
     base_ms = like_mode_ms(base.get("wall_ms"))
@@ -748,6 +756,7 @@ def build_env(args, instrumented: bool, bench=None, mode=None) -> dict:
     for k in (
         "ASH_GC_STATS",
         "ASH_TIER_LOG",
+        "ASH_TIER_SUMMARY",
         "ASH_TIER",
         "ASH_NO_PURE_CSE",
         "ASH_AIR",
@@ -768,6 +777,11 @@ def build_env(args, instrumented: bool, bench=None, mode=None) -> dict:
         env.update(mode.env)
     if bench is not None:
         env.update(bench.env)
+    if not instrumented and mode is not None and "--mode" in mode.args:
+        # One line after the program exits. Unlike --jit-log this writes
+        # nothing while it runs, so each timed sample can be matched to the
+        # tiers that actually ran in that sample.
+        env["ASH_TIER_SUMMARY"] = "1"
     return env
 
 
@@ -892,6 +906,7 @@ def run_one(
             "detail": "",
             "wall_ms": None,
             "samples_ms": [],
+            "sample_tiers": [],
             "checksum": None,
         }
 
@@ -908,6 +923,7 @@ def run_one(
         "detail": "",
         "wall_ms": None,
         "samples_ms": [],
+        "sample_tiers": [],
         "peak_rss_bytes": None,
         "exit_code": None,
         "signal": None,
@@ -955,6 +971,7 @@ def run_one(
             base["detail"] = detail
             return
         base["samples_ms"].append(res.wall_ms)
+        base["sample_tiers"].append(parse_tiered(res.stderr))
         base["checksum"] = checksum or None
 
     # Every iteration is judged, not just the last one. ASH promotes on a
@@ -981,6 +998,7 @@ def run_one(
                 base["wall_ms"] = summarize(base["samples_ms"])
             return record
         samples.append(res.wall_ms)
+        record["sample_tiers"].append(parse_tiered(res.stderr))
         verdicts.append(judge(bench, res, ref))
         fingerprints.append(fingerprint(bench, res))
         run_base()

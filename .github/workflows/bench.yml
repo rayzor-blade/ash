@@ -476,13 +476,13 @@ jobs:
             --timeout-scale 3 \
             --out "parts/hl-${{ matrix.bench }}.json"
 
-      # Which rungs the ladder actually climbed, read out of the timed runs
-      # themselves — ash_bench already records every install. A leg that
+      # Which rungs the ladder actually climbed, read from each timed sample's
+      # summary. The detailed installs below come from a separate logged run.
+      # A leg that
       # silently never leaves the interpreter looks like a slow runner rather
       # than an unclimbed ladder, and fib's 342ms -> 74ms came entirely from
       # the top rung, so this is the first question to ask of a disappointing
-      # number. Re-running the program under ASH_TIER_LOG would answer it too,
-      # but from a run nobody timed.
+      # number.
       - name: Which tiers did the ladder reach? (${{ matrix.bench }})
         continue-on-error: true
         run: |
@@ -499,11 +499,16 @@ jobs:
               for i in installs:
                   print(f"    findex={i['findex']:<6} {i['tier']:<10} "
                         f"compile={i.get('compile_ms', 0):.2f}ms")
+              for ms, tiers in zip(r.get('samples_ms') or [], r.get('sample_tiers') or []):
+                  tiers = tiers or {}
+                  print(f"    timed={ms:.2f}ms cranelift={tiers.get('cranelift', 0)} "
+                        f"llvm={tiers.get('llvm', 0)}")
               # Reaching only Cranelift is not a fault in itself: the LLVM
               # chase is call-gated, and free_call's Cranelift code already
               # matches hand-written C, so it correctly stops there. Reaching
               # no tier at all means this leg timed the interpreter.
-              if not installs:
+              if not any(t and (t.get('cranelift', 0) or t.get('llvm', 0))
+                         for t in r.get('sample_tiers') or []):
                   print(f"::warning title=No tier installed ({r['benchmark']})::"
                         "the ladder never promoted anything; this leg measured "
                         "the interpreter, and its number should not be read as "

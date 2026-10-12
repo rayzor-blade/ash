@@ -322,3 +322,46 @@ did not.
 | `scripts/aot_bench.py` | the AOT lane |
 | `scripts/generate_parity_oracle.py` | the HashLink oracle bundle `--oracle` consumes; runs in CI |
 | `crates/ash_cli/tests/parity_matrix.rs` | the parity gate proper; `ash_bench.py` borrows its case metadata and normalization |
+
+## Opt-in recursive tree fusion experiment
+
+This experiment has its own artifact-only CI job; it does not change the public
+benchmark rows or enable the compiler optimization by default. Dispatch the
+`benchmarks` workflow with `tree_fusion_only=true` to run only its build and
+measurement jobs, without site publication. Ordinary scheduled sweeps also run
+the experiment on a separate runner using the same prebuilt toolchain.
+
+```sh
+python3 scripts/bench_tree_fusion.py --ash target/release/ash \
+  --source local --source-revision "$(git rev-parse HEAD)" \
+  --pairs 7 --warmups 1 --diagnostics 2 --out /tmp/tree-fusion-results
+```
+
+`--source-revision` must name the source actually compiled into that binary.
+The harness hashes the executable, source and bytecode; refuses a changed
+benchmark artifact; alternates off/on and on/off pairs; and requires checksum
+`-104864` from every executed guest. Both variants use the same release binary
+and default hybrid settings. Timing includes process startup and compilation,
+plus the development option's normal preparation messages. It excludes explicit
+GC, JIT-log and profiler instrumentation. Inherited `ASH_*` overrides are removed.
+
+Separate accounting runs disable TLABs on both sides, include managed and
+external cumulative allocation, and retain GC counts/time, RSS, compiler phase
+profiles and per-function tier installations. Each allocation counter is rounded
+to 0.1 MiB, so the sum has up to ±0.1 MiB rounding uncertainty. RSS is a different
+metric. Phase totals from background compiler threads overlap and must not be
+summed into process wall time. An additional AIR dump verifies recursive helper
+calls and absence of node/field operations; this inspection does not execute the
+guest, so it supplies no checksum or timing evidence.
+
+`result.json` retains all samples, commands, sanitized environment settings,
+CPU/kernel provenance, binary/input hashes, paired ratios and a descriptive
+bootstrap interval. Raw stdout/stderr accompanies each run, including failures.
+Failed correctness/accounting/IR gates produce no performance summary. The
+allocation gate requires substantial elimination while retaining approximately
+4 MiB for the long-lived tree. Timing has no hard speed threshold on shared CI.
+
+NUC results use `--source nuc` and stay distinct from actual CI evidence.
+Whole-program latency and helper IR/compile evidence are reported separately;
+this harness makes no isolated-helper throughput claim. Native AOT and wasm
+fusion remain unsupported. Checkpoint `1499bef` tracks results and limitations.

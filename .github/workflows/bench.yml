@@ -39,6 +39,10 @@ on:
 
   workflow_dispatch:
     inputs:
+      tree_fusion_only:
+        description: Run only the opt-in tree fusion experiment; do not publish the site
+        type: boolean
+        default: false
       base:
         description: >-
           Commit or ref to A/B against, built beside HEAD and timed
@@ -88,7 +92,9 @@ jobs:
           shared-key: bench-build
 
       - name: Check benchmark evidence gates
-        run: python3 tests/ash_bench_test.py
+        run: |
+          python3 tests/ash_bench_test.py
+          python3 tests/tree_fusion_bench_test.py
 
       - name: Install LLVM 21 toolchain
         run: |
@@ -117,6 +123,7 @@ jobs:
       # `ash` and `libash_std` to target/release; HEAD's must be the ones
       # left there for packaging.
       - name: Build the base to A/B against
+        if: ${{ !inputs.tree_fusion_only }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,6 +176,7 @@ jobs:
       # built. Best-effort: a failure here costs that comparison row, never
       # the run, and hl_bench.py records the lane as UNAVAILABLE.
       - name: Cache HashLink ${{ env.HASHLINK_VERSION }}
+        if: ${{ !inputs.tree_fusion_only }}
         id: hl-cache
         uses: actions/cache@v4
         with:
@@ -176,7 +184,7 @@ jobs:
           key: hashlink-${{ env.HASHLINK_VERSION }}-ubuntu-24.04
 
       - name: Build HashLink ${{ env.HASHLINK_VERSION }}
-        if: steps.hl-cache.outputs.cache-hit != 'true'
+        if: ${{ !inputs.tree_fusion_only && steps.hl-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         run: |
           git clone --depth 1 --branch "${HASHLINK_VERSION}" \
@@ -193,6 +201,7 @@ jobs:
       # quietly rebuilds a HashLink on every leg, which is the cost this
       # split exists to remove.
       - name: Resolve ${{ env.HASHLINK_HL2_REF }} head
+        if: ${{ !inputs.tree_fusion_only }}
         id: hl2-rev
         run: |
           REV=$(git ls-remote https://github.com/HaxeFoundation/hashlink.git \
@@ -202,6 +211,7 @@ jobs:
           echo "$HASHLINK_HL2_REF is at $REV"
 
       - name: Cache HashLink ${{ env.HASHLINK_HL2_REF }}
+        if: ${{ !inputs.tree_fusion_only }}
         id: hl2-cache
         uses: actions/cache@v4
         with:
@@ -209,7 +219,7 @@ jobs:
           key: hashlink-hl2-ubuntu-24.04-${{ steps.hl2-rev.outputs.rev }}
 
       - name: Build HashLink ${{ env.HASHLINK_HL2_REF }}
-        if: steps.hl2-cache.outputs.cache-hit != 'true'
+        if: ${{ !inputs.tree_fusion_only && steps.hl2-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         run: |
           rm -rf ~/hashlink-hl2
@@ -240,6 +250,7 @@ jobs:
       # The simd benchmarks' natives, for the HashLink lanes: an HDLL beside
       # `hl`, where its own libraries live.
       - name: Build simd.hdll for HashLink
+        if: ${{ !inputs.tree_fusion_only }}
         continue-on-error: true
         run: |
           cargo build --release -p ash_hdll_simd
@@ -250,6 +261,8 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/ash dist/
+          git rev-parse HEAD > dist/ash.commit
+          { rustc -Vv; cargo -V; llvm-config-21 --version; } > dist/build-toolchain.txt
           cp target/release/libash_std.so dist/ 2>/dev/null || true
           cp target/release/libash_std.a dist/ 2>/dev/null || echo "no libash_std.a"
           tar czf dist/hashlink.tar.gz -C "$HOME" hashlink 2>/dev/null || echo "no hashlink"
@@ -271,7 +284,41 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  tree-fusion:
+    name: Experimental tree fusion (hybrid off/on)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-toolchain
+          path: dist
+      - name: Compare identical binary and workload with fusion off/on
+        run: |
+          chmod +x dist/ash
+          test "$(cat dist/ash.commit)" = "$(git rev-parse HEAD)"
+          python3 scripts/bench_tree_fusion.py \
+            --ash dist/ash --source ci --source-revision "$(cat dist/ash.commit)" \
+            --pairs 7 --warmups 1 --diagnostics 2 --out tree-fusion-results
+      # Experimental diagnostics are artifacts, never input to site aggregation.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tree-fusion-experiment
+          path: |
+            tree-fusion-results/
+            dist/ash.commit
+            dist/build-toolchain.txt
+          if-no-files-found: error
+          retention-days: 30
+
   benchmark:
+    if: ${{ !inputs.tree_fusion_only }}
     name: bench (${{ matrix.bench }})
     needs: build
     runs-on: ubuntu-24.04
@@ -579,7 +626,7 @@ jobs:
     # `needs` alone would skip this whenever any matrix leg failed, and a
     # skipped aggregate skips the deploy — one crashing benchmark would take
     # the whole published page down rather than just its own rows.
-    if: ${{ always() && github.event_name != 'workflow_run' && needs.benchmark.result != 'cancelled' }}
+    if: ${{ always() && !inputs.tree_fusion_only && github.event_name != 'workflow_run' && needs.benchmark.result != 'cancelled' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -623,7 +670,7 @@ jobs:
       group: pages
       cancel-in-progress: false
     if: >-
-      ${{ always() && (needs.aggregate.result == 'success' ||
+      ${{ always() && !inputs.tree_fusion_only && (needs.aggregate.result == 'success' ||
           (github.event_name == 'workflow_run' &&
            github.event.workflow_run.conclusion == 'success')) }}
     runs-on: ubuntu-24.04

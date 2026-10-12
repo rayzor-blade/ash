@@ -387,3 +387,11 @@ caller AIR/helpers. The refusal/startup fixture surveys seven bodies and adds
 about 0.7 ms median process time. Small timing differences are noisy; these
 local samples do not replace CI measurements. Binary trees remains unchanged,
 with checksum `-104864` and **900.0 → 4.0 MiB** allocation under the new default.
+
+The manually dispatched [default CI gate](https://github.com/rayzor-blade/ash/actions/runs/38313336422)
+at `384b753c` also passed: **327.5 → 213.6 ms** median process time across
+seven pairs on one EPYC 7763 runner, **900.0 → 4.0 MiB** allocation, checksum
+`-104864` throughout. Its raw artifact and provenance are retained with the
+rollout report. This host differs from the earlier CI experiment; compare
+within each run. Public benchmark aggregation and website publication were
+skipped for this gate.

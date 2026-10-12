@@ -757,5 +757,100 @@
         98.7
       ]
     }
+  },
+  "default_ci_gate": {
+    "url": "https://github.com/rayzor-blade/ash/actions/runs/38313336422",
+    "event": "workflow_dispatch",
+    "input": {
+      "tree_fusion_only": true
+    },
+    "source_revision": "384b753cf09a2c3c4a0422a2c1ed96ffe7bab55b",
+    "status": "PASS",
+    "system": {
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_model": "AMD EPYC 7763 64-Core Processor",
+      "cpu_count": 4,
+      "ram_mb": 15989,
+      "hostname": "runnervmmprz5",
+      "python": "3.12.15"
+    },
+    "binary_sha256": "802798114515fd2fff447d3f5433ebdc817d3639bae99efcf4d25edfb17bb6b2",
+    "summary": {
+      "process_wall_ms": {
+        "off": {
+          "samples": [
+            328.31530500000383,
+            329.035171000001,
+            309.8726790000015,
+            327.5414160000025,
+            322.8712430000016,
+            327.37161600000064,
+            330.11453400000335
+          ],
+          "median": 327.5414160000025,
+          "min": 309.8726790000015,
+          "max": 330.11453400000335,
+          "mean": 325.01742342857347,
+          "stddev": 7.057867831800825
+        },
+        "on": {
+          "samples": [
+            205.6306330000055,
+            199.67626300000063,
+            213.63502600000572,
+            233.69667400000083,
+            241.43820700000163,
+            237.4531760000025,
+            209.51504599999993
+          ],
+          "median": 213.63502600000572,
+          "min": 199.67626300000063,
+          "max": 241.43820700000163,
+          "mean": 220.14928928571666,
+          "stddev": 16.939269403356146
+        }
+      },
+      "paired_on_over_off": {
+        "samples": [
+          0.6263205822829463,
+          0.6068538581852698,
+          0.6894284023019812,
+          0.713487402154966,
+          0.7477847972976659,
+          0.7253322047321354,
+          0.6346738008208926
+        ],
+        "median": 0.6894284023019812,
+        "min": 0.6068538581852698,
+        "max": 0.7477847972976659,
+        "mean": 0.6776972925394081,
+        "stddev": 0.05493825845577551
+      },
+      "paired_ratio_bootstrap_95pct": [
+        0.6263205822829463,
+        0.7253322047321354
+      ],
+      "interval_note": "Descriptive paired bootstrap; shared-host noise and correlated runs remain possible.",
+      "cumulative_allocation_mib": {
+        "off": [
+          900.0,
+          900.0
+        ],
+        "on": [
+          4.0,
+          4.0
+        ]
+      },
+      "allocation_reduction_pct": 99.55555555555556
+    },
+    "guest_runs_checked": 20,
+    "ir_inspections": 1,
+    "checksum": "-104864",
+    "archive": {
+      "path": "tree-fusion-rollout-ci-2026-10-12.tar.gz",
+      "sha256": "0854c518b1d0c936207a55badc8cb89911b025a04c1f58721c83bd8784b13305"
+    },
+    "scope": "Default/off comparison passed; ordinary public sweep and site publication skipped. Compare within this host; it differs from the previous CI runner."
   }
 }

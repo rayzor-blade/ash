@@ -7,7 +7,9 @@ fn run(file: &str, mode: &[&str], fused: bool) -> std::process::Output {
     let mut cmd = Command::new(ash_cli_bin());
     cmd.args(mode).arg("--quiet");
     if fused {
-        cmd.arg("--dev-tree-fusion");
+        cmd.arg("--tree-fusion-log");
+    } else {
+        cmd.arg("--no-tree-fusion");
     }
     cmd.arg(tests_dir().join(file))
         .env("ASH_GC_STATS", "1")
@@ -119,5 +121,38 @@ fn runtime_dependent_fusion_cannot_be_serialized_or_hot_reloaded() {
         assert!(!result.timed_out && !result.output.status.success());
         assert!(String::from_utf8_lossy(&result.output.stderr).contains("cannot be used with"));
         assert!(!dir.path().join("output").exists());
+    }
+}
+
+#[test]
+fn default_execution_is_quiet_and_export_uses_original_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let exported = dir.path().join("optimized.hl");
+    let mut export = Command::new(ash_cli_bin());
+    export
+        .args(["--quiet", "--tree-fusion-log", "--emit-optimized"])
+        .arg(&exported)
+        .arg(tests_dir().join("test_tree_fusion.hl"));
+    let result = run_with_timeout(export, Duration::from_secs(30));
+    assert!(
+        !result.timed_out && result.output.status.success(),
+        "{}",
+        render_output(&result.output)
+    );
+    assert!(!String::from_utf8_lossy(&result.output.stderr).contains("[tree-fusion]"));
+    for input in [tests_dir().join("test_tree_fusion.hl"), exported] {
+        let mut cmd = Command::new(ash_cli_bin());
+        cmd.arg("--quiet").arg(input);
+        let result = run_with_timeout(cmd, Duration::from_secs(30));
+        assert!(
+            !result.timed_out && result.output.status.success(),
+            "{}",
+            render_output(&result.output)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.output.stdout).trim(),
+            "tree-fusion check=-3824 made=31"
+        );
+        assert!(!String::from_utf8_lossy(&result.output.stderr).contains("[tree-fusion]"));
     }
 }

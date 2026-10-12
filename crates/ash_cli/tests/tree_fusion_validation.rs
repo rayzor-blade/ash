@@ -24,7 +24,9 @@ fn command(file: &str, mode: &[&str], fused: bool, args: &[&str], env: &[(&str, 
     let mut cmd = Command::new(ash_cli_bin());
     cmd.args(mode).arg("--quiet");
     if fused {
-        cmd.arg("--dev-tree-fusion");
+        cmd.arg("--tree-fusion-log");
+    } else {
+        cmd.arg("--no-tree-fusion");
     }
     cmd.arg(tests_dir().join(file))
         .args(args)

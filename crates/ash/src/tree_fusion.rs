@@ -1,8 +1,9 @@
-//! Opt-in standalone preparation. The compiler may eliminate unreachable,
+//! Bounded standalone preparation. The compiler may eliminate unreachable,
 //! confined objects under Ash's allocation-elision convention: allocation
 //! counts, collection/finalizer scheduling, resource exhaustion and profiling
 //! timing are not semantic barriers. Value results, observable memory effects
 //! and ordinary exceptions remain barriers. No host policy is inferred here.
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use air::v2::tree_fusion::{self, Limits, TreeModule};
@@ -11,13 +12,23 @@ use anyhow::{Result, ensure};
 use crate::air_pipeline::AshModule;
 use crate::bytecode::DecodedBytecode;
 use crate::generated::{self, Declaration, Key};
+use crate::opcodes::Opcode;
 use crate::types::TypeRef;
+
+// Module-wide bounds supplement per-proof and generated-code limits.
+const MAX_FUNCTIONS: usize = 4096;
+const MAX_SURVEYS: usize = 128;
+const MAX_CALLER_AIR: usize = 8 * 1024 * 1024;
 
 /// Only the standalone CLI before guest execution may establish this contract.
 /// The linked Ash runtime has no replaceable allocator/plugin loader; native
 /// host code, registration hooks, and reload would void that assumption.
 /// Hosts must not call this while another program/runtime is active.
-pub fn prepare_standalone(input: &DecodedBytecode) -> Result<(DecodedBytecode, Vec<String>)> {
+/// No-candidate and refused transactions borrow the original module; callers
+/// can retain it without cloning metadata. Contract failures return an error.
+pub fn prepare_standalone(
+    input: &DecodedBytecode,
+) -> Result<(Cow<'_, DecodedBytecode>, Vec<String>)> {
     ensure!(
         crate::native_lib::std_is_static(),
         "tree fusion requires the linked standalone Ash runtime"
@@ -62,20 +73,61 @@ pub fn prepare_standalone(input: &DecodedBytecode) -> Result<(DecodedBytecode, V
     prepare(input)
 }
 
-fn prepare(input: &DecodedBytecode) -> Result<(DecodedBytecode, Vec<String>)> {
+fn prepare(input: &DecodedBytecode) -> Result<(Cow<'_, DecodedBytecode>, Vec<String>)> {
+    prepare_bounded(input, MAX_SURVEYS, MAX_CALLER_AIR)
+}
+
+fn prepare_bounded(
+    input: &DecodedBytecode,
+    max_surveys: usize,
+    max_caller_air: usize,
+) -> Result<(Cow<'_, DecodedBytecode>, Vec<String>)> {
     let module = AshModule::for_tree_fusion(input);
     let limits = Limits::default();
     let mut declarations = BTreeMap::new();
     let mut callers = Vec::new();
-    let mut report = vec![
-        "prototype; standalone allocation-elision contract; no hot reload or serialization".into(),
-    ];
+    let mut report =
+        vec!["standalone allocation-elision contract; no hot reload or serialization".into()];
     let mut skipped = 0;
-    for (fi, f) in input.functions.iter().enumerate().take(4096) {
+    let mut surveyed = 0;
+    let mut caller_air = 0;
+    let mut module_truncated = input.functions.len() > MAX_FUNCTIONS;
+    let mut tree_types = BTreeMap::new();
+    for (fi, f) in input.functions.iter().enumerate().take(MAX_FUNCTIONS) {
         if f.op_count() > limits.body_ops || f.regs.len() > limits.body_ops * 8 {
             skipped += 1;
             continue;
         }
+        // Cheap necessary condition: a direct call returning a recursive
+        // object. Avoid lowering ordinary numeric/dispatch workloads at startup.
+        let possible = f.ops().iter().any(|op| {
+            let dst = match op {
+                Opcode::Call0 { dst, .. }
+                | Opcode::Call1 { dst, .. }
+                | Opcode::Call2 { dst, .. }
+                | Opcode::Call3 { dst, .. }
+                | Opcode::Call4 { dst, .. }
+                | Opcode::CallN { dst, .. } => dst,
+                _ => return false,
+            };
+            let Some(ty) = f.regs.get(dst.0 as usize) else {
+                return false;
+            };
+            *tree_types.entry(ty.0).or_insert_with(|| {
+                let ty = air::v2::ir::TypeRef(ty.0 as u32);
+                module
+                    .plain_fields(ty)
+                    .is_some_and(|fields| fields.contains(&ty))
+            })
+        });
+        if !possible {
+            continue;
+        }
+        if surveyed == max_surveys {
+            module_truncated = true;
+            break;
+        }
+        surveyed += 1;
         let Some(body) = module.lowered_body(f.findex as usize) else {
             skipped += 1;
             continue;
@@ -118,8 +170,21 @@ fn prepare(input: &DecodedBytecode) -> Result<(DecodedBytecode, Vec<String>)> {
             }
         }
         if candidate {
+            caller_air += body.allocated_bytes();
+            if caller_air > max_caller_air
+                || declarations.len() > generated::Limits::default().helpers
+            {
+                report
+                    .push("module proof/helper budget exceeded; original program retained".into());
+                return Ok((Cow::Borrowed(input), report));
+            }
             callers.push((fi, body));
         }
+    }
+    report.push(format!("surveyed_bodies={surveyed} retained_caller_air_bytes={caller_air} module_truncated={module_truncated}"));
+    if declarations.is_empty() {
+        report.push(format!("transformed_sites=0 helpers=0 skipped_bodies={skipped} module_truncated={module_truncated}"));
+        return Ok((Cow::Borrowed(input), report));
     }
     let transaction = (|| -> Result<(DecodedBytecode, usize)> {
         let mut output = generated::prepare(
@@ -203,15 +268,15 @@ fn prepare(input: &DecodedBytecode) -> Result<(DecodedBytecode, Vec<String>)> {
             report.push(format!(
                 "transformed_sites={count} helpers={} skipped_bodies={skipped} module_truncated={}",
                 output.generated_helpers.len(),
-                input.functions.len() > 4096
+                module_truncated
             ));
-            Ok((output, report))
+            Ok((Cow::Owned(output), report))
         }
         Err(e) => {
             report.push(format!(
                 "transaction refused: {e:#}; original program retained"
             ));
-            Ok((input.clone(), report))
+            Ok((Cow::Borrowed(input), report))
         }
     }
 }
@@ -350,6 +415,46 @@ mod tests {
             tree_fusion::build_helper(&AshModule::new(&bc), 24, 23, 999, Limits::default())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn non_tree_program_keeps_original_module_without_metadata_clone() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test/tests/bench_fib.hl");
+        crate::native_lib::choose_std_linkage(&path);
+        crate::native_lib::init_std_library().unwrap();
+        let bc = BytecodeDecoder::decode(&path).unwrap();
+        let (prepared, report) = prepare(&bc).unwrap();
+        assert!(matches!(prepared, Cow::Borrowed(_)));
+        assert!(
+            report
+                .iter()
+                .any(|line| line.contains("retained_caller_air_bytes=0"))
+        );
+        assert!(prepared.generated_helpers.is_empty());
+    }
+
+    #[test]
+    fn module_budgets_retain_original_program() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tests/bench_binary_trees.hl");
+        crate::native_lib::choose_std_linkage(&path);
+        crate::native_lib::init_std_library().unwrap();
+        let bc = BytecodeDecoder::decode(&path).unwrap();
+        let old = crate::bytecode_encode::encode(&bc, 5).unwrap();
+        for (surveys, bytes, reason) in [
+            (0, MAX_CALLER_AIR, "module_truncated=true"),
+            (MAX_SURVEYS, 0, "module proof/helper budget exceeded"),
+        ] {
+            let (fallback, report) = prepare_bounded(&bc, surveys, bytes).unwrap();
+            assert!(
+                report.iter().any(|line| line.contains(reason)),
+                "{report:?}"
+            );
+            assert!(matches!(fallback, Cow::Borrowed(_)));
+            assert!(fallback.generated_helpers.is_empty());
+            assert!(!fallback.tree_fusion_runtime);
+            assert_eq!(old, crate::bytecode_encode::encode(&fallback, 5).unwrap());
+        }
     }
 
     #[test]

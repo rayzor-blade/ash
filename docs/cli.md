@@ -27,6 +27,8 @@ ash --build mygame.wasm --target wasm32-wasip1 main.hl
 | `--jit-tier` | `auto`, `cranelift`, `llvm`, `off` | `auto` | restrict the ladder to one compiler, or disable promotion |
 | `--jit-log` | flag | | log every promotion, decline and tier transfer to stderr |
 | `--quiet` | flag | | suppress everything ash prints that the program did not |
+| `--no-tree-fusion` | flag | | disable confined recursive tree allocation elimination |
+| `--tree-fusion-log` | flag | | log fusion candidates, refusals, helpers and budgets to stderr |
 | `--no-fma` | flag | | round every float operation on its own; see below |
 
 **`interp`** executes bytecode and compiles nothing. It is the reference

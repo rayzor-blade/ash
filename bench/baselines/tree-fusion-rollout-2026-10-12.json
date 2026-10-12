@@ -1,0 +1,761 @@
+{
+  "schema_version": 1,
+  "issue": "082042be6006eaf78e28dc381c9f575e95d68948ee8558332bbf894f5dcce374",
+  "source": "local macOS; not CI evidence",
+  "base_revision": "fc8a7c46e9832186fad79ad2369ec12553b82570",
+  "source_changes": {
+    ".github/workflows/bench.yml": "af8819c5aa0769bfcbb1144806257f94db6f9c485bcce9ecee873adb526d993e",
+    "bench/README.md": "9b8bac0de5b9d96ad9181e8d50291531e80959796f8515d09681d5233ea48cf7",
+    "crates/ash/src/tree_fusion.rs": "5af9d082bfbe82b40d5674c4ccd3ae9e6dd7fcbba683ab627300bfbe10185dda",
+    "crates/ash_cli/src/main.rs": "71efd8f4cd5cb701800023d092a5cb98cadc677110c8f8e815cb5dcea332c9ef",
+    "crates/ash_cli/tests/tree_fusion.rs": "687d362cd837cd31bb441cfdfff5dbfee10c77d234863b98c2cc9a389f308eaa",
+    "crates/ash_cli/tests/tree_fusion_validation.rs": "c493205f40dac2ffafce61c9ff8498d67533b9441aca3c9f5364c86d6c53faa8",
+    "docs/cli.md": "14ab12f6c20120e35f1fcb32d677976e4fb3d231464f08e60856dc33cf3cef1b",
+    "docs/debugging.md": "b224d177777b33a8a2f9ec56d5db4a7fc99b55743380296ea6f198d4e4b72913",
+    "scripts/bench_tree_fusion.py": "3558702cea5aa8dd979898b48a0772f5e63a74444e10722eb8d98f7b3a2abd3f"
+  },
+  "binary_sha256": "c15b97d4dc06664fcc687c9f5542cbf28d0e38614841c882f350656d9b288a9c",
+  "system": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu_model": "Apple M1 Pro",
+    "cpu_count": 10,
+    "ram_mb": 16384,
+    "hostname": "Damilares-MacBook-Pro.local",
+    "python": "3.14.3"
+  },
+  "method": "Same release binary, default hybrid, --no-tree-fusion versus default; one warmup pair, seven alternating pairs, two diagnostic pairs. Clean timing has no ASH diagnostics. Diagnostic phases/RSS are separate; no performance threshold on noisy local hardware.",
+  "archive": {
+    "path": "tree-fusion-rollout-local-2026-10-12.tar.gz",
+    "sha256": "18a6dbf3d2a430c90856e2dcf6a1d35c968cff83cb38d7103c33ccd26a86dd98"
+  },
+  "binary_trees": {
+    "process_wall_ms": {
+      "off": {
+        "samples": [
+          249.2610839981353,
+          254.4508340070024,
+          264.4259999942733,
+          228.09483400487807,
+          225.93816700100433,
+          252.77991700568236,
+          266.6216249926947
+        ],
+        "median": 252.77991700568236,
+        "min": 225.93816700100433,
+        "max": 266.6216249926947,
+        "mean": 248.7960658576672,
+        "stddev": 16.13037328881248
+      },
+      "on": {
+        "samples": [
+          135.17587499518413,
+          136.9925410108408,
+          135.4162079951493,
+          133.93629099300597,
+          134.2778329999419,
+          134.43624999490567,
+          138.29145800264087
+        ],
+        "median": 135.17587499518413,
+        "min": 133.93629099300597,
+        "max": 138.29145800264087,
+        "mean": 135.50377942738123,
+        "stddev": 1.5917671881589845
+      }
+    },
+    "paired_on_over_off": {
+      "samples": [
+        0.5423063754155678,
+        0.5383851129647734,
+        0.5121138163345588,
+        0.5871956354353102,
+        0.594312305805973,
+        0.531831213442022,
+        0.518680575915138
+      ],
+      "median": 0.5383851129647734,
+      "min": 0.5121138163345588,
+      "max": 0.594312305805973,
+      "mean": 0.5464035764733347,
+      "stddev": 0.0321377955290758
+    },
+    "paired_ratio_bootstrap_95pct": [
+      0.518680575915138,
+      0.5871956354353102
+    ],
+    "interval_note": "Descriptive paired bootstrap; shared-host noise and correlated runs remain possible.",
+    "cumulative_allocation_mib": {
+      "off": [
+        900.0,
+        900.0
+      ],
+      "on": [
+        4.0,
+        4.0
+      ]
+    },
+    "allocation_reduction_pct": 99.55555555555556
+  },
+  "broader": [
+    {
+      "name": "fib",
+      "input": "bench_fib.hl",
+      "sha256": "a4d2308e055252469be5731ee243bccb653cc4fee0d3357e85f0b31a47571f98",
+      "expected_numeric_checksum": "102334155",
+      "stdout": "BenchFib 102334155\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            26.802416003192775,
+            25.44445899548009,
+            25.122167004155926,
+            25.170499997329898,
+            25.364082990563475,
+            26.50795799854677,
+            25.54237499134615
+          ],
+          "median": 25.44445899548009,
+          "min": 25.122167004155926,
+          "max": 26.802416003192775,
+          "mean": 25.707708282945013,
+          "stddev": 0.6689481242488388
+        },
+        "on": {
+          "samples": [
+            25.267834003898315,
+            26.888207998126745,
+            25.226083991583437,
+            25.129249988822266,
+            25.63733299029991,
+            26.840000005904585,
+            27.080083003966138
+          ],
+          "median": 25.63733299029991,
+          "min": 25.129249988822266,
+          "max": 27.080083003966138,
+          "mean": 26.009827426085913,
+          "stddev": 0.8836630844586685
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.65,
+            0.6
+          ],
+          "peak_rss_bytes": [
+            55492608,
+            55656448
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            0.89,
+            0.87
+          ],
+          "peak_rss_bytes": [
+            55951360,
+            55771136
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "fib_calls",
+      "input": "bench_fib.hl",
+      "sha256": "a4d2308e055252469be5731ee243bccb653cc4fee0d3357e85f0b31a47571f98",
+      "expected_numeric_checksum": "102334155",
+      "stdout": "BenchFib 102334155\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            196.13637500151526,
+            196.78345900319982,
+            206.2840410071658,
+            205.14049999474082,
+            229.00108399335295,
+            213.24612500029616,
+            204.5997079985682
+          ],
+          "median": 205.14049999474082,
+          "min": 196.13637500151526,
+          "max": 229.00108399335295,
+          "mean": 207.31304171411986,
+          "stddev": 11.2138575423934
+        },
+        "on": {
+          "samples": [
+            198.55158300197218,
+            196.92400000349153,
+            209.45312500407454,
+            203.8674999930663,
+            208.49308298784308,
+            265.6904159957776,
+            205.03433400881477
+          ],
+          "median": 205.03433400881477,
+          "min": 196.92400000349153,
+          "max": 265.6904159957776,
+          "mean": 212.57343442786285,
+          "stddev": 23.881470412519846
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.59,
+            0.66
+          ],
+          "peak_rss_bytes": [
+            56377344,
+            56213504
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            0.86,
+            0.9
+          ],
+          "peak_rss_bytes": [
+            56492032,
+            56623104
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "mandelbrot",
+      "input": "test_mandelbrot.hl",
+      "sha256": "79b247515e7a00ab88da23c3d143b1bb442ffeba1d05b89f837ddbc71cd28456",
+      "expected_numeric_checksum": "112798587",
+      "stdout": "Checksum: 112798587\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            741.0428330040304,
+            646.5878750022966,
+            677.676250008517,
+            688.3422919927398,
+            648.7387910019606,
+            671.2656659947243,
+            641.9851660029963
+          ],
+          "median": 671.2656659947243,
+          "min": 641.9851660029963,
+          "max": 741.0428330040304,
+          "mean": 673.662696143895,
+          "stddev": 34.484635827513785
+        },
+        "on": {
+          "samples": [
+            635.2774580009282,
+            626.7897079960676,
+            640.3369170002406,
+            633.2488750049379,
+            649.0830830007326,
+            689.0864159940975,
+            640.36787499208
+          ],
+          "median": 640.3369170002406,
+          "min": 626.7897079960676,
+          "max": 689.0864159940975,
+          "mean": 644.8843331412978,
+          "stddev": 20.686639858587828
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.71,
+            0.64
+          ],
+          "peak_rss_bytes": [
+            71172096,
+            71073792
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            1.19,
+            0.95
+          ],
+          "peak_rss_bytes": [
+            71516160,
+            71565312
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "deltablue",
+      "input": "bench_deltablue.hl",
+      "sha256": "63075503ac5312b9ee643d9eabaf4df6c269c40c5d67820c50ba462d861fa204",
+      "expected_numeric_checksum": "14065400",
+      "stdout": "Checksum: 14065400\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            57.62375000631437,
+            60.24175000493415,
+            55.851083001471125,
+            55.137457995442674,
+            62.57779100269545,
+            53.13345899048727,
+            51.364458005991764
+          ],
+          "median": 55.851083001471125,
+          "min": 51.364458005991764,
+          "max": 62.57779100269545,
+          "mean": 56.56139271533383,
+          "stddev": 3.919219121121907
+        },
+        "on": {
+          "samples": [
+            59.56708299345337,
+            53.486290998989716,
+            57.18920899380464,
+            53.54029199224897,
+            54.769041991676204,
+            55.42304199479986,
+            52.05604100774508
+          ],
+          "median": 54.769041991676204,
+          "min": 52.05604100774508,
+          "max": 59.56708299345337,
+          "mean": 55.14728571038826,
+          "stddev": 2.5436291203363313
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.73,
+            0.71
+          ],
+          "peak_rss_bytes": [
+            59555840,
+            60407808
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            1.1,
+            1.05
+          ],
+          "peak_rss_bytes": [
+            61472768,
+            60440576
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=1 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=1 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "arrays",
+      "input": "bench_array_access.hl",
+      "sha256": "0108b5489b3b2c1ad8318c894c1e5840fa2aa7d1c615e6cf03c01593c95baaa2",
+      "expected_numeric_checksum": "-1737346944",
+      "stdout": "BenchArrayAccess -1737346944\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            302.982332999818,
+            315.02120799268596,
+            301.2680410029134,
+            299.08625000098255,
+            302.8370000101859,
+            312.99958399904426,
+            308.37495799642056
+          ],
+          "median": 302.982332999818,
+          "min": 299.08625000098255,
+          "max": 315.02120799268596,
+          "mean": 306.0813391431501,
+          "stddev": 6.127434767187856
+        },
+        "on": {
+          "samples": [
+            300.8040830027312,
+            305.9788749960717,
+            300.90225000458304,
+            300.65066598763224,
+            300.62741599977016,
+            307.33099998906255,
+            301.25420799595304
+          ],
+          "median": 300.90225000458304,
+          "min": 300.62741599977016,
+          "max": 307.33099998906255,
+          "mean": 302.5069282822577,
+          "stddev": 2.867877858829715
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.62,
+            0.62
+          ],
+          "peak_rss_bytes": [
+            65568768,
+            65748992
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            0.92,
+            0.9
+          ],
+          "peak_rss_bytes": [
+            65945600,
+            65798144
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "simd",
+      "input": "bench_simd_dot.hl",
+      "sha256": "71caa20a56112c40e65f42290f1a28081c4751013e0ca6aaee74dec79875577d",
+      "expected_numeric_checksum": "73726218",
+      "stdout": "BenchSimdDot 73726218\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            136.872916991706,
+            138.0641249998007,
+            139.05633299145848,
+            137.97058300406206,
+            139.3352919985773,
+            149.06941700610332,
+            136.08066600863822
+          ],
+          "median": 138.0641249998007,
+          "min": 136.08066600863822,
+          "max": 149.06941700610332,
+          "mean": 139.4927618571923,
+          "stddev": 4.374006700241238
+        },
+        "on": {
+          "samples": [
+            145.25075000710785,
+            137.91945899720304,
+            141.4183329907246,
+            138.30824999604374,
+            154.00208400387783,
+            134.93808399653062,
+            140.8063749986468
+          ],
+          "median": 140.8063749986468,
+          "min": 134.93808399653062,
+          "max": 154.00208400387783,
+          "mean": 141.80619071287634,
+          "stddev": 6.27518963229046
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.71,
+            0.79
+          ],
+          "peak_rss_bytes": [
+            68796416,
+            68599808
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            1.04,
+            1.04
+          ],
+          "peak_rss_bytes": [
+            69107712,
+            69238784
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "dispatch",
+      "input": "bench_dyn_dispatch.hl",
+      "sha256": "5ef2b3d777f1b89e71a23a72ba187e5b529874fc715bec6c11f3f648bda75a80",
+      "expected_numeric_checksum": null,
+      "stdout": "Checksum: 1148967109\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            140.5945000005886,
+            128.47408300149255,
+            126.45283399615437,
+            127.06470799457747,
+            131.19529200776014,
+            133.49700000253506,
+            131.60579199029598
+          ],
+          "median": 131.19529200776014,
+          "min": 126.45283399615437,
+          "max": 140.5945000005886,
+          "mean": 131.26917271334347,
+          "stddev": 4.8430514321777975
+        },
+        "on": {
+          "samples": [
+            124.82537499454338,
+            180.1721660012845,
+            126.51804099732544,
+            130.17066699103452,
+            139.91279200126883,
+            126.53304100967944,
+            128.8073329924373
+          ],
+          "median": 128.8073329924373,
+          "min": 124.82537499454338,
+          "max": 180.1721660012845,
+          "mean": 136.7056307125105,
+          "stddev": 19.803717970159227
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.74,
+            0.78
+          ],
+          "peak_rss_bytes": [
+            129892352,
+            129810432
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            1.07,
+            1.0
+          ],
+          "peak_rss_bytes": [
+            156106752,
+            130203648
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=1 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=0 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=1 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "startup",
+      "input": "test_tree_fusion_refusals.hl",
+      "sha256": "8de51e408fa8a42a3e3c904258d365ddc06d6e4758e416174ff3297a641eb3c4",
+      "expected_numeric_checksum": null,
+      "stdout": "observed=4 events=-2,0,-1,0,2,1,0,\ncaught=constructor events=-3,\ncaught=leaf\ncaught=Null access\nescape=5/7\nshared=3 identity=2\nskip=2 mutate=12 dynamic=0\n",
+      "wall_ms": {
+        "off": {
+          "samples": [
+            17.091125002480112,
+            16.956416991888545,
+            17.805833005695604,
+            22.926250007003546,
+            21.109915993292816,
+            17.41908300027717,
+            17.601125000510365
+          ],
+          "median": 17.601125000510365,
+          "min": 16.956416991888545,
+          "max": 22.926250007003546,
+          "mean": 18.701392714449735,
+          "stddev": 2.3432612722818758
+        },
+        "on": {
+          "samples": [
+            17.87720900028944,
+            17.91612501256168,
+            18.205583008239046,
+            18.270625005243346,
+            23.95187500223983,
+            21.248958000796847,
+            18.819042001268826
+          ],
+          "median": 18.270625005243346,
+          "min": 17.87720900028944,
+          "max": 23.95187500223983,
+          "mean": 19.469916718662716,
+          "stddev": 2.2972593353932917
+        }
+      },
+      "diagnostics": {
+        "off": {
+          "decode_and_preparation_ms": [
+            0.7,
+            0.6
+          ],
+          "peak_rss_bytes": [
+            29638656,
+            29638656
+          ],
+          "fusion_budget_report": [
+            [],
+            []
+          ]
+        },
+        "on": {
+          "decode_and_preparation_ms": [
+            1.28,
+            1.42
+          ],
+          "peak_rss_bytes": [
+            30195712,
+            30212096
+          ],
+          "fusion_budget_report": [
+            [
+              "[tree-fusion] surveyed_bodies=7 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ],
+            [
+              "[tree-fusion] surveyed_bodies=7 retained_caller_air_bytes=0 module_truncated=false",
+              "[tree-fusion] transformed_sites=0 helpers=0 skipped_bodies=0 module_truncated=false"
+            ]
+          ]
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Local regression screen, not a CI performance claim. Earlier same-host CI and NUC benefit measurements remain in tree-fusion-2026-10-12.json.",
+    "Clean timing excludes profiler/GC/AIR-cache logs; diagnostic runs are separate. Preparation cost is included in decode bytecode and diagnostic logging.",
+    "Seven timing pairs and two diagnostic pairs per workload; shared-machine and promotion/GC timing variability remain. Small speed differences are not attributed to tree fusion when no sites transform.",
+    "Dispatch peak RSS had an outlier; five additional alternating GC-instrumented pairs showed high peaks on both sides and equal cumulative allocation (98.7 MiB at the default TLAB counter granularity).",
+    "The refusal/startup fixture adds about 0.7 ms median process time; it surveys seven bodies, rejects every site, and retains zero caller AIR/helpers.",
+    "Proof/caller caches are temporary. A unit test verifies no-candidate preparation borrows the original module rather than cloning its metadata.",
+    "Binary-trees managed/external counters use TLAB off and rounded MiB, not total Rust/LLVM malloc traffic. Long-lived tree remains allocated. Fused AOT/wasm, serialization and hot reload remain unsupported."
+  ],
+  "dispatch_rss_followup": {
+    "off": {
+      "peak_rss_mib": [
+        109.828125,
+        125.1875,
+        150.453125,
+        125.625,
+        125.328125
+      ],
+      "allocated_mib": [
+        98.7,
+        98.7,
+        98.7,
+        98.7,
+        98.7
+      ]
+    },
+    "on": {
+      "peak_rss_mib": [
+        129.703125,
+        123.53125,
+        126.359375,
+        151.546875,
+        125.625
+      ],
+      "allocated_mib": [
+        98.7,
+        98.7,
+        98.7,
+        98.7,
+        98.7
+      ]
+    }
+  }
+}

@@ -125,7 +125,7 @@ def run_experiment(args, record):
         env = environment(diagnostic)
         env.update(extra_env or {})
         cmd = [str(binary), "--mode", "hybrid", "--quiet"]
-        if variant == "on": cmd += ["--dev-tree-fusion"]
+        if variant == "off": cmd += ["--no-tree-fusion"]
         if diagnostic: cmd += ["--jit-log"]
         cmd.append(hl)
         if diagnostic and (wrapper := bench.time_wrapper()): cmd = wrapper + cmd
@@ -191,8 +191,8 @@ def main(argv=None):
               "source": args.source, "source_revision": args.source_revision, "system": bench.system_info(),
               "kernel": platform.platform(), "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
               "harness_sha256": digest(Path(__file__)),
-              "comparison": "same binary, fusion flag off/on; alternating AB/BA pairs, fresh processes",
-              "timing_scope": "whole process including startup, compilation and normal preparation messages; no GC/JIT/profile instrumentation",
+              "comparison": "same binary, --no-tree-fusion versus default; alternating AB/BA pairs, fresh processes",
+              "timing_scope": "whole process including startup, compilation; no GC/JIT/profile instrumentation",
               "accounting_note": "TLAB disabled on both diagnostic variants; managed plus external counters, each rounded to 0.1 MiB (sum uncertainty +/-0.1 MiB). RSS is separate, not cumulative allocation.",
               "limitations": ["Helper IR/compilation diagnostics are separate from whole-program timing; no isolated helper throughput claim.",
                               "Local/NUC runs are not CI evidence. Fused AOT/wasm remain unsupported."],

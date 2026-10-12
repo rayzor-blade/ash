@@ -239,8 +239,9 @@ rooting for any retained objects. The survey does not cache executable proofs.
 
 The survey bounds body size, symbolic steps, candidate sites and module size.
 Skipped bodies and exhausted budgets are reported explicitly; a partial
-survey is not evidence that the remaining module has no candidates. No normal
-compilation path runs this analysis yet.
+survey is not evidence that the remaining module has no candidates. The
+`only` diagnostic bypasses default fusion and surveys the original bytecode;
+standalone execution establishes its runtime contract separately (see below).
 
 ### Generated helper preparation
 
@@ -299,17 +300,18 @@ elision must establish its policy separately and refuse serialization if that
 policy cannot travel with the program. A structural tree candidate alone is
 still insufficient authorization.
 
-### Recursive tree fusion prototype
+### Recursive tree fusion
 
-Git-bug `bfd0a53` adds an explicit development option:
+Git-bug `082042b` enables bounded fusion by default for standalone execution:
 
 ```sh
-ASH_GC_STATS=1 ASH_GC_TLAB=0 target/debug/ash --dev-tree-fusion --quiet \
+ASH_GC_STATS=1 ASH_GC_TLAB=0 target/debug/ash --tree-fusion-log --quiet \
   crates/ash/test/tests/bench_binary_trees.hl
 ```
 
-Normal runs do not enable it. Before creating runtime tables, preparation
-surveys raw AIR, reserves a helper for each proven producer/fold pair, then
+Use `--no-tree-fusion` to diagnose a regression. Reports are emitted only with
+`--tree-fusion-log`, `--jit-log`, or the legacy `--dev-tree-fusion` option.
+Before creating runtime tables, preparation surveys raw AIR, reserves a helper for each proven producer/fold pair, then
 rechecks and rewrites the callers. Unsupported sites retain their original
 calls. Failed helper construction, serialization, verification or growth
 limits abandon the entire transaction and retain the original module.
@@ -329,31 +331,45 @@ host native overrides, active object tails/drop hooks/layout room, and native
 registration hooks are refused. In-place hot reload is refused. As with
 allocation elimination elsewhere in the compiler, allocation counts, GC and
 unrelated finalizer scheduling, resource exhaustion (including stack/OOM), and
-profiling timing are not barriers under this opt-in contract. Observable value
-results, memory effects and ordinary exceptions must be preserved. The proof
+profiling timing are not barriers under this allocation-elision contract.
+Observable value results, memory effects and ordinary exceptions must be preserved. The proof
 excludes object identity, escaping references, weak observations, effectful
 constructors and unknown calls. Total wrapping integer operations and the
 well-founded recursion proof justify interleaving construction and consumption.
 
 Helpers use normal calls and the backend's normal safepoint policy. Retained
-objects continue through ordinary liveness/rooting; the prototype introduces
+objects continue through ordinary liveness/rooting; the optimization introduces
 no arena, hidden allocation counter or alternate collector. The long-lived
 benchmark tree still materializes. Source positions are retained, but helper
 frames can change diagnostic stack shape within the elided computation.
 
-This development flag conflicts with `--hot-reload`, `--dev-generated-helper`,
-`--emit-optimized`, `--build` and `--emit-aot`. The bytecode encoder also refuses
-a fused module: ordinary `.hl` cannot carry this runtime contract. Native AOT
+Default execution skips fusion for `--hot-reload`, `--dev-generated-helper`,
+`--emit-optimized`, `--build` and `--emit-aot`; an unsupported runtime contract
+also falls back to original bytecode. The legacy `--dev-tree-fusion` flag still
+requires the contract and rejects incompatible options. The bytecode encoder
+also refuses a fused module: ordinary `.hl` cannot carry this runtime contract. Native AOT
 and wasm activation need explicit policy plumbing in a later checkpoint.
 
 The unchanged depth-16 benchmark produces checksum `-104864`. A local hybrid
 comparison with TLAB disabled on both runs reported **900.0 MiB → 4.0 MiB**
 cumulative allocation: three immediate sites share one 19-op scalar helper,
 while the depth-16 long-lived tree remains. The runtime labels these counters
-`MB` but divides by 1,048,576. This is prototype allocation evidence, not a CI
-timing result or a default rollout. Diagnostics report transformed sites,
+`MB` but divides by 1,048,576. CI and NUC timing evidence is retained in
+`bench/baselines/tree-fusion-2026-10-12.json`. Diagnostics report transformed sites,
 refusals, helper size and skipped/truncated surveys. Inspect the helper with
 `ASH_VERIFY_AIR=dump:INDEX` alongside `--dev-tree-fusion`.
+
+Preparation examines at most 4,096 functions with at most 256 opcodes and
+2,048 registers per caller, using direct calls returning recursive objects as
+a cheap filter before lowering. At most 128 callers are surveyed, each with
+a 16,384-step proof budget and 64 sites. Retained caller AIR is capped at
+8 MiB; lowered-body reuse has a separate 2 MiB cache. Helper registration caps
+32 helpers, 2,048 ops per helper, 16,384 total helper ops and 16 MiB helper AIR.
+Over-budget callers stay original; retained-AIR/helper overflow abandons the
+transaction. Reports expose truncation and retained caller bytes. Proofs and
+helpers are local to the immutable module snapshot; code, layout or host policy
+changes require reconstruction from the original bytecode. There is no cache
+reuse across reloads or serialized programs.
 
 #### Fusion validation (checkpoint 5)
 
@@ -402,8 +418,8 @@ These are local macOS correctness checks, including a build without LLVM.
 Fusion remains unavailable for serialized bytecode, native AOT and wasm until
 their runtime contract is carried explicitly; portable-helper AOT tests do
 not establish support for fused programs. The benchmark source/bytecode and
-checksum remain unchanged. Same-host CI measurements and default rollout are
-the subsequent gates.
+checksum remain unchanged. CI now compares `--no-tree-fusion` against the
+default path; clean timings omit fusion reports.
 
 ## Bisecting a wrong answer
 

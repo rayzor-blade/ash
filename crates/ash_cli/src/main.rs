@@ -75,7 +75,13 @@ const VERSION: &str = env!("ASH_BUILD_VERSION");
         .multiple(true)
 ))]
 struct Cli {
-    /// Prototype recursive tree allocation elimination for standalone Ash.
+    /// Disable recursive tree allocation elimination.
+    #[arg(long, conflicts_with = "dev_tree_fusion")]
+    no_tree_fusion: bool,
+    /// Report tree fusion candidates, refusals, helpers and budgets.
+    #[arg(long)]
+    tree_fusion_log: bool,
+    /// Require the standalone tree fusion contract (diagnostic compatibility option).
     #[arg(long, hide = true, conflicts_with_all = ["hot_reload", "build", "emit_aot", "emit_optimized", "dev_generated_helper"])]
     dev_tree_fusion: bool,
     /// Development-only generated scalar helper registration/dispatch probe.
@@ -1137,12 +1143,39 @@ fn run() -> Result<()> {
     let bytecode = {
         let _p = ash_core::profile::scope("decode bytecode");
         let decoded = BytecodeDecoder::decode(&hl_path)?;
-        let decoded = if cli.dev_tree_fusion {
-            let (prepared, report) = ash_core::tree_fusion::prepare_standalone(&decoded)?;
-            for line in report {
-                eprintln!("[tree-fusion] {line}");
+        // Establish the allocation/lifetime contract only for execution in a
+        // fresh standalone process. Export and reload retain original bytecode.
+        let fusion = !cli.no_tree_fusion
+            && std::env::var("ASH_TREE_FUSION_SURVEY").as_deref() != Ok("only")
+            && !cli.hot_reload
+            && cli.build.is_none()
+            && cli.emit_aot.is_none()
+            && cli.emit_optimized.is_none()
+            && cli.dev_generated_helper.is_none();
+        let fusion_log = cli.tree_fusion_log || cli.jit_log || cli.dev_tree_fusion;
+        let decoded = if fusion {
+            match ash_core::tree_fusion::prepare_standalone(&decoded) {
+                Ok((prepared, report)) => {
+                    if fusion_log {
+                        for line in report {
+                            eprintln!("[tree-fusion] {line}");
+                        }
+                    }
+                    // A refused/no-candidate preparation borrows the input;
+                    // keep it directly instead of cloning module metadata.
+                    match prepared {
+                        std::borrow::Cow::Owned(prepared) => prepared,
+                        std::borrow::Cow::Borrowed(_) => decoded,
+                    }
+                }
+                Err(e) if !cli.dev_tree_fusion => {
+                    if fusion_log {
+                        eprintln!("[tree-fusion] refused: {e:#}; original program retained");
+                    }
+                    decoded
+                }
+                Err(e) => return Err(e),
             }
-            prepared
         } else if let Some(source) = cli.dev_generated_helper {
             ash_core::generated::probe(&decoded, source)?
         } else {

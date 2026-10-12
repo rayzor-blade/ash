@@ -40,7 +40,7 @@ on:
   workflow_dispatch:
     inputs:
       tree_fusion_only:
-        description: Run only the opt-in tree fusion experiment; do not publish the site
+        description: Run only the tree fusion default/off comparison; do not publish the site
         type: boolean
         default: false
       base:
@@ -285,7 +285,7 @@ jobs:
           retention-days: 7
 
   tree-fusion:
-    name: Experimental tree fusion (hybrid off/on)
+    name: Tree fusion (hybrid default/off)
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -305,7 +305,7 @@ jobs:
           python3 scripts/bench_tree_fusion.py \
             --ash dist/ash --source ci --source-revision "$(cat dist/ash.commit)" \
             --pairs 7 --warmups 1 --diagnostics 2 --out tree-fusion-results
-      # Experimental diagnostics are artifacts, never input to site aggregation.
+      # Fusion diagnostics are artifacts, never input to site aggregation.
       - uses: actions/upload-artifact@v4
         if: always()
         with:

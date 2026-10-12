@@ -323,10 +323,11 @@ did not.
 | `scripts/generate_parity_oracle.py` | the HashLink oracle bundle `--oracle` consumes; runs in CI |
 | `crates/ash_cli/tests/parity_matrix.rs` | the parity gate proper; `ash_bench.py` borrows its case metadata and normalization |
 
-## Opt-in recursive tree fusion experiment
+## Recursive tree fusion comparison
 
 This experiment has its own artifact-only CI job; it does not change the public
-benchmark rows or enable the compiler optimization by default. Dispatch the
+benchmark rows. Standalone execution enables bounded fusion by default; the
+comparison uses `--no-tree-fusion` versus that default. Dispatch the
 `benchmarks` workflow with `tree_fusion_only=true` to run only its build and
 measurement jobs, without site publication. Ordinary scheduled sweeps also run
 the experiment on a separate runner using the same prebuilt toolchain.
@@ -342,7 +343,7 @@ The harness hashes the executable, source and bytecode; refuses a changed
 benchmark artifact; alternates off/on and on/off pairs; and requires checksum
 `-104864` from every executed guest. Both variants use the same release binary
 and default hybrid settings. Timing includes process startup and compilation,
-plus the development option's normal preparation messages. It excludes explicit
+with no fusion reports during clean timing. It excludes explicit
 GC, JIT-log and profiler instrumentation. Inherited `ASH_*` overrides are removed.
 
 Separate accounting runs disable TLABs on both sides, include managed and
@@ -374,4 +375,15 @@ reported **900.0 → 4.0 MiB** cumulative managed/external allocation and checks
 Rust toolchains. The summary links compressed raw logs, samples and provenance.
 Cumulative Rust/LLVM allocator traffic is not measured by the GC counters.
 CI run: <https://github.com/rayzor-blade/ash/actions/runs/38309406232>.
-Default enablement remains checkpoint 7 (`082042b`).
+Checkpoint 7 (`082042b`) enables the guarded standalone default; the retained
+checkpoint 6 measurements above used the earlier opt-in switch.
+
+The [default rollout screen](baselines/tree-fusion-rollout-2026-10-12.json)
+retains local M1 Pro release measurements for eight broader workloads, plus
+binary trees and a follow-up on dispatch peak-memory variation. All outputs
+match the disabled control. Non-tree benchmarks add about 0.2–0.4 ms to
+instrumented decode/preparation, with zero surveyed bodies and zero retained
+caller AIR/helpers. The refusal/startup fixture surveys seven bodies and adds
+about 0.7 ms median process time. Small timing differences are noisy; these
+local samples do not replace CI measurements. Binary trees remains unchanged,
+with checksum `-104864` and **900.0 → 4.0 MiB** allocation under the new default.

@@ -1,0 +1,370 @@
+{
+  "schema_version": 1,
+  "issue": "1499bef19b7cfddddf7e5df9805e9890a13ec364456715c1e890011c88b8ca8e",
+  "ci_run": "https://github.com/rayzor-blade/ash/actions/runs/38309406232",
+  "harness_commit": "bf02bec7c9f3b58aac6293eec8a1024456c7849c",
+  "method": "One release binary per host, hybrid off/on, seven fresh-process paired samples with alternating AB/BA order after one warmup pair. Two separate accounting pairs with TLAB disabled; one non-executing helper IR inspection.",
+  "checksum": "-104864",
+  "workload_changed": false,
+  "counter_scope": "GC-managed plus runtime-reported external cumulative allocation; each printed counter rounded to 0.1 MiB. Sum uncertainty bounded by +/-0.1 MiB. Does not claim cumulative Rust/LLVM malloc traffic; process RSS is reported separately.",
+  "limits": [
+    "Within-host comparisons only; host CPU, memory and Rust toolchain differ.",
+    "Descriptive paired bootstrap intervals from seven pairs; shared-host noise and run correlation remain possible.",
+    "Instrumented phase/GC/RSS/tier runs are excluded from clean timing samples. Concurrent compiler phase totals overlap.",
+    "Helper IR, node allocations and compilation/install timings are measured separately; no isolated-helper throughput claim.",
+    "Native AOT/wasm fusion remains unsupported; optimization remains opt-in pending broader-workload rollout gate."
+  ],
+  "builds": {
+    "nuc": {
+      "source_commit": "038b24b458e5ffb808e87c0463567cc1ba5f2cbf",
+      "source_verification": "git get-tar-commit-id from the transferred source archive; retained run reads source.commit.",
+      "directory": "/home/raikage/ash-tree-fusion-038b24b4",
+      "commands": [
+        "cargo build --offline --release -p ash_std",
+        "cargo build --offline --release -p ash"
+      ],
+      "jobs": 2,
+      "llvm": "21.1.8",
+      "polly": "libpolly-21-dev 1:21.1.8-6ubuntu1 extracted into the isolated build tree; local llvm-config --libdir wrapper. No system package installation.",
+      "note": "Existing modified ~/ash checkout preserved. First attempt was discarded for a mistyped revision label before timing analysis; retained results-02 use the archive-verified label."
+    },
+    "ci": {
+      "source_commit": "bf02bec7c9f3b58aac6293eec8a1024456c7849c",
+      "dispatch": "bench.yml on codex/tree-fusion-ci, tree_fusion_only=true",
+      "jobs": "Build and experiment passed; standard benchmark, aggregation and site publication skipped.",
+      "compiler_source_difference_from_nuc": []
+    }
+  },
+  "results": {
+    "ci": {
+      "source_revision": "bf02bec7c9f3b58aac6293eec8a1024456c7849c",
+      "binary": {
+        "path": "/home/runner/work/ash/ash/dist/ash",
+        "sha256": "7491b42ddeed5fd44fc797504d8d6d6ec38420df9f861815a6530751a1194b7a"
+      },
+      "system": {
+        "os": "linux",
+        "arch": "x86_64",
+        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "cpu_count": 4,
+        "ram_mb": 15989,
+        "hostname": "runnervmmprz5",
+        "python": "3.12.15"
+      },
+      "input_hashes": {
+        "source": "d705a3b8c01dd2dcae7a89e27cf814317df8ba50ccbf3ec6d1ea8bfdcfd669b5",
+        "bytecode": "9698cecaf8852fa219acfd3361ea8659543cb7dc5a4033168aa3ff96d01a926d"
+      },
+      "measurement_summary": {
+        "process_wall_ms": {
+          "off": {
+            "samples": [
+              304.99006500008363,
+              304.0620900000022,
+              294.4230539999353,
+              313.2986079999682,
+              310.9297129999504,
+              294.1539670000566,
+              320.78655999998773
+            ],
+            "median": 304.99006500008363,
+            "min": 294.1539670000566,
+            "max": 320.78655999998773,
+            "mean": 306.09200814285487,
+            "stddev": 9.79187152302159
+          },
+          "on": {
+            "samples": [
+              229.27865299993755,
+              227.63388500004567,
+              223.4929569999622,
+              222.15520299994296,
+              217.20523199996933,
+              225.48883700005717,
+              203.24194199997692
+            ],
+            "median": 223.4929569999622,
+            "min": 203.24194199997692,
+            "max": 229.27865299993755,
+            "mean": 221.2138155714131,
+            "stddev": 8.847526775802146
+          }
+        },
+        "paired_on_over_off": {
+          "samples": [
+            0.7517577761094437,
+            0.7486427689819669,
+            0.759087829446981,
+            0.7090845516937806,
+            0.6985669844940292,
+            0.7665673840802351,
+            0.6335737444860056
+          ],
+          "median": 0.7486427689819669,
+          "min": 0.6335737444860056,
+          "max": 0.7665673840802351,
+          "mean": 0.7238972913274917,
+          "stddev": 0.04737622624456996
+        },
+        "paired_ratio_bootstrap_95pct": [
+          0.6985669844940292,
+          0.759087829446981
+        ],
+        "interval_note": "Descriptive paired bootstrap; shared-host noise and correlated runs remain possible.",
+        "cumulative_allocation_mib": {
+          "off": [
+            900.0,
+            900.0
+          ],
+          "on": [
+            4.0,
+            4.0
+          ]
+        },
+        "allocation_reduction_pct": 99.55555555555556
+      },
+      "diagnostics": {
+        "off": {
+          "peak_rss_mib": [
+            661.44921875,
+            661.21875
+          ],
+          "gc_collections": [
+            1,
+            1
+          ],
+          "gc_pause_ms": [
+            21.1,
+            22.8
+          ],
+          "decode_and_preparation_ms": [
+            0.95,
+            1.03
+          ]
+        },
+        "on": {
+          "peak_rss_mib": [
+            105.34765625,
+            102.4375
+          ],
+          "gc_collections": [
+            0,
+            0
+          ],
+          "gc_pause_ms": [
+            0.0,
+            0.0
+          ],
+          "decode_and_preparation_ms": [
+            5.73,
+            5.63
+          ]
+        }
+      },
+      "helpers": [
+        {
+          "findex": 388,
+          "producer": 24,
+          "consumer": 23,
+          "ops": 19,
+          "regs": 19,
+          "node_allocations": 0
+        }
+      ],
+      "helper_installs": [
+        {
+          "findex": 388,
+          "tier": "cranelift",
+          "compile_ms": 2.33,
+          "installed_at_run_ms": 14.2
+        },
+        {
+          "findex": 388,
+          "tier": "llvm",
+          "compile_ms": 18.96,
+          "installed_at_run_ms": 33.7
+        },
+        {
+          "findex": 388,
+          "tier": "cranelift",
+          "compile_ms": 2.13,
+          "installed_at_run_ms": 13.7
+        },
+        {
+          "findex": 388,
+          "tier": "llvm",
+          "compile_ms": 15.79,
+          "installed_at_run_ms": 29.8
+        }
+      ],
+      "archive": "tree-fusion-ci-2026-10-12.tar.gz",
+      "archive_sha256": "75ce37942ac60ad3ad2fcba19c8726694d8802b1a902b0e910e5baba118dc27a",
+      "raw_report": "tree-fusion-results/result.json"
+    },
+    "nuc": {
+      "source_revision": "038b24b458e5ffb808e87c0463567cc1ba5f2cbf",
+      "binary": {
+        "path": "/home/raikage/ash-tree-fusion-038b24b4/target/release/ash",
+        "sha256": "7e1f0a4dc64f0e1009576a73c6e252460d352d197d5a6d25414f63d0c3752760"
+      },
+      "system": {
+        "os": "linux",
+        "arch": "x86_64",
+        "cpu_model": "12th Gen Intel(R) Core(TM) i5-1250P",
+        "cpu_count": 16,
+        "ram_mb": 6981,
+        "hostname": "raikage-NUC12WSH-B",
+        "python": "3.14.4"
+      },
+      "input_hashes": {
+        "source": "d705a3b8c01dd2dcae7a89e27cf814317df8ba50ccbf3ec6d1ea8bfdcfd669b5",
+        "bytecode": "9698cecaf8852fa219acfd3361ea8659543cb7dc5a4033168aa3ff96d01a926d"
+      },
+      "measurement_summary": {
+        "process_wall_ms": {
+          "off": {
+            "samples": [
+              332.5594500056468,
+              329.661217998364,
+              336.6385720000835,
+              334.17143300175667,
+              322.6793549983995,
+              345.4477829945972,
+              344.5314609998604
+            ],
+            "median": 334.17143300175667,
+            "min": 322.6793549983995,
+            "max": 345.4477829945972,
+            "mean": 335.09846742838687,
+            "stddev": 8.057767057466066
+          },
+          "on": {
+            "samples": [
+              126.72104699595366,
+              129.3190180003876,
+              128.23362700873986,
+              127.34719199943356,
+              120.94628899649251,
+              133.4990940085845,
+              128.26602799759712
+            ],
+            "median": 128.23362700873986,
+            "min": 120.94628899649251,
+            "max": 133.4990940085845,
+            "mean": 127.7617564295984,
+            "stddev": 3.7310542271726224
+          }
+        },
+        "paired_on_over_off": {
+          "samples": [
+            0.3810478006076867,
+            0.3922785300181393,
+            0.3809237493103079,
+            0.38108341833864695,
+            0.37481880115042504,
+            0.38645231082774795,
+            0.37229119113058035
+          ],
+          "median": 0.3810478006076867,
+          "min": 0.37229119113058035,
+          "max": 0.3922785300181393,
+          "mean": 0.3812708287690763,
+          "stddev": 0.006714227729287464
+        },
+        "paired_ratio_bootstrap_95pct": [
+          0.37481880115042504,
+          0.38645231082774795
+        ],
+        "interval_note": "Descriptive paired bootstrap; shared-host noise and correlated runs remain possible.",
+        "cumulative_allocation_mib": {
+          "off": [
+            900.0,
+            900.0
+          ],
+          "on": [
+            4.0,
+            4.0
+          ]
+        },
+        "allocation_reduction_pct": 99.55555555555556
+      },
+      "diagnostics": {
+        "off": {
+          "peak_rss_mib": [
+            318.296875,
+            316.30859375
+          ],
+          "gc_collections": [
+            4,
+            4
+          ],
+          "gc_pause_ms": [
+            18.7,
+            22.2
+          ],
+          "decode_and_preparation_ms": [
+            0.83,
+            0.8
+          ]
+        },
+        "on": {
+          "peak_rss_mib": [
+            67.5234375,
+            66.859375
+          ],
+          "gc_collections": [
+            0,
+            0
+          ],
+          "gc_pause_ms": [
+            0.0,
+            0.0
+          ],
+          "decode_and_preparation_ms": [
+            4.72,
+            6.83
+          ]
+        }
+      },
+      "helpers": [
+        {
+          "findex": 388,
+          "producer": 24,
+          "consumer": 23,
+          "ops": 19,
+          "regs": 19,
+          "node_allocations": 0
+        }
+      ],
+      "helper_installs": [
+        {
+          "findex": 388,
+          "tier": "cranelift",
+          "compile_ms": 1.76,
+          "installed_at_run_ms": 10.4
+        },
+        {
+          "findex": 388,
+          "tier": "llvm",
+          "compile_ms": 7.14,
+          "installed_at_run_ms": 17.8
+        },
+        {
+          "findex": 388,
+          "tier": "cranelift",
+          "compile_ms": 1.81,
+          "installed_at_run_ms": 13.3
+        },
+        {
+          "findex": 388,
+          "tier": "llvm",
+          "compile_ms": 6.65,
+          "installed_at_run_ms": 20.1
+        }
+      ],
+      "archive": "tree-fusion-nuc-2026-10-12.tar.gz",
+      "archive_sha256": "f31e675130d82db31e614b50d4324e6addd49f89c033e3edc75800c16dc2ebea",
+      "raw_report": "results-02/result.json"
+    }
+  }
+}

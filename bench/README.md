@@ -365,3 +365,13 @@ NUC results use `--source nuc` and stay distinct from actual CI evidence.
 Whole-program latency and helper IR/compile evidence are reported separately;
 this harness makes no isolated-helper throughput claim. Native AOT and wasm
 fusion remain unsupported. Checkpoint `1499bef` tracks results and limitations.
+
+The [2026-10-12 retained experiment](baselines/tree-fusion-2026-10-12.json)
+passed on CI and the NUC. Seven-pair median process times (fusion off → on)
+were **305.0 → 223.5 ms** on CI and **334.2 → 128.2 ms** on the NUC. Both
+reported **900.0 → 4.0 MiB** cumulative managed/external allocation and checksum
+`-104864`. Compare each pair within its host; these are different machines and
+Rust toolchains. The summary links compressed raw logs, samples and provenance.
+Cumulative Rust/LLVM allocator traffic is not measured by the GC counters.
+CI run: <https://github.com/rayzor-blade/ash/actions/runs/38309406232>.
+Default enablement remains checkpoint 7 (`082042b`).

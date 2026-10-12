@@ -31,6 +31,10 @@ jobs:
     name: build (wasm runtime)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # rust-toolchain.toml names the floating `nightly` channel. It overrides
+    # rustup's default even after the action installs the dated toolchain.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-10-06
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +73,7 @@ jobs:
 
       - name: Build the runtime objects
         run: |
+          rustc --version
           ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot
           ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot --target wasm32-wasip1-threads
 

@@ -22,6 +22,11 @@ pub use fuse::{build_helper, rewrite_caller};
 
 /// Facts not encoded in a function's AIR. Default knowledge is conservative.
 pub trait TreeModule: ModuleInfo {
+    /// Unoptimized body for legality analysis, independent of whether the
+    /// embedder offers this function to the inliner.
+    fn proof_body(&self, function: usize) -> Option<super::module::CalleeBody> {
+        self.callee(function)
+    }
     fn signature(&self, function: usize) -> Option<(Vec<TypeRef>, TypeRef)>;
     fn is_i32(&self, ty: TypeRef) -> bool;
     fn is_void(&self, ty: TypeRef) -> bool;
@@ -173,7 +178,7 @@ impl Checker<'_> {
         }
         let f = self
             .info
-            .callee(index)
+            .proof_body(index)
             .ok_or("callee body unavailable")?
             .into_function(index, self.info)
             .map_err(|e| format!("lowering failed: {e}"))?;

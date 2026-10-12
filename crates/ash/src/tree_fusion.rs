@@ -222,6 +222,137 @@ mod tests {
     use crate::bytecode::BytecodeDecoder;
 
     #[test]
+    fn active_host_object_policy_is_refused_in_fresh_process() {
+        const CHILD: &str = "ASH_TEST_TREE_FUSION_HOST_POLICY";
+        let Ok(policy) = std::env::var(CHILD) else {
+            // These registrations are process-wide and intentionally cannot
+            // be reset. Never contaminate the other compiler/runtime tests.
+            for policy in ["room", "tails", "drops"] {
+                let out = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "tree_fusion::tests::active_host_object_policy_is_refused_in_fresh_process",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, policy)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{policy}: {} {}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            return;
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tests/bench_binary_trees.hl");
+        crate::native_lib::choose_std_linkage(&path);
+        crate::native_lib::init_std_library().unwrap();
+        let bc = BytecodeDecoder::decode(&path).unwrap();
+        assert!(!ash_std::obj::has_host_object_policy());
+        // Only the descriptor's address is registered; no guest object is
+        // allocated or callback invoked in these refusal tests.
+        let mut ty: ash_std::hl::hl_type = unsafe { std::mem::zeroed() };
+        match policy.as_str() {
+            "room" => assert!(ash_std::obj::hlp_set_object_room(16)),
+            "tails" => unsafe {
+                ash_std::obj::hlp_set_object_tails(
+                    &ash_std::obj::ObjectTail {
+                        t: &mut ty,
+                        bytes: 8,
+                    },
+                    1,
+                );
+            },
+            "drops" => unsafe {
+                ash_std::obj::hlp_set_object_drops(&(&mut ty as *mut _), 1);
+            },
+            _ => panic!("unknown policy"),
+        }
+        let error = prepare_standalone(&bc)
+            .err()
+            .expect("active host policy must refuse");
+        assert!(
+            error.to_string().contains("active host object policy"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn standalone_contract_rejects_host_metadata_external_natives_and_registration_hooks() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tests/bench_binary_trees.hl");
+        crate::native_lib::choose_std_linkage(&path);
+        crate::native_lib::init_std_library().unwrap();
+        let bc = BytecodeDecoder::decode(&path).unwrap();
+        let mut hosted = bc.clone();
+        hosted
+            .host_modules
+            .push(crate::host_module::RegisteredModule(
+                crate::host_module::HostModule {
+                    lib: "test".into(),
+                    classes: vec![],
+                },
+            ));
+        assert!(
+            prepare_standalone(&hosted)
+                .err()
+                .expect("policy must refuse")
+                .to_string()
+                .contains("hosted modules")
+        );
+        let mut overridden = bc.clone();
+        overridden.host_natives.insert(
+            ("std".into(), "gc_major".into()),
+            crate::native_lib::HostNative::plain(0),
+        );
+        assert!(
+            prepare_standalone(&overridden)
+                .err()
+                .expect("policy must refuse")
+                .to_string()
+                .contains("hosted modules")
+        );
+        for (lib, name, message) in [
+            (
+                "external",
+                "pure_looking_function",
+                "external native libraries",
+            ),
+            ("std", "set_object_tails", "registration hooks"),
+            ("std", "set_object_drops", "registration hooks"),
+            ("std", "set_object_room", "registration hooks"),
+            ("std", "set_reload_callback", "registration hooks"),
+            ("std", "set_reload_apply", "registration hooks"),
+            ("std", "setup_reload_check", "registration hooks"),
+        ] {
+            let mut input = bc.clone();
+            input.natives[0].lib = lib.into();
+            input.natives[0].name = name.into();
+            assert!(
+                prepare_standalone(&input)
+                    .err()
+                    .expect("policy must refuse")
+                    .to_string()
+                    .contains(message),
+                "{lib}/{name}"
+            );
+            assert!(input.generated_helpers.is_empty());
+        }
+        // The proof view remains usable when ordinary inliner bodies are
+        // withheld. Runtime permissions still belong to that explicit view.
+        let module = AshModule::for_tree_fusion(&bc).without_callees();
+        assert!(air::v2::module::ModuleInfo::callee(&module, 24).is_none());
+        assert!(tree_fusion::analyze_pair(&module, 24, 23, Limits::default()).is_ok());
+        assert!(
+            tree_fusion::build_helper(&AshModule::new(&bc), 24, 23, 999, Limits::default())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn preparation_is_atomic_and_runtime_contract_does_not_escape_serialization() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("test/tests/bench_binary_trees.hl");

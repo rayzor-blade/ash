@@ -355,6 +355,56 @@ timing result or a default rollout. Diagnostics report transformed sites,
 refusals, helper size and skipped/truncated surveys. Inspect the helper with
 `ASH_VERIFY_AIR=dump:INDEX` alongside `--dev-tree-fusion`.
 
+#### Fusion validation (checkpoint 5)
+
+Git-bug `3189601` exercises the transformation beyond the benchmark checksum:
+
+- `TestTreeFusionMatrix`: unary and ternary recursion, depth in different
+  argument positions, reordered fields and child consumption, constructor
+  arithmetic, a Haxe-inline wrapper, and 128 deterministic wrapping-integer
+  cases. Retained trees provide the unfused reference result. Four sites share
+  two helpers; the normal result is `tree-matrix=-663667236`.
+- `TestTreeFusionRefusals`: shared/escaping references, identity, mutation,
+  dynamic calls, skipped children, constructor effects and exceptions, and
+  null access. No site transforms. A separate bounded timeout checks that a
+  divergent producer remains divergent even when its consumer skips children.
+- `TestTreeFusionSuspended`: a retained local tree survives worker suspension
+  and explicit collections around a fused call, with zero and two native
+  workers. It reports `tree-suspended=57`.
+
+The CLI tests compare original and fused execution in the interpreter,
+Cranelift, LLVM (when enabled), and hybrid. GC stress runs also verify the heap
+and require more collections than the fixture explicitly requests. The hot
+matrix case retains a local reference and scalar accumulator through an
+asserted Cranelift OSR entry. Another run pins promotion to the generated
+unary helper and asserts each enabled tier's installation. Merely selecting
+hybrid mode or getting the right checksum does not satisfy those assertions.
+
+Fusion now requests unoptimized proof bodies independently of inliner policy.
+Previously `ASH_AIR_NO_INLINE=1` silently prevented fusion by withholding its
+callees. It now keeps fusion active while disabling later inlining, so the
+helper dispatch/promotion test actually exercises the intended code.
+
+Core tests reject host metadata, external natives and registration hooks;
+fresh child processes also install actual object tails, drop policy or layout
+room and verify refusal. Existing tests cover atomic fallback, serialization
+and reload refusal, and portable helper AOT/wasm object registration.
+
+```sh
+cargo test --offline -p ash_core --lib tree_fusion
+cargo test --offline -p ash --test tree_fusion --test tree_fusion_validation \
+  --test tree_fusion_survey --test generated_helpers
+cargo test --offline -p ash --no-default-features --test tree_fusion \
+  --test tree_fusion_validation --test tree_fusion_survey
+```
+
+These are local macOS correctness checks, including a build without LLVM.
+Fusion remains unavailable for serialized bytecode, native AOT and wasm until
+their runtime contract is carried explicitly; portable-helper AOT tests do
+not establish support for fused programs. The benchmark source/bytecode and
+checksum remain unchanged. Same-host CI measurements and default rollout are
+the subsequent gates.
+
 ## Bisecting a wrong answer
 
 Cheapest first:

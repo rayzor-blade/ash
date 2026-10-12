@@ -375,6 +375,10 @@ impl<'b> ModuleInfo for AshModule<'b> {
 }
 
 impl air::v2::tree_fusion::TreeModule for AshModule<'_> {
+    fn proof_body(&self, findex: usize) -> Option<CalleeBody> {
+        Some(CalleeBody::Air(Box::new((*self.lowered_body(findex)?).clone())))
+    }
+
     fn allocation_elision(&self, _: TypeRef) -> air::v2::tree_fusion::AllocationElision {
         use air::v2::tree_fusion::AllocationElision;
         if self.tree_elision {

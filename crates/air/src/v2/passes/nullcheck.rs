@@ -22,6 +22,13 @@ use std::collections::HashSet;
 /// the handler and the arity of the handler's phis — has to survive the pass.
 pub struct NullCheckElim;
 
+/// Fold null branches whose operand is a fresh allocation (or another value
+/// that cannot be null). Inlining exposes this shape in conversions such as
+/// `new BytesDataImpl(bytes, length)` immediately cast back to `hl.Bytes`.
+/// The dead null arm must go before scalar replacement sees the allocation:
+/// otherwise its branch use makes the temporary object appear to escape.
+pub struct NonNullBranchElim;
+
 /// Follow `Copy` chains to the value that actually holds the pointer.
 fn copy_root(f: &Function, defs: &[Option<DefSite>], mut v: ValueId) -> ValueId {
     for _ in 0..f.values.len() {
@@ -74,6 +81,61 @@ fn guard_anchors(f: &Function, cfg: &CfgInfo, defs: &[Option<DefSite>]) -> Vec<(
         }
     }
     out
+}
+
+impl Pass for NonNullBranchElim {
+    fn name(&self) -> &'static str {
+        "non-null-branch-elim"
+    }
+
+    fn run(&self, f: &mut Function, _opts: &PassOptions) -> Result<PassStats> {
+        if !f.blocks.iter().any(|blk| {
+            matches!(
+                blk.term,
+                Terminator::CondJump {
+                    cond: CondKind::Null | CondKind::NotNull,
+                    ..
+                }
+            )
+        }) {
+            return Ok(PassStats::default());
+        }
+        let defs = def_sites(f);
+        let nonnull = non_null_defs(f, &defs);
+        let mut stats = PassStats::default();
+        for b in 0..f.blocks.len() {
+            let Terminator::CondJump {
+                cond,
+                a,
+                if_true,
+                if_false,
+                ..
+            } = f.blocks[b].term
+            else {
+                continue;
+            };
+            if !nonnull[copy_root(f, &defs, a).idx()] {
+                continue;
+            }
+            let (target, dropped) = match cond {
+                CondKind::NotNull => (if_true, if_false),
+                CondKind::Null => (if_false, if_true),
+                _ => continue,
+            };
+            f.blocks[b].term = Terminator::Jump { target };
+            if dropped != target {
+                for phi in &mut f.blocks[dropped.idx()].phis {
+                    phi.incoming.retain(|(pred, _)| pred.idx() != b);
+                }
+            }
+            stats.eliminated += 1;
+        }
+        if stats.eliminated > 0 {
+            super::guardelim::prune_unreachable(f);
+            compact_values(f)?;
+        }
+        Ok(stats)
+    }
 }
 
 impl Pass for NullCheckElim {

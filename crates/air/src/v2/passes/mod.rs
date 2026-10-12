@@ -26,12 +26,12 @@
 //!
 //! # Passes that grow the function
 //!
-//! [`TailRecursionElim`], [`Inlining`] and [`ScalarReplacement`] make up
-//! [`OptLevel::O3`] and run in that order, ahead of the O2 pipeline. The
-//! ordering is forced by HL's object protocol rather than chosen: `new C(...)`
-//! passes the fresh object straight into the constructor call, so every
-//! allocation escapes until that call has been inlined, and escape analysis
-//! run before inlining finds nothing at all.
+//! [`TailRecursionElim`], [`Inlining`], [`NonNullBranchElim`] and
+//! [`ScalarReplacement`] make up [`OptLevel::O3`] and run in that order, ahead
+//! of the O2 pipeline. HL passes `new C(...)` straight into its constructor,
+//! so the constructor must be inlined before escape analysis. Inlining also
+//! exposes null branches on newly allocated values; folding those first lets
+//! scalar replacement see that the object does not escape.
 
 use super::analysis::{AliasClass, CfgInfo, clobbers_all, write_class};
 use super::ir::*;
@@ -61,7 +61,7 @@ pub use guardelim::RedundantGuardElim;
 pub use gvn::GlobalValueNumbering;
 pub use inline::Inlining;
 pub use licm::{LoopAllocHoisting, LoopInvariantCodeMotion};
-pub use nullcheck::NullCheckElim;
+pub use nullcheck::{NonNullBranchElim, NullCheckElim};
 pub use sroa::ScalarReplacement;
 pub use tre::TailRecursionElim;
 
@@ -372,8 +372,9 @@ impl<'m> PassManager<'m> {
             OptLevel::O3 => vec![
                 Box::new(TailRecursionElim),
                 Box::new(Inlining::new(info)),
-                // SROA stays directly after the inliner. Moving it behind
-                // NullCheckElim and GVN was tried and changed nothing:
+                Box::new(NonNullBranchElim),
+                // SROA follows the inliner and the non-null branch cleanup.
+                // Moving it behind NullCheckElim and GVN was tried and changed nothing:
                 // measured with ASH_SROA_WHY, every refusal on this corpus is
                 // "phi merge", and those phis are real loop-carried merges
                 // rather than inliner artifacts the cleanup could remove.

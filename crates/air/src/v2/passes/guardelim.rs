@@ -370,7 +370,7 @@ impl Pass for RedundantGuardElim<'_> {
 
 /// Drop blocks no longer reachable from the entry, renumbering what remains
 /// and dropping the phi arms that named them. Whether anything was dropped.
-fn prune_unreachable(f: &mut Function) -> bool {
+pub(super) fn prune_unreachable(f: &mut Function) -> bool {
     let n = f.blocks.len();
     let mut seen = vec![false; n];
     let mut stack = vec![0usize];

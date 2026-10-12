@@ -280,12 +280,9 @@ jobs:
       matrix:
         bench:
           - fib
-          # The same program with pure-call CSE suppressed. `fib` alone does
-          # not measure calls: the optimizer proves the callee effect-free and
-          # eliminates most of the recursion, which is a real capability but
-          # not a call benchmark. Both rows publish, so the page says which is
-          # which instead of implying one number means both.
-          - fib_calls
+          # The fib leg also runs fib_calls below, on the same runner. The
+          # separate jobs previously landed on different CPU models, so the
+          # pure-call setting could not be compared across the two rows.
           - binary_trees
           - deltablue
           - mandelbrot
@@ -391,12 +388,14 @@ jobs:
       - name: Bench ash (${{ matrix.bench }})
         run: |
           mkdir -p parts
+          BENCHES="${{ matrix.bench }}"
+          if [ "$BENCHES" = fib ]; then BENCHES=fib,fib_calls; fi
           AB=()
           if [ -x target/release/ash-base ]; then
             AB=(--ash-base target/release/ash-base --base-commit "$(cat dist/ash-base.commit)")
           fi
           ./scripts/ash_bench.py \
-            --benchmarks "${{ matrix.bench }}" \
+            --benchmarks "$BENCHES" \
             --modes hybrid-auto \
             --iterations 7 \
             --warmups 1 \
@@ -423,9 +422,11 @@ jobs:
       - name: Bench ash AOT (${{ matrix.bench }})
         continue-on-error: true
         run: |
+          BENCHES="${{ matrix.bench }}"
+          if [ "$BENCHES" = fib ]; then BENCHES=fib,fib_calls; fi
           if [ -x target/release/ash ] && [ -f target/release/libash_std.a ]; then
             ./scripts/aot_bench.py \
-              --benchmarks "${{ matrix.bench }}" \
+              --benchmarks "$BENCHES" \
               --lanes ash-aot \
               --iterations 7 \
               --warmups 1 \
@@ -437,6 +438,8 @@ jobs:
 
       - name: Bench HashLink (JIT, hl2-ir, HL/C) and Haxe JVM (${{ matrix.bench }})
         run: |
+          BENCHES="${{ matrix.bench }}"
+          if [ "$BENCHES" = fib ]; then BENCHES=fib,fib_calls; fi
           # An explicit `if`, not `test && assign`: under `bash -e` the
           # latter fails the whole step on the very case it is testing for.
           HL=()
@@ -466,7 +469,7 @@ jobs:
             echo "::warning::clang not available; the HL/C lane falls back to cc and is not compiler-matched with Ash AOT"
           fi
           ./scripts/hl_bench.py \
-            --benchmarks "${{ matrix.bench }}" \
+            --benchmarks "$BENCHES" \
             --hashlink-dir ~/hashlink \
             "${CC_ARG[@]}" \
             "${HL[@]}" \

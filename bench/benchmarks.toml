@@ -477,7 +477,7 @@ timeout_secs = 300
 group = "call"
 modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
 modes_reason = "recursion depth 40 is minutes under the interpreter"
-description = "Recursive fib(40): raw call/return latency with no loop to vectorize."
+description = "Recursive fib(40), with LLVM pure-call CSE enabled."
 
 [[bench]]
 name = "fib_calls"
@@ -488,7 +488,7 @@ checksum_marker = "BenchFib"
 checksums = [{ value = "102334155", label = "reference" }]
 timeout_secs = 300
 group = "call"
-description = "Recursive fib(40) with pure-call CSE suppressed: 331M real invocations."
+description = "Recursive fib(40) with LLVM pure-call CSE suppressed: 331M real invocations."
 env = { ASH_NO_PURE_CSE = "1" }
 modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
 modes_reason = "recursion depth 40 is minutes under the interpreter"

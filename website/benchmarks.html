@@ -311,7 +311,7 @@
       <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">These benchmarks
         cover fib(40), Mandelbrot, n-body, and several kinds of function calls. They compare Ash with HashLink's
         released JIT, the experimental hl2-ir JIT, compiled HL/C output, and Haxe's JVM target. Results are checked
-        against accepted checksums and published by CI on each push to <code>main</code>.</p>
+        against accepted checksums and published by a daily CI sweep.</p>
 
       <div
         style="margin-top:32px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
@@ -357,8 +357,10 @@
           Haxe-to-JVM compilation is also excluded. JIT compilation happens during execution and is included in the timing.
           <code>haxe -hl main.c</code> generates C, which this benchmark compiles with <code>clang</code>.
           Ash emits object code directly through LLVM. Using clang for HL/C keeps both native builds on LLVM.
-          Each benchmark runs in a separate CI job. Engines within a row share a machine, but different rows and
-          sweeps may use different hardware. Compare engines within the same row. Hover over a timing to see its CPU.
+          Each benchmark runs in a separate CI job, except the two fib rows, which share a runner.
+          <code>fib(40)</code> allows LLVM pure-call CSE; <code>fib(40), real calls</code> disables it.
+          Engines within a row share a machine, but other rows and sweeps may use different hardware.
+          Hover over an Ash timing for the tier reached by each timed sample and over any timing for its CPU.
         </div>
       </div>
 

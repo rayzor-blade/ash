@@ -1319,8 +1319,11 @@ impl HLInterpreter {
             _ => vec![tier0],
         };
         let workers = tier0_workers();
-        let adapter =
-            TieredAdapter::with_workers(policies, beadie::TieredDeoptPolicy::default(), workers);
+        let adapter = Arc::new(TieredAdapter::with_workers(
+            policies,
+            beadie::TieredDeoptPolicy::default(),
+            workers,
+        ));
         if config.log_promotions {
             eprintln!("[tiered] tier0 workers={workers}");
             eprintln!(
@@ -1396,6 +1399,7 @@ impl HLInterpreter {
             osr_image_regs: Mutex::new(HashMap::new()),
             uniform_entries: Mutex::new(HashMap::new()),
             worker_beads: Mutex::new(HashMap::new()),
+            adapter: Arc::downgrade(&adapter),
             worker_compile_lock: Mutex::new(()),
             worker_closure_deps: Mutex::new(HashMap::new()),
             worker_closure_deps_changed: Condvar::new(),
@@ -4989,37 +4993,18 @@ impl HLInterpreter {
             }
         }
 
-        let baseline_is_llvm = ctx
-            .llvm_done
-            .lock()
-            .expect("llvm_done mutex poisoned")
-            .contains(&findex);
-        let has_retier_site = ctx
-            .hot_loop_pcs
-            .lock()
-            .expect("hot_loop_pcs mutex poisoned")
-            .contains_key(&findex);
-        if config.tier_mode == TierMode::Auto
-            && bead.generation() == 0
-            && !baseline_is_llvm
-            && has_retier_site
-        {
-            let queued = {
-                let tiered = self
-                    .tiered_runtime
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("compiled-only runtime disappeared"))?;
-                let bound = tiered.beads[findex]
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("JIT lost bead for findex {}", findex))?;
-                let promote_ctx = Arc::clone(&tiered.shared_ctx);
-                tiered.adapter.force_promote(bound, 1, move |promote_bead| {
-                    tiered_compile_tier(&promote_ctx, 1, findex, promote_bead, true, u32::MAX)
-                })
-            };
-            if !queued && config.log_promotions {
-                eprintln!("[tiered] LLVM queue busy for findex={findex}; keeping Cranelift");
-            }
+        let queued = {
+            let tiered = self
+                .tiered_runtime
+                .as_ref()
+                .ok_or_else(|| anyhow!("compiled-only runtime disappeared"))?;
+            let bound = tiered.beads[findex]
+                .as_ref()
+                .ok_or_else(|| anyhow!("JIT lost bead for findex {}", findex))?;
+            queue_llvm_promotion(&ctx, &tiered.adapter, bound, findex)
+        };
+        if queued == Some(false) && config.log_promotions {
+            eprintln!("[tiered] LLVM queue busy for findex={findex}; keeping Cranelift");
         }
 
         Ok(entry)

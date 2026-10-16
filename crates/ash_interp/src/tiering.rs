@@ -706,7 +706,12 @@ pub(crate) struct TieredSharedCtx {
     pub(crate) uniform_entries: Mutex<HashMap<usize, usize>>,
     /// Per-findex beads for compiled-only lazy sentinel resolution. The lock
     /// protects bead creation; the backend mutexes serialize cold compiles.
-    pub(crate) worker_beads: Mutex<HashMap<usize, Arc<Bead>>>,
+    /// Registered with `adapter` so a baseline with a re-tier site can be
+    /// queued for the top tier.
+    pub(crate) worker_beads: Mutex<HashMap<usize, TieredBound>>,
+    /// The runtime's adapter. Weak: dropping it joins the broker threads, and
+    /// a queued compile holds this context.
+    pub(crate) adapter: std::sync::Weak<TieredAdapter>,
     /// Serializes the check/compile/install sequence for cold worker entries.
     /// Dependency discovery runs after this guard is released, so recursive
     /// closure graphs do not deadlock it.
@@ -966,7 +971,7 @@ unsafe impl Send for PrewarmedJit {}
 /// metadata and stats.
 pub(crate) struct TieredRuntime {
     pub(crate) config: TieredConfig,
-    pub(crate) adapter: TieredAdapter,
+    pub(crate) adapter: Arc<TieredAdapter>,
     /// findex-indexed bounds. `None` = gate not yet run, or untierable.
     pub(crate) beads: Vec<Option<TieredBound>>,
     /// findex-indexed: whether the one-time registration gate has run.
@@ -1687,6 +1692,37 @@ pub(crate) fn compile_with_cranelift(
     }
 }
 
+/// Queue the top-tier compile of a compiled-only Cranelift baseline that has a
+/// re-tier site. `None` when the function does not qualify, otherwise whether
+/// the promotion broker took the job.
+pub(crate) fn queue_llvm_promotion(
+    ctx: &Arc<TieredSharedCtx>,
+    adapter: &TieredAdapter,
+    bound: &TieredBound,
+    findex: usize,
+) -> Option<bool> {
+    if ctx.mode != TierMode::Auto || bound.generation() != 0 {
+        return None;
+    }
+    let baseline_is_llvm = ctx
+        .llvm_done
+        .lock()
+        .expect("llvm_done mutex poisoned")
+        .contains(&findex);
+    let has_retier_site = ctx
+        .hot_loop_pcs
+        .lock()
+        .expect("hot_loop_pcs mutex poisoned")
+        .contains_key(&findex);
+    if baseline_is_llvm || !has_retier_site {
+        return None;
+    }
+    let promote_ctx = Arc::clone(ctx);
+    Some(adapter.force_promote(bound, 1, move |promote_bead| {
+        tiered_compile_tier(&promote_ctx, 1, findex, promote_bead, true, u32::MAX)
+    }))
+}
+
 /// Resolve one cold worker-lane call without touching `HLInterpreter`.
 /// Generated code retains the typed call ABI and invokes the returned pointer
 /// directly, so this path only needs the immutable/shared tier context. It is
@@ -1742,6 +1778,7 @@ pub(crate) fn resolve_worker_stub(
         };
     }
 
+    let mut compiled_here = None;
     let code = {
         // Another thread may hold this across an ENTIRE compile, and this one
         // is regularly a fiber worker -- a registered mutator. Waiting on the
@@ -1789,25 +1826,33 @@ pub(crate) fn resolve_worker_stub(
         if !installed.is_null() {
             installed
         } else {
-            let bead = {
+            let bound = {
                 let mut beads = ctx
                     .worker_beads
                     .lock()
                     .expect("worker beads mutex poisoned");
-                Arc::clone(
-                    beads
-                        .entry(findex)
-                        .or_insert_with(|| Bead::new(findex as beadie::CoreHandle, None)),
-                )
+                match beads.get(&findex) {
+                    Some(bound) => bound.clone(),
+                    None => {
+                        let Some(adapter) = ctx.adapter.upgrade() else {
+                            return std::ptr::null_mut();
+                        };
+                        let bound = adapter.register(findex as beadie::CoreHandle, None);
+                        beads.insert(findex, bound.clone());
+                        bound
+                    }
+                }
             };
+            let bead = bound.bead();
             if let Some(code) = bead.compiled() {
                 code
             } else {
-                let code = tiered_compile_tier(ctx, 0, findex, &bead, may_block, u32::MAX);
+                let code = tiered_compile_tier(ctx, 0, findex, bead, may_block, u32::MAX);
                 if code.is_null() {
                     return code;
                 }
                 if bead.eager_install(code) || bead.compiled().is_some() {
+                    compiled_here = Some(bound.clone());
                     bead.compiled().unwrap_or(code)
                 } else {
                     return std::ptr::null_mut();
@@ -1815,6 +1860,14 @@ pub(crate) fn resolve_worker_stub(
             }
         }
     };
+    // The interpreter's promotion path never sees a function first reached on
+    // a worker, so its top-tier compile is queued here, off the compile lock.
+    if ctx.compiled_only
+        && let Some(bound) = compiled_here
+        && let Some(adapter) = ctx.adapter.upgrade()
+    {
+        queue_llvm_promotion(ctx, &adapter, &bound, findex);
+    }
     if prepare_worker_closure_dependencies(ctx, findex) {
         code
     } else {

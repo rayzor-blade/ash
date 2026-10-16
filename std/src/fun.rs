@@ -835,6 +835,43 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
     }
 }
 
+/// A dynamic call may leave out the trailing parameters that accept null,
+/// Haxe's optional ones; the callee receives a null for each. A missing
+/// parameter that cannot be null is an error, as in HashLink.
+unsafe fn pad_optional_args(cl: *mut vclosure, args: *mut varray) -> *mut varray {
+    unsafe {
+        let Some(sig) = (*(*cl).t).__bindgen_anon_1.fun.as_ref() else {
+            return args;
+        };
+        let (passed, wanted) = ((*args).size, sig.nargs);
+        if passed >= wanted
+            || (*cl).hasValue == 2
+            || (*cl).fun == fun_var_args as *mut libc::c_void
+            || (*cl).fun == fun_record as *mut libc::c_void
+        {
+            return args;
+        }
+        if (passed..wanted).any(|i| !hl_is_ptr(*sig.args.add(i as usize))) {
+            let bound = i32::from((*cl).hasValue != 0);
+            hlp_error(str_to_uchar_ptr(&format!(
+                "Missing arguments : {} expected but {} passed",
+                wanted + bound,
+                passed + bound
+            )));
+        }
+        let padded = crate::obj::hlp_alloc_dyn_array(wanted);
+        if padded.is_null() {
+            return args;
+        }
+        let to = hl_aptr::<*mut vdynamic>(padded);
+        let from = hl_aptr::<*mut vdynamic>(args);
+        for i in 0..passed as usize {
+            *to.add(i) = *from.add(i);
+        }
+        padded
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdynamic {
     unsafe {
@@ -842,6 +879,7 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
         if cl.is_null() {
             return ptr::null_mut();
         }
+        let args = pad_optional_args(cl, args);
         let vargs = hl_aptr::<*mut vdynamic>(args);
         let mut pargs: [*mut libc::c_void; HL_MAX_ARGS] = [ptr::null_mut(); HL_MAX_ARGS];
         let mut tmp: [mem::MaybeUninit<libc::c_double>; HL_MAX_ARGS] =

@@ -5660,6 +5660,36 @@ impl HLInterpreter {
             }
         };
 
+        // A call may leave out the trailing parameters that accept null, which
+        // are Haxe's optional ones. Each reads as null; an omitted slot would
+        // otherwise hold the void a missing argument leaves, which a nullable
+        // Int unboxes to zero.
+        let padded: Vec<NanBoxedValue>;
+        let args: &[NanBoxedValue] = {
+            let params = bc.types[bc.functions[func_idx].type_.0]
+                .fun
+                .as_ref()
+                .map(|f| f.args.as_slice())
+                .unwrap_or(&[]);
+            if args.len() < params.len()
+                && params[args.len()..]
+                    .iter()
+                    .all(|p| bc.types[p.0].kind >= hl::hl_type_kind_HBYTES)
+            {
+                padded = args
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat_n(
+                        NanBoxedValue::null(),
+                        params.len() - args.len(),
+                    ))
+                    .collect();
+                &padded
+            } else {
+                args
+            }
+        };
+
         if self.ssa.needs_prepare(func_idx) {
             let _compiling = CompileBlocking::enter(self.fn_blocking);
             self.ssa.prepare(bc, func_idx);

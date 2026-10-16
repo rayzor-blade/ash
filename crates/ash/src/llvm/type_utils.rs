@@ -17,8 +17,7 @@ use super::module::JITModule;
 
 /// Convert a Rust &str to a leaked, null-terminated UTF-16 pointer (for HashLink uchar*).
 fn str_to_uchar_leaked(s: &str) -> *const u16 {
-    let mut utf16: Vec<u16> = s.encode_utf16().collect();
-    utf16.push(0); // null terminator
+    let utf16 = crate::bytecode::str_to_uchar_z(s);
     let ptr = utf16.as_ptr();
     std::mem::forget(utf16);
     ptr

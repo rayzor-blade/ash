@@ -1704,8 +1704,21 @@ pub(crate) fn hash_bytes(mut h: u32, bytes: &[u8]) -> u32 {
 }
 
 pub fn str_to_uchar_ptr(s: &str) -> Vec<u16> {
-    // Convert the &str to a UTF-16 vector
-    s.encode_utf16().collect()
+    // Counted first: `collect` from `encode_utf16` only knows a lower bound, so
+    // it grows by doubling, and a string constant keeps its vector for the life
+    // of the program.
+    let mut units = Vec::with_capacity(s.encode_utf16().count());
+    units.extend(s.encode_utf16());
+    units
+}
+
+/// `s` as UTF-16 units and a NUL, in a vector of exactly that length, for a
+/// name that is leaked and so kept for the life of the program.
+pub(crate) fn str_to_uchar_z(s: &str) -> Vec<u16> {
+    let mut units = Vec::with_capacity(s.encode_utf16().count() + 1);
+    units.extend(s.encode_utf16());
+    units.push(0);
+    units
 }
 
 pub(crate) const CRC_TABLE: [u32; 256] = [
@@ -1754,6 +1767,32 @@ pub fn H32(hash: u32, i: u32) -> u32 {
     result = H(result, ((i >> 16) & 0xFF) as u8);
     result = H(result, ((i >> 24) & 0xFF) as u8);
     result
+}
+
+#[cfg(test)]
+mod uchar_tests {
+    use super::{str_to_uchar_ptr, str_to_uchar_z};
+
+    /// A name kept for the life of the program has no capacity beyond its
+    /// length, whatever the string is made of.
+    #[test]
+    fn a_kept_name_has_no_spare_capacity() {
+        let mut words = vec![String::new()];
+        for n in 1..70 {
+            words.push("a".repeat(n));
+            words.push("é".repeat(n));
+            words.push("x😀".repeat(n));
+        }
+        for w in &words {
+            let units = str_to_uchar_ptr(w);
+            assert_eq!(units.len(), w.encode_utf16().count());
+            assert_eq!(units.capacity(), units.len(), "{w:?}");
+            let z = str_to_uchar_z(w);
+            assert_eq!(z.last(), Some(&0));
+            assert_eq!(z[..z.len() - 1], units[..]);
+            assert_eq!(z.capacity(), z.len(), "{w:?}");
+        }
+    }
 }
 
 #[cfg(test)]

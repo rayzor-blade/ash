@@ -669,8 +669,11 @@ jobs:
     concurrency:
       group: pages
       cancel-in-progress: false
+    # Pages accepts deployments from main only; a dispatch from any other ref
+    # would end red at this job.
     if: >-
-      ${{ always() && !inputs.tree_fusion_only && (needs.aggregate.result == 'success' ||
+      ${{ always() && github.ref == 'refs/heads/main' && !inputs.tree_fusion_only &&
+          (needs.aggregate.result == 'success' ||
           (github.event_name == 'workflow_run' &&
            github.event.workflow_run.conclusion == 'success')) }}
     runs-on: ubuntu-24.04

@@ -2238,6 +2238,52 @@ impl HLInterpreter {
         }
     }
 
+    /// Read a dynamic field through the runtime, under a trap.
+    ///
+    /// The runtime raises through `hlp_error` when the stored value cannot be
+    /// cast to the requested type, and a raise with no trap armed aborts the
+    /// process; this is the boundary a native call gets, so the raise becomes
+    /// an interpreter exception the program can catch.
+    fn dyn_get_field_checked(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        obj_ptr: *mut c_void,
+        hfield: i32,
+        dst_kind: hl::hl_type_kind,
+        dst_type_ptr: *mut c_void,
+    ) -> Result<NanBoxedValue> {
+        let stack_depth = self.stack.len();
+        let (getd, getf, geti64, geti, getp) = (
+            self.fn_dyn_getd,
+            self.fn_dyn_getf,
+            self.fn_dyn_geti64,
+            self.fn_dyn_geti,
+            self.fn_dyn_getp,
+        );
+        let mut out = NanBoxedValue::null();
+        let jumped = run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+            out = Self::dyn_get_field_by_hash(
+                obj_ptr,
+                hfield,
+                dst_kind,
+                dst_type_ptr,
+                getd,
+                getf,
+                geti64,
+                geti,
+                getp,
+            );
+        });
+        if jumped != 0 {
+            return Err(self.longjmp_error(
+                Some(bytecode),
+                stack_depth,
+                "Runtime longjmp without exception value: dyn_get".to_string(),
+            ));
+        }
+        Ok(out)
+    }
+
     /// Store into a dynamic field through the runtime, under a trap.
     ///
     /// The runtime raises through `hlp_error` when the object has no such
@@ -6641,20 +6687,17 @@ impl HLInterpreter {
                         {
                             let dst_type_idx = func.regs[dst.0 as usize].0;
                             let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                            Self::dyn_get_field_by_hash(
+                            self.dyn_get_field_checked(
+                                bytecode,
                                 obj_val.as_ptr() as *mut c_void,
                                 hfield,
                                 dst_kind,
                                 dst_type_ptr,
-                                self.fn_dyn_getd,
-                                self.fn_dyn_getf,
-                                self.fn_dyn_geti64,
-                                self.fn_dyn_geti,
-                                self.fn_dyn_getp,
-                            )
+                            )?
                         } else {
                             NanBoxedValue::null()
                         };
+                        let frame = self.stack.last_mut().unwrap();
                         if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[GETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
@@ -6669,17 +6712,14 @@ impl HLInterpreter {
                     let obj_ptr = obj_val.as_ptr() as *mut c_void;
                     let dst_type_idx = func.regs[dst.0 as usize].0;
                     let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                    let out = Self::dyn_get_field_by_hash(
+                    let out = self.dyn_get_field_checked(
+                        bytecode,
                         obj_ptr,
                         hfield,
                         dst_kind,
                         dst_type_ptr,
-                        self.fn_dyn_getd,
-                        self.fn_dyn_getf,
-                        self.fn_dyn_geti64,
-                        self.fn_dyn_geti,
-                        self.fn_dyn_getp,
-                    );
+                    )?;
+                    let frame = self.stack.last_mut().unwrap();
                     frame.registers.set(dst.0, out);
                 } else {
                     frame.registers.set(dst.0, NanBoxedValue::null());

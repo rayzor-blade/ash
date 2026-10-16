@@ -1102,17 +1102,9 @@ impl HLInterpreter {
             let dst_type_idx = func.regs[dst as usize].0;
             let dst_kind = bytecode.types[dst_type_idx].kind;
             let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-            let out = Self::dyn_get_field_by_hash(
-                obj_ptr,
-                hfield,
-                dst_kind,
-                dst_type_ptr,
-                self.fn_dyn_getd,
-                self.fn_dyn_getf,
-                self.fn_dyn_geti64,
-                self.fn_dyn_geti,
-                self.fn_dyn_getp,
-            );
+            let out =
+                self.dyn_get_field_checked(bytecode, obj_ptr, hfield, dst_kind, dst_type_ptr)?;
+            let frame = self.stack.last_mut().unwrap();
             if env_flag!("ASH_DBG_DYN") {
                 eprintln!(
                     "[DYNGET] f{} pc={} dst_kind={} -> {:?}",
@@ -1345,20 +1337,17 @@ impl HLInterpreter {
                 {
                     let dst_type_idx = func.regs[dst as usize].0;
                     let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                    Self::dyn_get_field_by_hash(
+                    self.dyn_get_field_checked(
+                        bytecode,
                         obj_val.as_ptr() as *mut c_void,
                         hfield,
                         dst_kind,
                         dst_type_ptr,
-                        self.fn_dyn_getd,
-                        self.fn_dyn_getf,
-                        self.fn_dyn_geti64,
-                        self.fn_dyn_geti,
-                        self.fn_dyn_getp,
-                    )
+                    )?
                 } else {
                     NanBoxedValue::null()
                 };
+                let frame = self.stack.last_mut().unwrap();
                 if env_flag!("ASH_DBG_FIELD") {
                     eprintln!(
                         "[GETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
@@ -1371,17 +1360,9 @@ impl HLInterpreter {
             let obj_ptr = obj_val.as_ptr() as *mut c_void;
             let dst_type_idx = func.regs[dst as usize].0;
             let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-            let out = Self::dyn_get_field_by_hash(
-                obj_ptr,
-                hfield,
-                dst_kind,
-                dst_type_ptr,
-                self.fn_dyn_getd,
-                self.fn_dyn_getf,
-                self.fn_dyn_geti64,
-                self.fn_dyn_geti,
-                self.fn_dyn_getp,
-            );
+            let out =
+                self.dyn_get_field_checked(bytecode, obj_ptr, hfield, dst_kind, dst_type_ptr)?;
+            let frame = self.stack.last_mut().unwrap();
             frame.registers.set(dst, out);
         } else {
             frame.registers.set(dst, NanBoxedValue::null());
@@ -2088,17 +2069,13 @@ impl HLInterpreter {
                                 && !header.is_null()
                                 && (*header).kind == hl::hl_type_kind_HOBJ
                             {
-                                let closure_value = Self::dyn_get_field_by_hash(
+                                let closure_value = self.dyn_get_field_checked(
+                                    bytecode,
                                     dispatch_obj as *mut c_void,
                                     hname,
                                     (*virt_field.t).kind,
                                     virt_field.t as *mut c_void,
-                                    self.fn_dyn_getd,
-                                    self.fn_dyn_getf,
-                                    self.fn_dyn_geti64,
-                                    self.fn_dyn_geti,
-                                    self.fn_dyn_getp,
-                                );
+                                )?;
                                 if closure_value.is_ptr() {
                                     let closure = closure_value.as_ptr() as *const _vclosure;
                                     if !closure.is_null() {

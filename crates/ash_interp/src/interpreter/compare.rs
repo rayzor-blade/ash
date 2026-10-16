@@ -686,6 +686,7 @@ impl HLInterpreter {
                     k if k == hl::hl_type_kind_HBYTES => {
                         Self::utf16z_eq((*a).v.bytes as *const u16, (*b).v.bytes as *const u16)
                     }
+                    k if k == hl::hl_type_kind_HFUN => self.closure_eq(a, b),
                     _ => {
                         if ka == hl::hl_type_kind_HOBJ {
                             let ta_name = self.dynamic_type_name(a);
@@ -749,6 +750,42 @@ impl HLInterpreter {
                 (Some(x), Some(y)) => x == y,
                 _ => false,
             }
+        }
+    }
+
+    /// Two closures are equal when they run the same function over equal bound
+    /// values; a wrapper compares as the closure it wraps. Mirrors
+    /// `hlp_dyn_compare`.
+    unsafe fn closure_eq(&self, a: *mut hl::vdynamic, b: *mut hl::vdynamic) -> bool {
+        unsafe {
+            let (ca, cb) = (a as *mut hl::vclosure, b as *mut hl::vclosure);
+            if (*ca).hasValue == 2 {
+                let wrapped = (*(ca as *mut hl::vclosure_wrapper)).wrappedFun;
+                return self.dynamic_eq(wrapped as *mut hl::vdynamic, b);
+            }
+            if (*cb).hasValue == 2 {
+                let wrapped = (*(cb as *mut hl::vclosure_wrapper)).wrappedFun;
+                return self.dynamic_eq(a, wrapped as *mut hl::vdynamic);
+            }
+            if (*ca).fun != (*cb).fun {
+                return false;
+            }
+            let (va, vb) = ((*ca).value, (*cb).value);
+            if va == vb {
+                return true;
+            }
+            // The bound value has the type of the function's first argument;
+            // only a pointer-typed one is an object to compare.
+            let bound_is_object = !va.is_null() && !vb.is_null() && {
+                let parent = (*(*ca).t).__bindgen_anon_1.fun.as_ref().map(|f| f.parent);
+                parent
+                    .filter(|p| !p.is_null())
+                    .and_then(|p| (*p).__bindgen_anon_1.fun.as_ref())
+                    .is_some_and(|f| {
+                        !f.args.is_null() && (**f.args).kind >= hl::hl_type_kind_HBYTES
+                    })
+            };
+            bound_is_object && self.dynamic_eq(va as *mut hl::vdynamic, vb as *mut hl::vdynamic)
         }
     }
 

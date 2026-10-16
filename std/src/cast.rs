@@ -722,6 +722,44 @@ pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic)
     }
 }
 
+/// Two closures are equal when they run the same function over equal bound
+/// values; a different function is never equal. A wrapper compares as the
+/// closure it wraps.
+unsafe fn closure_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
+    unsafe {
+        let (ca, cb) = (a as *mut vclosure, b as *mut vclosure);
+        if (*ca).hasValue == 2 {
+            let wrapped = (*(ca as *mut hl::vclosure_wrapper)).wrappedFun;
+            return hlp_dyn_compare(wrapped as *mut vdynamic, b);
+        }
+        if (*cb).hasValue == 2 {
+            let wrapped = (*(cb as *mut hl::vclosure_wrapper)).wrappedFun;
+            return hlp_dyn_compare(a, wrapped as *mut vdynamic);
+        }
+        if (*ca).fun != (*cb).fun {
+            return hl::hl_invalid_comparison as i32;
+        }
+        let (va, vb) = ((*ca).value, (*cb).value);
+        if va == vb {
+            return 0;
+        }
+        // The bound value is stored as the type of the function's first
+        // argument, so only a pointer-typed one is an object to compare.
+        let bound_is_object = !va.is_null() && !vb.is_null() && {
+            let parent = (*(*ca).t).__bindgen_anon_1.fun.as_ref().map(|f| f.parent);
+            parent
+                .filter(|p| !p.is_null())
+                .and_then(|p| (*p).__bindgen_anon_1.fun.as_ref())
+                .is_some_and(|f| !f.args.is_null() && crate::types::hl_is_ptr(*f.args))
+        };
+        if bound_is_object {
+            hlp_dyn_compare(va as *mut vdynamic, vb as *mut vdynamic)
+        } else {
+            hlp_ptr_compare(va as *const vdynamic, vb as *const vdynamic)
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
     unsafe {
@@ -849,6 +887,7 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                 // Reading v.ptr observes the constructor index at offset 8, so
                 // two unrelated zero-argument enums otherwise compare equal.
                 hl::hl_type_kind_HENUM => hlp_ptr_compare(a, b),
+                hl_type_kind_HFUN => closure_compare(a, b),
                 _ => hlp_ptr_compare((*a).v.ptr as *const vdynamic, (*b).v.ptr as *const vdynamic),
             };
         }

@@ -48,10 +48,6 @@ pub enum OsrRefusal {
     RefTaken,
     /// The function has no loop to enter.
     NoBackEdge,
-    /// More than one latch, so several paths reach the header carrying
-    /// different state. v1 takes only the single-entry case. Refuses that loop
-    /// alone.
-    MultipleLatches(usize),
     /// More live-ins than [`MAX_OSR_LIVE_INS`].
     TooManyLiveIns(usize),
 }
@@ -215,8 +211,7 @@ pub fn analyze_loops(f: &Function, cfg: &CfgInfo, forest: &LoopForest) -> OsrPla
     let mut entry_headers = Vec::new();
     if loopless {
         // Block 0 is the ordinary entry; calling the function is already the
-        // way in. Single-predecessor is the same "one path carries state in"
-        // property MultipleLatches demands of a loop header.
+        // way in. A block with one predecessor has one path carrying state in.
         for (i, _) in f.blocks.iter().enumerate().skip(1) {
             if cfg.preds[i].len() != 1 {
                 continue;
@@ -239,10 +234,9 @@ pub fn analyze_loops(f: &Function, cfg: &CfgInfo, forest: &LoopForest) -> OsrPla
     }
     for l in forest.innermost_first() {
         let lp = forest.get(l);
-        if lp.latches.len() != 1 {
-            refusals.push(OsrRefusal::MultipleLatches(lp.header.0 as usize));
-            continue;
-        }
+        // The entry takes the header's state from the transfer buffer and runs
+        // the loop's blocks, whichever of them jump back to the header, so a
+        // loop with several latches (a `continue`) is entered like any other.
         if ref_held[lp.header.idx()] {
             if !refusals.contains(&OsrRefusal::RefTaken) {
                 refusals.push(OsrRefusal::RefTaken);
@@ -507,10 +501,10 @@ mod tests {
         assert!(!p.eligible());
     }
 
-    /// A loop with two back edges is refused by itself; the function's other
-    /// loops stay enterable.
+    /// A loop with two back edges, which is what a `continue` makes, is entered
+    /// like one with a single back edge.
     #[test]
-    fn a_refused_loop_does_not_refuse_the_others() {
+    fn a_loop_with_two_back_edges_is_eligible() {
         let ops = vec![
             Opcode::Int {
                 dst: Reg(0),
@@ -534,29 +528,46 @@ mod tests {
                 offset: -4,
             },
             Opcode::JAlways { offset: -5 },
-            // One back edge.
-            Opcode::Int {
-                dst: Reg(0),
-                ptr: RefInt(0),
-            },
-            Opcode::Label,
-            Opcode::Incr { dst: Reg(0) },
-            Opcode::JSLt {
-                a: Reg(0),
-                b: Reg(1),
-                offset: -3,
-            },
             Opcode::Ret { ret: Reg(0) },
         ];
         let f = lower(&ops, &tys(2)).unwrap();
         let p = analyze(&f);
-        assert!(
-            p.refusals
-                .iter()
-                .any(|r| matches!(r, OsrRefusal::MultipleLatches(_))),
-            "{:?}",
-            p.refusals
-        );
+        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+        assert_eq!(p.entry_headers.len(), 1, "{:?}", p.entry_headers);
+        assert!(p.eligible());
+    }
+
+    /// A loop that cannot be entered is refused by itself; the function's other
+    /// loops stay enterable. The pointer is made between the two, so only the
+    /// loop it can still reach holds it.
+    #[test]
+    fn a_refused_loop_does_not_refuse_the_others() {
+        let ops = vec![
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Incr { dst: Reg(0) },
+            Opcode::JSLt {
+                a: Reg(0),
+                b: Reg(0),
+                offset: -2,
+            },
+            Opcode::Ref {
+                dst: Reg(1),
+                src: Reg(0),
+            },
+            Opcode::Incr { dst: Reg(0) },
+            Opcode::JSLt {
+                a: Reg(0),
+                b: Reg(0),
+                offset: -2,
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ];
+        let f = lower(&ops, &tys(2)).unwrap();
+        let p = analyze(&f);
+        assert!(p.refusals.contains(&OsrRefusal::RefTaken), "{:?}", p.refusals);
         assert_eq!(p.entry_headers.len(), 1, "{:?}", p.entry_headers);
         assert!(p.eligible());
     }

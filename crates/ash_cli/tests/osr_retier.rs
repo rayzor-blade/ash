@@ -21,6 +21,7 @@ fn fixture(main: &str) -> PathBuf {
             "TestOsrRefBeforeLoop" => "test_osr_ref_before_loop.hl",
             "TestOsrF32" => "test_osr_f32.hl",
             "TestOsrNested" => "test_osr_nested.hl",
+            "TestOsrLatches" => "test_osr_latches.hl",
             _ => panic!("unknown fixture"),
         };
         let path = tests_dir().join(name);
@@ -230,6 +231,35 @@ fn a_loop_inside_a_loop_is_entered_mid_flight() {
                 "{tier} entered compiled code {entered} times\n{log}"
             );
             assert!(!log.contains("declined"), "{tier} refused an entry\n{log}");
+        }
+    }
+}
+
+/// A `continue` is a second jump back to the loop header. Both entry builders
+/// take the loop's state from the interpreter and run whichever blocks come
+/// next, so a loop with several ways back is entered like any other and gives
+/// the interpreter's answer.
+#[test]
+fn a_loop_with_a_continue_is_entered_mid_flight() {
+    let hl = fixture("TestOsrLatches");
+    let (interp, _) = run_for(&hl, &["--mode", "interp"], &[], "latches=");
+    for tier in ["cranelift", "llvm"] {
+        let (answer, log) = run_for(
+            &hl,
+            &["--mode", "hybrid", "--jit-tier", tier],
+            &[("ASH_OSR_LOG", "1"), ("ASH_OSR_ENTRY_SYNC", "1")],
+            "latches=",
+        );
+        assert_eq!(answer, interp, "{tier}\n{log}");
+        assert!(!log.contains("refused"), "{tier} refused a loop\n{log}");
+        // The Cranelift entry is built in about a millisecond, before any of
+        // the six loops is over; an LLVM one can lose that race.
+        if tier == "cranelift" {
+            let entered = log
+                .lines()
+                .filter(|l| l.starts_with("[osr] entering findex="))
+                .count();
+            assert!(entered >= 5, "{tier} entered compiled code {entered} times\n{log}");
         }
     }
 }

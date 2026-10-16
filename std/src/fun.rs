@@ -191,40 +191,72 @@ pub unsafe extern "C" fn ash_static_call(
         let ft = (*t).__bindgen_anon_1.fun.as_ref().unwrap();
         let nargs = ft.nargs as usize;
 
-        // Separate integer/pointer and float args for register allocation
+        // Separate integer/pointer and float args for register allocation.
+        // An argument that finds its bank full goes to `stack`, in call order;
+        // a call carries at most `HL_MAX_ARGS` arguments, so one slot overflows
+        // at most.
         let mut ivals = [0usize; 8];
         let mut fvals = [0.0f64; 8];
+        let mut stack = [0usize; 2];
         let mut ireg = 0usize;
         let mut freg = 0usize;
+        let mut nstack = 0usize;
+        let mut spill = |word: usize| {
+            if nstack == stack.len() {
+                hlp_error(str_to_uchar_ptr("Too many arguments"));
+            }
+            stack[nstack] = word;
+            nstack += 1;
+        };
 
-        for i in 0..nargs.min(8) {
+        for i in 0..nargs {
             let arg_t = *ft.args.add(i);
             let kind = (*arg_t).kind;
             let p = *args.add(i);
             match kind {
                 hl_type_kind_HF32 => {
-                    fvals[freg] = f32_in_float_reg(*(p as *const f32));
-                    freg += 1;
+                    if freg < 8 {
+                        fvals[freg] = f32_in_float_reg(*(p as *const f32));
+                        freg += 1;
+                    } else {
+                        spill((*(p as *const f32)).to_bits() as usize);
+                    }
                 }
                 hl_type_kind_HF64 => {
-                    fvals[freg] = *(p as *const f64);
-                    freg += 1;
+                    if freg < 8 {
+                        fvals[freg] = *(p as *const f64);
+                        freg += 1;
+                    } else {
+                        spill((*(p as *const f64)).to_bits() as usize);
+                    }
                 }
                 hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
                     // p points to a stack slot containing the value as f64
-                    let val = (*(p as *const f64)) as i32;
-                    ivals[ireg] = val as i64 as usize; // sign-extend
-                    ireg += 1;
+                    let val = (*(p as *const f64)) as i32 as i64 as usize; // sign-extend
+                    if ireg < 8 {
+                        ivals[ireg] = val;
+                        ireg += 1;
+                    } else {
+                        spill(val);
+                    }
                 }
                 hl_type_kind_HI64 => {
-                    let val = *(p as *const i64);
-                    ivals[ireg] = val as usize;
-                    ireg += 1;
+                    let val = *(p as *const i64) as usize;
+                    if ireg < 8 {
+                        ivals[ireg] = val;
+                        ireg += 1;
+                    } else {
+                        spill(val);
+                    }
                 }
                 _ => {
                     // Pointer types: p IS the pointer value
-                    ivals[ireg] = p as usize;
-                    ireg += 1;
+                    if ireg < 8 {
+                        ivals[ireg] = p as usize;
+                        ireg += 1;
+                    } else {
+                        spill(p as usize);
+                    }
                 }
             }
         }
@@ -233,7 +265,15 @@ pub unsafe extern "C" fn ash_static_call(
         let fresult: f64;
 
         core::arch::asm!(
+            // The spilled words, at the bottom of the caller's stack: the
+            // first at `[sp]`, which is where the callee looks for its ninth
+            // argument. Sixteen bytes keep `sp` aligned.
+            "sub sp, sp, #16",
+            "stp {s0}, {s1}, [sp]",
             "blr x9",
+            "add sp, sp, #16",
+            s0 = in(reg) stack[0],
+            s1 = in(reg) stack[1],
             in("x9") fun,
             inout("x0") ivals[0] => result,
             in("x1") ivals[1],
@@ -301,13 +341,25 @@ pub unsafe extern "C" fn ash_static_call(
         let ft = (*t).__bindgen_anon_1.fun.as_ref().unwrap();
         let nargs = ft.nargs as usize;
 
-        // x86_64 SysV: integer and float args use independent register banks
+        // x86_64 SysV: integer and float args use independent register banks.
+        // An argument that finds its bank full goes to `stack`, in call order,
+        // one eight-byte word each; a call carries at most `HL_MAX_ARGS`
+        // arguments, so three integers overflow at most.
         let mut ivals = [0usize; 6];
         let mut fvals = [0.0f64; 8];
+        let mut stack = [0usize; 4];
         let mut ireg = 0usize;
         let mut freg = 0usize;
+        let mut nstack = 0usize;
+        let mut spill = |word: usize| {
+            if nstack == stack.len() {
+                hlp_error(str_to_uchar_ptr("Too many arguments"));
+            }
+            stack[nstack] = word;
+            nstack += 1;
+        };
 
-        for i in 0..nargs.min(14) {
+        for i in 0..nargs {
             let arg_t = *ft.args.add(i);
             let kind = (*arg_t).kind;
             let p = *args.add(i);
@@ -316,32 +368,42 @@ pub unsafe extern "C" fn ash_static_call(
                     if freg < 8 {
                         fvals[freg] = f32_in_float_reg(*(p as *const f32));
                         freg += 1;
+                    } else {
+                        spill((*(p as *const f32)).to_bits() as usize);
                     }
                 }
                 hl_type_kind_HF64 => {
                     if freg < 8 {
                         fvals[freg] = *(p as *const f64);
                         freg += 1;
+                    } else {
+                        spill((*(p as *const f64)).to_bits() as usize);
                     }
                 }
                 hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+                    let val = (*(p as *const f64)) as i32 as i64 as usize; // sign-extend
                     if ireg < 6 {
-                        let val = (*(p as *const f64)) as i32;
-                        ivals[ireg] = val as i64 as usize; // sign-extend
+                        ivals[ireg] = val;
                         ireg += 1;
+                    } else {
+                        spill(val);
                     }
                 }
                 hl_type_kind_HI64 => {
+                    let val = *(p as *const i64) as usize;
                     if ireg < 6 {
-                        let val = *(p as *const i64);
-                        ivals[ireg] = val as usize;
+                        ivals[ireg] = val;
                         ireg += 1;
+                    } else {
+                        spill(val);
                     }
                 }
                 _ => {
                     if ireg < 6 {
                         ivals[ireg] = p as usize;
                         ireg += 1;
+                    } else {
+                        spill(p as usize);
                     }
                 }
             }
@@ -351,7 +413,19 @@ pub unsafe extern "C" fn ash_static_call(
         let fresult: f64;
 
         core::arch::asm!(
+            // The spilled words at the bottom of the caller's stack, the first
+            // at `[rsp]`; thirty-two bytes keep `rsp` aligned for the call.
+            "sub rsp, 32",
+            "mov [rsp], {s0}",
+            "mov [rsp + 8], {s1}",
+            "mov [rsp + 16], {s2}",
+            "mov [rsp + 24], {s3}",
             "call r10",
+            "add rsp, 32",
+            s0 = in(reg) stack[0],
+            s1 = in(reg) stack[1],
+            s2 = in(reg) stack[2],
+            s3 = in(reg) stack[3],
             in("r10") fun,
             out("rax") result,
             in("rdi") ivals[0],

@@ -21,6 +21,10 @@ use crate::values::NanBoxedValue;
 
 use super::{FnGetObjRt, HLInterpreter, HlpName, func_of, kind_u32, native_of, run_with_hl_trap};
 
+/// The most words a native call takes by the integer dispatch: its context,
+/// when it has one, and its arguments.
+const MAX_NATIVE_WORDS: usize = 12;
+
 impl HLInterpreter {
     /// Call a native function via FFI.
     pub(super) fn call_native_inner(
@@ -368,19 +372,18 @@ impl HLInterpreter {
 
         // The words the callee takes: the context, when there is one, then
         // the arguments.
-        let mut words: Vec<i64> = Vec::with_capacity(args.len() + 1);
-        if context != 0 {
-            words.push(context as i64);
+        let lead = usize::from(context != 0);
+        let len = lead + args.len();
+        if len > MAX_NATIVE_WORDS {
+            return Err(anyhow!("Native call with {len} args not yet supported"));
         }
-        words.extend((0..args.len()).map(extract_arg));
+        let mut buffer = [0i64; MAX_NATIVE_WORDS];
+        buffer[0] = context as i64;
+        for (slot, arg) in buffer[lead..len].iter_mut().zip(0..) {
+            *slot = extract_arg(arg);
+        }
+        let words = &buffer[..len];
         let word = |i: usize| words[i];
-
-        if words.len() > 12 {
-            return Err(anyhow!(
-                "Native call with {} args not yet supported",
-                words.len()
-            ));
-        }
 
         // Arm the native call recovery point so SIGSEGV/SIGBUS from native code
         // (e.g., macOS GL driver bugs) is caught and turned into a recoverable error.

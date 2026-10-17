@@ -16,7 +16,9 @@
 //! library widens its ABI by what that library actually asks for and no more.
 
 use anyhow::Result;
-use wasmparser::{Parser, Payload};
+use wasm_encoder::ExportKind;
+use wasm_encoder::reencode::{self, Reencode};
+use wasmparser::{Parser, Payload, TypeRef};
 
 /// What a side module needs from the program that hosts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -175,6 +177,59 @@ fn uleb(data: &[u8], mut p: usize) -> Option<(u32, usize)> {
         if shift > 31 {
             return None;
         }
+    }
+}
+
+/// The module with the memory it imports also exported as `memory`.
+///
+/// A side module imports the program's memory. A WASI function the host
+/// answers it with reads and writes through the export named `memory` of the
+/// instance that CALLED it, so a module that exports none fails its first
+/// WASI call ("missing required memory export"). Exporting the very memory it
+/// imports changes nothing else about it. A module that imports no memory,
+/// already exports `memory`, or has no export section is returned unchanged.
+pub fn expose_memory(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut imported = false;
+    let mut exported = false;
+    let mut has_exports = false;
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::ImportSection(section) => {
+                for import in section.into_imports() {
+                    imported |= matches!(import?.ty, TypeRef::Memory(_));
+                }
+            }
+            Payload::ExportSection(section) => {
+                has_exports = true;
+                for export in section {
+                    exported |= export?.name == "memory";
+                }
+            }
+            _ => {}
+        }
+    }
+    if !imported || exported || !has_exports {
+        return Ok(bytes.to_vec());
+    }
+    let mut module = wasm_encoder::Module::new();
+    ExposeMemory.parse_core_module(&mut module, Parser::new(0), bytes)?;
+    Ok(module.finish())
+}
+
+struct ExposeMemory;
+
+impl Reencode for ExposeMemory {
+    type Error = std::convert::Infallible;
+
+    fn parse_export_section(
+        &mut self,
+        exports: &mut wasm_encoder::ExportSection,
+        section: wasmparser::ExportSectionReader<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        reencode::utils::parse_export_section(self, exports, section)?;
+        // An imported memory is memory 0.
+        exports.export("memory", ExportKind::Memory, 0);
+        Ok(())
     }
 }
 

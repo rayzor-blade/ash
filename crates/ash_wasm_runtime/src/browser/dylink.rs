@@ -174,6 +174,7 @@ fn load_one(
         table.grow(side.table_size)?;
     }
 
+    let placed_at = memory_base;
     let memory_base = global(memory_base, false)?;
     let table_base = global(table_base, false)?;
     let env: Object = Reflect::get(host_imports, &"env".into())?.unchecked_into();
@@ -250,7 +251,7 @@ fn load_one(
     let mut placed: HashMap<String, i32> = HashMap::new();
     for (kind, name, slot) in got {
         let value = match kind {
-            GotKind::Data => data_address(&exports, main_exports, &name)?,
+            GotKind::Data => data_address(&exports, main_exports, &name, placed_at)?,
             GotKind::Function => {
                 function_address(&exports, main_exports, &table, &name, &mut placed)?
             }
@@ -281,11 +282,18 @@ fn global(value: i32, mutable: bool) -> Result<WebAssembly::Global, JsValue> {
 
 /// Where a data symbol was placed: a position-independent module exports each
 /// as a global holding its address.
-fn data_address(exports: &Object, main: &Object, name: &str) -> Result<Option<i32>, JsValue> {
-    for owner in [exports, main] {
+fn data_address(
+    exports: &Object,
+    main: &Object,
+    name: &str,
+    memory_base: i32,
+) -> Result<Option<i32>, JsValue> {
+    // The library exports its own data symbols as offsets from `__memory_base`;
+    // the program is not position-independent, so its exports are absolute.
+    for (owner, base) in [(exports, memory_base), (main, 0)] {
         let value = Reflect::get(owner, &name.into())?;
         if let Some(g) = value.dyn_ref::<WebAssembly::Global>() {
-            return Ok(g.value().as_f64().map(|v| v as i32));
+            return Ok(g.value().as_f64().map(|v| v as i32 + base));
         }
     }
     Ok(None)

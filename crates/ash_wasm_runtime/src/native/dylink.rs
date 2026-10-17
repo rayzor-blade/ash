@@ -172,7 +172,13 @@ async fn load_one(
     bytes: &[u8],
     side: &ash_wasm_link::SideModule,
 ) -> Result<(Instance, wasmtime::Table)> {
-    let module = Module::new(store.engine(), ash_wasm_link::waits::instrument(bytes)?)?;
+    // The library imports the program's memory, so it is given an export of
+    // it: the host's WASI functions find the memory to use through the export
+    // `memory` of whichever instance calls them.
+    let module = Module::new(
+        store.engine(),
+        ash_wasm_link::dylink::expose_memory(&ash_wasm_link::waits::instrument(bytes)?)?,
+    )?;
 
     // As an `Extern` rather than a `Memory`, because a program built for
     // threads exports a shared memory and `get_memory` answers `None` for one.
@@ -294,7 +300,7 @@ async fn load_one(
     let mut placed: HashMap<String, i32> = HashMap::new();
     for (kind, name, slot) in got {
         let value = match kind {
-            GotKind::Data => data_address(&mut *store, &instance, main, &name),
+            GotKind::Data => data_address(&mut *store, &instance, main, &name, memory_base),
             GotKind::Function => {
                 function_address(&mut *store, &instance, main, table, &name, &mut placed)?
             }
@@ -333,12 +339,15 @@ fn data_address(
     instance: &Instance,
     main: &Instance,
     name: &str,
+    memory_base: i32,
 ) -> Option<i32> {
-    for owner in [instance, main] {
+    // The library exports its own data symbols as offsets from `__memory_base`;
+    // the program is not position-independent, so its exports are absolute.
+    for (owner, base) in [(instance, memory_base), (main, 0)] {
         if let Some(Extern::Global(g)) = owner.get_export(&mut *store, name)
             && let Some(v) = g.get(&mut *store).i32()
         {
-            return Some(v);
+            return Some(v + base);
         }
     }
     None

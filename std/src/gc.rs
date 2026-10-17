@@ -1134,7 +1134,11 @@ pub(crate) unsafe extern "C" fn gc_registered_threads(out: *mut u64, cap: usize)
             // `pthread_*` call accepts.
             #[cfg(unix)]
             {
-                *out.add(i) = m.pthread as u64;
+                // `pthread_t` is `u64` on Linux and a pointer on macOS.
+                #[allow(clippy::unnecessary_cast)]
+                {
+                    *out.add(i) = m.pthread as u64;
+                }
             }
             #[cfg(not(unix))]
             {

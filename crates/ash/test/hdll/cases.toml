@@ -166,6 +166,17 @@ purpose = "closure passed, native returns, Haxe drops its own reference"
 roots = ["none", "slot"]
 
 [[case]]
+name = "cb16"
+class = "Cb16"
+lib = "cb16test"
+env_prefix = "CB16"   # unused: the library reads no switches
+purpose = "a native raises through hl_throw inside a try; the catch must see the value"
+# No reference is held across a collection here, so the root spelling does not
+# apply; the one row gates.
+roots = ["none"]
+contract = ["none"]
+
+[[case]]
 name = "cbtest"
 class = "TestHdllCb"
 lib = "cbtest"

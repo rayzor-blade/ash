@@ -1105,9 +1105,8 @@ fn stop_mutator_world() -> StoppedWorld {
 ///
 /// The sampling profiler interrupts one thread, the one that started it, which
 /// makes a worker invisible: a fiber worker holding up a world stop for 350ms
-/// leaves no trace in a profile that never signals it. `thread_self_fast`
-/// returns the same value `pthread_self` does on both supported platforms, so
-/// these handles can be signalled directly.
+/// leaves no trace in a profile that never signals it. On unix the handles are
+/// each mutator's `pthread_t`, so they can be signalled directly.
 ///
 /// `try_lock`, deliberately: the sampler must never block on the world lock,
 /// least of all while a collection holds it. A tick that finds it contended
@@ -1130,7 +1129,17 @@ pub(crate) unsafe extern "C" fn gc_registered_threads(out: *mut u64, cap: usize)
         };
         let n = world.mutators.len().min(cap);
         for (i, m) in world.mutators.iter().take(n).enumerate() {
-            *out.add(i) = m.thread;
+            // The thread's `pthread_t`: the GC's own identity is the same
+            // word on Linux, but the TSD base on macOS arm64, which no
+            // `pthread_*` call accepts.
+            #[cfg(unix)]
+            {
+                *out.add(i) = m.pthread as u64;
+            }
+            #[cfg(not(unix))]
+            {
+                *out.add(i) = m.thread;
+            }
         }
         n
     }

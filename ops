@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1792246308,"nonce":"1QlSXobJ8KL1A0djSm8YF2xf9bo=","status":2}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1792246327,"nonce":"MBbtLKfeHkG7sm+tkDl20hcbUiI=","message":"Correction to the previous comment: the libm set added in c0047e661eae429483215f978a1d55a11da8126e is 63 functions, not 66.","files":null}]}

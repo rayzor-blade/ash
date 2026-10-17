@@ -319,38 +319,43 @@ pub extern "C" fn hlp_sys_is64() -> bool {
     }
 }
 
+/// The name `Sys.systemName` reports for this target.
+fn system_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "Mac"
+    } else if cfg!(target_os = "ios") {
+        "iOS"
+    } else if cfg!(target_os = "tvos") {
+        "tvOS"
+    } else if cfg!(target_os = "android") {
+        "Android"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else if cfg!(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )) {
+        "BSD"
+    } else if cfg!(target_family = "wasm") {
+        // `std::env::consts::OS` is empty on the wasm targets.
+        "Wasm"
+    } else {
+        // Upstream #errors here. Reporting the target's own name is more
+        // useful than a wrong-but-familiar one; the Haxe callers that branch
+        // on this only ever test for "Windows".
+        std::env::consts::OS
+    }
+}
+
 /// UTF-16 always: Sys.systemName decodes this with `String.fromUCS2`,
 /// on every platform.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_string() -> *mut vbyte {
-    unsafe {
-        let name = if cfg!(target_os = "windows") {
-            "Windows"
-        } else if cfg!(target_os = "macos") {
-            "Mac"
-        } else if cfg!(target_os = "ios") {
-            "iOS"
-        } else if cfg!(target_os = "tvos") {
-            "tvOS"
-        } else if cfg!(target_os = "android") {
-            "Android"
-        } else if cfg!(target_os = "linux") {
-            "Linux"
-        } else if cfg!(any(
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd",
-            target_os = "dragonfly"
-        )) {
-            "BSD"
-        } else {
-            // Upstream #errors here. Reporting the target's own name is more
-            // useful than a wrong-but-familiar one; the Haxe callers that branch
-            // on this only ever test for "Windows".
-            std::env::consts::OS
-        };
-        alloc_ubytes(name)
-    }
+    unsafe { alloc_ubytes(system_name()) }
 }
 
 /// `getenv("LANG")` upstream; the system default locale name on Windows,
@@ -1792,6 +1797,16 @@ mod new_prim_tests {
                 "25ms of sleep measured as {delta}; wrong unit?"
             );
         }
+    }
+
+    /// A target whose `std::env::consts::OS` is empty (wasm) still has a name:
+    /// an empty one cannot be told from a missing one by a program.
+    #[test]
+    fn the_target_has_a_name() {
+        assert!(!system_name().is_empty());
+        let name = unsafe { hlp_sys_string() };
+        assert!(!name.is_null());
+        assert_ne!(unsafe { *(name as *const u16) }, 0);
     }
 
     /// Both hooks are absent in ash, and upstream's own answer for an absent

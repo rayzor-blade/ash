@@ -860,6 +860,12 @@ def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
                 break
         if not detail and rc:
             detail = f"exit {rc}"
+        if not detail:
+            # Exit 0 and no tally: not a signal, so there is nothing to find
+            # in a crash report. Say what the process did print.
+            tail = [l.strip() for l in out.splitlines() if l.strip()]
+            detail = "exit 0 without a tally; " + (
+                f"last line: {tail[-1][:160]}" if tail else "no output")
     return {
         "case": case,
         "status": status,

@@ -1721,8 +1721,8 @@ impl HLInterpreter {
                             return Ok(StepResult::Continue);
                         }
                         arg_vals.clear();
-                        if (*wrapped).hasValue != 0 && !(*wrapped).value.is_null() {
-                            arg_vals.push(NanBoxedValue::from_ptr((*wrapped).value as usize));
+                        if (*wrapped).hasValue != 0 {
+                            arg_vals.push(Self::bound_arg((*wrapped).value));
                         }
                         arg_vals.push(packed);
                         return Ok(StepResult::Call {
@@ -1794,7 +1794,7 @@ impl HLInterpreter {
                             anyhow!("CallClosure on unknown compiled closure {fun_ptr:?}")
                         })?
                     };
-                    let bound_value = (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null();
+                    let bound_value = (*cl_ptr).hasValue != 0;
                     // What this site called, for the LLVM tier's guarded
                     // devirtualisation. Only sentinel-form targets are worth
                     // recording: the emitted guard compares the fun field
@@ -1811,8 +1811,7 @@ impl HLInterpreter {
                     }
                     // If the closure has a bound value, prepend it as the first arg
                     if bound_value {
-                        let bound = NanBoxedValue::from_ptr((*cl_ptr).value as usize);
-                        arg_vals.insert(0, bound);
+                        arg_vals.insert(0, Self::bound_arg((*cl_ptr).value));
                     }
                     fi
                 }

@@ -667,8 +667,8 @@ impl HLInterpreter {
                 } else {
                     self.findex_for_code_addr(stub).unwrap_or(usize::MAX)
                 };
-                let bound = if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
-                    Some(NanBoxedValue::from_ptr((*cl_ptr).value as usize))
+                let bound = if (*cl_ptr).hasValue != 0 {
+                    Some(Self::bound_arg((*cl_ptr).value))
                 } else {
                     None
                 };

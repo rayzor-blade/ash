@@ -2774,8 +2774,8 @@ impl HLInterpreter {
                     is_root(c)
                 };
                 let mut args_v = Vec::new();
-                if (*cl).hasValue != 0 && !(*cl).value.is_null() {
-                    args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
+                if (*cl).hasValue != 0 {
+                    args_v.push(HLInterpreter::bound_arg((*cl).value));
                 }
                 let interp = &mut *ctx.interp;
                 let bytecode = interp.current(&*ctx.bytecode);
@@ -3395,8 +3395,8 @@ impl HLInterpreter {
                     }
                 };
                 let bound = unsafe {
-                    if (*cl).hasValue != 0 && !(*cl).value.is_null() {
-                        Some(NanBoxedValue::from_ptr((*cl).value as usize))
+                    if (*cl).hasValue != 0 {
+                        Some(HLInterpreter::bound_arg((*cl).value))
                     } else {
                         None
                     }
@@ -7640,6 +7640,17 @@ impl HLInterpreter {
     /// the whole VM dies where a C runtime would have read garbage. A real
     /// box is word-aligned and above the first page.
     #[inline]
+    /// A closure's bound value as the callee's first argument. A closure bound
+    /// to null (`hasValue` set, `value` null) still passes that null: the
+    /// callee's parameters begin with the bound one.
+    fn bound_arg(value: *mut c_void) -> NanBoxedValue {
+        if value.is_null() {
+            NanBoxedValue::null()
+        } else {
+            NanBoxedValue::from_ptr(value as usize)
+        }
+    }
+
     fn is_derefable_dynamic(d: *const hl::vdynamic) -> bool {
         let addr = d as usize;
         addr >= 0x10000 && addr.is_multiple_of(std::mem::align_of::<usize>())

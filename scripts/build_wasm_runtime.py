@@ -64,6 +64,17 @@ LIBRARY_LIBC = [
     # VFS out of them -- and those must be exported to be given a table slot.
     "close", "fcntl", "fstat", "ftruncate", "read", "access", "rmdir",
     "unlink", "stat", "lstat", "mkdir", "readlink",
+    # libm. wasi-libc keeps it in libc.a, and a Rust library that does f32 or
+    # f64 math imports these (a side module asking for `acosf` was refused at
+    # link). Every name here is one libc.a defines.
+    "acos", "acosf", "acosh", "asin", "asinf", "asinh", "atan", "atanf",
+    "atanh", "atan2", "atan2f", "cbrt", "cbrtf", "ceil", "ceilf", "copysign",
+    "cos", "cosf", "cosh", "exp", "expf", "exp2", "exp2f", "expm1", "fabs",
+    "fabsf", "floor", "floorf", "fma", "fmax", "fmin", "fmod", "fmodf",
+    "frexp", "hypot", "hypotf", "ldexp", "log", "logf", "log2", "log2f",
+    "log10", "log10f", "log1p", "lround", "modf", "nearbyint", "pow", "powf",
+    "rint", "round", "roundf", "scalbn", "sin", "sinf", "sinh", "sqrt",
+    "sqrtf", "tan", "tanf", "tanh", "trunc", "truncf",
 ]
 REPO = pathlib.Path(__file__).resolve().parent.parent
 

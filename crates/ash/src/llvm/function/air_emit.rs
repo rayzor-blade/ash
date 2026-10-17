@@ -14,7 +14,10 @@ use inkwell::{
     AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate, basic_block::BasicBlock,
 };
 
-use crate::hl::{hl_type_kind_HDYN, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HVIRTUAL};
+use crate::hl::{
+    hl_invalid_comparison, hl_type_kind_HDYN, hl_type_kind_HNULL, hl_type_kind_HOBJ,
+    hl_type_kind_HVIRTUAL,
+};
 use crate::llvm::module::JITModule;
 use crate::types::{HLFunction, TypeRef};
 use anyhow::{Result, anyhow};
@@ -1682,12 +1685,32 @@ impl<'ctx> JITModule<'ctx> {
                         .basic()
                         .ok_or_else(|| anyhow!("hlp_dyn_compare returned void"))?
                         .into_int_value();
-                    self.builder.build_int_compare(
+                    let by_order = self.builder.build_int_compare(
                         int_pred,
                         result,
                         self.context.i32_type().const_zero(),
                         "air_dyn_condition",
-                    )?
+                    )?;
+                    // A pair with no order (NaN) answers the invalid-comparison
+                    // sentinel. It is nonzero, so `==` is already false; an
+                    // ordering test has to refuse it, as the sentinel is
+                    // negative.
+                    if matches!(int_pred, IntPredicate::EQ | IntPredicate::NE) {
+                        by_order
+                    } else {
+                        let invalid = self
+                            .context
+                            .i32_type()
+                            .const_int(u64::from(hl_invalid_comparison), false);
+                        let ordered = self.builder.build_int_compare(
+                            IntPredicate::NE,
+                            result,
+                            invalid,
+                            "air_dyn_ordered",
+                        )?;
+                        self.builder
+                            .build_and(by_order, ordered, "air_dyn_ordering")?
+                    }
                 } else {
                     let ai = self.builder.build_ptr_to_int(
                         av.into_pointer_value(),

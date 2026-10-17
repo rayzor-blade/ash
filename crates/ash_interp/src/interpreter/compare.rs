@@ -164,6 +164,11 @@ impl HLInterpreter {
                 && !va.is_null()
                 && !vb.is_null()
                 && va.as_ptr() == vb.as_ptr()
+                // Only a Dynamic register can hold a float box. Any other
+                // pointer kind may be raw data (HBYTES is UTF-16 text), whose
+                // first word is not a type to read.
+                && !(ak == hl::hl_type_kind_HDYN
+                    && unsafe { Self::is_nan_box(va.as_ptr() as *const hl::vdynamic) })
             {
                 return op == CmpOp::Eq;
             }
@@ -628,10 +633,48 @@ impl HLInterpreter {
         }
     }
 
+    /// Whether a value of this kind starts with its `hl_type`, so it may be
+    /// read as a `vdynamic`. Raw data (HBYTES, HREF, HSTRUCT, HABSTRACT, HTYPE)
+    /// does not.
+    fn has_type_header(kind: hl::hl_type_kind) -> bool {
+        matches!(
+            kind,
+            hl::hl_type_kind_HDYN
+                | hl::hl_type_kind_HOBJ
+                | hl::hl_type_kind_HVIRTUAL
+                | hl::hl_type_kind_HDYNOBJ
+                | hl::hl_type_kind_HNULL
+                | hl::hl_type_kind_HARRAY
+                | hl::hl_type_kind_HFUN
+                | hl::hl_type_kind_HENUM
+        )
+    }
+
+    /// Whether `d` is a boxed float that is NaN.
+    unsafe fn is_nan_box(d: *const hl::vdynamic) -> bool {
+        unsafe {
+            if !Self::is_derefable_dynamic(d) || !Self::is_derefable_dynamic((*d).t.cast()) {
+                return false;
+            }
+            match (*(*d).t).kind {
+                k if k == hl::hl_type_kind_HF64 => (*d).v.d.is_nan(),
+                k if k == hl::hl_type_kind_HF32 => (*d).v.f.is_nan(),
+                _ => false,
+            }
+        }
+    }
+
+    /// Whether `v` is an unboxed Dynamic float that is NaN.
+    unsafe fn is_nan_scalar(v: NanBoxedValue) -> bool {
+        unsafe { matches!(Self::dynamic_scalar(v), Some(DynamicScalar::Float(x)) if x.is_nan()) }
+    }
+
     unsafe fn dynamic_eq(&self, a: *mut hl::vdynamic, b: *mut hl::vdynamic) -> bool {
         unsafe {
             if a == b {
-                return true;
+                // The same box is the same value, except NaN, which is not
+                // equal to itself.
+                return !Self::is_nan_box(a);
             }
             if a.is_null() || b.is_null() {
                 return false;
@@ -781,9 +824,7 @@ impl HLInterpreter {
                 parent
                     .filter(|p| !p.is_null())
                     .and_then(|p| (*p).__bindgen_anon_1.fun.as_ref())
-                    .is_some_and(|f| {
-                        !f.args.is_null() && (**f.args).kind >= hl::hl_type_kind_HBYTES
-                    })
+                    .is_some_and(|f| !f.args.is_null() && Self::has_type_header((**f.args).kind))
             };
             bound_is_object && self.dynamic_eq(va as *mut hl::vdynamic, vb as *mut hl::vdynamic)
         }
@@ -801,7 +842,7 @@ impl HLInterpreter {
                 );
             }
             if a.raw_bits() == b.raw_bits() {
-                return true;
+                return !Self::is_nan_scalar(a);
             }
 
             match (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
@@ -833,7 +874,7 @@ impl HLInterpreter {
                     _ => unreachable!(),
                 });
             }
-            if a.raw_bits() == b.raw_bits() {
+            if a.raw_bits() == b.raw_bits() && !Self::is_nan_scalar(a) {
                 return Some(Ordering::Equal);
             }
 
@@ -849,9 +890,12 @@ impl HLInterpreter {
                 }
             };
             if let (Some(x), Some(y)) = (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
-                // Match hl_dyn_compare: NaN is neither less nor greater, so it
-                // compares equal for ordering purposes.
+                // NaN has no order against anything, itself included, so no
+                // ordering test on it holds.
                 let (x, y) = (scalar_number(x), scalar_number(y));
+                if x.is_nan() || y.is_nan() {
+                    return None;
+                }
                 return Some(if x < y {
                     Ordering::Less
                 } else if x > y {

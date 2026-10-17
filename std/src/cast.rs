@@ -722,6 +722,22 @@ pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic)
     }
 }
 
+/// Whether a value of this kind starts with its `hl_type`, so it may be read
+/// as a `vdynamic`. Raw data (HBYTES, HREF, HSTRUCT, HABSTRACT, HTYPE) does not.
+fn has_type_header(kind: hl::hl_type_kind) -> bool {
+    matches!(
+        kind,
+        hl::hl_type_kind_HDYN
+            | hl::hl_type_kind_HOBJ
+            | hl::hl_type_kind_HVIRTUAL
+            | hl::hl_type_kind_HDYNOBJ
+            | hl::hl_type_kind_HNULL
+            | hl::hl_type_kind_HARRAY
+            | hl::hl_type_kind_HFUN
+            | hl::hl_type_kind_HENUM
+    )
+}
+
 /// Two closures are equal when they run the same function over equal bound
 /// values; a different function is never equal. A wrapper compares as the
 /// closure it wraps.
@@ -750,7 +766,7 @@ unsafe fn closure_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
             parent
                 .filter(|p| !p.is_null())
                 .and_then(|p| (*p).__bindgen_anon_1.fun.as_ref())
-                .is_some_and(|f| !f.args.is_null() && crate::types::hl_is_ptr(*f.args))
+                .is_some_and(|f| !f.args.is_null() && has_type_header((**f.args).kind))
         };
         if bound_is_object {
             hlp_dyn_compare(va as *mut vdynamic, vb as *mut vdynamic)
@@ -764,6 +780,18 @@ unsafe fn closure_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
 pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
     unsafe {
         if a == b {
+            // The same box is the same value, except a NaN float, which has
+            // no order against anything, itself included.
+            if !a.is_null() && !(*a).t.is_null() {
+                let is_nan = match (*(*a).t).kind {
+                    hl_type_kind_HF64 => (*a).v.d.is_nan(),
+                    hl_type_kind_HF32 => (*a).v.f.is_nan(),
+                    _ => false,
+                };
+                if is_nan {
+                    return hl::hl_invalid_comparison as i32;
+                }
+            }
             return 0;
         }
         if a.is_null() {
@@ -778,8 +806,14 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 
         let ka = (*(*a).t).kind;
         let kb = (*(*b).t).kind;
+        // NaN is unordered: it is neither equal to nor ordered against
+        // anything, itself included. The answer is the sentinel for an
+        // incomparable pair, which is nonzero (so `==` is false) and which
+        // compiled ordering tests recognise and refuse.
         let cmp_f64 = |x: f64, y: f64| -> i32 {
-            if x < y {
+            if x.is_nan() || y.is_nan() {
+                hl::hl_invalid_comparison as i32
+            } else if x < y {
                 -1
             } else if x > y {
                 1

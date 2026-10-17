@@ -1368,7 +1368,20 @@ impl Lowerer<'_, '_> {
                 || kind == hl::hl_type_kind_HOBJ
             {
                 let res = self.call_dyn_compare(va, vb)?;
-                self.b.ins().icmp_imm_s(icc, res, 0)
+                let by_order = self.b.ins().icmp_imm_s(icc, res, 0);
+                // A pair with no order (NaN) answers the invalid-comparison
+                // sentinel. It is nonzero, so `==` is already false; an
+                // ordering test has to refuse it, as the sentinel is negative.
+                if matches!(icc, IntCC::Equal | IntCC::NotEqual) {
+                    by_order
+                } else {
+                    let ordered = self.b.ins().icmp_imm(
+                        IntCC::NotEqual,
+                        res,
+                        i64::from(hl::hl_invalid_comparison as i32),
+                    );
+                    self.b.ins().band(by_order, ordered)
+                }
             } else {
                 self.b.ins().icmp(icc, va, vb)
             }

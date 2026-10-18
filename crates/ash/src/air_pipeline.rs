@@ -39,7 +39,9 @@ use air::v2::{
 };
 
 use crate::bytecode::DecodedBytecode;
-use crate::hl::{hl_type_kind_HF32, hl_type_kind_HF64};
+use crate::hl::{
+    hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HUI8, hl_type_kind_HUI16,
+};
 use crate::types::HLFunction;
 
 // Re-exported so callers (ash_cli) can drive the pipeline without taking their
@@ -291,6 +293,20 @@ impl<'b> ModuleInfo for AshModule<'b> {
             .types
             .get(ty.0 as usize)
             .is_some_and(|t| t.kind == hl_type_kind_HF32 || t.kind == hl_type_kind_HF64)
+    }
+
+    fn value_is_i32(&self, ty: TypeRef) -> bool {
+        self.bc
+            .types
+            .get(ty.0 as usize)
+            .is_some_and(|t| t.kind == hl_type_kind_HI32)
+    }
+
+    fn value_is_small_uint(&self, ty: TypeRef) -> bool {
+        self.bc
+            .types
+            .get(ty.0 as usize)
+            .is_some_and(|t| t.kind == hl_type_kind_HUI8 || t.kind == hl_type_kind_HUI16)
     }
 
     fn intrinsic_of(&self, findex: usize) -> Option<air::v2::ir::IntrinsicKind> {

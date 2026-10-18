@@ -8306,3 +8306,238 @@ fn barrier_free_stores_are_fresh_targets_and_null_sources() {
     }
     assert_eq!(elided, [true, false, true, false]);
 }
+
+// ── Unboxing a nullable integer that is only compared and cast ─────────────
+
+struct UnboxInfo(&'static [i32]);
+impl ModuleInfo for UnboxInfo {
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        self.0.get(idx).copied()
+    }
+    fn int_pool_len(&self) -> usize {
+        self.0.len()
+    }
+    fn value_is_i32(&self, ty: TypeRef) -> bool {
+        ty == t(3)
+    }
+    fn value_is_small_uint(&self, ty: TypeRef) -> bool {
+        ty == t(4)
+    }
+}
+
+/// `c = sel == 0 ? null : (dyn) x; if (c != K) return (int) c; return 1`,
+/// the shape an inlined `charCodeAt` leaves. `leak` also returns `c` itself.
+///
+/// r0 sel, r1 x, r2 c (dyn), r3 K, r4 boxed K, r5 result, r6 zero.
+fn nullable_int_compare(
+    compare_with: usize,
+    leak: bool,
+    source: TypeRef,
+) -> (Vec<Opcode>, Vec<TypeRef>) {
+    nullable_int_shape(compare_with, leak, source, true)
+}
+
+/// The same with `has_null` false: the other arm boxes the zero in r6, so
+/// the phi never holds null.
+fn nullable_int_shape(
+    compare_with: usize,
+    leak: bool,
+    source: TypeRef,
+    has_null: bool,
+) -> (Vec<Opcode>, Vec<TypeRef>) {
+    let regs = vec![t(3), source, t(5), t(3), t(5), t(3), t(3)];
+    let mut ops = vec![
+        Opcode::Int {
+            dst: Reg(6),
+            ptr: RefInt(0),
+        },
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(compare_with),
+        },
+        Opcode::JEq {
+            a: Reg(0),
+            b: Reg(6),
+            offset: 2,
+        },
+        Opcode::ToDyn {
+            dst: Reg(2),
+            src: Reg(1),
+        },
+        Opcode::JAlways { offset: 1 },
+        if has_null {
+            Opcode::Null { dst: Reg(2) }
+        } else {
+            Opcode::ToDyn {
+                dst: Reg(2),
+                src: Reg(6),
+            }
+        },
+        Opcode::ToDyn {
+            dst: Reg(4),
+            src: Reg(3),
+        },
+        Opcode::JNotEq {
+            a: Reg(2),
+            b: Reg(4),
+            offset: 2,
+        },
+        Opcode::Int {
+            dst: Reg(5),
+            ptr: RefInt(2),
+        },
+        Opcode::Ret { ret: Reg(5) },
+        Opcode::SafeCast {
+            dst: Reg(5),
+            src: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(5) },
+    ];
+    if leak {
+        // `return c` replaces the final return: a read the pass cannot redo.
+        ops.pop();
+        ops.push(Opcode::Ret { ret: Reg(2) });
+    }
+    (ops, regs)
+}
+
+fn run_unbox(ops: &[Opcode], regs: &[TypeRef], info: &'static UnboxInfo) -> (Function, PassStats) {
+    let mut f = lower_with(ops, regs, info).expect("lower");
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+    let stats = run_pass(
+        &mut f,
+        &super::passes::unbox::UnboxNullableInt { info },
+        PassOptions::default(),
+    );
+    run_pass(&mut f, &DeadCodeElim, PassOptions::default());
+    (f, stats)
+}
+
+static UNBOX_POOL: UnboxInfo = UnboxInfo(&[0, 62, 1]);
+static UNBOX_POOL_MINUS_ONE: UnboxInfo = UnboxInfo(&[0, -1, 1]);
+
+#[test]
+fn a_nullable_int_that_is_compared_and_cast_is_carried_unboxed() {
+    let (ops, regs) = nullable_int_compare(1, false, t(3));
+    let (f, stats) = run_unbox(&ops, &regs, &UNBOX_POOL);
+    assert!(stats.replaced >= 1 && stats.added > 0, "{}", f.dump());
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::Cast {
+                kind: CastKind::ToDyn | CastKind::SafeCast,
+                ..
+            }
+        )),
+        0,
+        "boxes and dynamic casts must be gone:\n{}",
+        f.dump()
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::Null { .. })),
+        0,
+        "{}",
+        f.dump()
+    );
+    // The phi now carries integers.
+    let phi_ty: Vec<_> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.phis.iter())
+        .map(|p| f.value_ty(p.dst))
+        .collect();
+    assert!(
+        phi_ty.iter().all(|&ty| ty == t(3)),
+        "{phi_ty:?}\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn a_boxed_unsigned_short_is_widened_and_carried_unboxed() {
+    // `charCodeAt` reads a u16: the box holds a ui16, the cast back is to int.
+    let (ops, regs) = nullable_int_compare(1, false, t(4));
+    let (f, stats) = run_unbox(&ops, &regs, &UNBOX_POOL);
+    assert!(stats.replaced >= 1, "{}", f.dump());
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::Cast {
+                kind: CastKind::ToDyn | CastKind::SafeCast,
+                ..
+            }
+        )),
+        0,
+        "{}",
+        f.dump()
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::Cast {
+                kind: CastKind::ToInt,
+                ..
+            }
+        )),
+        1,
+        "the u16 is widened once:\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn a_phi_of_boxes_with_no_null_needs_no_sentinel() {
+    // Compared with -1 as well: with no null edge there is nothing to confuse.
+    let (ops, regs) = nullable_int_shape(1, false, t(3), false);
+    let (f, stats) = run_unbox(&ops, &regs, &UNBOX_POOL_MINUS_ONE);
+    assert!(stats.replaced >= 2, "{}", f.dump());
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::Cast {
+                kind: CastKind::ToDyn | CastKind::SafeCast,
+                ..
+            }
+        )),
+        0,
+        "{}",
+        f.dump()
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::BinOp {
+                op: BinOp::SShr,
+                ..
+            }
+        )),
+        0,
+        "the cast back is a copy, not a masked shift:\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn a_comparison_with_minus_one_is_left_boxed() {
+    // Null would stand for -1, so `c != -1` could not tell them apart.
+    let (ops, regs) = nullable_int_compare(1, false, t(3));
+    let (f, stats) = run_unbox(&ops, &regs, &UNBOX_POOL_MINUS_ONE);
+    assert_eq!(stats.replaced + stats.added, 0, "{}", f.dump());
+    assert!(
+        count_instrs(&f, |i| matches!(i, Instr::Null { .. })) == 1,
+        "{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn a_nullable_int_that_is_also_returned_is_left_boxed() {
+    let (ops, regs) = nullable_int_compare(1, true, t(3));
+    let (f, stats) = run_unbox(&ops, &regs, &UNBOX_POOL);
+    assert_eq!(stats.replaced + stats.added, 0, "{}", f.dump());
+    assert!(
+        count_instrs(&f, |i| matches!(i, Instr::Null { .. })) == 1,
+        "{}",
+        f.dump()
+    );
+}

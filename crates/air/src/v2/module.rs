@@ -281,6 +281,21 @@ pub trait ModuleInfo {
         false
     }
 
+    /// True when values of `ty` are HL `i32`. The unboxing of a nullable
+    /// integer consults this and refuses when it is false.
+    fn value_is_i32(&self, ty: TypeRef) -> bool {
+        let _ = ty;
+        false
+    }
+
+    /// True when values of `ty` are unsigned 8- or 16-bit integers, which a
+    /// zero-extending `ToInt` turns into `i32` unchanged. Inert unless the
+    /// embedder says so.
+    fn value_is_small_uint(&self, ty: TypeRef) -> bool {
+        let _ = ty;
+        false
+    }
+
     /// How many bytes one value of `ty` occupies in memory.
     ///
     /// Needed wherever an index is in BYTES and contiguity is a question

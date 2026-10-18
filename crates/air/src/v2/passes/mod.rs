@@ -51,6 +51,7 @@ pub mod nullcheck;
 pub mod sroa;
 pub mod stripmine;
 pub mod tre;
+pub mod unbox;
 pub mod widen;
 
 pub use celldse::DeadCellStoreElim;
@@ -379,6 +380,7 @@ impl<'m> PassManager<'m> {
                 // "phi merge", and those phis are real loop-carried merges
                 // rather than inliner artifacts the cleanup could remove.
                 Box::new(ScalarReplacement::new(info)),
+                Box::new(unbox::UnboxNullableInt { info }),
                 Box::new(CellForwarding),
                 Box::new(DeadCellStoreElim),
                 Box::new(NullCheckElim),

@@ -1991,6 +1991,28 @@ fn gc_share_target() -> f64 {
     })
 }
 
+/// The interval multiplier after a collection: wider while the pause is a
+/// large share of the time since the last collection, back toward `base`
+/// while it is small, and never past four times `base`.
+///
+/// An explicit collection leaves it alone. The caller chose when to run it,
+/// so the time since the last collection says nothing about the program's
+/// allocation rate, and a run of explicit collections measures each pause
+/// against almost no mutator time and would widen the interval to its limit.
+fn next_growth(growth: f64, base: f64, share: f64, target: f64, explicit: bool) -> f64 {
+    if explicit {
+        return growth;
+    }
+    let step = if share > target {
+        1.5
+    } else if share < target / 2.0 {
+        0.75
+    } else {
+        1.0
+    };
+    (growth * step).clamp(base, base * 4.0)
+}
+
 /// Reuse the unmarked lines inside blocks a sweep kept. `ASH_GC_RECYCLE=0`
 /// falls back to retaining those blocks whole.
 ///
@@ -4947,14 +4969,7 @@ impl ImmixAllocator {
         let share = pause.as_secs_f64() / (pause + mutator).as_secs_f64().max(1e-9);
         let target = gc_share_target();
         let base = growth_factor() as f64;
-        let step = if share > target {
-            1.5
-        } else if share < target / 2.0 {
-            0.75
-        } else {
-            1.0
-        };
-        self.heap.growth = (self.heap.growth * step).clamp(base, base * 4.0);
+        self.heap.growth = next_growth(self.heap.growth, base, share, target, origin == 6);
         let scaled = (live_bytes as f64 * self.heap.growth) as usize;
         self.heap.trigger_threshold = scaled.clamp(floor, ceiling);
 
@@ -8378,6 +8393,27 @@ mod tests {
     /// `mmap` gets that from page alignment; a platform served by the plain
     /// allocator gets whatever it asked for, and asking for too little cost a
     /// wasm build a live array's contents with no crash and no diagnostic.
+
+    #[test]
+    fn explicit_collections_do_not_widen_the_interval() {
+        // Back to back: each pause is nearly all of the time since the last.
+        let mut growth = 4.0;
+        for _ in 0..10 {
+            growth = next_growth(growth, 4.0, 0.9, 0.05, true);
+        }
+        assert_eq!(growth, 4.0);
+        // The program's own collections still widen it, to four times base...
+        for _ in 0..10 {
+            growth = next_growth(growth, 4.0, 0.9, 0.05, false);
+        }
+        assert_eq!(growth, 16.0);
+        // ...and narrow it again when the pauses are small.
+        for _ in 0..10 {
+            growth = next_growth(growth, 4.0, 0.001, 0.05, false);
+        }
+        assert_eq!(growth, 4.0);
+    }
+
     #[test]
     fn the_heap_base_is_line_aligned() {
         let heap = HeapMemory::new(BLOCK_SIZE * 4);

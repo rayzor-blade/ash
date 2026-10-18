@@ -1054,6 +1054,26 @@ fn entered_again(ctx: &TieredSharedCtx, findex: usize) -> bool {
             .contains(&findex)
 }
 
+/// Whether more than one call site in the program names `findex`: a function
+/// that can be entered again after its first activation, even when nothing has
+/// yet been seen to enter it twice. The counts are taken once, from the
+/// bytecode the program started with.
+#[cfg(feature = "llvm")]
+fn named_by_several_call_sites(ctx: &TieredSharedCtx, findex: usize) -> bool {
+    static SITES: OnceLock<HashMap<usize, u32>> = OnceLock::new();
+    SITES
+        .get_or_init(|| {
+            let bytecode = ctx
+                .bytecode
+                .lock()
+                .expect("bytecode mutex poisoned")
+                .clone();
+            bytecode.static_call_sites()
+        })
+        .get(&findex)
+        .is_some_and(|&n| n > 1)
+}
+
 /// Findexes the AIR ceiling turned down, so the decision is made once.
 ///
 /// Deliberately separate from `llvm_failed`: that set means "a compile was
@@ -2517,6 +2537,7 @@ pub(crate) fn compile_with_llvm(
             && !ctx.compiled_only
             && calls <= 1
             && !entered_again(ctx, findex)
+            && !named_by_several_call_sites(ctx, findex)
         {
             return Ok(None);
         }

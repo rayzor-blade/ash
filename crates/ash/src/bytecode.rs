@@ -1565,6 +1565,30 @@ impl DecodedBytecode {
         names
     }
 
+    /// How many call sites and static closures name each function, over the
+    /// whole module. Only the ones that say which function they reach: a call
+    /// through a vtable, a method slot or a closure value is not counted.
+    pub fn static_call_sites(&self) -> std::collections::HashMap<usize, u32> {
+        let mut sites = std::collections::HashMap::new();
+        for f in &self.functions {
+            for op in f.ops() {
+                match op {
+                    Opcode::Call0 { fun, .. }
+                    | Opcode::Call1 { fun, .. }
+                    | Opcode::Call2 { fun, .. }
+                    | Opcode::Call3 { fun, .. }
+                    | Opcode::Call4 { fun, .. }
+                    | Opcode::CallN { fun, .. }
+                    | Opcode::StaticClosure { fun, .. } => {
+                        *sites.entry(fun.0).or_insert(0) += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        sites
+    }
+
     /// How many fields this type inherits, so a binding's chain-wide field
     /// index can be turned back into one of the type's own fields.
     fn inherited_field_count(&self, obj: &HLTypeObj) -> usize {

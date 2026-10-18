@@ -2090,7 +2090,9 @@ fn trace_freed() -> bool {
     *V.get_or_init(|| std::env::var("ASH_GC_TRACE_FREED").is_ok())
 }
 
-/// `ASH_GC_DEBUG_ROOTS`: name every root a collection marks from. Safe;
+/// `ASH_GC_DEBUG_ROOTS`: name every root a collection marks from, how many
+/// bytes each kept alive that no earlier root had and how long its trace took,
+/// and the word that first reached any object of a megabyte or more. Safe;
 /// verbose. Read once.
 fn debug_roots() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
@@ -3658,6 +3660,47 @@ fn containing_allocation(
     }
 }
 
+/// Bytes of objects claimed so far; counted only under `ASH_GC_DEBUG_ROOTS`.
+static CLAIMED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// An object this large that a debug collection reaches is reported with the
+/// word that reached it.
+const BIG_CLAIM: usize = 1 << 20;
+
+/// For every object claimed under `ASH_GC_DEBUG_ROOTS`: the word that reached
+/// it, and the object that word was in (`None` for a root).
+static CLAIM_SOURCE: std::sync::Mutex<Option<HashMap<usize, (String, Option<usize>)>>> =
+    std::sync::Mutex::new(None);
+
+/// Remember how `object` was reached, for [`report_big_claim`] to walk back.
+#[cold]
+fn note_claim((start, _): (usize, usize), from: String, parent: Option<usize>) {
+    if let Ok(mut map) = CLAIM_SOURCE.lock() {
+        map.get_or_insert_with(HashMap::new)
+            .insert(start, (from, parent));
+    }
+}
+
+/// Print an object of [`BIG_CLAIM`] bytes or more and the chain of words that
+/// kept it reachable, back to a root.
+#[cold]
+fn report_big_claim((start, size): (usize, usize)) {
+    eprintln!(
+        "[gc-roots]   {} KB object at +{start:#x} is kept by:",
+        size / 1024
+    );
+    let map = CLAIM_SOURCE.lock().ok();
+    let map = map.as_deref().and_then(Option::as_ref);
+    let mut at = Some(start);
+    while let Some(object) = at {
+        let Some((from, parent)) = map.and_then(|m| m.get(&object)) else {
+            break;
+        };
+        eprintln!("[gc-roots]     +{object:#x} <- {from}");
+        at = *parent;
+    }
+}
+
 /// Claim OBJECTS, not lines. Two reachable objects on a shared line must
 /// both be traced; an unreachable neighbour on that line must not be traced.
 fn mark_allocation_shared(
@@ -3675,6 +3718,9 @@ fn mark_allocation_shared(
         || slot.fetch_or(OBJECT_MARK, Ordering::Relaxed) & OBJECT_MARK != 0
     {
         return;
+    }
+    if debug_roots() {
+        CLAIMED_BYTES.fetch_add(size, Ordering::Relaxed);
     }
     for line in start / LINE_SIZE..=(start + size - 1) / LINE_SIZE {
         claim_line(&blocks[line / LINES_PER_BLOCK], line % LINES_PER_BLOCK);
@@ -3757,10 +3803,22 @@ fn scan_allocation_shared(
     if blocks[start / BLOCK_SIZE].noptr {
         return;
     }
+    let debug = debug_roots();
     for off in (0..size).step_by(WORD) {
         let val = unsafe { *((heap_start + start + off) as *const usize) };
         if val >= heap_start && val < heap_end {
+            let before = out.len();
             mark_allocation_shared(blocks, alloc_sizes, objects, val - heap_start, out);
+            if debug && out.len() > before {
+                let from = format!(
+                    "heap word +{:#x} ({size} bytes from +{start:#x}), value {val:#x}",
+                    start + off
+                );
+                note_claim(out[before], from, Some(start));
+                if out[before].1 >= BIG_CLAIM {
+                    report_big_claim(out[before]);
+                }
+            }
         }
     }
 }
@@ -4711,6 +4769,7 @@ impl ImmixAllocator {
         // That is what a wasm build was faulting on. Scanning every word
         // over-retains on 64-bit only if the word is not a pointer, which is
         // the conservative contract already.
+        let debug = debug_roots();
         let mut addr = start;
         while addr + WORD <= end {
             let raw = unsafe { *(addr as *const usize) };
@@ -4729,7 +4788,18 @@ impl ImmixAllocator {
             // over-retains, which is the conservative contract already.
             let consider = |val: usize, this: &mut Self, out: &mut Vec<(usize, usize)>| {
                 if val >= heap_start && val < heap_end {
+                    let before = out.len();
                     this.mark_allocation(val - heap_start, out);
+                    if debug && out.len() > before {
+                        note_claim(
+                            out[before],
+                            format!("root slot {addr:#x}, value {val:#x}"),
+                            None,
+                        );
+                        if out[before].1 >= BIG_CLAIM {
+                            report_big_claim(out[before]);
+                        }
+                    }
                 }
             };
             consider(raw, self, &mut newly_marked);
@@ -4758,6 +4828,23 @@ impl ImmixAllocator {
     /// recycling; the worklist and duplicate suppression are object-granular.
     fn conservative_trace(&mut self, initial: Vec<(usize, usize)>) {
         self.trace_from(initial, &[]);
+    }
+
+    /// `ASH_GC_DEBUG_ROOTS`: trace what `pending` reaches now and say how many
+    /// bytes it kept alive that no earlier root had, if that is `min_kb` or
+    /// more. Where it prints is only as fine as where it is called.
+    fn attribute_roots(&mut self, label: &str, pending: &mut Vec<(usize, usize)>, min_kb: usize) {
+        if !debug_roots() {
+            return;
+        }
+        let before = CLAIMED_BYTES.load(Ordering::Relaxed);
+        let t0 = Instant::now();
+        self.conservative_trace(std::mem::take(pending));
+        let kb = (CLAIMED_BYTES.load(Ordering::Relaxed) - before) / 1024;
+        if kb >= min_kb {
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("[gc-roots]   {label}: keeps {kb} KB alive, traced in {ms:.2} ms");
+        }
     }
 
     /// A minor's old roots: scan the marked objects in `root_ranges` (see
@@ -5460,12 +5547,14 @@ impl ImmixAllocator {
                 self.mark_allocation(addr - heap_start, &mut all_newly_marked);
             }
         }
+        self.attribute_roots("globals", &mut all_newly_marked, 0);
         for &stack_ptr in &root_set.stack_roots {
             let addr = stack_ptr as usize;
             if addr >= heap_start && addr < heap_end {
                 self.mark_allocation(addr - heap_start, &mut all_newly_marked);
             }
         }
+        self.attribute_roots("stack roots", &mut all_newly_marked, 0);
         // A persistent root's contents are scanned even when it is already
         // marked: runtime metadata such as a class's `hl_runtime_obj` is
         // filled in after it is allocated, without the write barrier, so a
@@ -5485,8 +5574,20 @@ impl ImmixAllocator {
                 {
                     all_newly_marked.push(object);
                 }
+                if debug_roots() {
+                    let word = |i: usize| unsafe { *((addr + i * WORD) as *const usize) };
+                    let label = format!(
+                        "persistent root {addr:#x} [{:#x} {:#x} {:#x} {:#x}]",
+                        word(0),
+                        word(1),
+                        word(2),
+                        word(3)
+                    );
+                    self.attribute_roots(&label, &mut all_newly_marked, 1024);
+                }
             }
         }
+        self.attribute_roots("persistent roots", &mut all_newly_marked, 0);
         // A native root is a SLOT, so read through it rather than marking the
         // address: `&stash->cb` is malloc'd and would fail the bounds check
         // above, which is precisely how these were silently dropped before --
@@ -5507,6 +5608,7 @@ impl ImmixAllocator {
             all_newly_marked.extend(newly);
         }
 
+        self.attribute_roots("root slots", &mut all_newly_marked, 0);
         // Conservative scan of globals_data
         let dbg = debug_roots();
         if let Some((globals_ptr, count)) = self.globals_range {
@@ -5518,9 +5620,11 @@ impl ImmixAllocator {
             }
             all_newly_marked.extend(newly_marked);
         }
+        self.attribute_roots("globals", &mut all_newly_marked, 0);
         for (start, end) in self.static_ranges.clone() {
             all_newly_marked.extend(self.conservative_scan_range(start, end));
         }
+        self.attribute_roots("static ranges", &mut all_newly_marked, 0);
 
         // Conservative scan of interpreter-provided ranges
         for mutator in mutators {
@@ -5618,6 +5722,10 @@ impl ImmixAllocator {
                 }
             }
 
+            if dbg {
+                let label = format!("thread {:#x} stack", mutator.thread);
+                self.attribute_roots(&label, &mut all_newly_marked, 0);
+            }
             // All OTHER stacks owned by this mutator scan from their saved
             // switch-out SP. The id-0 descriptor is its suspended main stack.
             for f in fiber_stacks.iter().filter(|f| f.thread == mutator.thread) {
@@ -5667,6 +5775,7 @@ impl ImmixAllocator {
                 }
             }
 
+            self.attribute_roots("thread's other stacks", &mut all_newly_marked, 0);
             // Parked/blocked mutators copied their callee-saved registers
             // into registry-owned storage. The collector's registers are in
             // `buf`, which its live-stack scan already includes.

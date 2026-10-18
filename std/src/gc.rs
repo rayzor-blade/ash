@@ -28,6 +28,10 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const RESIDENT_FREE_BLOCKS: usize = 16; // Keep 512 KiB warm between idle bursts.
+/// The most free blocks one quiet sweep hands back to the OS (32 MiB). The
+/// rest wait for the next idle collection, so a heap that frees most of its
+/// memory does not hold the world for the whole madvise.
+const HANDBACK_CHUNK_BLOCKS: usize = 1024;
 const LINE_SIZE: usize = 128; // 128 bytes
 const ALLOC_QUANTUM: usize = 16;
 const OBJECT_MARK: u8 = 0x80;
@@ -6666,6 +6670,7 @@ impl ImmixAllocator {
             let mut hand_back: Vec<usize> = self.heap.pending_handback.iter().copied().collect();
             hand_back.sort_unstable();
             hand_back.truncate(hand_back.len().saturating_sub(RESIDENT_FREE_BLOCKS));
+            hand_back.truncate(HANDBACK_CHUNK_BLOCKS);
             if !hand_back.is_empty() {
                 let base = self.heap.memory.as_mut_ptr();
                 let mut run_start = hand_back[0];
@@ -8414,6 +8419,29 @@ mod tests {
         assert_eq!(growth, 4.0);
     }
 
+    #[test]
+    fn a_quiet_sweep_hands_back_one_chunk_and_leaves_the_rest_pending() {
+        if !handback_enabled() || no_reclaim() || quarantine_freed() {
+            return;
+        }
+        let blocks = HANDBACK_CHUNK_BLOCKS + RESIDENT_FREE_BLOCKS + 200;
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * (blocks + 8));
+        for _ in 0..blocks {
+            gc.acquire_free_block(false).unwrap();
+        }
+        set_collect_origin(6);
+        assert_eq!(gc.sweep(&[], false, 0), blocks);
+        assert_eq!(gc.heap.pending_handback.len(), blocks);
+        set_collect_origin(8);
+        gc.sweep(&[], false, 0);
+        assert_eq!(gc.heap.reusable_blocks.len(), HANDBACK_CHUNK_BLOCKS);
+        assert_eq!(
+            gc.heap.pending_handback.len(),
+            blocks - HANDBACK_CHUNK_BLOCKS
+        );
+        gc.sweep(&[], false, 0);
+        assert_eq!(gc.heap.pending_handback.len(), RESIDENT_FREE_BLOCKS);
+    }
     #[test]
     fn the_heap_base_is_line_aligned() {
         let heap = HeapMemory::new(BLOCK_SIZE * 4);

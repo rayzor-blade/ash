@@ -3690,9 +3690,10 @@ const BIG_CLAIM: usize = 1 << 20;
 
 /// For every object claimed under `ASH_GC_DEBUG_ROOTS`: the address of the
 /// word that reached it and the heap offset of the object that word was in
-/// ([`ROOT`] for a word outside the heap). About twenty bytes per claimed
-/// object on wasm32, dropped when the collection's marking ends.
-static CLAIM_SOURCE: std::sync::Mutex<Option<HashMap<usize, (usize, usize)>>> =
+/// ([`ROOT`] for a word outside the heap) and that object's size. About
+/// twenty-eight bytes per claimed object on wasm32, dropped when the
+/// collection's marking ends.
+static CLAIM_SOURCE: std::sync::Mutex<Option<HashMap<usize, (usize, usize, usize)>>> =
     std::sync::Mutex::new(None);
 
 /// The `parent` of a claim made from a root.
@@ -3700,10 +3701,10 @@ const ROOT: usize = usize::MAX;
 
 /// Remember how `object` was reached, for [`report_big_claim`] to walk back.
 #[cold]
-fn note_claim((start, _): (usize, usize), word: usize, parent: usize) {
+fn note_claim((start, _): (usize, usize), word: usize, parent: usize, parent_size: usize) {
     if let Ok(mut map) = CLAIM_SOURCE.lock() {
         map.get_or_insert_with(HashMap::new)
-            .insert(start, (word, parent));
+            .insert(start, (word, parent, parent_size));
     }
 }
 
@@ -3754,7 +3755,7 @@ fn report_big_claim(heap_start: usize, (start, size): (usize, usize)) {
     let map = CLAIM_SOURCE.lock().ok();
     let map = map.as_deref().and_then(Option::as_ref);
     let mut at = start;
-    while let Some(&(word, parent)) = map.and_then(|m| m.get(&at)) {
+    while let Some(&(word, parent, parent_size)) = map.and_then(|m| m.get(&at)) {
         let class = object_class(heap_start + at);
         // The world is stopped, so the word still holds what reached the object.
         let value = unsafe { *(word as *const usize) };
@@ -3765,7 +3766,7 @@ fn report_big_claim(heap_start: usize, (start, size): (usize, usize)) {
             break;
         }
         debug_say(format!(
-            "[gc-roots]     +{at:#x}{class} <- heap word +{:#x} (object +{parent:#x}), value {value:#x}",
+            "[gc-roots]     +{at:#x}{class} <- heap word +{:#x} (object +{parent:#x}, {parent_size} bytes), value {value:#x}",
             word - heap_start
         ));
         at = parent;
@@ -3881,7 +3882,7 @@ fn scan_allocation_shared(
             let before = out.len();
             mark_allocation_shared(blocks, alloc_sizes, objects, val - heap_start, out);
             if debug && out.len() > before {
-                note_claim(out[before], heap_start + start + off, start);
+                note_claim(out[before], heap_start + start + off, start, size);
                 if out[before].1 >= BIG_CLAIM {
                     report_big_claim(heap_start, out[before]);
                 }
@@ -4037,7 +4038,7 @@ fn scan_object_shared_with(
                     let before = out.len();
                     mark_allocation_shared(blocks, alloc_sizes, objects, val - heap_start, out);
                     if debug && out.len() > before {
-                        note_claim(out[before], heap_start + start + off, start);
+                        note_claim(out[before], heap_start + start + off, start, size);
                         if out[before].1 >= BIG_CLAIM {
                             report_big_claim(heap_start, out[before]);
                         }
@@ -5068,7 +5069,7 @@ impl ImmixAllocator {
                     let before = out.len();
                     this.mark_allocation(val - heap_start, out);
                     if debug && out.len() > before {
-                        note_claim(out[before], addr, ROOT);
+                        note_claim(out[before], addr, ROOT, 0);
                         if out[before].1 >= BIG_CLAIM {
                             report_big_claim(heap_start, out[before]);
                         }

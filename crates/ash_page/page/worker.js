@@ -153,7 +153,11 @@ self.ashAgent = ({ name, memory, address }) => {
 // listed in `libraries.json`, fetched before the program runs: a guest that
 // asks for a library is inside a synchronous call and cannot wait for one.
 // No manifest is a program without libraries.
-async function fetchLibraries(module) {
+//
+// Every library is requested as soon as the manifest names it, together and
+// alongside the program's own download, not after it. `since` stamps each
+// step with the milliseconds since the load began.
+async function fetchLibraries(module, since) {
   const base = new URL(module, self.location.href);
   let names = [];
   try {
@@ -163,34 +167,54 @@ async function fetchLibraries(module) {
     return undefined;
   }
   if (!Array.isArray(names) || names.length === 0) return undefined;
-  const libraries = {};
-  for (const name of names) {
-    const response = await fetch(new URL(`${name}.wasm`, base));
-    if (!response.ok) {
-      post("err", `fetching library ${name}: ${response.status}`);
-      continue;
-    }
-    libraries[name] = new Uint8Array(await response.arrayBuffer());
-    post("meta", `loaded library ${name}, ${libraries[name].length.toLocaleString()} bytes`);
-  }
-  return libraries;
+  const fetched = await Promise.all(
+    names.map(async (name) => {
+      const response = await fetch(new URL(`${name}.wasm`, base));
+      if (!response.ok) {
+        post("err", `fetching library ${name}: ${response.status}`);
+        return undefined;
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      post("meta", `loaded library ${name}, ${bytes.length.toLocaleString()} bytes, at ${since()}`);
+      return [name, bytes];
+    }),
+  );
+  // Listed order, whichever finished first.
+  return Object.fromEntries(fetched.filter(Boolean));
 }
 
 self.onmessage = async (event) => {
   const { module, args, environ, display: wanted, agents: ports } = event.data;
   display = !!wanted;
   try {
-    await init();
+    // Every download starts before anything is awaited, so the host's own
+    // module, the program and the libraries share the connection and the
+    // round trips overlap. The host's goes first: nothing runs without it.
+    const begun = performance.now();
+    const since = () => `${Math.round(performance.now() - begun)}ms`;
+    post("meta", `fetching ${module} and its libraries`);
+    const initialising = init();
+    const programRequest = fetch(module);
+    const libraryRequest = fetchLibraries(module, since);
+    // Settled by the awaits below; this only keeps an early failure from
+    // being reported twice.
+    for (const pending of [initialising, programRequest, libraryRequest]) {
+      pending.catch(() => {});
+    }
+
+    await initialising;
+    post("meta", `host ready at ${since()}`);
     // Before the program runs, and before it can ask for a thread.
     const ready = Array.isArray(ports)
       ? adoptAgents(ports)
       : await warmAgents(Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
-    post("meta", `${ready} agents ready`);
-    const response = await fetch(module);
+    post("meta", `${ready} agents ready at ${since()}`);
+    const response = await programRequest;
     if (!response.ok) throw new Error(`fetching ${module}: ${response.status}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
-    post("meta", `loaded ${module}, ${bytes.length.toLocaleString()} bytes`);
-    const libraries = await fetchLibraries(module);
+    post("meta", `loaded ${module}, ${bytes.length.toLocaleString()} bytes, at ${since()}`);
+    const libraries = await libraryRequest;
+    post("meta", `starting the program at ${since()}`);
 
     const started = performance.now();
     const outcome = await run(bytes, args ?? [module], environ ?? [], spawn, libraries);

@@ -91,6 +91,9 @@ struct Placement {
     got: Vec<(GotKind, String, i32)>,
     /// The slots appended for a function whose address the library takes.
     slots: Vec<(i32, Owner, String)>,
+    /// The thread-local block the first instance started with, to give every
+    /// other instance a copy of. See [`capture_tls`].
+    tls: Option<Vec<u8>>,
 }
 
 /// A library as the first load placed it.
@@ -198,6 +201,7 @@ pub fn load(
 fn thread_module(bytes: &[u8]) -> Result<WebAssembly::Module, JsValue> {
     let bytes = ash_wasm_link::dylink::without_initial_data(bytes)
         .and_then(|b| ash_wasm_link::waits::instrument(&b))
+        .and_then(|b| ash_wasm_link::dylink::expose_tls_base(&b))
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     WebAssembly::Module::new(&Uint8Array::from(bytes.as_slice()))
 }
@@ -217,8 +221,9 @@ fn load_one(
     let side = ash_wasm_link::read_side_module(bytes)
         .map_err(|e| JsValue::from_str(&e.to_string()))?
         .ok_or_else(|| JsValue::from_str("it is not a side module (no dylink.0 section)"))?;
-    let bytes =
-        ash_wasm_link::waits::instrument(bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let bytes = ash_wasm_link::waits::instrument(bytes)
+        .and_then(|b| ash_wasm_link::dylink::expose_tls_base(&b))
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let module = WebAssembly::Module::new(&Uint8Array::from(bytes.as_slice()))?;
 
     let (memory, table) = program_memory_and_table(main_exports)?;
@@ -252,7 +257,7 @@ fn load_one(
         main_exports,
         host_imports,
         &Bases {
-            memory,
+            memory: memory.clone(),
             table: table.clone(),
             memory_base,
             table_base,
@@ -289,7 +294,13 @@ fn load_one(
         answers.push((kind, name, value));
     }
 
+    let mut tls = None;
     for init in ["__wasm_apply_data_relocs", "__wasm_call_ctors"] {
+        // After the relocations that patch it and before any constructor
+        // that writes to it: this is the image a thread's block starts from.
+        if init == "__wasm_call_ctors" {
+            tls = capture_tls(&exports, &memory, memory_base, side.memory_size);
+        }
         if let Ok(f) = Reflect::get(&exports, &init.into())?.dyn_into::<Function>() {
             f.call0(&JsValue::UNDEFINED)?;
         }
@@ -303,6 +314,7 @@ fn load_one(
             table_size: side.table_size,
             got: answers,
             slots,
+            tls,
         },
     ))
 }
@@ -428,6 +440,66 @@ fn supply_imports(
     Ok((imports, got))
 }
 
+/// The bytes of the library's thread-local block as its first instance
+/// started with it, or nothing if it has none.
+///
+/// The block runs from the module's `__tls_base` to the end of the library's
+/// memory. That takes in whatever follows it (the library's start flag, in
+/// what wasm-ld lays out), which a copy carries along harmlessly; stopping
+/// short would cut thread-local data off.
+fn capture_tls(
+    exports: &Object,
+    memory: &JsValue,
+    memory_base: i32,
+    memory_size: u32,
+) -> Option<Vec<u8>> {
+    let global: WebAssembly::Global =
+        Reflect::get(exports, &ash_wasm_link::dylink::TLS_BASE_EXPORT.into())
+            .ok()?
+            .dyn_into()
+            .ok()?;
+    let base = global.value().as_f64()? as i32;
+    let end = memory_base.checked_add(i32::try_from(memory_size).ok()?)?;
+    if base < memory_base || base >= end {
+        return None;
+    }
+    let buffer = Reflect::get(memory, &"buffer".into()).ok()?;
+    let view =
+        Uint8Array::new_with_byte_offset_and_length(&buffer, base as u32, (end - base) as u32);
+    Some(view.to_vec())
+}
+
+/// A block of the program's memory for this instance's thread-locals, holding
+/// the first instance's initial image, with `__tls_base` pointed at it.
+fn give_thread_block(
+    main_exports: &Object,
+    memory: &JsValue,
+    exports: &Object,
+    image: &Uint8Array,
+) -> Result<(), JsValue> {
+    let malloc: Function = Reflect::get(main_exports, &"malloc".into())?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("the program exports no malloc to place it"))?;
+    let size = image.length() + 16;
+    let addr = malloc
+        .call1(&JsValue::UNDEFINED, &size.into())?
+        .as_f64()
+        .unwrap_or(0.0) as u32;
+    if addr == 0 {
+        return Err(format!("no room for {} bytes", image.length()).into());
+    }
+    // 16 covers what a thread-local asks for.
+    let block = (addr + 15) & !15;
+    let buffer = Reflect::get(memory, &"buffer".into())?;
+    Uint8Array::new_with_byte_offset_and_length(&buffer, block, image.length()).set(image, 0);
+    let global: WebAssembly::Global =
+        Reflect::get(exports, &ash_wasm_link::dylink::TLS_BASE_EXPORT.into())?
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("the thread's instance has no thread-local base"))?;
+    global.set_value(&JsValue::from_f64(f64::from(block)));
+    Ok(())
+}
+
 /// Load the libraries again in a thread's instance of the program, laid out
 /// as the first load laid them out.
 ///
@@ -497,6 +569,14 @@ pub fn replay(
         )?;
         let instance = WebAssembly::Instance::new(&module, &imports)?;
         let exports = instance.exports();
+        if let Some(image) = field(&lib, "tls")?.dyn_ref::<Uint8Array>() {
+            give_thread_block(main_exports, &memory, &exports, image).map_err(|e| {
+                JsValue::from_str(&format!(
+                    "thread-local storage for {name}: {}",
+                    describe(&e)
+                ))
+            })?;
+        }
         for entry in array(&lib, "slots")?.iter() {
             let index = number(&Reflect::get_u32(&entry, 0)?)?;
             let owner = match number(&Reflect::get_u32(&entry, 1)?)? {
@@ -586,6 +666,9 @@ fn layout_object(
             ));
         }
         set(&object, "slots", slots.into())?;
+        if let Some(image) = &p.tls {
+            set(&object, "tls", Uint8Array::from(image.as_slice()).into())?;
+        }
         let resolved = Object::new();
         if let Some(library) = loaded.by_name.get(&lib.name) {
             for (export, index) in &library.resolved {

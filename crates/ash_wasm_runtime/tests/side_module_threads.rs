@@ -12,7 +12,11 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const PROGRAM: &str = r#"(module
+/// The program: resolve `func` in `lib`, call it on the main thread (which must
+/// return 42), then call it from a thread, which must return `thread_expects`.
+fn program(lib: &str, func: &str, thread_expects: u32) -> String {
+    format!(
+        r#"(module
   (import "env" "memory" (memory 1 1 shared))
   (import "env" "ash_host_dlsym"
     (func $dlsym (param i32 i32 i32 i32) (result i32)))
@@ -21,8 +25,8 @@ const PROGRAM: &str = r#"(module
   (table (export "__indirect_function_table") 1 funcref)
   (type $answer (func (result i32)))
   (global $brk (mut i32) (i32.const 4096))
-  (data (i32.const 64) "library")
-  (data (i32.const 96) "answer")
+  (data (i32.const 64) "{lib}")
+  (data (i32.const 96) "{func}")
   (func (export "malloc") (param $n i32) (result i32)
     (local $p i32)
     (local.set $p (global.get $brk))
@@ -38,16 +42,23 @@ const PROGRAM: &str = r#"(module
   (func (export "main") (param i32 i32) (result i32)
     (local $index i32)
     (local.set $index
-      (call $dlsym (i32.const 64) (i32.const 7) (i32.const 96) (i32.const 6)))
+      (call $dlsym (i32.const 64) (i32.const {lib_len}) (i32.const 96) (i32.const {func_len})))
     (if (i32.eqz (local.get $index)) (then (return (i32.const 10))))
     (i32.store (i32.const 256) (local.get $index))
     (if (i32.ne (call_indirect (type $answer) (local.get $index)) (i32.const 42))
       (then (return (i32.const 11))))
     (drop (call $spawn (i32.const 0)))
     (drop (memory.atomic.wait32 (i32.const 264) (i32.const 0) (i64.const 10000000000)))
-    (if (i32.ne (i32.load (i32.const 260)) (i32.const 43))
+    (if (i32.ne (i32.load (i32.const 260)) (i32.const {thread_expects}))
       (then (return (i32.const 12))))
-    (i32.const 0)))"#;
+    (i32.const 0)))"#,
+        lib = lib,
+        func = func,
+        lib_len = lib.len(),
+        func_len = func.len(),
+        thread_expects = thread_expects,
+    )
+}
 
 /// `dylink.0` memory info: 4 bytes of data, aligned to 2^2, no table.
 const LIBRARY: &str = r#"(module
@@ -60,19 +71,58 @@ const LIBRARY: &str = r#"(module
       (i32.add (i32.load (global.get $base)) (i32.const 1)))
     (i32.load (global.get $base))))"#;
 
-/// Write the program and its library into a fresh directory.
-fn files() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+/// Write the program and the library it calls into a fresh directory.
+fn files(
+    program: &str,
+    library_name: &str,
+    library: &str,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("program.wasm");
-    let library = dir.path().join("library.wasm");
-    std::fs::write(&program, wat::parse_str(PROGRAM).unwrap()).unwrap();
-    std::fs::write(&library, wat::parse_str(LIBRARY).unwrap()).unwrap();
-    (dir, program, library)
+    let program_path = dir.path().join("program.wasm");
+    let library_path = dir.path().join(format!("{library_name}.wasm"));
+    std::fs::write(&program_path, wat::parse_str(program).unwrap()).unwrap();
+    std::fs::write(&library_path, wat::parse_str(library).unwrap()).unwrap();
+    (dir, program_path, library_path)
 }
 
 #[test]
 fn a_thread_calls_a_primitive_by_the_index_another_thread_resolved() {
-    let (_dir, program, _library) = files();
+    let (_dir, program, _library) = files(&program("library", "answer", 43), "library", LIBRARY);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ash-wasm-run"));
+    command.arg("--threads").arg(&program);
+    finish(command);
+}
+
+/// Laid out as wasm-ld lays out a library with thread-locals: the module's own
+/// `__tls_base` global, assigned by its start function to a block inside the
+/// library's memory for the first instance only, and an init flag. A later
+/// instance leaves it at zero, and there is no `__wasm_init_tls` to call.
+const TLS_LIBRARY: &str = r#"(module
+  (@custom "dylink.0" (before first) "\01\04\28\04\00\00")
+  (import "env" "memory" (memory 1 1 shared))
+  (import "env" "__memory_base" (global $base i32))
+  (global $tls (mut i32) (i32.const 0))
+  (data $tdata "\29\00\00\00")
+  (func $init (local $flag i32)
+    (local.set $flag (i32.add (global.get $base) (i32.const 36)))
+    (if (i32.eqz (i32.atomic.rmw.cmpxchg (local.get $flag) (i32.const 0) (i32.const 1)))
+      (then
+        (global.set $tls (i32.add (global.get $base) (i32.const 16)))
+        (memory.init $tdata (global.get $tls) (i32.const 0) (i32.const 4))
+        (i32.atomic.store (local.get $flag) (i32.const 2)))))
+  (start $init)
+  (func (export "next") (result i32)
+    (i32.store (global.get $tls) (i32.add (i32.load (global.get $tls)) (i32.const 1)))
+    (i32.load (global.get $tls))))"#;
+
+/// A thread-local counter starts at 41 in every thread. The main thread's
+/// first call makes it 42; a thread gets its own block, from the initial
+/// image, so its first call also returns 42. Without a block the thread
+/// counts in the program's own low memory and returns 1, and sharing the main
+/// thread's block would return 43.
+#[test]
+fn a_thread_starts_its_thread_locals_from_the_initial_image() {
+    let (_dir, program, _library) = files(&program("tls", "next", 42), "tls", TLS_LIBRARY);
     let mut command = Command::new(env!("CARGO_BIN_EXE_ash-wasm-run"));
     command.arg("--threads").arg(&program);
     finish(command);
@@ -87,7 +137,7 @@ fn browser_threads_load_the_same_libraries() {
     let host = std::path::PathBuf::from(std::env::var_os("ASH_BROWSER_HOST_DIR").expect(
         "set ASH_BROWSER_HOST_DIR to the directory containing run-node.js and ash_browser.js",
     ));
-    let (dir, program, library) = files();
+    let (dir, program, library) = files(&program("library", "answer", 43), "library", LIBRARY);
     let mut command = Command::new("node");
     command
         .arg("--experimental-wasm-exnref")
@@ -95,6 +145,25 @@ fn browser_threads_load_the_same_libraries() {
         .args(["--agents", "2"])
         .arg("--lib")
         .arg(format!("library={}", library.display()))
+        .arg(&program);
+    finish(command);
+    drop(dir);
+}
+
+#[test]
+#[ignore = "requires Node and generated browser bindings in ASH_BROWSER_HOST_DIR"]
+fn browser_threads_start_their_thread_locals_from_the_initial_image() {
+    let host = std::path::PathBuf::from(std::env::var_os("ASH_BROWSER_HOST_DIR").expect(
+        "set ASH_BROWSER_HOST_DIR to the directory containing run-node.js and ash_browser.js",
+    ));
+    let (dir, program, library) = files(&program("tls", "next", 42), "tls", TLS_LIBRARY);
+    let mut command = Command::new("node");
+    command
+        .arg("--experimental-wasm-exnref")
+        .arg(host.join("run-node.js"))
+        .args(["--agents", "2"])
+        .arg("--lib")
+        .arg(format!("tls={}", library.display()))
         .arg(&program);
     finish(command);
     drop(dir);

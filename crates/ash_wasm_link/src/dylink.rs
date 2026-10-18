@@ -233,6 +233,103 @@ impl Reencode for ExposeMemory {
     }
 }
 
+/// What a side module exports its thread-local base as. See
+/// [`expose_tls_base`].
+pub const TLS_BASE_EXPORT: &str = "__ash_tls_base";
+
+/// The module with its thread-local base exported as [`TLS_BASE_EXPORT`].
+///
+/// A shared library built with thread-local storage has no `__wasm_init_tls`
+/// for a loader to call. Its start function points the module's own mutable
+/// `__tls_base` global at a block inside the library's memory and sets a flag,
+/// and an instance started after that finds the flag set and leaves
+/// `__tls_base` at zero. Exporting the global lets the loader read the first
+/// instance's block and give every other instance a block of its own.
+///
+/// The global is the one the start function assigns: the only mutable `i32`
+/// global the module defines that it sets there. A module whose start function
+/// sets no such global, or several, has no thread-local base to find and is
+/// returned unchanged.
+pub fn expose_tls_base(bytes: &[u8]) -> Result<Vec<u8>> {
+    let (mut imported_functions, mut imported_globals) = (0u32, 0u32);
+    let mut start = None;
+    let mut mutable_i32: Vec<u32> = Vec::new();
+    let mut set_in_start: Vec<u32> = Vec::new();
+    let mut body = 0u32;
+    let mut exported = false;
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::ImportSection(section) => {
+                for import in section.into_imports() {
+                    match import?.ty {
+                        TypeRef::Func(_) | TypeRef::FuncExact(_) => imported_functions += 1,
+                        TypeRef::Global(_) => imported_globals += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Payload::GlobalSection(section) => {
+                for (i, global) in section.into_iter().enumerate() {
+                    let ty = global?.ty;
+                    if ty.mutable && ty.content_type == wasmparser::ValType::I32 {
+                        mutable_i32.push(imported_globals + i as u32);
+                    }
+                }
+            }
+            Payload::ExportSection(section) => {
+                for export in section {
+                    exported |= export?.name == TLS_BASE_EXPORT;
+                }
+            }
+            Payload::StartSection { func, .. } => start = Some(func),
+            Payload::CodeSectionEntry(function) => {
+                if start == Some(imported_functions + body) {
+                    for op in function.get_operators_reader()? {
+                        if let wasmparser::Operator::GlobalSet { global_index } = op? {
+                            set_in_start.push(global_index);
+                        }
+                    }
+                }
+                body += 1;
+            }
+            _ => {}
+        }
+    }
+    set_in_start.sort_unstable();
+    set_in_start.dedup();
+    let candidates: Vec<u32> = set_in_start
+        .into_iter()
+        .filter(|g| mutable_i32.contains(g))
+        .collect();
+    let [global] = candidates[..] else {
+        return Ok(bytes.to_vec());
+    };
+    if exported {
+        return Ok(bytes.to_vec());
+    }
+    let mut module = wasm_encoder::Module::new();
+    ExposeTlsBase { global }.parse_core_module(&mut module, Parser::new(0), bytes)?;
+    Ok(module.finish())
+}
+
+struct ExposeTlsBase {
+    global: u32,
+}
+
+impl Reencode for ExposeTlsBase {
+    type Error = std::convert::Infallible;
+
+    fn parse_export_section(
+        &mut self,
+        exports: &mut wasm_encoder::ExportSection,
+        section: wasmparser::ExportSectionReader<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        reencode::utils::parse_export_section(self, exports, section)?;
+        exports.export(TLS_BASE_EXPORT, ExportKind::Global, self.global);
+        Ok(())
+    }
+}
+
 /// The module without its initial data.
 ///
 /// A second instance of a side module -- a thread's -- shares the memory the
@@ -272,6 +369,67 @@ impl Reencode for WithoutInitialData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The global the start function sets is exported; a module whose start
+    /// function sets none is left as it was.
+    #[test]
+    fn the_global_the_start_function_assigns_is_exported() {
+        use wasm_encoder::{
+            CodeSection, ConstExpr, ExportSection, Function, FunctionSection, GlobalSection,
+            GlobalType, Instruction, Module, StartSection, TypeSection, ValType,
+        };
+        let build = |sets: bool| {
+            let mut module = Module::new();
+            let mut types = TypeSection::new();
+            types.ty().function([], []);
+            module.section(&types);
+            let mut functions = FunctionSection::new();
+            functions.function(0);
+            module.section(&functions);
+            let mut globals = GlobalSection::new();
+            let ty = GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            };
+            globals.global(ty, &ConstExpr::i32_const(0));
+            globals.global(ty, &ConstExpr::i32_const(0));
+            module.section(&globals);
+            let mut exports = ExportSection::new();
+            exports.export("start", ExportKind::Func, 0);
+            module.section(&exports);
+            module.section(&StartSection { function_index: 0 });
+            let mut code = CodeSection::new();
+            let mut start = Function::new([]);
+            if sets {
+                start.instruction(&Instruction::I32Const(64));
+                start.instruction(&Instruction::GlobalSet(1));
+            }
+            start.instruction(&Instruction::End);
+            code.function(&start);
+            module.section(&code);
+            module.finish()
+        };
+        let exported = |bytes: &[u8]| -> Vec<(String, u32)> {
+            let mut out = Vec::new();
+            for payload in Parser::new(0).parse_all(bytes) {
+                if let Payload::ExportSection(section) = payload.unwrap() {
+                    for export in section {
+                        let export = export.unwrap();
+                        out.push((export.name.to_string(), export.index));
+                    }
+                }
+            }
+            out
+        };
+        let with = expose_tls_base(&build(true)).unwrap();
+        assert_eq!(
+            exported(&with),
+            [("start".to_string(), 0), (TLS_BASE_EXPORT.to_string(), 1)]
+        );
+        let without = build(false);
+        assert_eq!(expose_tls_base(&without).unwrap(), without);
+    }
 
     /// Active segments become empty passive ones; passive ones are kept, and
     /// the numbering does not move.

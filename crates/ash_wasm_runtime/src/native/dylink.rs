@@ -110,6 +110,9 @@ struct Placed {
     got: Vec<(GotKind, String, i32)>,
     /// The slots appended for a function whose address the library takes.
     slots: Vec<(i32, Owner, String)>,
+    /// The thread-local block the first instance started with, to give every
+    /// other instance a copy of. See [`capture_tls`].
+    tls: Option<Vec<u8>>,
     resolved: Arc<HashMap<String, i32>>,
 }
 
@@ -127,6 +130,7 @@ struct Placement {
     table_size: u32,
     got: Vec<(GotKind, String, i32)>,
     slots: Vec<(i32, Owner, String)>,
+    tls: Option<Vec<u8>>,
 }
 
 /// The name a program calls a library, taken from its file name.
@@ -222,6 +226,7 @@ pub(crate) async fn load_beside(
                         table_size: placement.table_size,
                         got: placement.got,
                         slots: placement.slots,
+                        tls: placement.tls,
                         resolved: Arc::default(),
                     });
                 }
@@ -294,11 +299,8 @@ fn library_module(engine: &wasmtime::Engine, bytes: &[u8], for_thread: bool) -> 
     // The library imports the program's memory, so it is given an export of
     // it: the host's WASI functions find the memory to use through the export
     // `memory` of whichever instance calls them.
-    Module::new(
-        engine,
-        ash_wasm_link::dylink::expose_memory(&ash_wasm_link::waits::instrument(&bytes)?)?,
-    )
-    .map_err(Into::into)
+    let bytes = ash_wasm_link::dylink::expose_memory(&ash_wasm_link::waits::instrument(&bytes)?)?;
+    Module::new(engine, ash_wasm_link::dylink::expose_tls_base(&bytes)?).map_err(Into::into)
 }
 
 async fn load_one(
@@ -349,7 +351,7 @@ async fn load_one(
         main,
         &module,
         &Bases {
-            memory,
+            memory: memory.clone(),
             table,
             memory_base,
             table_base,
@@ -391,6 +393,9 @@ async fn load_one(
     if let Ok(relocs) = instance.get_typed_func::<(), ()>(&mut *store, "__wasm_apply_data_relocs") {
         relocs.call_async(&mut *store, ()).await?;
     }
+    // After the relocations that patch it and before any constructor that
+    // writes to it: this is the image a thread's block starts from.
+    let tls = capture_tls(store, &instance, &memory, memory_base, side.memory_size);
     if let Ok(ctors) = instance.get_typed_func::<(), ()>(&mut *store, "__wasm_call_ctors") {
         ctors.call_async(&mut *store, ()).await?;
     }
@@ -403,6 +408,7 @@ async fn load_one(
             table_size: side.table_size,
             got: answers,
             slots,
+            tls,
         },
     ))
 }
@@ -527,6 +533,110 @@ fn supply_imports(
     Ok((imports, got))
 }
 
+/// The bytes of the library's thread-local block as its first instance
+/// started with it, or nothing if it has none.
+///
+/// The block runs from the module's `__tls_base` to the end of the library's
+/// memory. That takes in whatever follows it (the library's start flag, in
+/// what wasm-ld lays out), which a copy carries along harmlessly; stopping
+/// short would cut thread-local data off.
+fn capture_tls(
+    store: &mut Store<Host>,
+    instance: &Instance,
+    memory: &Extern,
+    memory_base: i32,
+    memory_size: u32,
+) -> Option<Vec<u8>> {
+    let Some(Extern::Global(global)) =
+        instance.get_export(&mut *store, ash_wasm_link::dylink::TLS_BASE_EXPORT)
+    else {
+        return None;
+    };
+    let base = global.get(&mut *store).i32()?;
+    let end = memory_base.checked_add(i32::try_from(memory_size).ok()?)?;
+    if base < memory_base || base >= end {
+        return None;
+    }
+    read_memory(store, memory, base as usize, (end - base) as usize)
+}
+
+/// A block of the program's memory for this instance's thread-locals, holding
+/// the first instance's initial image, with `__tls_base` pointed at it.
+async fn give_thread_block(
+    store: &mut Store<Host>,
+    main: &Instance,
+    memory: &Extern,
+    instance: &Instance,
+    image: &[u8],
+) -> Result<()> {
+    let malloc = main
+        .get_typed_func::<i32, i32>(&mut *store, "malloc")
+        .map_err(|_| anyhow!("the program exports no malloc to place it"))?;
+    let size = i32::try_from(image.len() + 16)?;
+    let addr = malloc.call_async(&mut *store, size).await?;
+    if addr == 0 {
+        return Err(anyhow!("no room for {} bytes", image.len()));
+    }
+    // 16 covers what a thread-local asks for.
+    let block = (addr + 15) & !15;
+    if !write_memory(store, memory, block as usize, image) {
+        return Err(anyhow!(
+            "the block at {block:#x} is outside the program's memory"
+        ));
+    }
+    let Some(Extern::Global(global)) =
+        instance.get_export(&mut *store, ash_wasm_link::dylink::TLS_BASE_EXPORT)
+    else {
+        return Err(anyhow!("the thread's instance has no thread-local base"));
+    };
+    global.set(&mut *store, Val::I32(block))?;
+    Ok(())
+}
+
+/// Bytes of the program's memory, whichever kind it is.
+fn read_memory(
+    store: &mut Store<Host>,
+    memory: &Extern,
+    addr: usize,
+    len: usize,
+) -> Option<Vec<u8>> {
+    match memory {
+        Extern::Memory(m) => m
+            .data(&*store)
+            .get(addr..addr.checked_add(len)?)
+            .map(<[u8]>::to_vec),
+        Extern::SharedMemory(m) => {
+            let cells = m.data().get(addr..addr.checked_add(len)?)?;
+            // SAFETY: another thread may be writing, and that is a data race a
+            // shared memory permits; the copy is a read of initial bytes no
+            // thread writes yet.
+            Some(cells.iter().map(|c| unsafe { *c.get() }).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Write `bytes` into the program's memory at `addr`; whether they fit.
+fn write_memory(store: &mut Store<Host>, memory: &Extern, addr: usize, bytes: &[u8]) -> bool {
+    match memory {
+        Extern::Memory(m) => m.write(&mut *store, addr, bytes).is_ok(),
+        Extern::SharedMemory(m) => {
+            let Some(end) = addr.checked_add(bytes.len()) else {
+                return false;
+            };
+            let Some(cells) = m.data().get(addr..end) else {
+                return false;
+            };
+            for (cell, byte) in cells.iter().zip(bytes) {
+                // SAFETY: the block was just allocated for this thread.
+                unsafe { *cell.get() = *byte };
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Load the libraries again in a thread's instance of the program, laid out
 /// as the first load laid them out.
 ///
@@ -579,6 +689,11 @@ pub(crate) async fn replay(
         let instance = Instance::new_async(&mut *store, &lib.module, &imports)
             .await
             .map_err(|e| anyhow!("instantiating {} for the thread: {e}", lib.name))?;
+        if let Some(image) = &lib.tls {
+            give_thread_block(store, main, &memory, &instance, image)
+                .await
+                .map_err(|e| anyhow!("thread-local storage for {}: {e}", lib.name))?;
+        }
         for (index, owner, export) in &lib.slots {
             at(store, *index, export)?;
             let from = match owner {

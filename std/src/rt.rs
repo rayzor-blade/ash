@@ -137,6 +137,7 @@ runtime_table! {
     alloc_locked(size: usize) -> *mut u8 = ash::alloc_locked;
     alloc_locked_noptr(size: usize) -> *mut u8 = ash::alloc_locked_noptr;
     alloc_immortal(size: usize) -> *mut u8 = ash::alloc_immortal;
+    alloc_immortal_noptr(size: usize) -> *mut u8 = ash::alloc_immortal_noptr;
     alloc_with_finalizer(size: usize, finalize: Option<Finalizer>) -> *mut c_void = ash::alloc_with_finalizer;
     allocation_size(ptr: *const c_void) -> usize = ash::allocation_size;
     is_gc_ptr(ptr: *const c_void) -> bool = ash::is_gc_ptr;
@@ -324,6 +325,13 @@ pub fn alloc_immortal(size: usize) -> Option<NonNull<u8>> {
     NonNull::new(unsafe { call::alloc_immortal(size) })
 }
 
+/// [`alloc_immortal`] for a table with no heap pointer in it; see
+/// [`gc_alloc_noptr`].
+#[inline(always)]
+pub fn alloc_immortal_noptr(size: usize) -> Option<NonNull<u8>> {
+    NonNull::new(unsafe { call::alloc_immortal_noptr(size) })
+}
+
 /// Allocate a finalizable block whose word zero holds `finalize`.
 #[inline(always)]
 pub unsafe fn alloc_with_finalizer(size: usize, finalize: Finalizer) -> *mut c_void {
@@ -481,6 +489,12 @@ mod ash {
     pub unsafe extern "C" fn alloc_immortal(size: usize) -> *mut u8 {
         crate::gc::gc_locked_init()
             .allocate_immortal(size)
+            .map_or(std::ptr::null_mut(), NonNull::as_ptr)
+    }
+
+    pub unsafe extern "C" fn alloc_immortal_noptr(size: usize) -> *mut u8 {
+        crate::gc::gc_locked_init()
+            .allocate_immortal_noptr(size)
             .map_or(std::ptr::null_mut(), NonNull::as_ptr)
     }
 

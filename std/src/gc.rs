@@ -3445,6 +3445,10 @@ struct Block {
     /// walking a sea of zero `alloc_sizes` entries — that walk was 76% of
     /// mandelbrot once NaN-box decoding multiplied candidate hits.
     has_span: bool,
+    /// The block lies inside a multi-block span and does not hold its start,
+    /// so every `alloc_sizes` entry in it is zero. The walk-back steps over it
+    /// whole rather than reading its 256 entries one by one.
+    span_tail: bool,
     /// Set by the marker the first time any line in this block is claimed.
     /// Sweep reads it to skip the per-line scan of a block that nothing
     /// reached: its bits are already clear from the previous sweep, so there
@@ -3637,6 +3641,10 @@ fn containing_allocation(
             return None;
         }
         let floor = b * LINES_PER_BLOCK;
+        if blocks[b].span_tail {
+            start = floor.checked_sub(1)?;
+            continue;
+        }
         while start > floor && alloc_sizes[start] == 0 {
             start -= 1;
         }
@@ -4225,6 +4233,7 @@ impl ImmixAllocator {
         let addr = self.heap.free_blocks.pop()?;
         self.clear_allocation_metadata(addr, BLOCK_SIZE);
         self.blocks[addr / BLOCK_SIZE].has_span = false;
+        self.blocks[addr / BLOCK_SIZE].span_tail = false;
         self.blocks[addr / BLOCK_SIZE].noptr = noptr;
         self.blocks[addr / BLOCK_SIZE].allocated = true;
         self.clear_cards(addr);
@@ -4297,7 +4306,20 @@ impl ImmixAllocator {
     /// allocation would be reclaimed by the first collection that runs while
     /// no stack reference exists (surfaced by ASH_GC_STRESS).
     pub fn allocate_immortal(&mut self, size: usize) -> Option<NonNull<u8>> {
-        let p = self.allocate(size)?;
+        self.allocate_immortal_kind(size, false)
+    }
+
+    /// [`allocate_immortal`](Self::allocate_immortal) for a table that holds no
+    /// heap pointer: it stays alive but its words are never read as candidates.
+    /// The hash and index tables of a class are the case that matters -- an HL
+    /// field hash is 29 bits, so on a 32-bit target it lands inside the heap
+    /// and, read as a pointer, keeps whatever happens to lie there alive.
+    pub fn allocate_immortal_noptr(&mut self, size: usize) -> Option<NonNull<u8>> {
+        self.allocate_immortal_kind(size, true)
+    }
+
+    fn allocate_immortal_kind(&mut self, size: usize, noptr: bool) -> Option<NonNull<u8>> {
+        let p = self.allocate_kind(size, noptr)?;
         self.roots
             .borrow_mut()
             .persistent_roots
@@ -4461,6 +4483,7 @@ impl ImmixAllocator {
                 for block in removed {
                     self.clear_allocation_metadata(block, BLOCK_SIZE);
                     self.blocks[block / BLOCK_SIZE].has_span = false;
+                    self.blocks[block / BLOCK_SIZE].span_tail = false;
                     self.blocks[block / BLOCK_SIZE].noptr = noptr;
                     self.heap.used_blocks.insert(block);
                     self.blocks[block / BLOCK_SIZE].allocated = true;
@@ -4475,11 +4498,11 @@ impl ImmixAllocator {
                 // Record allocation size for GC multi-line marking
                 let num_lines = size.div_ceil(LINE_SIZE);
                 let start_line = start_addr / LINE_SIZE;
-                for b in
-                    start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK
-                {
+                let first_block = start_line / LINES_PER_BLOCK;
+                for b in first_block..=(start_line + num_lines - 1) / LINES_PER_BLOCK {
                     if let Some(blk) = self.blocks.get_mut(b) {
                         blk.has_span = true;
+                        blk.span_tail = b != first_block;
                     }
                 }
                 self.heap.alloc_sizes[start_line] = num_lines as u32;
@@ -6611,6 +6634,7 @@ impl ImmixAllocator {
                     *slot.get_mut() = 0;
                 }
                 self.blocks[block_index].has_span = false;
+                self.blocks[block_index].span_tail = false;
                 self.blocks[block_index].noptr = false;
                 freed.push(block_addr);
             }
@@ -8168,6 +8192,71 @@ mod tests {
         gc.mark_roots(&[]);
         assert!(object_marked(&gc, offset(&gc, held)));
         assert!(!object_marked(&gc, offset(&gc, unrelated)));
+    }
+
+    #[test]
+    fn a_pointer_free_immortal_table_is_kept_but_not_read() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let scanned = gc.allocate_immortal(16).unwrap();
+        let unscanned = gc.allocate_immortal_noptr(16).unwrap();
+        let reached = gc.allocate(16).unwrap();
+        let missed = gc.allocate(16).unwrap();
+        unsafe {
+            scanned
+                .cast::<usize>()
+                .as_ptr()
+                .write(reached.as_ptr() as usize);
+            unscanned
+                .cast::<usize>()
+                .as_ptr()
+                .write(missed.as_ptr() as usize);
+        }
+        gc.mark_roots(&[]);
+        assert!(object_marked(&gc, offset(&gc, scanned)));
+        assert!(object_marked(&gc, offset(&gc, unscanned)));
+        assert!(object_marked(&gc, offset(&gc, reached)));
+        assert!(
+            !object_marked(&gc, offset(&gc, missed)),
+            "a word in a pointer-free table is not a reference"
+        );
+    }
+
+    #[test]
+    fn an_address_deep_inside_a_multi_block_span_finds_its_start() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 8);
+        let size = BLOCK_SIZE * 3 + 4096;
+        let big = gc.allocate_kind(size, true).unwrap();
+        let start = offset(&gc, big);
+        let first = start / BLOCK_SIZE;
+        assert!(
+            !gc.blocks[first].span_tail,
+            "the first block holds the start"
+        );
+        for (b, block) in gc.blocks.iter().enumerate().skip(first + 1).take(3) {
+            assert!(block.span_tail, "block {b} is inside the span");
+        }
+        for at in [
+            0,
+            1,
+            BLOCK_SIZE - 1,
+            BLOCK_SIZE,
+            2 * BLOCK_SIZE + 5 * LINE_SIZE + 3,
+            size - 1,
+        ] {
+            let found = containing_allocation(
+                &gc.blocks,
+                &gc.heap.alloc_sizes,
+                &gc.heap.objects,
+                start + at,
+            );
+            assert_eq!(found.map(|(begin, _)| begin), Some(start), "offset {at}");
+        }
+        let past = start + size.div_ceil(LINE_SIZE) * LINE_SIZE;
+        assert_eq!(
+            containing_allocation(&gc.blocks, &gc.heap.alloc_sizes, &gc.heap.objects, past),
+            None,
+            "the rest of the last block belongs to nothing"
+        );
     }
 
     #[test]

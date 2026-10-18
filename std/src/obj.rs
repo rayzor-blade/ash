@@ -1101,7 +1101,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             }
         }
         (*t).interfaces =
-            crate::rt::alloc_immortal(std::mem::size_of::<i32>() * (*t).ninterfaces as usize)
+            crate::rt::alloc_immortal_noptr(std::mem::size_of::<i32>() * (*t).ninterfaces as usize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("runtime type metadata"))
                 .as_ptr() as *mut i32;
         (*t).ninterfaces = 0;
@@ -1459,13 +1459,15 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
             }
         }
 
-        (*t).lookup = crate::rt::alloc_immortal(
+        // The lookup, index and mark tables hold hashes, offsets and bits, and
+        // types that live outside the heap: nothing in them is a heap pointer.
+        (*t).lookup = crate::rt::alloc_immortal_noptr(
             std::mem::size_of::<hl_field_lookup>() * (*t).nlookup as usize,
         )
         .unwrap_or_else(|| crate::rt::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut hl_field_lookup;
         (*t).fields_indexes =
-            crate::rt::alloc_immortal(std::mem::size_of::<i32>() * (*t).nfields as usize)
+            crate::rt::alloc_immortal_noptr(std::mem::size_of::<i32>() * (*t).nfields as usize)
                 .unwrap_or_else(|| crate::rt::out_of_memory("runtime type metadata"))
                 .as_ptr() as *mut i32;
         (*t).bindings = crate::rt::alloc_immortal(
@@ -1627,7 +1629,7 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
         // Mark bits
         if (*t).hasPtr {
             let mark_size = hlp_mark_size((*t).size) as usize;
-            let mark = crate::rt::alloc_immortal(mark_size)
+            let mark = crate::rt::alloc_immortal_noptr(mark_size)
                 .unwrap_or_else(|| crate::rt::out_of_memory("runtime type metadata"))
                 .as_ptr() as *mut u32;
             ptr::write_bytes(mark as *mut u8, 0, mark_size);
@@ -3820,16 +3822,18 @@ pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_contex
         let _gc = crate::gc::gc_guard();
 
         // Immortal: stored only into the (never-scanned) type's virt data.
-        let l =
-            crate::rt::alloc_immortal(mem::size_of::<hl_field_lookup>() * virt.nfields as usize)
-                .unwrap()
-                .cast::<hl_field_lookup>()
-                .as_ptr();
+        let l = crate::rt::alloc_immortal_noptr(
+            mem::size_of::<hl_field_lookup>() * virt.nfields as usize,
+        )
+        .unwrap()
+        .cast::<hl_field_lookup>()
+        .as_ptr();
 
-        let indexes = crate::rt::alloc_immortal(mem::size_of::<i32>() * virt.nfields as usize)
-            .unwrap()
-            .cast::<i32>()
-            .as_ptr();
+        let indexes =
+            crate::rt::alloc_immortal_noptr(mem::size_of::<i32>() * virt.nfields as usize)
+                .unwrap()
+                .cast::<i32>()
+                .as_ptr();
 
         for i in 0..virt.nfields as usize {
             let f = &*virt.fields.add(i);
@@ -3844,7 +3848,7 @@ pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_contex
         virt.dataSize = (size - vsize) as i32;
 
         let mark_size = hlp_mark_size(size as i32);
-        let mark = crate::rt::alloc_immortal(mark_size as usize)
+        let mark = crate::rt::alloc_immortal_noptr(mark_size as usize)
             .unwrap()
             .cast::<u32>()
             .as_ptr();

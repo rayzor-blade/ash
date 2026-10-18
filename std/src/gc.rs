@@ -3660,6 +3660,27 @@ fn containing_allocation(
     }
 }
 
+/// Lines `ASH_GC_DEBUG_ROOTS` has for a collection, held until its marking has
+/// been timed: a host console can take milliseconds a line, and a report of a
+/// hundred lines would otherwise be most of the pause it describes.
+static DEBUG_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn debug_say(line: String) {
+    if let Ok(mut lines) = DEBUG_LINES.lock() {
+        lines.push(line);
+    }
+}
+
+fn flush_debug_lines() {
+    let lines = DEBUG_LINES
+        .lock()
+        .map(|mut lines| std::mem::take(&mut *lines))
+        .unwrap_or_default();
+    for line in lines {
+        eprintln!("{line}");
+    }
+}
+
 /// Bytes of objects claimed so far; counted only under `ASH_GC_DEBUG_ROOTS`.
 static CLAIMED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -3716,10 +3737,10 @@ fn object_class(addr: usize) -> String {
 /// kept it reachable, back to a root.
 #[cold]
 fn report_big_claim(heap_start: usize, (start, size): (usize, usize)) {
-    eprintln!(
+    debug_say(format!(
         "[gc-roots]   {} KB object at +{start:#x} is kept by:",
         size / 1024
-    );
+    ));
     let map = CLAIM_SOURCE.lock().ok();
     let map = map.as_deref().and_then(Option::as_ref);
     let mut at = start;
@@ -3728,13 +3749,15 @@ fn report_big_claim(heap_start: usize, (start, size): (usize, usize)) {
         // The world is stopped, so the word still holds what reached the object.
         let value = unsafe { *(word as *const usize) };
         if parent == ROOT {
-            eprintln!("[gc-roots]     +{at:#x}{class} <- root slot {word:#x}, value {value:#x}");
+            debug_say(format!(
+                "[gc-roots]     +{at:#x}{class} <- root slot {word:#x}, value {value:#x}"
+            ));
             break;
         }
-        eprintln!(
+        debug_say(format!(
             "[gc-roots]     +{at:#x}{class} <- heap word +{:#x} (object +{parent:#x}), value {value:#x}",
             word - heap_start
-        );
+        ));
         at = parent;
     }
 }
@@ -5083,7 +5106,9 @@ impl ImmixAllocator {
         let kb = (CLAIMED_BYTES.load(Ordering::Relaxed) - before) / 1024;
         if kb >= min_kb {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
-            eprintln!("[gc-roots]   {label}: keeps {kb} KB alive, traced in {ms:.2} ms");
+            debug_say(format!(
+                "[gc-roots]   {label}: keeps {kb} KB alive, traced in {ms:.2} ms"
+            ));
         }
     }
 
@@ -5225,7 +5250,7 @@ impl ImmixAllocator {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
             let origin = ORIGIN_NAMES[(COLLECT_ORIGIN.load(Ordering::Relaxed) as usize).min(ORIGIN_NAMES.len() - 1)];
             let base = self.heap.memory.as_ptr() as usize;
-            eprintln!(
+            debug_say(format!(
                 "[gc-collect] #{seq} origin={origin} heap={base:#x}..{:#x} ranges={} pending={}",
                 base + self.heap.memory.len,
                 stopped_world
@@ -5234,7 +5259,7 @@ impl ImmixAllocator {
                     .map(|m| m.scan_ranges.len())
                     .sum::<usize>(),
                 self.heap.collect_pending,
-            );
+            ));
         }
         // Split the pause. Which half dominates decides the fix: marking can be
         // parallelised inside the stop -- the world is already stopped, so no
@@ -5284,6 +5309,7 @@ impl ImmixAllocator {
             self.report_stack_only_objects(&stopped_world.snapshots);
         }
         let t_mark = t_mark0.elapsed();
+        flush_debug_lines();
         let t_sweep0 = Instant::now();
         // The collector's own frame, so the audit can leave the sweep's
         // locals out of the roots it reports.
@@ -5859,7 +5885,10 @@ impl ImmixAllocator {
             let end = start + count * std::mem::size_of::<usize>();
             let newly_marked = self.conservative_scan_range(start, end);
             if dbg {
-                eprintln!("[gc-roots]   globals marked {} lines", newly_marked.len());
+                debug_say(format!(
+                    "[gc-roots]   globals marked {} lines",
+                    newly_marked.len()
+                ));
             }
             all_newly_marked.extend(newly_marked);
         }
@@ -5879,10 +5908,10 @@ impl ImmixAllocator {
                 if end > start {
                     let newly_marked = self.conservative_scan_range(start, end);
                     if dbg {
-                        eprintln!(
+                        debug_say(format!(
                             "[gc-roots]   range {start:#x}+{size} marked {} lines",
                             newly_marked.len()
-                        );
+                        ));
                     }
                     all_newly_marked.extend(newly_marked);
                 }
@@ -5930,27 +5959,27 @@ impl ImmixAllocator {
                 let top = running_fiber
                     .map(|(_, top)| top)
                     .unwrap_or(mutator.stack_top);
-                eprintln!(
+                debug_say(format!(
                     "[gc-roots] thread={:#x} sp={sp:#x} stack_top={top:#x} span={}KB ranges={} globals={:?}",
                     mutator.thread,
                     top.saturating_sub(sp) / 1024,
                     mutator.scan_ranges.len(),
                     self.globals_range.map(|(_, c)| c)
-                );
+                ));
                 // Every stack this mutator owns. Which of them gets scanned
                 // is decided below, a descriptor with no saved SP is skipped
                 // silently, and the range for one that IS scanned is only as
                 // good as the SP it recorded -- none of which is visible
                 // without printing it.
                 for f in fiber_stacks.iter().filter(|f| f.thread == mutator.thread) {
-                    eprintln!(
+                    debug_say(format!(
                         "[gc-roots]   stack id={} base={:#x} size={} saved_sp={:#x}{}",
                         f.id,
                         f.base,
                         f.size,
                         f.saved_sp(),
                         if f.saved_sp() == 0 { "  <- SKIPPED" } else { "" }
-                    );
+                    ));
                 }
             }
             match running_fiber {

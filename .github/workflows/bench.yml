@@ -341,6 +341,13 @@ jobs:
           - method_call
           - free_call
           - closure_call
+          - fannkuchredux
+          - spectralnorm
+          - pidigits
+          - fasta
+          - knucleotide
+          - regexredux
+          - revcomp
     steps:
       # Only what measurement needs: the .hl corpus, the bench scripts, and
       # the prebuilt binaries. No toolchain, no compiler, no cargo.

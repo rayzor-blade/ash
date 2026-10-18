@@ -316,6 +316,110 @@ number that only restates what mandelbrot_small already measures"""
 description = """N-body, 10M integration steps. Verbatim from HaxeBenchmarks, \
 so the number is comparable with the official Haxe targets."""
 
+# ── Benchmarks Game kernels ─────────────────────────────────────────────────
+#
+# rayzor's seven kernels (rayzor compiler/benchmarks/haxe, BM*Code.hx), copied
+# unchanged so a row here is the same program as the same row in rayzor's own
+# table. Each is self-contained: the FASTA input the Benchmarks Game reads from
+# stdin is generated in-process, and a program prints either its reduced values
+# or a byte count and a hash of what it would have written.
+#
+# Judged on one printed value each, like nbody, so no interpreter reference run
+# is needed. The marker names the line the value is read from; the programs'
+# other lines are not compared.
+
+[[bench]]
+name = "fannkuchredux"
+main = "BMFannkuchReduxCode"
+hl = "bench_fannkuchredux.hl"
+expectation = "checksum"
+checksum_marker = "Pfannkuchen(10) = "
+checksums = [{ value = "38", label = "reference" }]
+timeout_secs = 120
+group = "array"
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+modes_reason = "n=10 permutation walk; the interpreter takes about a minute"
+description = """Fannkuch-redux, n=10: permutation flipping over small integer \
+arrays. Prints the checksum 73196 and the maximum flip count read here."""
+
+[[bench]]
+name = "spectralnorm"
+main = "BMSpectralNormCode"
+hl = "bench_spectralnorm.hl"
+expectation = "checksum"
+checksum_marker = "x1e9 = "
+checksums = [{ value = "1274224152", label = "reference" }]
+timeout_secs = 120
+group = "fp"
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+modes_reason = "dense double loops; the interpreter takes about half a minute"
+description = """Spectral norm, n=2000: ten power iterations over an implicit \
+matrix in double precision. The value is the norm scaled by 1e9."""
+
+[[bench]]
+name = "pidigits"
+main = "BMPidigitsCode"
+hl = "bench_pidigits.hl"
+expectation = "checksum"
+checksum_marker = "checksum "
+checksums = [{ value = "882142 last 9216420198", label = "reference" }]
+timeout_secs = 120
+group = "int"
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+modes_reason = "base-10000 limb arithmetic for 1000 digits; the interpreter takes about twenty seconds"
+description = """Pi digits: the Benchmarks Game spigot, 1000 digits, over \
+base-10000 limb arrays (Haxe has no portable BigInt)."""
+
+[[bench]]
+name = "fasta"
+main = "BMFastaCode"
+hl = "bench_fasta.hl"
+expectation = "checksum"
+checksum_marker = "hash "
+checksums = [{ value = "3666008", label = "reference" }]
+timeout_secs = 120
+group = "string"
+description = """FASTA generation: a repeated sequence and two weighted random \
+ones, 25 MB written to a hash rather than stdout."""
+
+[[bench]]
+name = "knucleotide"
+main = "BMKNucleotideCode"
+hl = "bench_knucleotide.hl"
+expectation = "checksum"
+checksum_marker = "GG "
+checksums = [{ value = "19463", label = "reference" }]
+timeout_secs = 120
+group = "string"
+description = """K-nucleotide: substring extraction and Map<String, Int> \
+counting of the 1-mers, 2-mers and five longer fragments of a generated \
+sequence. The value is the GG count."""
+
+[[bench]]
+name = "regexredux"
+main = "BMRegexReduxCode"
+hl = "bench_regexredux.hl"
+expectation = "checksum"
+checksum_marker = "agg[act]taaa|ttta[agt]cct "
+checksums = [{ value = "58", label = "reference" }]
+timeout_secs = 120
+group = "regex"
+description = """Regex-redux: nine alternation patterns counted over a generated \
+sequence, then five global substitutions. The value is one pattern's match \
+count."""
+
+[[bench]]
+name = "revcomp"
+main = "BMReverseComplementCode"
+hl = "bench_revcomp.hl"
+expectation = "checksum"
+checksum_marker = "hash "
+checksums = [{ value = "11578911", label = "reference" }]
+timeout_secs = 120
+group = "string"
+description = """Reverse-complement of a generated 2.5 MB FASTA input, scanned \
+one character at a time into a StringBuf."""
+
 # ── Call latency ────────────────────────────────────────────────────────────
 #
 # Four kernels, identical but for how the step is reached: inline, static call,

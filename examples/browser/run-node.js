@@ -11,6 +11,7 @@
 //     target/wasm32-unknown-unknown/release/ash_browser.wasm
 //   node --experimental-wasm-exnref <dir>/run-node.js prog.wasm
 //   node --experimental-wasm-exnref <dir>/run-node.js --agents 7 threads.wasm
+//   node --experimental-wasm-exnref <dir>/run-node.js --lib name=lib.wasm prog.wasm
 //
 // `--agents` is the threads path, and it is the same one a page takes: warm
 // some agents, hand the host a `spawn` that posts to an idle one, and let the
@@ -39,6 +40,14 @@ let agents = 0;
 const at = argv.indexOf("--agents");
 if (at >= 0) {
   agents = Number(argv[at + 1]);
+  argv.splice(at, 2);
+}
+// `--lib name=path` hands the program a native library, as a page does from
+// its libraries.json. Repeatable.
+const libraryFiles = {};
+for (let at = argv.indexOf("--lib"); at >= 0; at = argv.indexOf("--lib")) {
+  const [name, file] = argv[at + 1].split("=");
+  libraryFiles[name] = file;
   argv.splice(at, 2);
 }
 const path = argv[0];
@@ -89,7 +98,17 @@ const spawn = (request) => {
   const environ = Object.entries(process.env)
     .filter(([name]) => name.startsWith("ASH_"))
     .map(([name, value]) => `${name}=${value}`);
-  const outcome = await run(bytes, [path, ...argv.slice(1)], environ, agents > 0 ? spawn : undefined);
+  const libraries = {};
+  for (const [name, file] of Object.entries(libraryFiles)) {
+    libraries[name] = new Uint8Array(fs.readFileSync(file));
+  }
+  const outcome = await run(
+    bytes,
+    [path, ...argv.slice(1)],
+    environ,
+    agents > 0 ? spawn : undefined,
+    Object.keys(libraries).length > 0 ? libraries : undefined,
+  );
   for (const worker of started) worker.terminate();
   if (outcome.trapped) {
     console.error(`trapped: ${outcome.trapped}`);

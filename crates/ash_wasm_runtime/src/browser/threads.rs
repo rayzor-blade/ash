@@ -36,6 +36,9 @@ pub struct Threads {
     /// same one rather than fetching and compiling it again.
     module: RefCell<Option<WebAssembly::Module>>,
     memory: RefCell<Option<WebAssembly::Memory>>,
+    /// How the native libraries were laid out (see [`super::dylink`]), sent
+    /// with each thread so its instance can load the same ones.
+    libraries: RefCell<Option<JsValue>>,
     args: Vec<String>,
     environ: Vec<String>,
     next_id: Cell<i32>,
@@ -57,6 +60,7 @@ impl Threads {
             spawn,
             module: RefCell::new(None),
             memory: RefCell::new(None),
+            libraries: RefCell::new(None),
             args,
             environ,
             next_id: Cell::new(1),
@@ -67,6 +71,11 @@ impl Threads {
     pub fn attach(&self, module: WebAssembly::Module, memory: Option<WebAssembly::Memory>) {
         *self.module.borrow_mut() = Some(module);
         *self.memory.borrow_mut() = memory;
+    }
+
+    /// The library layout every thread will be given.
+    pub fn attach_libraries(&self, layout: Option<JsValue>) {
+        *self.libraries.borrow_mut() = layout;
     }
 
     /// Answer `wasi.thread-spawn`: the new thread's id, or a negative number.
@@ -99,6 +108,9 @@ impl Threads {
         set("args", to_array(&self.args));
         set("environ", to_array(&self.environ));
         set("control", self.control.buffer());
+        if let Some(layout) = self.libraries.borrow().as_ref() {
+            set("libraries", layout.clone());
+        }
 
         match spawn.call1(&JsValue::UNDEFINED, &request) {
             // False rather than an exception: a page with no agent free is

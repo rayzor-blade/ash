@@ -37,6 +37,11 @@ pub(crate) struct Spawner {
     dirs: Vec<PathBuf>,
     /// wasi-threads requires a thread id to be positive and distinct.
     next_id: std::sync::atomic::AtomicI32,
+    /// How loading the native libraries laid out the table, so a thread's
+    /// instance can be given the same libraries at the same indices. Set
+    /// once the first instance has loaded them, before it runs anything that
+    /// could start a thread.
+    layout: std::sync::OnceLock<super::dylink::Layout>,
 }
 
 impl Spawner {
@@ -56,7 +61,12 @@ impl Spawner {
             args: args.to_vec(),
             dirs: dirs.to_vec(),
             next_id: std::sync::atomic::AtomicI32::new(1),
+            layout: std::sync::OnceLock::new(),
         })
+    }
+
+    pub(crate) fn set_layout(&self, layout: super::dylink::Layout) {
+        let _ = self.layout.set(layout);
     }
 
     /// Start one, and answer with its id.
@@ -117,6 +127,14 @@ impl Spawner {
                 .instantiate_async(&mut store, &self.module)
                 .await
                 .map_err(|e| anyhow!("instantiating the module for the thread: {e}"))?;
+            // The libraries the first instance loaded, in this instance's
+            // table: a function pointer into one is an index, and an index
+            // means nothing to a table that was not laid out the same way.
+            if let Some(layout) = self.layout.get() {
+                let libraries =
+                    super::dylink::replay(&mut store, &linker, &instance, layout).await?;
+                store.data_mut().libraries = libraries;
+            }
             let start = instance
                 .get_typed_func::<(i32, i32), ()>(&mut store, "wasi_thread_start")
                 .map_err(|e| {

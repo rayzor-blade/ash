@@ -233,9 +233,88 @@ impl Reencode for ExposeMemory {
     }
 }
 
+/// The module without its initial data.
+///
+/// A second instance of a side module -- a thread's -- shares the memory the
+/// first instance already filled, and instantiating runs every active data
+/// segment again: the library's statics would be reset to their initial
+/// values under a thread that is running. Each active segment is replaced by
+/// an empty passive one, so segment numbers, and any `memory.init` naming
+/// them, are unchanged.
+pub fn without_initial_data(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut module = wasm_encoder::Module::new();
+    WithoutInitialData.parse_core_module(&mut module, Parser::new(0), bytes)?;
+    Ok(module.finish())
+}
+
+struct WithoutInitialData;
+
+impl Reencode for WithoutInitialData {
+    type Error = std::convert::Infallible;
+
+    fn parse_data_section(
+        &mut self,
+        data: &mut wasm_encoder::DataSection,
+        section: wasmparser::DataSectionReader<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        for segment in section {
+            let segment = segment?;
+            if matches!(segment.kind, wasmparser::DataKind::Active { .. }) {
+                data.passive([]);
+            } else {
+                self.parse_data(data, segment)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Active segments become empty passive ones; passive ones are kept, and
+    /// the numbering does not move.
+    #[test]
+    fn initial_data_is_dropped_without_renumbering() {
+        use wasm_encoder::{
+            ConstExpr, DataCountSection, DataSection, EntityType, ImportSection, MemoryType, Module,
+        };
+        let mut module = Module::new();
+        let mut imports = ImportSection::new();
+        imports.import(
+            "env",
+            "memory",
+            EntityType::Memory(MemoryType {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            }),
+        );
+        module.section(&imports);
+        module.section(&DataCountSection { count: 2 });
+        let mut data = DataSection::new();
+        data.active(0, &ConstExpr::i32_const(8), [1, 2, 3, 4]);
+        data.passive([9, 9]);
+        module.section(&data);
+
+        let stripped = without_initial_data(&module.finish()).unwrap();
+        let mut kinds = Vec::new();
+        for payload in Parser::new(0).parse_all(&stripped) {
+            if let Payload::DataSection(section) = payload.unwrap() {
+                for segment in section {
+                    let segment = segment.unwrap();
+                    kinds.push((
+                        matches!(segment.kind, wasmparser::DataKind::Passive),
+                        segment.data.to_vec(),
+                    ));
+                }
+            }
+        }
+        assert_eq!(kinds, [(true, vec![]), (true, vec![9, 9])]);
+    }
 
     /// A module without the section is not a side module, and saying so is
     /// not an error.

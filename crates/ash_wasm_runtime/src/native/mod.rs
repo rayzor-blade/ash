@@ -228,7 +228,17 @@ impl Program {
         // Before the program initialises, because that is when it resolves
         // its primitives -- and because instantiating a module from inside a
         // call the guest is making is a knot not worth tying.
-        let libraries = dylink::load_beside(&mut store, &linker, &instance, &self.path).await?;
+        let (libraries, layout) = dylink::load_beside(
+            &mut store,
+            &linker,
+            &instance,
+            &self.path,
+            spawner.is_some(),
+        )
+        .await?;
+        if let (Some(spawner), Some(layout)) = (&spawner, layout) {
+            spawner.set_layout(layout);
+        }
         if !libraries.is_empty() {
             eprintln!(
                 "[ash] loaded native {}: {}",

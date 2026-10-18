@@ -615,7 +615,7 @@ fn install_env(env: &Object, host: &Rc<Host>) {
                 lib.and_then(|b| String::from_utf8(b).ok()),
                 sym.and_then(|b| String::from_utf8(b).ok()),
             ) {
-                (Some(lib), Some(sym)) => h.libraries.borrow_mut().resolve(&lib, &sym),
+                (Some(lib), Some(sym)) => h.libraries.borrow().resolve(&lib, &sym),
                 _ => 0,
             }
         }

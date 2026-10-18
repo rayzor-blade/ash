@@ -33,9 +33,9 @@ console.error = toStderr;
 console.warn = toStderr;
 
 parentPort.postMessage({ ready: true });
-parentPort.on("message", async ({ tid, startArg, module, memory, args, environ, control }) => {
+parentPort.on("message", async ({ tid, startArg, module, memory, args, environ, control, libraries }) => {
   try {
-    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, control);
+    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, control, libraries);
   } catch (e) {
     console.error(`thread ${tid}: ${e && e.message ? e.message : e}`);
   } finally {

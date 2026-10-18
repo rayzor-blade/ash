@@ -47,12 +47,14 @@ self.onmessage = (event) => {
 };
 
 async function runThread(request) {
-  const { tid, startArg, module, memory, args, environ } = request;
+  const { tid, startArg, module, memory, args, environ, libraries } = request;
   const started = performance.now();
   try {
     await ready;
     post({ kind: "meta", text: `thread ${tid}: agent entering` });
-    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, request.control);
+    // `libraries` is how the program's native libraries were laid out, so this
+    // instance can load the same ones at the same table indices.
+    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, request.control, libraries);
     post({
       kind: "meta",
       text: `thread ${tid}: returned after ${Math.round(performance.now() - started)}ms`,

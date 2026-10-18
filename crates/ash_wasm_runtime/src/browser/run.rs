@@ -80,6 +80,7 @@ pub async fn run(
     // what makes it. See [`super::module::imported_memory`] for why the
     // limits are read out of the module rather than asked of the engine.
     let shared = imported_memory(&bytes).map(shared_memory).transpose()?;
+    let threaded = shared.is_some();
     let control = if shared.is_some() {
         super::control::Control::new()
     } else {
@@ -111,7 +112,9 @@ pub async fn run(
     // Before the entrypoint, because that is when the program resolves its
     // primitives, and because a guest cannot wait for a library to load.
     if let Some(libraries) = &libraries {
-        let loaded = super::dylink::load(libraries, &exports, &import_object)?;
+        let loaded = super::dylink::load(libraries, &exports, &import_object, threaded)?;
+        // A thread's instance loads the same libraries; this is how.
+        threads.attach_libraries(loaded.layout());
         if !loaded.is_empty() {
             web_sys::console::log_1(
                 &format!("[ash] loaded native libraries: {}", loaded.names().join(", ")).into(),
@@ -201,7 +204,7 @@ fn shared_memory(limits: MemoryLimits) -> Result<WebAssembly::Memory, JsValue> {
 /// calls `wasi_thread_start` rather than an entrypoint -- the guest's own
 /// `pthread_create` prepared `start_arg`, and everything about what this
 /// thread will do is in there.
-// Eight, and every one of them comes from the JavaScript that calls this:
+// Nine, and every one of them comes from the JavaScript that calls this:
 // `thread.js` in a page and `run-node-agent.js` under node both post exactly
 // this set and spread it positionally. Grouping them into a struct would put
 // a shape on the JS side of the boundary that JS has no reason to know.
@@ -216,14 +219,15 @@ pub async fn run_thread(
     environ: Vec<String>,
     spawn: Option<Function>,
     control: Option<SharedArrayBuffer>,
+    libraries: JsValue,
 ) -> Result<(), JsValue> {
     let control = super::control::Control::attach(control);
     let host = Host::with_control(args.clone(), environ.clone(), control.clone());
     host.attach(Guest::new(memory.clone()));
     let threads = Rc::new(Threads::with_control(spawn, args, environ, control.clone()));
     let result = async {
-        let ready =
-            WebAssembly::instantiate_module(&module, &imports(&host, Some(&memory), &threads));
+        let import_object = imports(&host, Some(&memory), &threads);
+        let ready = WebAssembly::instantiate_module(&module, &import_object);
         let instance: WebAssembly::Instance = JsFuture::from(ready).await?.unchecked_into();
         let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
 
@@ -231,6 +235,15 @@ pub async fn run_thread(
         host.attach_fibers(Fibers::from_exports(&exports));
         // A thread may start a thread, so it is given what it would need to.
         threads.attach(module, Some(memory.clone()));
+
+        // The native libraries the first instance loaded, in this instance's
+        // table: a function pointer into one is an index, and an index means
+        // nothing to a table that was not laid out the same way.
+        if libraries.is_object() {
+            *host.libraries.borrow_mut() =
+                super::dylink::replay(&libraries, &exports, &import_object)?;
+            threads.attach_libraries(Some(libraries.clone()));
+        }
 
         export(&exports, "wasi_thread_start")?
             .call2(&JsValue::UNDEFINED, &tid.into(), &start_arg.into())

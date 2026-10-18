@@ -3693,6 +3693,25 @@ fn forget_claims() {
     }
 }
 
+/// ` [Class]` for the object at `addr` when its first word is a class this
+/// program has built, else nothing. The registry is consulted rather than the
+/// word followed, since an object's first word is not always a type.
+fn object_class(addr: usize) -> String {
+    let header = unsafe { *(addr as *const usize) };
+    let known = CENSUS_TYPES
+        .lock()
+        .map(|types| types.contains(&header))
+        .unwrap_or(false);
+    if known {
+        // "kind <n> <name>": the name is what the reader wants.
+        let described = describe_header(header);
+        let name = described.splitn(3, ' ').nth(2).unwrap_or(&described);
+        format!(" [{name}]")
+    } else {
+        String::new()
+    }
+}
+
 /// Print an object of [`BIG_CLAIM`] bytes or more and the chain of words that
 /// kept it reachable, back to a root.
 #[cold]
@@ -3705,14 +3724,15 @@ fn report_big_claim(heap_start: usize, (start, size): (usize, usize)) {
     let map = map.as_deref().and_then(Option::as_ref);
     let mut at = start;
     while let Some(&(word, parent)) = map.and_then(|m| m.get(&at)) {
+        let class = object_class(heap_start + at);
         // The world is stopped, so the word still holds what reached the object.
         let value = unsafe { *(word as *const usize) };
         if parent == ROOT {
-            eprintln!("[gc-roots]     +{at:#x} <- root slot {word:#x}, value {value:#x}");
+            eprintln!("[gc-roots]     +{at:#x}{class} <- root slot {word:#x}, value {value:#x}");
             break;
         }
         eprintln!(
-            "[gc-roots]     +{at:#x} <- heap word +{:#x} (object +{parent:#x}), value {value:#x}",
+            "[gc-roots]     +{at:#x}{class} <- heap word +{:#x} (object +{parent:#x}), value {value:#x}",
             word - heap_start
         );
         at = parent;
@@ -6946,6 +6966,12 @@ impl ImmixAllocator {
     /// Root the object a native slot currently points at, and keep doing so as
     /// its contents change. See [`RootSet::root_slots`].
     pub fn add_root_slot(&mut self, slot: usize) {
+        if debug_roots() {
+            eprintln!(
+                "[gc-roots] hl_add_root slot {slot:#x} from {}",
+                crate::error::haxe_frames(6).join(" <- ")
+            );
+        }
         self.roots.borrow_mut().root_slots.insert(slot);
     }
 

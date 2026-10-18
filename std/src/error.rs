@@ -614,6 +614,18 @@ mod shadow {
         unsafe { *STACK.depth.get() }
     }
 
+    /// The innermost `max` frames, innermost first, as `(findex, pos)`.
+    pub fn innermost(max: usize) -> Vec<(u32, u64)> {
+        let depth = depth().min(CAP);
+        let frames = unsafe { &*STACK.frames.get() };
+        frames[..depth]
+            .iter()
+            .rev()
+            .take(max)
+            .map(|f| (f.findex, f.pos))
+            .collect()
+    }
+
     /// Drop the frames a longjmp is about to abandon.
     pub fn unwind_to(depth: usize) {
         unsafe {
@@ -726,6 +738,24 @@ pub unsafe extern "C" fn hlp_shadow_pop() {
 /// the entrypoint, which it reads as a `LocalFunction`. A frame that never
 /// reached a position marker is named alone, as HashLink names a frame
 /// without debug info.
+/// The innermost `max` Haxe frames, `Class.method(file:line)`, innermost
+/// first. Only a wasm module keeps its own frame list; elsewhere the machine
+/// stack is the record and this reports none.
+pub(crate) fn haxe_frames(max: usize) -> Vec<String> {
+    #[cfg(target_family = "wasm")]
+    {
+        shadow::innermost(max)
+            .into_iter()
+            .map(|(findex, pos)| format_frame(findex, pos))
+            .collect()
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = max;
+        Vec::new()
+    }
+}
+
 #[cfg(target_family = "wasm")]
 fn format_frame(findex: u32, pos: u64) -> String {
     if findex == shadow::ENTRY {

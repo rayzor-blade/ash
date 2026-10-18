@@ -50,7 +50,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
         let kind = (*t).kind;
         match kind {
             hl_type_kind_HUI8 => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*v).t = t;
@@ -58,7 +58,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 v
             }
             hl_type_kind_HUI16 => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*v).t = t;
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 v
             }
             hl_type_kind_HI32 => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*v).t = t;
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 v
             }
             hl_type_kind_HI64 => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*v).t = t;
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 v
             }
             hl_type_kind_HF32 => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*v).t = t;
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 v
             }
             hl_type_kind_HF64 => {
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*v).t = t;
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             }
             hl_type_kind_HBOOL => {
                 let b = *(data as *mut bool);
-                let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+                let v = crate::gc::alloc_scalar_box()
                     .expect("Failed to allocate vdynamic")
                     .as_ptr() as *mut vdynamic;
                 (*t).kind = hl_type_kind_HBOOL;

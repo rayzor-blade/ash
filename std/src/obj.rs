@@ -504,9 +504,13 @@ pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     unsafe {
         // let flags = mem_kind | MEM_ZERO;
 
-        let d = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
-            .unwrap_or_else(|| crate::rt::out_of_memory("runtime memory"))
-            .as_ptr() as *mut vdynamic;
+        let d = if crate::types::hl_is_ptr(t) {
+            crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
+        } else {
+            crate::gc::alloc_scalar_box()
+        }
+        .unwrap_or_else(|| crate::rt::out_of_memory("runtime memory"))
+        .as_ptr() as *mut vdynamic;
 
         // Zero-initialize the memory
         ptr::write_bytes(d as *mut u8, 0, std::mem::size_of::<vdynamic>());
@@ -1660,6 +1664,21 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
                     *mark.add((pos >> 5) as usize) |= 1 << (pos & 31);
                 }
             }
+        }
+
+        // The collector reads an instance by this layout (see
+        // `register_class_layout`). A struct has no class word to find it by.
+        if (*ot).kind == hl::hl_type_kind_HOBJ {
+            let bits = if (*t).hasPtr {
+                (*ot).mark_bits as usize
+            } else {
+                crate::gc::LAYOUT_NO_POINTERS
+            };
+            crate::gc::register_class_layout(
+                ot as usize,
+                bits,
+                ((*t).size as usize).div_ceil(std::mem::size_of::<*mut c_void>()),
+            );
         }
 
         if force {

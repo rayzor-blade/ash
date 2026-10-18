@@ -3857,6 +3857,216 @@ fn scan_allocation_shared(
     }
 }
 
+// ── Class layouts ───────────────────────────────────────────────────────────
+//
+// A conservative scan reads every word of an object as a possible pointer. On
+// a 32-bit target that is a real cost: the heap lies across the range of small
+// integers and of Haxe field hashes, so an Int field -- a packed colour, an
+// id, a hash -- pins whatever object sits at that address, and a large dead
+// buffer hangs off it. A class instance carries its class in word zero, and a
+// class's runtime layout already says which words are pointers (`mark_bits`),
+// so an instance of a registered class has only those words read.
+//
+// Words beyond the class's own size (the room reserved for hot-reloaded
+// fields, an instance tail) are still read conservatively, and so is any
+// object whose first word is not a registered class.
+
+/// Classes the table can hold. A class that does not fit is scanned
+/// conservatively, as it was before.
+const LAYOUT_SLOTS: usize = 1 << 14;
+const LAYOUT_PROBES: usize = 32;
+/// A `bits` value that is not a pointer: the class's layout changed after it
+/// was first recorded, so instances made under either layout are scanned
+/// conservatively from then on.
+const LAYOUT_CONSERVATIVE: usize = 1;
+/// A `bits` value that is not a pointer: the class has no pointer fields.
+pub(crate) const LAYOUT_NO_POINTERS: usize = 2;
+
+struct LayoutTable {
+    classes: [std::sync::atomic::AtomicUsize; LAYOUT_SLOTS],
+    bits: [std::sync::atomic::AtomicUsize; LAYOUT_SLOTS],
+    words: [std::sync::atomic::AtomicU32; LAYOUT_SLOTS],
+}
+
+static LAYOUTS: LayoutTable = LayoutTable {
+    classes: [const { std::sync::atomic::AtomicUsize::new(0) }; LAYOUT_SLOTS],
+    bits: [const { std::sync::atomic::AtomicUsize::new(0) }; LAYOUT_SLOTS],
+    words: [const { std::sync::atomic::AtomicU32::new(0) }; LAYOUT_SLOTS],
+};
+
+fn layout_slot(class: usize) -> usize {
+    (((class as u64) >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - 14)) as usize
+}
+
+/// Record the layout of `class` (its `hl_type*`): `bits` is its `mark_bits`
+/// (bit n set: word n is a pointer) or [`LAYOUT_NO_POINTERS`], `words` the
+/// size of an instance in words. Recording a different layout for a class
+/// already recorded -- a hot reload rebuilt it -- turns its scan conservative.
+pub(crate) fn register_class_layout(class: usize, bits: usize, words: usize) {
+    if class == 0 || bits < LAYOUT_NO_POINTERS {
+        return;
+    }
+    let mut at = layout_slot(class);
+    for _ in 0..LAYOUT_PROBES {
+        let seen = LAYOUTS.classes[at].load(Ordering::Acquire);
+        if seen == 0 {
+            // Publish the layout before the class that names it.
+            LAYOUTS.bits[at].store(bits, Ordering::Release);
+            LAYOUTS.words[at].store(words as u32, Ordering::Release);
+            if LAYOUTS.classes[at]
+                .compare_exchange(0, class, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+            // Another class took the slot first; try the next.
+        } else if seen == class {
+            if LAYOUTS.bits[at].load(Ordering::Acquire) != bits
+                || LAYOUTS.words[at].load(Ordering::Acquire) != words as u32
+            {
+                LAYOUTS.bits[at].store(LAYOUT_CONSERVATIVE, Ordering::Release);
+            }
+            return;
+        }
+        at = (at + 1) & (LAYOUT_SLOTS - 1);
+    }
+}
+
+/// `(bits, words)` for the class at `class`, when it is registered and its
+/// layout can be trusted.
+fn class_layout(class: usize) -> Option<(usize, usize)> {
+    let mut at = layout_slot(class);
+    for _ in 0..LAYOUT_PROBES {
+        match LAYOUTS.classes[at].load(Ordering::Acquire) {
+            0 => return None,
+            seen if seen == class => {
+                let bits = LAYOUTS.bits[at].load(Ordering::Acquire);
+                if bits < LAYOUT_NO_POINTERS {
+                    return None;
+                }
+                return Some((bits, LAYOUTS.words[at].load(Ordering::Acquire) as usize));
+            }
+            _ => at = (at + 1) & (LAYOUT_SLOTS - 1),
+        }
+    }
+    None
+}
+
+/// Whether class instances are scanned by layout. On by default where a stray
+/// integer can land in the heap -- a 32-bit target. `ASH_GC_PRECISE=1` turns
+/// it on elsewhere, which is how the conformance corpus checks the layouts
+/// under GC stress; `=0` turns it off. Safe either way: an unregistered class
+/// is scanned as before.
+fn precise_objects() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("ASH_GC_PRECISE").as_deref() {
+        Ok("0") => false,
+        Ok(_) => true,
+        Err(_) => cfg!(target_pointer_width = "32"),
+    })
+}
+
+/// A box for an Int, Float or Bool: pointer-free when objects are scanned by
+/// layout, since its value word is data. Otherwise as every other object.
+pub(crate) fn alloc_scalar_box() -> Option<NonNull<u8>> {
+    let size = std::mem::size_of::<hl::vdynamic>();
+    if precise_objects() {
+        crate::rt::gc_alloc_noptr(size)
+    } else {
+        crate::rt::gc_alloc(size)
+    }
+}
+
+/// Trace one whole object: by its class's layout when `precise` and it has
+/// one, else every word.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn scan_object_shared_with(
+    precise: bool,
+    blocks: &[Block],
+    alloc_sizes: &[u32],
+    objects: &[std::sync::atomic::AtomicU8],
+    heap_start: usize,
+    heap_end: usize,
+    start: usize,
+    size: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    if precise && size >= WORD && !blocks[start / BLOCK_SIZE].noptr {
+        let class = unsafe { *((heap_start + start) as *const usize) };
+        if let Some((bits, words)) = class_layout(class)
+            && words * WORD <= size
+        {
+            let debug = debug_roots();
+            let follow = |off: usize, out: &mut Vec<(usize, usize)>| {
+                let val = unsafe { *((heap_start + start + off) as *const usize) };
+                if val >= heap_start && val < heap_end {
+                    let before = out.len();
+                    mark_allocation_shared(blocks, alloc_sizes, objects, val - heap_start, out);
+                    if debug && out.len() > before {
+                        note_claim(out[before], heap_start + start + off, start);
+                        if out[before].1 >= BIG_CLAIM {
+                            report_big_claim(heap_start, out[before]);
+                        }
+                    }
+                }
+            };
+            if bits != LAYOUT_NO_POINTERS {
+                for chunk in 0..words.div_ceil(32) {
+                    let mut mask = unsafe { *(bits as *const u32).add(chunk) };
+                    while mask != 0 {
+                        let word = chunk * 32 + mask.trailing_zeros() as usize;
+                        mask &= mask - 1;
+                        if word < words {
+                            follow(word * WORD, out);
+                        }
+                    }
+                }
+            }
+            for off in (words * WORD..size).step_by(WORD) {
+                follow(off, out);
+            }
+            return;
+        }
+    }
+    scan_allocation_shared(
+        blocks,
+        alloc_sizes,
+        objects,
+        heap_start,
+        heap_end,
+        start,
+        size,
+        out,
+    );
+}
+
+/// [`scan_object_shared_with`] under the process setting.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn scan_object_shared(
+    blocks: &[Block],
+    alloc_sizes: &[u32],
+    objects: &[std::sync::atomic::AtomicU8],
+    heap_start: usize,
+    heap_end: usize,
+    start: usize,
+    size: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    scan_object_shared_with(
+        precise_objects(),
+        blocks,
+        alloc_sizes,
+        objects,
+        heap_start,
+        heap_end,
+        start,
+        size,
+        out,
+    );
+}
+
 /// How many threads mark. `ASH_GC_MARK_THREADS` overrides; 1 keeps the phase
 /// on the collecting thread.
 fn mark_threads() -> usize {
@@ -4092,7 +4302,7 @@ fn mark_worker(job: &MarkJob) {
             }
         }
         while let Some((start, size)) = local.pop() {
-            scan_allocation_shared(
+            scan_object_shared(
                 blocks,
                 alloc_sizes,
                 objects,
@@ -4925,7 +5135,7 @@ impl ImmixAllocator {
             let Some((start, size)) = worklist.pop() else {
                 return;
             };
-            scan_allocation_shared(
+            scan_object_shared(
                 blocks,
                 alloc_sizes,
                 &self.heap.objects,
@@ -8457,6 +8667,134 @@ mod tests {
 
     fn object_marked(gc: &ImmixAllocator, at: usize) -> bool {
         gc.heap.objects[at / ALLOC_QUANTUM].load(Ordering::Relaxed) & OBJECT_MARK != 0
+    }
+
+    /// Two class addresses and bit maps for the layout tests: any address does
+    /// to name a class, so long as each test uses its own.
+    #[repr(align(16))]
+    struct FakeClass(#[allow(dead_code)] [u8; 16]);
+    static CLASS_A: FakeClass = FakeClass([0; 16]);
+    static CLASS_B: FakeClass = FakeClass([0; 16]);
+    static CLASS_C: FakeClass = FakeClass([0; 16]);
+    static CLASS_D: FakeClass = FakeClass([0; 16]);
+    /// Words 1 and 3 are pointers.
+    static BITS_1_3: [u32; 1] = [0b1010];
+    static BITS_1: [u32; 1] = [0b0010];
+
+    /// Trace from `root` the way the collector does, under `precise`.
+    fn trace_objects(gc: &mut ImmixAllocator, root: NonNull<u8>, precise: bool) {
+        let heap_start = gc.heap.memory.as_ptr() as usize;
+        let heap_end = heap_start + gc.heap.memory.len;
+        let mut work = Vec::new();
+        gc.mark_allocation(offset(gc, root), &mut work);
+        while let Some((start, size)) = work.pop() {
+            scan_object_shared_with(
+                precise,
+                &gc.blocks,
+                &gc.heap.alloc_sizes,
+                &gc.heap.objects,
+                heap_start,
+                heap_end,
+                start,
+                size,
+                &mut work,
+            );
+        }
+    }
+
+    /// An instance of `class` with `words` in its fields (word 0 is the class).
+    fn instance(gc: &mut ImmixAllocator, class: &FakeClass, fields: &[NonNull<u8>]) -> NonNull<u8> {
+        let object = gc.allocate((fields.len() + 1) * WORD).unwrap();
+        let words = object.cast::<usize>().as_ptr();
+        unsafe {
+            *words = class as *const FakeClass as usize;
+            for (i, field) in fields.iter().enumerate() {
+                *words.add(i + 1) = field.as_ptr() as usize;
+            }
+        }
+        object
+    }
+
+    #[test]
+    fn an_instance_is_read_by_its_class_layout() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let (a, looks_like_pointer, c) = (
+            gc.allocate(16).unwrap(),
+            gc.allocate(16).unwrap(),
+            gc.allocate(16).unwrap(),
+        );
+        // Word 2 is an Int field whose value happens to be b's address.
+        let object = instance(&mut gc, &CLASS_A, &[a, looks_like_pointer, c]);
+        register_class_layout(
+            &CLASS_A as *const FakeClass as usize,
+            BITS_1_3.as_ptr() as usize,
+            4,
+        );
+
+        trace_objects(&mut gc, object, true);
+        assert!(object_marked(&gc, offset(&gc, a)), "a pointer field is followed");
+        assert!(object_marked(&gc, offset(&gc, c)), "so is the other");
+        assert!(
+            !object_marked(&gc, offset(&gc, looks_like_pointer)),
+            "an Int field is not a reference"
+        );
+
+        gc.clear_all_marks();
+        trace_objects(&mut gc, object, false);
+        assert!(
+            object_marked(&gc, offset(&gc, looks_like_pointer)),
+            "without layouts every word is a candidate"
+        );
+    }
+
+    #[test]
+    fn words_past_the_class_size_are_still_read() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let (a, tail) = (gc.allocate(16).unwrap(), gc.allocate(16).unwrap());
+        // The class says 2 words; the instance has a third, as a reload's room
+        // would be.
+        let object = instance(&mut gc, &CLASS_B, &[a, tail]);
+        register_class_layout(
+            &CLASS_B as *const FakeClass as usize,
+            BITS_1.as_ptr() as usize,
+            2,
+        );
+
+        trace_objects(&mut gc, object, true);
+        assert!(object_marked(&gc, offset(&gc, a)));
+        assert!(
+            object_marked(&gc, offset(&gc, tail)),
+            "a word the layout does not cover is read as before"
+        );
+    }
+
+    #[test]
+    fn a_class_whose_layout_changed_is_read_conservatively() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let (a, int_like) = (gc.allocate(16).unwrap(), gc.allocate(16).unwrap());
+        let object = instance(&mut gc, &CLASS_C, &[a, int_like]);
+        let class = &CLASS_C as *const FakeClass as usize;
+        register_class_layout(class, BITS_1.as_ptr() as usize, 3);
+        register_class_layout(class, BITS_1_3.as_ptr() as usize, 3);
+
+        trace_objects(&mut gc, object, true);
+        assert!(
+            object_marked(&gc, offset(&gc, int_like)),
+            "once a class's layout differs, no layout of it is trusted"
+        );
+    }
+
+    #[test]
+    fn a_class_without_pointer_fields_reads_none() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let (a, b) = (gc.allocate(16).unwrap(), gc.allocate(16).unwrap());
+        let object = instance(&mut gc, &CLASS_D, &[a, b]);
+        register_class_layout(&CLASS_D as *const FakeClass as usize, LAYOUT_NO_POINTERS, 3);
+
+        trace_objects(&mut gc, object, true);
+        assert!(object_marked(&gc, offset(&gc, object)));
+        assert!(!object_marked(&gc, offset(&gc, a)));
+        assert!(!object_marked(&gc, offset(&gc, b)));
     }
 
     #[test]

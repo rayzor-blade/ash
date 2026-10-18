@@ -74,14 +74,14 @@ def hl_version(hl: str, env: dict | None = None) -> str | None:
 
 def judge(bench: dict, stdout: str) -> tuple[bool, str]:
     """Whether the run printed an accepted value, mirroring ash_bench's
-    checksum judgment: find the marker line, compare the trailing token."""
+    checksum judgment: find the marker line, compare what follows the marker."""
     marker = bench.get("checksum_marker", "Checksum:")
     accepted = {c["value"] for c in bench.get("checksums", [])}
     if not accepted:
         return True, "exit only"
     for line in stdout.splitlines():
         if marker in line:
-            got = line.split()[-1].strip()
+            got = line.split(marker, 1)[1].strip()
             if got in accepted:
                 return True, f"checksum {got}"
             return False, f"checksum {got} not in accepted set"

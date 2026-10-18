@@ -190,7 +190,7 @@ unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
 }
 
 pub mod hl_hb {
-    use crate::ucs2::ucmp;
+    use crate::{obj::hlp_hash_gen, ucs2::ucmp};
 
     use super::*;
 
@@ -200,34 +200,8 @@ pub mod hl_hb {
         key
     }
 
-    /// The hash a string key is filed under. Private to the map -- nothing else
-    /// reads an entry's hash -- so it is free to be a good one: FNV-1a over the
-    /// UTF-16 units, finished by a mix that spreads every bit into the top
-    /// ones, which is where [`cell_of`] reads. It replaces the field-name hash
-    /// and its remainder by a constant, and the remainder by the cell count
-    /// that followed it.
     pub fn hb_hash(key: MKeyType) -> u32 {
-        if key.is_null() {
-            return 0;
-        }
-        let mut h: u32 = 0x811C_9DC5;
-        let mut at = key;
-        unsafe {
-            while *at != 0 {
-                h = (h ^ *at as u32).wrapping_mul(0x0100_0193);
-                at = at.add(1);
-            }
-        }
-        h ^= h >> 15;
-        h = h.wrapping_mul(0x2C1B_3C6D);
-        h ^ (h >> 12)
-    }
-
-    /// The cell a hash falls in: its top bits scaled to `ncells`, which is a
-    /// multiply where a remainder is a division.
-    #[inline(always)]
-    pub fn cell_of(hash: u32, ncells: i32) -> u32 {
-        ((hash as u64 * ncells as u64) >> 32) as u32
+        unsafe { hlp_hash_gen(key, false) as u32 }
     }
 
     pub trait HbMap {
@@ -351,7 +325,7 @@ pub unsafe extern "C" fn hlp_hbset(
         let hash = hl_hb::hb_hash(key);
         let mut ckey = 0u32;
         if !(*m).values.is_null() {
-            ckey = hl_hb::cell_of(hash, (*m).ncells);
+            ckey = hash % (*m).ncells as u32;
             c = m.m_index(ckey);
             while c >= 0 {
                 if m.match_entry(c as usize, hash, key) {
@@ -367,7 +341,7 @@ pub unsafe extern "C" fn hlp_hbset(
         if c < 0 {
             hl_hb_resize(m);
             crate::gc::write_barrier_range(m as usize, std::mem::size_of::<hl::hl_hb_map>());
-            ckey = hl_hb::cell_of(hash, (*m).ncells);
+            ckey = hash % (*m).ncells as u32;
             c = hl_freelist_get(&mut (*m).lfree);
         }
         m.set_entry(c as usize, hash, key);
@@ -418,10 +392,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         } else {
             H_SIZE_INIT
         };
-        // One cell per entry. Upstream sizes this at a quarter of the entries,
-        // so a full table averages four entries a chain and a lookup reads
-        // each one's hash from a separate array before it finds its own.
-        let mut ncells = nentries;
+        let mut ncells = nentries >> 2;
 
         while H_PRIMES[i] < ncells as u32 {
             i += 1;
@@ -522,7 +493,7 @@ pub unsafe extern "C" fn hlp_hbget(
             return ptr::null_mut();
         }
         let hash = hl_hb::hb_hash(key);
-        let ckey = hl_hb::cell_of(hash, (*m).ncells);
+        let ckey = hash % (*m).ncells as u32;
         let mut c = m.m_index(ckey);
         while c >= 0 {
             if m.match_entry(c as usize, hash, key) {
@@ -543,7 +514,7 @@ pub unsafe extern "C" fn hlp_hbexists(m: *mut hl::hl_hb_map, key: *mut hl::uchar
             return false;
         }
         let hash = hl_hb::hb_hash(key);
-        let ckey = hl_hb::cell_of(hash, (*m).ncells);
+        let ckey = hash % (*m).ncells as u32;
         let mut c = m.m_index(ckey);
         while c >= 0 {
             if m.match_entry(c as usize, hash, key) {
@@ -564,7 +535,7 @@ pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::u
             return false;
         }
         let hash = hl_hb::hb_hash(key);
-        let ckey = hl_hb::cell_of(hash, (*m).ncells);
+        let ckey = hash % (*m).ncells as u32;
         let mut c = m.m_index(ckey);
         let mut prev: i32 = -1;
         while c >= 0 {

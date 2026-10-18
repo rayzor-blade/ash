@@ -5,19 +5,28 @@
 <title>__ASH_MODULE_TEXT__</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 auto; padding: 2rem 1rem; max-width: 48rem; }
+  body { font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
+  /* The log is for debugging (`?debug`); the browser's console is where a
+     program's output belongs. Without it the canvas has the page. */
+  body.debug { margin: 0 auto; padding: 2rem 1rem; max-width: 48rem; }
   #out { white-space: pre-wrap; border-left: 3px solid currentColor; padding: .8rem 1rem; min-height: 8rem; }
-  #screen { display: block; width: 100%; height: auto; margin: 0 0 1rem; background: #0e0e12; image-rendering: pixelated; }
+  #screen { display: block; width: 100%; height: auto; background: #0e0e12; }
+  body.debug #screen { margin: 0 0 1rem; }
   .err { color: #d33; }
   .meta { opacity: .55; }
 </style>
 <canvas id="screen" width="640" height="360" hidden></canvas>
-<pre id="out"></pre>
+<pre id="out" hidden></pre>
 <script type="module">
 // The program runs in worker.js, never on this thread: a Haxe main loop does
 // not return, and Atomics.wait is forbidden here.
 const module = "./" + __ASH_MODULE_JSON__;
 const out = document.getElementById("out");
+// Kept in the document either way, so what the program wrote can still be read
+// from its textContent.
+const debug = new URLSearchParams(location.search).has("debug");
+document.body.classList.toggle("debug", debug);
+out.hidden = !debug;
 const write = (text, cls) => {
   const line = document.createElement("span");
   if (cls) line.className = cls;
@@ -44,6 +53,9 @@ const takeScreen = () => {
   try {
     const canvas = screen.transferControlToOffscreen();
     screen.hidden = false;
+    // A framebuffer is low resolution: scale it up without smoothing. A GPU
+    // surface that took the canvas first is drawn at its own size.
+    screen.style.imageRendering = "pixelated";
     return canvas;
   } catch {
     return null;

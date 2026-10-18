@@ -240,6 +240,21 @@ mod tests {
     }
 
     #[test]
+    fn the_log_pane_is_hidden_unless_debugging() {
+        // Hidden rather than absent: a page runner reads its textContent.
+        assert!(INDEX_HTML.contains("<pre id=\"out\" hidden></pre>"));
+        assert!(INDEX_HTML.contains("has(\"debug\")"));
+        // The column and margin belong to the debugging layout.
+        assert!(INDEX_HTML.contains("body.debug { margin: 0 auto;"));
+        assert!(
+            !INDEX_HTML.contains("#screen { display: block; width: 100%; height: auto; margin")
+        );
+        // Pixelated scaling is for the framebuffer path, not every canvas.
+        assert!(!INDEX_HTML.contains("image-rendering: pixelated;"));
+        assert!(INDEX_HTML.contains("style.imageRendering = \"pixelated\""));
+    }
+
+    #[test]
     fn the_host_is_built_in() {
         assert!(HOST_JS.contains("run_thread"));
         // `init()` with no argument has to find the module beside the script.

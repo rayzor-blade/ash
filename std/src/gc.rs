@@ -1663,6 +1663,13 @@ pub extern "C" fn hlp_gc_allocation_code(addr: usize) -> u32 {
 static HEAP_BASE_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static HEAP_LEN_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Whether `addr` lies in the collector's heap. Only the address range: it
+/// says nothing about whether anything is allocated there, and takes no lock.
+pub(crate) fn in_heap_range(addr: usize) -> bool {
+    let base = HEAP_BASE_HOOK.load(Ordering::Relaxed);
+    base != 0 && addr >= base && addr < base + HEAP_LEN_HOOK.load(Ordering::Relaxed)
+}
+
 /// Bytes of heap per card of the write barrier's card table.
 const CARD_SHIFT: usize = 9;
 const CARD_SIZE: usize = 1 << CARD_SHIFT;

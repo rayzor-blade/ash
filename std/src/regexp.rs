@@ -23,15 +23,24 @@ struct RegexpState {
 /// A UTF-16 subject as fancy_regex needs it: UTF-8, with a table from each
 /// UTF-16 unit index to its UTF-8 byte offset.
 ///
-/// Recognised by its address and then by its contents, compared in one
-/// pass: an address alone is not the same string once the buffer is freed
-/// and reused. That compare is the only per-call cost the cache leaves.
+/// Recognised by its address and the NUL where it ends, which costs the same
+/// for a subject of any size. For a string in the collector's heap the address
+/// identifies it, because the cache holds it: the `EReg` block is scanned by
+/// the collector, so the buffer cannot be freed and reused for another string
+/// while it is cached, and a string's units never change. What can change is
+/// the end: a `StringBuf` hands out its own buffer from `toString` and goes on
+/// appending after it, which overwrites the terminator, so the terminator is
+/// checked. A buffer outside the heap is nobody's to retain, and may be freed
+/// and reused, so it keeps a copy of its units to compare against.
 struct Subject {
     source: *const u16,
-    units: Vec<u16>,
+    /// The subject's length in UTF-16 units.
+    len: usize,
+    /// The units, for a subject the collector does not hold.
+    units: Option<Vec<u16>>,
     text: String,
-    /// `units.len() + 1` entries. A unit inside a surrogate pair maps to the
-    /// byte after the pair.
+    /// `len + 1` entries. A unit inside a surrogate pair maps to the byte
+    /// after the pair.
     to_byte: Vec<u32>,
 }
 
@@ -54,16 +63,18 @@ impl Subject {
         }
         debug_assert_eq!(i, units.len());
         to_byte.push(text.len() as u32);
+        let held = crate::gc::in_heap_range(source as usize);
         Subject {
             source,
-            units: units.to_vec(),
+            len: units.len(),
+            units: (!held).then(|| units.to_vec()),
             text,
             to_byte,
         }
     }
 
     fn byte_of(&self, unit: usize) -> usize {
-        self.to_byte[unit.min(self.units.len())] as usize
+        self.to_byte[unit.min(self.len)] as usize
     }
 
     /// The UTF-16 units before `byte`, a char boundary.
@@ -72,12 +83,16 @@ impl Subject {
     }
 
     /// Whether the NUL-terminated string at `source` is this one: the same
-    /// address, the same units, and its terminator where this one ends.
+    /// address, its terminator where this one ends, and for a buffer the
+    /// collector does not hold, the same units.
     unsafe fn is(&self, source: *const u16) -> bool {
         unsafe {
             source == self.source
-                && std::slice::from_raw_parts(source, self.units.len()) == self.units.as_slice()
-                && *source.add(self.units.len()) == 0
+                && *source.add(self.len) == 0
+                && self
+                    .units
+                    .as_ref()
+                    .is_none_or(|units| std::slice::from_raw_parts(source, self.len) == units)
         }
     }
 }
@@ -197,7 +212,7 @@ pub unsafe extern "C" fn hlp_regexp_match(
             crate::gc::write_barrier_range(r as usize, std::mem::size_of::<RegexpState>());
         }
         let subject = state.subject.as_ref().unwrap();
-        let total_len = subject.units.len() as i32;
+        let total_len = subject.len as i32;
         let start = pos.clamp(0, total_len) as usize;
         let avail = total_len - start as i32;
         let run_len = if size < 0 {
@@ -296,6 +311,20 @@ pub unsafe extern "C" fn hlp_regexp_matched_num(r: *mut c_void) -> i32 {
 #[cfg(test)]
 mod regexp_matched_num_tests {
     use super::*;
+
+    /// A StringBuf's buffer grows past the string it handed out: the same
+    /// address with the terminator gone is not the cached subject.
+    #[test]
+    fn an_overwritten_terminator_is_not_the_cached_subject() {
+        let mut buffer: Vec<u16> = "abc".encode_utf16().collect();
+        buffer.extend([0, 0]);
+        let subject = Subject::new(buffer.as_ptr(), &buffer[..3]);
+        unsafe {
+            assert!(subject.is(buffer.as_ptr()));
+            buffer[3] = u16::from(b'd');
+            assert!(!subject.is(buffer.as_ptr()));
+        }
+    }
 
     /// Subjects and patterns cross this boundary as NUL-terminated UTF-16,
     /// which is what `read_utf16z` on the other side expects.

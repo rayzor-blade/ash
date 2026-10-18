@@ -53,6 +53,8 @@ pub mod process;
 #[cfg(target_family = "wasm")]
 #[path = "process_wasm.rs"]
 pub mod process;
+#[cfg(any(test, target_family = "wasm"))]
+pub mod pthread_keys;
 pub mod random;
 pub mod regexp;
 pub mod rt;

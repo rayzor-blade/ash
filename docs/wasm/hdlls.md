@@ -114,6 +114,13 @@ force-included into the runtime object for libraries. It can be generous:
 nothing references them in an ordinary program, so tree shaking drops them
 again.
 
+The pthread key functions (`pthread_key_create`, `pthread_key_delete`,
+`pthread_setspecific`, `pthread_getspecific`) are not taken from libc: a Rust
+library's thread-local destructors import them, and wasi-libc's
+`pthread_key_delete` does not return in either runtime. `std/src/pthread_keys.rs`
+answers them, with a key table shared by all threads and a value for each
+thread.
+
 ## A library whose work is the host's
 
 A library that draws to a canvas or plays sound calls neither the runtime nor

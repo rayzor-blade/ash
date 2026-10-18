@@ -40,6 +40,13 @@ const REQUIRED: &[&str] = &[
     "hlp_shadow_push",
     "hlp_shadow_pop",
     "hlp_alloc_obj_sized",
+    // Not the program's either: a side module built with a current Rust
+    // nightly imports these for its thread-local destructors, and the build
+    // refuses a library whose imports the runtime does not define.
+    "pthread_key_create",
+    "pthread_key_delete",
+    "pthread_setspecific",
+    "pthread_getspecific",
 ];
 
 /// How to rebuild it, quoted in the failure so nobody has to go looking.

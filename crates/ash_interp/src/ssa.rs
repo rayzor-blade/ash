@@ -127,6 +127,9 @@ pub struct Prepared {
     pub cfg: ash_core::air_pipeline::AirConfigKey,
     pub positions: Box<[air::v2::positions::PcPosition]>,
     osr: OnceLock<OsrState>,
+    /// For each block, the headers of the loops it is a latch of; built on
+    /// first use.
+    back_edges: OnceLock<Box<[Box<[u32]>]>>,
 }
 
 struct OsrState {
@@ -141,6 +144,30 @@ impl Prepared {
 
     pub fn block_pcs(&self) -> &[usize] {
         &self.optimized.ser.block_pcs
+    }
+
+    /// Whether the edge from `latch` to `header` closes a loop: `header`
+    /// dominates `latch`. A branch to a block that sits earlier in the layout
+    /// is not that. Inlining adds blocks after the ones it was called from, so
+    /// an ordinary forward edge can run to a lower-numbered block, and a
+    /// loop's preheader laid out after its header enters it the same way.
+    /// Counting those named a block that is no loop's header as the hot loop.
+    pub fn is_back_edge(&self, latch: u32, header: u32) -> bool {
+        let table = self.back_edges.get_or_init(|| {
+            let ir = self.ir();
+            let cfg = air::v2::CfgInfo::build(ir);
+            let forest = air::v2::analysis::LoopForest::analyze(ir, &cfg);
+            let mut headers: Vec<Vec<u32>> = vec![Vec::new(); ir.blocks.len()];
+            for lp in &forest.loops {
+                for latch in &lp.latches {
+                    headers[latch.idx()].push(lp.header.0);
+                }
+            }
+            headers.into_iter().map(Vec::into_boxed_slice).collect()
+        });
+        table
+            .get(latch as usize)
+            .is_some_and(|headers| headers.contains(&header))
     }
 
     pub fn instr_pcs(&self) -> &[Vec<usize>] {
@@ -379,6 +406,7 @@ impl Cache {
                             cfg: air_cfg,
                             positions: positions.into_boxed_slice(),
                             osr: OnceLock::new(),
+                            back_edges: OnceLock::new(),
                         }))
                     }
                 },
@@ -541,6 +569,7 @@ mod tests {
             cfg: ash_core::air_pipeline::AirConfigKey::interpreter(),
             positions: Box::new([]),
             osr: OnceLock::new(),
+            back_edges: OnceLock::new(),
         })));
         let active = cache.body(0).unwrap();
         assert!(active.osr.get().is_none(), "OSR data must not be eager");

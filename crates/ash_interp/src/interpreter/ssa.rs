@@ -90,11 +90,11 @@ impl HLInterpreter {
             // The tiering ladder is driven by back edges, and it was the
             // opcode loop alone that counted them: under this walker a hot
             // loop raised no demand and never asked for a compile, so a
-            // hybrid run stayed interpreted no matter how hot it got. A
-            // branch to a block at or before this one is the same signal the
-            // opcode loop reads from a negative jump offset.
+            // hybrid run stayed interpreted no matter how hot it got. An edge
+            // that closes a loop is the same signal the opcode loop reads from
+            // a negative jump offset.
             if let Some(prev) = prev_block
-                && block <= prev as usize
+                && prep.is_back_edge(prev, block as u32)
             {
                 let frame = self.stack.last_mut().unwrap();
                 frame.backedges = frame.backedges.wrapping_add(1);

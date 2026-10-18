@@ -1,6 +1,6 @@
 //! `ash run`, `ash serve`, and the page `--build` writes beside a wasm module.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 
@@ -76,9 +76,15 @@ fn respond(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request = String::new();
     reader.read_line(&mut request)?;
-    // Headers are read and ignored; the request line is all this needs.
+    // The request line and the Range header are all this reads.
+    let mut range_header = None;
     let mut line = String::new();
     while reader.read_line(&mut line)? > 2 {
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("range")
+        {
+            range_header = Some(value.trim().to_string());
+        }
         line.clear();
     }
     let mut parts = request.split_whitespace();
@@ -101,22 +107,113 @@ fn respond(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
             method == "GET",
         );
     };
-    match std::fs::read(&path) {
-        Ok(body) => send(
-            &mut stream,
-            "200 OK",
-            content_type(&path),
-            &body,
-            method == "GET",
-        ),
-        Err(_) => send(
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return send(
             &mut stream,
             "404 Not Found",
             "text/plain",
             b"not found\n",
             method == "GET",
+        );
+    };
+    let Ok(total) = file.metadata().map(|m| m.len()) else {
+        return send(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"not found\n",
+            method == "GET",
+        );
+    };
+    let with_body = method == "GET";
+    let kind = content_type(&path);
+    match range_header
+        .as_deref()
+        .map_or(RangeRequest::Whole, |h| parse_range(h, total))
+    {
+        RangeRequest::Whole => {
+            let mut body = Vec::with_capacity(total as usize);
+            file.read_to_end(&mut body)?;
+            send_with(&mut stream, "200 OK", kind, &body, with_body, "")
+        }
+        RangeRequest::Part(first, last) => {
+            // Only the bytes asked for are read, so a seek into a large
+            // media file does not load the rest of it.
+            let mut body = vec![0u8; (last - first + 1) as usize];
+            file.seek(SeekFrom::Start(first))?;
+            file.read_exact(&mut body)?;
+            let extra = format!("Content-Range: bytes {first}-{last}/{total}\r\n");
+            send_with(
+                &mut stream,
+                "206 Partial Content",
+                kind,
+                &body,
+                with_body,
+                &extra,
+            )
+        }
+        RangeRequest::Unsatisfiable => send_with(
+            &mut stream,
+            "416 Range Not Satisfiable",
+            "text/plain",
+            b"",
+            false,
+            &format!("Content-Range: bytes */{total}\r\n"),
         ),
     }
+}
+
+/// What a request's `Range` header asks of a file of a given length.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeRequest {
+    /// No range, or one this does not honour: the whole file.
+    Whole,
+    /// Bytes `first..=last`, both inside the file.
+    Part(u64, u64),
+    /// A range that starts at or past the end of the file.
+    Unsatisfiable,
+}
+
+/// Read one `bytes=` range. A list of ranges, another unit and a range that
+/// is malformed are all answered with the whole file, which RFC 9110 allows;
+/// a media element asks for one range at a time.
+fn parse_range(header: &str, total: u64) -> RangeRequest {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else {
+        return RangeRequest::Whole;
+    };
+    if spec.contains(',') {
+        return RangeRequest::Whole;
+    }
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return RangeRequest::Whole;
+    };
+    let (first, last) = (first.trim(), last.trim());
+    if first.is_empty() {
+        // The last `n` bytes.
+        return match last.parse::<u64>() {
+            Ok(n) if n > 0 && total > 0 => RangeRequest::Part(total.saturating_sub(n), total - 1),
+            Ok(_) => RangeRequest::Unsatisfiable,
+            Err(_) => RangeRequest::Whole,
+        };
+    }
+    let Ok(first) = first.parse::<u64>() else {
+        return RangeRequest::Whole;
+    };
+    let last = if last.is_empty() {
+        None
+    } else {
+        match last.parse::<u64>() {
+            Ok(n) => Some(n),
+            Err(_) => return RangeRequest::Whole,
+        }
+    };
+    if last.is_some_and(|last| last < first) {
+        return RangeRequest::Whole;
+    }
+    if first >= total {
+        return RangeRequest::Unsatisfiable;
+    }
+    RangeRequest::Part(first, last.map_or(total - 1, |last| last.min(total - 1)))
 }
 
 /// The file a request names, or `None` for one outside `root`.
@@ -155,7 +252,8 @@ fn percent_decode(s: &str) -> Option<String> {
 }
 
 fn content_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match extension.to_ascii_lowercase().as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "wasm" => "application/wasm",
@@ -163,8 +261,24 @@ fn content_type(path: &Path) -> &'static str {
         "json" => "application/json",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
         "svg" => "image/svg+xml",
         "txt" | "md" => "text/plain; charset=utf-8",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
         _ => "application/octet-stream",
     }
 }
@@ -176,11 +290,26 @@ fn send(
     body: &[u8],
     with_body: bool,
 ) -> std::io::Result<()> {
+    send_with(stream, status, content_type, body, with_body, "")
+}
+
+/// [`send`] with more header lines, each ending in CRLF. Every response says
+/// it accepts byte ranges, so a media element knows it may seek.
+fn send_with(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    with_body: bool,
+    extra_headers: &str,
+) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
+         Accept-Ranges: bytes\r\n\
+         {extra_headers}\
          Cross-Origin-Opener-Policy: same-origin\r\n\
          Cross-Origin-Embedder-Policy: require-corp\r\n\
          Cache-Control: no-store\r\n\
@@ -221,7 +350,115 @@ pub fn write_page(module: &Path, quiet: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode, resolve};
+    use super::{RangeRequest, content_type, parse_range, percent_decode, resolve};
+    use std::path::Path;
+
+    #[test]
+    fn a_single_byte_range_is_read_against_the_file_length() {
+        use RangeRequest::{Part, Unsatisfiable, Whole};
+        assert_eq!(parse_range("bytes=1000-1999", 5000), Part(1000, 1999));
+        assert_eq!(parse_range("bytes=1000-", 5000), Part(1000, 4999));
+        assert_eq!(parse_range("bytes=4500-9999", 5000), Part(4500, 4999));
+        assert_eq!(parse_range("bytes=-500", 5000), Part(4500, 4999));
+        assert_eq!(parse_range("bytes=-9999", 5000), Part(0, 4999));
+        assert_eq!(parse_range("bytes=0-0", 5000), Part(0, 0));
+        assert_eq!(parse_range("bytes=5000-", 5000), Unsatisfiable);
+        assert_eq!(parse_range("bytes=-0", 5000), Unsatisfiable);
+        assert_eq!(parse_range("bytes=0-", 0), Unsatisfiable);
+        assert_eq!(parse_range("bytes=-5", 0), Unsatisfiable);
+        // Not honoured: the whole file is a valid answer to each.
+        assert_eq!(parse_range("bytes=0-1,5-9", 5000), Whole);
+        assert_eq!(parse_range("items=0-1", 5000), Whole);
+        assert_eq!(parse_range("bytes=9-3", 5000), Whole);
+        assert_eq!(parse_range("bytes=a-b", 5000), Whole);
+        assert_eq!(parse_range("bytes=", 5000), Whole);
+    }
+
+    /// One request to `respond` over a real socket; the raw response.
+    fn ask(root: &Path, request: &str) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let root = root.to_path_buf();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            super::respond(stream, &root).unwrap();
+        });
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        server.join().unwrap();
+        response
+    }
+
+    fn split(response: &[u8]) -> (String, &[u8]) {
+        let at = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("a header block")
+            + 4;
+        (
+            String::from_utf8_lossy(&response[..at]).into_owned(),
+            &response[at..],
+        )
+    }
+
+    #[test]
+    fn a_range_request_gets_the_bytes_asked_for() {
+        let root = std::env::temp_dir().join(format!("ash-range-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let data: Vec<u8> = (0..100u8).collect();
+        std::fs::write(root.join("night-drive.m4a"), &data).unwrap();
+
+        let whole = ask(&root, "GET /night-drive.m4a HTTP/1.1\r\n\r\n");
+        let (head, body) = split(&whole);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("Accept-Ranges: bytes"), "{head}");
+        assert!(head.contains("Content-Type: audio/mp4"), "{head}");
+        assert_eq!(body, &data[..]);
+
+        let part = ask(
+            &root,
+            "GET /night-drive.m4a HTTP/1.1\r\nRange: bytes=10-19\r\n\r\n",
+        );
+        let (head, body) = split(&part);
+        assert!(head.starts_with("HTTP/1.1 206 Partial Content"), "{head}");
+        assert!(head.contains("Content-Range: bytes 10-19/100"), "{head}");
+        assert!(head.contains("Content-Length: 10"), "{head}");
+        assert_eq!(body, &data[10..20]);
+
+        let head_only = ask(
+            &root,
+            "HEAD /night-drive.m4a HTTP/1.1\r\nrange: bytes=90-\r\n\r\n",
+        );
+        let (head, body) = split(&head_only);
+        assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+        assert!(head.contains("Content-Length: 10"), "{head}");
+        assert!(body.is_empty());
+
+        let past = ask(
+            &root,
+            "GET /night-drive.m4a HTTP/1.1\r\nRange: bytes=100-\r\n\r\n",
+        );
+        let (head, body) = split(&past);
+        assert!(head.starts_with("HTTP/1.1 416"), "{head}");
+        assert!(head.contains("Content-Range: bytes */100"), "{head}");
+        assert!(body.is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn media_files_get_their_media_types() {
+        let kind = |name| content_type(Path::new(name));
+        assert_eq!(kind("a/night-drive.m4a"), "audio/mp4");
+        assert_eq!(kind("a.MP3"), "audio/mpeg");
+        assert_eq!(kind("a.ogg"), "audio/ogg");
+        assert_eq!(kind("a.mp4"), "video/mp4");
+        assert_eq!(kind("a.webm"), "video/webm");
+        assert_eq!(kind("a.unknown"), "application/octet-stream");
+    }
 
     #[test]
     fn a_request_resolves_inside_the_served_directory_only() {

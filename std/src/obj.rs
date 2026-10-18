@@ -512,6 +512,7 @@ pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
         ptr::write_bytes(d as *mut u8, 0, std::mem::size_of::<vdynamic>());
 
         (*d).t = t;
+        crate::gc::census_note_leaf_type(t);
 
         d
     }
@@ -1568,6 +1569,7 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
         (*t).methods = ptr::null_mut();
         if !force {
             (*o).rt = t;
+            crate::gc::census_note_type(ot);
         }
         (*ot).vobj_proto = ptr::null_mut();
 
@@ -1660,6 +1662,7 @@ unsafe fn build_obj_rt(ot: *mut hl_type, force: bool) -> *mut hl_runtime_obj {
 
         if force {
             (*o).rt = t;
+            crate::gc::census_note_type(ot);
         }
         t
     }

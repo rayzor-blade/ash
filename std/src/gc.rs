@@ -7552,6 +7552,260 @@ unsafe fn c_utf8_path(p: *const hl::vbyte) -> Option<String> {
     }
 }
 
+// ── Heap census ─────────────────────────────────────────────────────────────
+
+/// Class types that have a runtime object: the ones whose instances the census
+/// can recognise by the type pointer in their first word. Filled where the
+/// runtime object is built, because compiled code bumps the thread's buffer
+/// for an instance without calling the allocator.
+static CENSUS_TYPES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn census_note_type(t: *mut hl_type) {
+    if let Ok(mut types) = CENSUS_TYPES.lock() {
+        types.push(t as usize);
+    }
+}
+
+/// Element types of arrays and value types of boxes, as the bytecode module
+/// owns them: the census cannot tell these from the builtin singletons by
+/// address, so the allocators name each one the first time they see it.
+static CENSUS_LEAF_TYPES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn census_note_leaf_type(t: *mut hl_type) {
+    thread_local! {
+        // Direct-mapped by address, so a type already seen costs one load.
+        static SEEN: [std::cell::Cell<usize>; 32] = const { [const { std::cell::Cell::new(0) }; 32] };
+    }
+    let key = t as usize;
+    let seen = SEEN.try_with(|seen| {
+        let slot = &seen[(key >> 4) & 31];
+        let hit = slot.get() == key;
+        slot.set(key);
+        hit
+    });
+    if seen == Ok(true) {
+        return;
+    }
+    if let Ok(mut types) = CENSUS_LEAF_TYPES.lock()
+        && let Err(at) = types.binary_search(&key)
+    {
+        types.insert(at, key);
+    }
+}
+
+/// `ASH_GC_CENSUS=1`: print the census to stderr as the process exits. By then
+/// the entry point has returned, so what is marked is what the program's
+/// statics and runtime roots still reach. The world is not stopped: a mutator
+/// record may outlive its thread's stack at exit, and the census only reads.
+/// Called from `sys::exit_process`, which skips `atexit` handlers.
+pub fn print_census_if_enabled() {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("ASH_GC_CENSUS").is_ok_and(|v| !v.is_empty() && v != "0"))
+    {
+        return;
+    }
+    unsafe {
+        let mut gc = gc_locked_init();
+        gc.mark_roots(&[]);
+        let heap_base = gc.heap.memory.as_ptr() as usize;
+        eprintln!("[gc-census] begin");
+        census_write(&gc, heap_base, &mut |line| eprintln!("[gc-census] {line}"));
+        eprintln!("[gc-census] end");
+    }
+}
+
+/// A name for a type: a class by its name, anything else by its kind.
+unsafe fn census_label(t: *mut hl_type) -> String {
+    unsafe {
+        let kind = (*t).kind;
+        if kind == hl::hl_type_kind_HOBJ || kind == hl::hl_type_kind_HSTRUCT {
+            let obj = (*t).__bindgen_anon_1.obj;
+            if !obj.is_null() && !(*obj).name.is_null() {
+                let mut units = Vec::new();
+                let mut p = (*obj).name;
+                while *p != 0 && units.len() < 256 {
+                    units.push(*p);
+                    p = p.add(1);
+                }
+                return String::from_utf16_lossy(&units);
+            }
+        }
+        crate::types::TSTR
+            .get(kind as usize)
+            .copied()
+            .unwrap_or("?")
+            .to_string()
+    }
+}
+
+/// What the marked lines hold, by type: an ESTIMATE, because the heap records
+/// no allocation's type and small objects are packed 16 bytes apart inside a
+/// line with no recorded start. Each marked line of a pointer block is read in
+/// 16-byte steps for a first word that is a known type pointer -- a class with
+/// a runtime object, or one of the builtin boxed and array types -- and the
+/// object is sized from that type. A field that holds a type pointer would
+/// count as an object, and an instance of a type with no runtime object is not
+/// seen. Pointer-free blocks are reported by live lines, and by size where an
+/// allocation spans lines and so recorded its size.
+///
+/// The heap must have been marked and the world stopped, as `gc_dump_memory`
+/// does before calling this.
+unsafe fn census_write(gc: &ImmixAllocator, heap_base: usize, w: &mut dyn FnMut(String)) {
+    unsafe {
+        use std::collections::HashMap;
+        // Builtin types are single statics shared by every value of the kind.
+        let builtin: Vec<usize> = [
+            crate::types::hlt_dynobj(),
+            crate::types::hlt_array(),
+            crate::types::hlt_bytes(),
+            crate::types::hlt_type(),
+            crate::types::hlt_dyn(),
+            crate::types::hlt_i32(),
+            crate::types::hlt_f64(),
+            crate::types::hlt_f32(),
+            crate::types::hlt_i64(),
+            crate::types::hlt_bool(),
+        ]
+        .iter()
+        .map(|&t| t as usize)
+        .collect();
+        let array_t = crate::types::hlt_array() as usize;
+        // try_lock: a mutator stopped inside a registration holds the lock for
+        // good; the census then reports what it can classify without it.
+        let mut classes: Vec<usize> = CENSUS_TYPES
+            .try_lock()
+            .map(|t| t.clone())
+            .unwrap_or_default();
+        classes.sort_unstable();
+        classes.dedup();
+        let leaves: Vec<usize> = CENSUS_LEAF_TYPES
+            .try_lock()
+            .map(|t| t.clone())
+            .unwrap_or_default();
+        let is_class = |word: usize| classes.binary_search(&word).is_ok();
+        let known = |word: usize| {
+            is_class(word) || builtin.contains(&word) || leaves.binary_search(&word).is_ok()
+        };
+
+        let mut rows: HashMap<String, (u64, u64)> = HashMap::new();
+        let (mut pointer_live, mut classified, mut noptr_live) = (0u64, 0u64, 0u64);
+        // Spans in pointer-free blocks, by size: (count, bytes) per bucket.
+        const BUCKETS: [(usize, &str); 8] = [
+            (256, "<=256"),
+            (1024, "<=1K"),
+            (4096, "<=4K"),
+            (16384, "<=16K"),
+            (65536, "<=64K"),
+            (262144, "<=256K"),
+            (1 << 20, "<=1M"),
+            (usize::MAX, ">1M"),
+        ];
+        let mut spans = [(0u64, 0u64); 8];
+        let mut span_lines = 0u64;
+
+        let mut used: Vec<usize> = gc.heap.used_blocks.iter().copied().collect();
+        used.sort_unstable();
+        for block_addr in used {
+            let block = &gc.blocks[block_addr / BLOCK_SIZE];
+            let first_line = block_addr / LINE_SIZE;
+            if block.noptr {
+                for line in 0..LINES_PER_BLOCK {
+                    if !block.is_marked(line) {
+                        continue;
+                    }
+                    noptr_live += LINE_SIZE as u64;
+                    let lines = gc.heap.alloc_sizes[first_line + line] as usize;
+                    if lines > 0 {
+                        let bytes = lines * LINE_SIZE;
+                        let b = BUCKETS
+                            .iter()
+                            .position(|(max, _)| bytes <= *max)
+                            .unwrap_or(7);
+                        spans[b].0 += 1;
+                        spans[b].1 += bytes as u64;
+                        span_lines += lines as u64;
+                    }
+                }
+                continue;
+            }
+            for line in 0..LINES_PER_BLOCK {
+                if !block.is_marked(line) {
+                    continue;
+                }
+                pointer_live += LINE_SIZE as u64;
+                let base = heap_base + block_addr + line * LINE_SIZE;
+                for slot in 0..LINE_SIZE / 16 {
+                    let at = base + slot * 16;
+                    let word = *(at as *const usize);
+                    if !known(word) {
+                        continue;
+                    }
+                    let t = word as *mut hl_type;
+                    let (label, bytes) = if is_class(word) {
+                        let obj = (*t).__bindgen_anon_1.obj;
+                        let rt = if obj.is_null() {
+                            ptr::null_mut()
+                        } else {
+                            (*obj).rt
+                        };
+                        if rt.is_null() || (*rt).size <= 0 {
+                            continue;
+                        }
+                        (census_label(t), (*rt).size as u64)
+                    } else if word == array_t {
+                        let at_t = *((at + 8) as *const usize);
+                        let count = *((at + 16) as *const i32);
+                        if !known(at_t) || count < 0 {
+                            continue;
+                        }
+                        let elem = crate::types::T_SIZES
+                            .get((*(at_t as *mut hl_type)).kind as usize)
+                            .copied()
+                            .unwrap_or(mem::size_of::<usize>() as isize)
+                            .max(0) as u64;
+                        (
+                            format!("array<{}>", census_label(at_t as *mut hl_type)),
+                            24 + elem * count as u64,
+                        )
+                    } else {
+                        // A boxed primitive, bytes handle or dynamic object.
+                        (format!("box<{}>", census_label(t)), 16)
+                    };
+                    let row = rows.entry(label).or_insert((0, 0));
+                    row.0 += 1;
+                    row.1 += bytes.next_multiple_of(16);
+                    classified += bytes.next_multiple_of(16);
+                }
+            }
+        }
+
+        w("# census (estimate): see the note in std/src/gc.rs census_write".into());
+        w(format!("census-pointer-live-bytes {pointer_live}"));
+        w(format!("census-classified-bytes {classified}"));
+        w(format!(
+            "census-unclassified-bytes {}",
+            pointer_live.saturating_sub(classified)
+        ));
+        w(format!("census-noptr-live-bytes {noptr_live}"));
+        w(format!(
+            "census-noptr-span-bytes {}",
+            span_lines * LINE_SIZE as u64
+        ));
+        let mut sorted: Vec<(String, (u64, u64))> = rows.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(a.0.cmp(&b.0)));
+        w("# type <count> <bytes> <name>, largest first".into());
+        for (name, (count, bytes)) in sorted.into_iter().take(60) {
+            w(format!("type {count} {bytes} {name}"));
+        }
+        w("# noptr-span <size> <count> <bytes>".into());
+        for (i, (_, name)) in BUCKETS.iter().enumerate() {
+            if spans[i].0 > 0 {
+                w(format!("noptr-span {name} {} {}", spans[i].0, spans[i].1));
+            }
+        }
+    }
+}
+
 /// Upstream hl_gc_dump_memory (gc.c): mark, then write the heap out for
 /// offline analysis.
 ///
@@ -7685,6 +7939,9 @@ pub(crate) unsafe extern "C" fn gc_dump_memory(filename: *mut hl::vbyte) {
                 heap_base + block_addr,
                 live * LINE_SIZE
             ));
+        }
+        if marked {
+            census_write(&gc, heap_base, &mut w);
         }
         w("end".into());
 

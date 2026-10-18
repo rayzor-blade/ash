@@ -33,6 +33,7 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
 
         (*a).t = crate::types::hlt_array();
         (*a).at = at;
+        crate::gc::census_note_leaf_type(at);
         (*a).size = size;
 
         a

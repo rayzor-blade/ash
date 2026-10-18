@@ -1177,6 +1177,7 @@ pub unsafe extern "C" fn hlp_sys_read_dir(path: *const vbyte) -> *mut varray {
 /// process. `Sys.exit` and the CLI's own return both come through this.
 pub fn exit_process(code: i32) -> ! {
     crate::gc::print_stats_if_enabled();
+    crate::gc::print_census_if_enabled();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     #[cfg(unix)]

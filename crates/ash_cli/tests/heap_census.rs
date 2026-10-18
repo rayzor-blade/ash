@@ -33,6 +33,18 @@ fn stat(dump: &str, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("no {key} in the dump:\n{dump}"))
 }
 
+/// A `<key> <live> of <total>` line.
+fn pages(dump: &str, key: &str) -> (u64, u64) {
+    dump.lines()
+        .find_map(|line| {
+            let mut parts = line.strip_prefix(key)?.strip_prefix(' ')?.split(' ');
+            let live = parts.next()?.parse().ok()?;
+            (parts.next()? == "of").then_some(())?;
+            Some((live, parts.next()?.parse().ok()?))
+        })
+        .unwrap_or_else(|| panic!("no {key} in the dump:\n{dump}"))
+}
+
 /// The fixture program, compiled when Haxe is here and otherwise the
 /// committed bytecode, inside a directory the caller keeps alive.
 fn fixture(dir: &tempfile::TempDir) -> std::path::PathBuf {
@@ -96,6 +108,18 @@ fn dump_memory_reports_live_objects_by_type() {
             span_row(&dump, "<=256K").is_some(),
             "{mode}: no integer array span"
         );
+
+        // Live pages are some, not all, of the pages of the blocks in use.
+        for (key, page) in [
+            ("census-pages-4k-live", 4096u64),
+            ("census-pages-16k-live", 16384),
+        ] {
+            let (live, total) = pages(&dump, key);
+            assert!(
+                live > 0 && live <= total && total * page >= 32768,
+                "{mode}: {key} {live} of {total}"
+            );
+        }
 
         // Most of the pointer-bearing heap is attributed to a type.
         let live = stat(&dump, "census-pointer-live-bytes");

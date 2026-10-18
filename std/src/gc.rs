@@ -7702,12 +7702,26 @@ unsafe fn census_write(gc: &ImmixAllocator, heap_base: usize, w: &mut dyn FnMut(
         ];
         let mut spans = [(0u64, 0u64); 8];
         let mut span_lines = 0u64;
+        // Pages holding at least one live line, in used blocks: what a block
+        // keeps resident when its free lines cannot be handed back.
+        let (mut live_4k, mut live_16k) = (0u64, 0u64);
 
         let mut used: Vec<usize> = gc.heap.used_blocks.iter().copied().collect();
         used.sort_unstable();
         for block_addr in used {
             let block = &gc.blocks[block_addr / BLOCK_SIZE];
             let first_line = block_addr / LINE_SIZE;
+            for (lines_per_page, live) in [
+                (4096 / LINE_SIZE, &mut live_4k),
+                (16384 / LINE_SIZE, &mut live_16k),
+            ] {
+                for page in 0..LINES_PER_BLOCK / lines_per_page {
+                    let first = page * lines_per_page;
+                    if (first..first + lines_per_page).any(|line| block.is_marked(line)) {
+                        *live += 1;
+                    }
+                }
+            }
             if block.noptr {
                 for line in 0..LINES_PER_BLOCK {
                     if !block.is_marked(line) {
@@ -7787,6 +7801,17 @@ unsafe fn census_write(gc: &ImmixAllocator, heap_base: usize, w: &mut dyn FnMut(
             pointer_live.saturating_sub(classified)
         ));
         w(format!("census-noptr-live-bytes {noptr_live}"));
+        // Pages with a live line, and all pages of the used blocks: the gap is
+        // what handing back free page-sized runs inside blocks could return.
+        let pages = (gc.heap.used_blocks.len() * BLOCK_SIZE) as u64;
+        w(format!(
+            "census-pages-4k-live {live_4k} of {}",
+            pages / 4096
+        ));
+        w(format!(
+            "census-pages-16k-live {live_16k} of {}",
+            pages / 16384
+        ));
         w(format!(
             "census-noptr-span-bytes {}",
             span_lines * LINE_SIZE as u64

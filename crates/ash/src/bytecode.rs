@@ -1522,6 +1522,66 @@ pub fn field_hash(name: &str) -> i32 {
 }
 
 impl DecodedBytecode {
+    /// findex -> "Class.method" for every function a type names.
+    ///
+    /// A function does not carry its own name: `HLFunction::field_name` is set
+    /// only where the reader can attribute it directly, so most functions
+    /// render as `Fun_<findex>`. The names live on the types -- every `obj`
+    /// lists its protos (method name + findex) and its bindings (field index +
+    /// findex) -- so one pass over the type table recovers them.
+    pub fn method_names(&self) -> std::collections::HashMap<usize, String> {
+        let mut names = std::collections::HashMap::new();
+        for ty in &self.types {
+            let Some(obj) = ty.obj.as_ref() else { continue };
+            for proto in &obj.proto {
+                if proto.findex >= 0 {
+                    names.insert(proto.findex as usize, format!("{}.{}", obj.name, proto.name));
+                }
+            }
+            // Bindings are (field index, findex) pairs -- how a class's STATIC
+            // functions are named, which is most of what a Haxe stack trace
+            // shows. The index counts from the top of the inheritance chain,
+            // not from this type's own fields: `$NullAcc` binds field 6 while
+            // owning only two, because its parent contributes the first five.
+            let inherited = self.inherited_field_count(obj);
+            let (pairs, _) = obj.bindings.as_chunks::<2>();
+            for &[field_idx, findex] in pairs {
+                if findex < 0 {
+                    continue;
+                }
+                let own = usize::try_from(field_idx)
+                    .ok()
+                    .and_then(|i| i.checked_sub(inherited));
+                if let Some(field) = own.and_then(|i| obj.fields.get(i)) {
+                    // `$Name` is HashLink's own marker for a class's statics
+                    // type; upstream traces read `Name.method`.
+                    let owner = obj.name.strip_prefix('$').unwrap_or(&obj.name);
+                    names
+                        .entry(findex as usize)
+                        .or_insert_with(|| format!("{owner}.{}", field.name));
+                }
+            }
+        }
+        names
+    }
+
+    /// How many fields this type inherits, so a binding's chain-wide field
+    /// index can be turned back into one of the type's own fields.
+    fn inherited_field_count(&self, obj: &HLTypeObj) -> usize {
+        let mut count = 0usize;
+        let mut parent = obj.super_.clone();
+        // Bounded by the type table: a malformed chain must not spin here.
+        for _ in 0..self.types.len() {
+            let Some(tref) = parent.clone() else { break };
+            let Some(sup) = self.types.get(tref.0).and_then(|t| t.obj.as_ref()) else {
+                break;
+            };
+            count += sup.fields.len();
+            parent = sup.super_.clone();
+        }
+        count
+    }
+
     /// Facts about every function body: recorded by the decoder, and gathered
     /// from the bodies on first use for a program built any other way.
     pub fn body_facts(&self) -> &BodyFacts {

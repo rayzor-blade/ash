@@ -7711,26 +7711,6 @@ impl HLInterpreter {
         }
     }
 
-    /// How many fields this type inherits, so a binding's chain-wide field
-    /// index can be turned back into one of the type's own fields.
-    fn inherited_field_count(
-        bytecode: &DecodedBytecode,
-        obj: &ash_core::types::HLTypeObj,
-    ) -> usize {
-        let mut count = 0usize;
-        let mut parent = obj.super_.clone();
-        // Bounded by the type table: a malformed chain must not spin here.
-        for _ in 0..bytecode.types.len() {
-            let Some(tref) = parent.clone() else { break };
-            let Some(sup) = bytecode.types.get(tref.0).and_then(|t| t.obj.as_ref()) else {
-                break;
-            };
-            count += sup.fields.len();
-            parent = sup.super_.clone();
-        }
-        count
-    }
-
     /// findex -> "Class.method", built once from the type tables.
     ///
     /// A function does not carry its own name: `HLFunction::field_name` is set
@@ -7768,42 +7748,7 @@ impl HLInterpreter {
     }
 
     fn build_function_name_table(&self, bytecode: &DecodedBytecode) -> HashMap<usize, String> {
-        let mut names: HashMap<usize, String> = HashMap::new();
-        for ty in &bytecode.types {
-            let Some(obj) = ty.obj.as_ref() else { continue };
-            for proto in &obj.proto {
-                if proto.findex >= 0 {
-                    names.insert(
-                        proto.findex as usize,
-                        format!("{}.{}", obj.name, proto.name),
-                    );
-                }
-            }
-            // Bindings are (field index, findex) pairs — how a class's STATIC
-            // functions are named, which is most of what a Haxe stack trace
-            // shows. The index counts from the top of the inheritance chain,
-            // not from this type's own fields: `$NullAcc` binds field 6 while
-            // owning only two, because its parent contributes the first five.
-            let inherited = Self::inherited_field_count(bytecode, obj);
-            let (pairs, _) = obj.bindings.as_chunks::<2>();
-            for &[field_idx, findex] in pairs {
-                if findex < 0 {
-                    continue;
-                }
-                let own = usize::try_from(field_idx)
-                    .ok()
-                    .and_then(|i| i.checked_sub(inherited));
-                if let Some(field) = own.and_then(|i| obj.fields.get(i)) {
-                    // `$Name` is HashLink's own marker for a class's statics
-                    // type; upstream traces read `Name.method`.
-                    let owner = obj.name.strip_prefix('$').unwrap_or(&obj.name);
-                    names
-                        .entry(findex as usize)
-                        .or_insert_with(|| format!("{owner}.{}", field.name));
-                }
-            }
-        }
-        names
+        bytecode.method_names()
     }
 }
 

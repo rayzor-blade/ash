@@ -1189,12 +1189,22 @@ fn run() -> Result<()> {
     }
     let mut native_resolver = NativeFunctionResolver::new();
 
+    // Class methods are named by the type table, not by the function itself.
+    let methods = {
+        let _p = ash_core::profile::scope("method names");
+        bytecode.method_names()
+    };
+
     // Give the profiler findex → name so sampled JIT frames and hot
     // interpreted functions print as names. Built once, only when profiling.
     if ash_core::profile::enabled() {
         let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
         for f in &bytecode.functions {
-            names.insert(f.findex as u32, f.name().to_string());
+            let name = methods
+                .get(&(f.findex as usize))
+                .cloned()
+                .unwrap_or_else(|| f.name());
+            names.insert(f.findex as u32, name);
         }
         for n in &bytecode.natives {
             names.insert(n.findex as u32, format!("{}@{}", n.lib, n.name));
@@ -1211,7 +1221,13 @@ fn run() -> Result<()> {
         bytecode
             .functions
             .iter()
-            .map(|f| (f.findex as u32, f.name().to_string()))
+            .map(|f| {
+                let name = methods
+                    .get(&(f.findex as usize))
+                    .cloned()
+                    .unwrap_or_else(|| f.name());
+                (f.findex as u32, name)
+            })
             .chain(
                 bytecode
                     .natives

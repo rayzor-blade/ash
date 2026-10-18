@@ -392,7 +392,10 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         } else {
             H_SIZE_INIT
         };
-        let mut ncells = nentries >> 2;
+        // One cell per entry. Upstream sizes this at a quarter of the entries,
+        // so a full table averages four entries a chain and a lookup reads
+        // each one's hash from a separate array before it finds its own.
+        let mut ncells = nentries;
 
         while H_PRIMES[i] < ncells as u32 {
             i += 1;

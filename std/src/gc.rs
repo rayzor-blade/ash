@@ -3667,37 +3667,55 @@ static CLAIMED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// word that reached it.
 const BIG_CLAIM: usize = 1 << 20;
 
-/// For every object claimed under `ASH_GC_DEBUG_ROOTS`: the word that reached
-/// it, and the object that word was in (`None` for a root).
-static CLAIM_SOURCE: std::sync::Mutex<Option<HashMap<usize, (String, Option<usize>)>>> =
+/// For every object claimed under `ASH_GC_DEBUG_ROOTS`: the address of the
+/// word that reached it and the heap offset of the object that word was in
+/// ([`ROOT`] for a word outside the heap). About twenty bytes per claimed
+/// object on wasm32, dropped when the collection's marking ends.
+static CLAIM_SOURCE: std::sync::Mutex<Option<HashMap<usize, (usize, usize)>>> =
     std::sync::Mutex::new(None);
+
+/// The `parent` of a claim made from a root.
+const ROOT: usize = usize::MAX;
 
 /// Remember how `object` was reached, for [`report_big_claim`] to walk back.
 #[cold]
-fn note_claim((start, _): (usize, usize), from: String, parent: Option<usize>) {
+fn note_claim((start, _): (usize, usize), word: usize, parent: usize) {
     if let Ok(mut map) = CLAIM_SOURCE.lock() {
         map.get_or_insert_with(HashMap::new)
-            .insert(start, (from, parent));
+            .insert(start, (word, parent));
+    }
+}
+
+/// Drop what [`note_claim`] recorded.
+fn forget_claims() {
+    if let Ok(mut map) = CLAIM_SOURCE.lock() {
+        *map = None;
     }
 }
 
 /// Print an object of [`BIG_CLAIM`] bytes or more and the chain of words that
 /// kept it reachable, back to a root.
 #[cold]
-fn report_big_claim((start, size): (usize, usize)) {
+fn report_big_claim(heap_start: usize, (start, size): (usize, usize)) {
     eprintln!(
         "[gc-roots]   {} KB object at +{start:#x} is kept by:",
         size / 1024
     );
     let map = CLAIM_SOURCE.lock().ok();
     let map = map.as_deref().and_then(Option::as_ref);
-    let mut at = Some(start);
-    while let Some(object) = at {
-        let Some((from, parent)) = map.and_then(|m| m.get(&object)) else {
+    let mut at = start;
+    while let Some(&(word, parent)) = map.and_then(|m| m.get(&at)) {
+        // The world is stopped, so the word still holds what reached the object.
+        let value = unsafe { *(word as *const usize) };
+        if parent == ROOT {
+            eprintln!("[gc-roots]     +{at:#x} <- root slot {word:#x}, value {value:#x}");
             break;
-        };
-        eprintln!("[gc-roots]     +{object:#x} <- {from}");
-        at = *parent;
+        }
+        eprintln!(
+            "[gc-roots]     +{at:#x} <- heap word +{:#x} (object +{parent:#x}), value {value:#x}",
+            word - heap_start
+        );
+        at = parent;
     }
 }
 
@@ -3810,13 +3828,9 @@ fn scan_allocation_shared(
             let before = out.len();
             mark_allocation_shared(blocks, alloc_sizes, objects, val - heap_start, out);
             if debug && out.len() > before {
-                let from = format!(
-                    "heap word +{:#x} ({size} bytes from +{start:#x}), value {val:#x}",
-                    start + off
-                );
-                note_claim(out[before], from, Some(start));
+                note_claim(out[before], heap_start + start + off, start);
                 if out[before].1 >= BIG_CLAIM {
-                    report_big_claim(out[before]);
+                    report_big_claim(heap_start, out[before]);
                 }
             }
         }
@@ -4791,13 +4805,9 @@ impl ImmixAllocator {
                     let before = out.len();
                     this.mark_allocation(val - heap_start, out);
                     if debug && out.len() > before {
-                        note_claim(
-                            out[before],
-                            format!("root slot {addr:#x}, value {val:#x}"),
-                            None,
-                        );
+                        note_claim(out[before], addr, ROOT);
                         if out[before].1 >= BIG_CLAIM {
-                            report_big_claim(out[before]);
+                            report_big_claim(heap_start, out[before]);
                         }
                     }
                 }
@@ -5532,6 +5542,9 @@ impl ImmixAllocator {
     }
 
     fn mark_roots(&mut self, mutators: &[MutatorSnapshot]) {
+        if debug_roots() {
+            forget_claims();
+        }
         let roots = self.roots.clone();
         let root_set = roots.borrow();
 
@@ -5789,6 +5802,9 @@ impl ImmixAllocator {
         // Transitive conservative marking
         if !all_newly_marked.is_empty() {
             self.conservative_trace(all_newly_marked);
+        }
+        if debug_roots() {
+            forget_claims();
         }
     }
 

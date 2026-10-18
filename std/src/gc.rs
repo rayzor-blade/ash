@@ -3727,7 +3727,17 @@ fn object_class(addr: usize) -> String {
         // "kind <n> <name>": the name is what the reader wants.
         let described = describe_header(header);
         let name = described.splitn(3, ' ').nth(2).unwrap_or(&described);
-        format!(" [{name}]")
+        // A class's runtime object starts with the class's type too.
+        let ty = header as *const hl::hl_type;
+        let is_runtime = unsafe {
+            let obj = (*ty).__bindgen_anon_1.obj;
+            !obj.is_null() && (*obj).rt as usize == addr
+        };
+        if is_runtime {
+            format!(" [runtime object of {name}]")
+        } else {
+            format!(" [{name}]")
+        }
     } else {
         String::new()
     }
@@ -6499,6 +6509,10 @@ impl ImmixAllocator {
                     continue;
                 }
                 let rt = unsafe { (*obj).rt };
+                // A class's runtime object also starts with the class's type.
+                if rt as usize == begin {
+                    continue;
+                }
                 let nfields = unsafe { (*rt).nfields };
                 for fid in 0..nfields {
                     let f = unsafe { crate::obj::hlp_obj_field_fetch(t, fid) };

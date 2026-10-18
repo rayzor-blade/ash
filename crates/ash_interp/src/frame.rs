@@ -294,6 +294,9 @@ pub struct InterpreterFrame {
     /// what notices it. A plain `u32` on the frame keeps the probe to an
     /// increment and a compare on the interpreter's hottest path.
     pub backedges: u32,
+    /// The back-edge count reached a probe point and no edge that closes a
+    /// loop has named the hot loop yet.
+    pub hot_loop_due: bool,
     /// Callee returns into this frame from a SELF-recursive call. A recursive
     /// frame has no back-edge, so this is its only recurring transfer point.
     pub self_returns: u32,
@@ -320,6 +323,7 @@ impl InterpreterFrame {
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,
+            hot_loop_due: false,
             self_returns: 0,
             native_sp: 0,
         }
@@ -345,6 +349,7 @@ impl InterpreterFrame {
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,
+            hot_loop_due: false,
             self_returns: 0,
             native_sp: 0,
         }

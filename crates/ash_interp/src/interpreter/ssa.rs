@@ -90,33 +90,42 @@ impl HLInterpreter {
             // The tiering ladder is driven by back edges, and it was the
             // opcode loop alone that counted them: under this walker a hot
             // loop raised no demand and never asked for a compile, so a
-            // hybrid run stayed interpreted no matter how hot it got. An edge
-            // that closes a loop is the same signal the opcode loop reads from
-            // a negative jump offset.
-            if let Some(prev) = prev_block
-                && prep.is_back_edge(prev, block as u32)
-            {
-                let frame = self.stack.last_mut().unwrap();
-                frame.backedges = frame.backedges.wrapping_add(1);
-                // Every 64th, for the reason the opcode loop gives: there
-                // are two thresholds to cross, so one signal would stall
-                // the ladder at Cranelift.
-                let hot = frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0;
-                // Named by the header's bytecode pc, which is what the
-                // tiering map and `compile_osr_entry` both key on -- the
-                // block index would look up a different block, or none.
-                if hot && let Some(&header_pc) = prep.block_pcs().get(block) {
-                    self.note_hot_loop(bc, func_idx, header_pc);
-                    // Promotion swaps a pointer, which only the next
-                    // call observes; a loop entered once would keep
-                    // interpreting past its own compile without this.
-                    if let Some(ret) = self.try_osr_transfer(
-                        bc,
-                        func_idx,
-                        header_pc,
-                        Some((prep, block, prev_block)),
-                    )? {
-                        return Ok(ret);
+            // hybrid run stayed interpreted no matter how hot it got. A
+            // branch to an earlier-numbered block counts, as a negative jump
+            // does in the opcode loop; the loop is named only at an edge
+            // whose target dominates its source, since inlining numbers new
+            // blocks after their callers and so gives forward edges to lower
+            // numbers.
+            if let Some(prev) = prev_block {
+                let closes_loop = prep.is_back_edge(prev, block as u32);
+                if closes_loop || block <= prev as usize {
+                    let frame = self.stack.last_mut().unwrap();
+                    frame.backedges = frame.backedges.wrapping_add(1);
+                    // Every 64th, for the reason the opcode loop gives: there
+                    // are two thresholds to cross, so one signal would stall
+                    // the ladder at Cranelift.
+                    if frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0 {
+                        frame.hot_loop_due = true;
+                    }
+                }
+                if closes_loop && self.stack.last().unwrap().hot_loop_due {
+                    self.stack.last_mut().unwrap().hot_loop_due = false;
+                    // Named by the header's bytecode pc, which is what the
+                    // tiering map and `compile_osr_entry` both key on -- the
+                    // block index would look up a different block, or none.
+                    if let Some(&header_pc) = prep.block_pcs().get(block) {
+                        self.note_hot_loop(bc, func_idx, header_pc);
+                        // Promotion swaps a pointer, which only the next
+                        // call observes; a loop entered once would keep
+                        // interpreting past its own compile without this.
+                        if let Some(ret) = self.try_osr_transfer(
+                            bc,
+                            func_idx,
+                            header_pc,
+                            Some((prep, block, prev_block)),
+                        )? {
+                            return Ok(ret);
+                        }
                     }
                 }
             }

@@ -5350,7 +5350,9 @@ impl ImmixAllocator {
         let live_blocks = self.heap.used_blocks.len();
         let live_bytes = live_blocks * BLOCK_SIZE;
         if minor {
-            if live_blocks > 2 * self.heap.live_after_major + 64 {
+            // What a minor leaves is promoted and stays until a major, so a
+            // live set half again the last major's is garbage that needs one.
+            if 2 * live_blocks > 3 * self.heap.live_after_major + 128 {
                 self.heap.since_major = major_every();
             }
         } else {

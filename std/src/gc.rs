@@ -7116,7 +7116,12 @@ impl ImmixAllocator {
             let mut hand_back: Vec<usize> = self.heap.pending_handback.iter().copied().collect();
             hand_back.sort_unstable();
             hand_back.truncate(hand_back.len().saturating_sub(RESIDENT_FREE_BLOCKS));
-            hand_back.truncate(HANDBACK_CHUNK_BLOCKS);
+            // An idle collection runs with every mutator waiting, so it has no
+            // pause to protect and returns all of them; a heartbeat one stops
+            // at a chunk so the world is not held for the whole madvise.
+            if COLLECT_ORIGIN.load(Ordering::Relaxed) != 8 {
+                hand_back.truncate(HANDBACK_CHUNK_BLOCKS);
+            }
             if !hand_back.is_empty() {
                 let base = self.heap.memory.as_mut_ptr();
                 let mut run_start = hand_back[0];
@@ -9080,7 +9085,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_sweep_hands_back_one_chunk_and_leaves_the_rest_pending() {
+    fn a_heartbeat_sweep_hands_back_one_chunk_and_an_idle_one_hands_back_all() {
         if !handback_enabled() || no_reclaim() || quarantine_freed() {
             return;
         }
@@ -9092,13 +9097,16 @@ mod tests {
         set_collect_origin(6);
         assert_eq!(gc.sweep(&[], false, 0), blocks);
         assert_eq!(gc.heap.pending_handback.len(), blocks);
-        set_collect_origin(8);
+        // Quiet because nothing collected for a heartbeat: one chunk.
+        gc.heap.last_collect = Instant::now() - HEARTBEAT;
         gc.sweep(&[], false, 0);
         assert_eq!(gc.heap.reusable_blocks.len(), HANDBACK_CHUNK_BLOCKS);
         assert_eq!(
             gc.heap.pending_handback.len(),
             blocks - HANDBACK_CHUNK_BLOCKS
         );
+        // Idle: everything but the resident blocks.
+        set_collect_origin(8);
         gc.sweep(&[], false, 0);
         assert_eq!(gc.heap.pending_handback.len(), RESIDENT_FREE_BLOCKS);
     }

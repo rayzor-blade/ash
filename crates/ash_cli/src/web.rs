@@ -78,12 +78,15 @@ fn respond(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
     reader.read_line(&mut request)?;
     // The request line and the Range header are all this reads.
     let mut range_header = None;
+    let mut brotli_accepted = false;
     let mut line = String::new();
     while reader.read_line(&mut line)? > 2 {
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("range")
-        {
-            range_header = Some(value.trim().to_string());
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("range") {
+                range_header = Some(value.trim().to_string());
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                brotli_accepted = accepts_brotli(value);
+            }
         }
         line.clear();
     }
@@ -134,6 +137,17 @@ fn respond(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
         RangeRequest::Whole => {
             let mut body = Vec::with_capacity(total as usize);
             file.read_to_end(&mut body)?;
+            if brotli_accepted && compressible(&path) && body.len() > 1024 {
+                let packed = compressed(&path, &body, total);
+                return send_with(
+                    &mut stream,
+                    "200 OK",
+                    kind,
+                    &packed,
+                    with_body,
+                    "Content-Encoding: br\r\nVary: Accept-Encoding\r\n",
+                );
+            }
             send_with(&mut stream, "200 OK", kind, &body, with_body, "")
         }
         RangeRequest::Part(first, last) => {
@@ -161,6 +175,58 @@ fn respond(mut stream: TcpStream, root: &Path) -> std::io::Result<()> {
             &format!("Content-Range: bytes */{total}\r\n"),
         ),
     }
+}
+
+/// Whether an `Accept-Encoding` value lists brotli, and not as `br;q=0`.
+fn accepts_brotli(value: &str) -> bool {
+    value.split(',').any(|item| {
+        let mut parts = item.split(';');
+        parts
+            .next()
+            .is_some_and(|c| c.trim().eq_ignore_ascii_case("br"))
+            && !parts.any(|p| p.trim().replace(' ', "") == "q=0")
+    })
+}
+
+/// Files worth compressing: text and wasm. Images and audio already are.
+fn compressible(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("wasm" | "js" | "mjs" | "html" | "css" | "json" | "svg" | "wgsl" | "hl" | "txt")
+    )
+}
+
+/// A file's brotli form, made once per version of it: the page is fetched
+/// again on every reload, and compressing megabytes costs seconds.
+fn compressed(path: &Path, body: &[u8], total: u64) -> std::sync::Arc<Vec<u8>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    // Keyed by path, length and modification time.
+    type Packed = Mutex<HashMap<(PathBuf, u64, u64), Arc<Vec<u8>>>>;
+    static CACHE: OnceLock<Packed> = OnceLock::new();
+    let modified = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64);
+    let key = (path.to_path_buf(), total, modified);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().expect("compression cache poisoned").get(&key) {
+        return hit.clone();
+    }
+    let mut out = Vec::new();
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: 5,
+        ..Default::default()
+    };
+    let mut input = body;
+    brotli::BrotliCompress(&mut input, &mut out, &params).expect("compressing into memory");
+    let out = Arc::new(out);
+    cache
+        .lock()
+        .expect("compression cache poisoned")
+        .insert(key, out.clone());
+    out
 }
 
 /// What a request's `Range` header asks of a file of a given length.
@@ -350,7 +416,7 @@ pub fn write_page(module: &Path, quiet: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RangeRequest, content_type, parse_range, percent_decode, resolve};
+    use super::{RangeRequest, accepts_brotli, content_type, parse_range, percent_decode, resolve};
     use std::path::Path;
 
     #[test]
@@ -402,6 +468,40 @@ mod tests {
             String::from_utf8_lossy(&response[..at]).into_owned(),
             &response[at..],
         )
+    }
+
+    #[test]
+    fn a_module_is_sent_brotli_compressed_to_a_browser_that_accepts_it() {
+        let root = std::env::temp_dir().join(format!("ash-brotli-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let data: Vec<u8> = b"asm".iter().cycle().take(50_000).copied().collect();
+        std::fs::write(root.join("app.wasm"), &data).unwrap();
+        std::fs::write(root.join("song.m4a"), &data).unwrap();
+
+        let packed = ask(
+            &root,
+            "GET /app.wasm HTTP/1.1\r\nAccept-Encoding: gzip, br\r\n\r\n",
+        );
+        let (head, body) = split(&packed);
+        assert!(head.contains("Content-Encoding: br"), "{head}");
+        assert!(head.contains("Vary: Accept-Encoding"), "{head}");
+        assert!(body.len() < data.len() / 10, "{} bytes", body.len());
+        let mut unpacked = Vec::new();
+        brotli::BrotliDecompress(&mut &body[..], &mut unpacked).unwrap();
+        assert_eq!(unpacked, data);
+
+        for request in [
+            "GET /app.wasm HTTP/1.1\r\n\r\n",
+            "GET /app.wasm HTTP/1.1\r\nAccept-Encoding: br;q=0\r\n\r\n",
+            "GET /song.m4a HTTP/1.1\r\nAccept-Encoding: br\r\n\r\n",
+        ] {
+            let plain = ask(&root, request);
+            let (head, body) = split(&plain);
+            assert!(!head.contains("Content-Encoding"), "{head}");
+            assert_eq!(body, &data[..]);
+        }
+        assert!(accepts_brotli("gzip, deflate, br, zstd"));
+        assert!(!accepts_brotli("gzip"));
     }
 
     #[test]

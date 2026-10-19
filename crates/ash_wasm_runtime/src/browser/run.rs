@@ -59,27 +59,94 @@ impl Outcome {
     }
 }
 
+const PREPARED_PROGRAM: &str = "ash-prepared-program";
+
+/// The program rewritten and compiled, and the limits of the memory it
+/// imports if it imports one.
+fn prepare(bytes: &[u8]) -> Result<(WebAssembly::Module, Option<MemoryLimits>), JsValue> {
+    let bytes =
+        ash_wasm_link::waits::instrument(bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let limits = imported_memory(&bytes);
+    let module = WebAssembly::Module::new(&Uint8Array::from(bytes.as_slice()))?;
+    Ok((module, limits))
+}
+
+/// Rewrite and compile a program as soon as its bytes are in, so that the
+/// work overlaps whatever else the page is still downloading. Hand the result
+/// to [`run`] in place of the bytes.
+#[wasm_bindgen]
+pub fn prepare_program(module: Uint8Array) -> Result<Object, JsValue> {
+    let (compiled, limits) = prepare(&module.to_vec())?;
+    let out = Object::new();
+    let set = |key: &str, value: JsValue| Reflect::set(&out, &key.into(), &value).map(|_| ());
+    set("kind", PREPARED_PROGRAM.into())?;
+    set("module", compiled.into())?;
+    if let Some(limits) = limits {
+        set("minimum", limits.minimum.into())?;
+        set("maximum", limits.maximum.into())?;
+    }
+    Ok(out)
+}
+
+/// Prepare a native library as soon as its bytes are in; see
+/// [`prepare_program`]. `threads` asks for the module a thread's instance is
+/// made from as well, which a program that uses threads needs.
+#[wasm_bindgen]
+pub fn prepare_library(bytes: Uint8Array, threads: bool) -> Result<Object, JsValue> {
+    super::dylink::prepare_library(&bytes, threads)
+}
+
+/// A prepared program's parts, or a program's bytes prepared here.
+fn program_parts(
+    program: &JsValue,
+) -> Result<(WebAssembly::Module, Option<MemoryLimits>), JsValue> {
+    if let Some(bytes) = program.dyn_ref::<Uint8Array>() {
+        return prepare(&bytes.to_vec());
+    }
+    if Reflect::get(program, &"kind".into())?
+        .as_string()
+        .as_deref()
+        != Some(PREPARED_PROGRAM)
+    {
+        return Err("run takes a program's bytes, or what prepare_program made of them".into());
+    }
+    let limit = |key: &str| {
+        Reflect::get(program, &key.into())
+            .ok()
+            .and_then(|v| v.as_f64())
+    };
+    let limits = limit("minimum")
+        .zip(limit("maximum"))
+        .map(|(minimum, maximum)| MemoryLimits {
+            minimum: minimum as u32,
+            maximum: maximum as u32,
+        });
+    let module = Reflect::get(program, &"module".into())?.dyn_into()?;
+    Ok((module, limits))
+}
+
 /// Run a module, and answer how it ended.
 ///
+/// `module` is the program's bytes, or what [`prepare_program`] made of them.
 /// `args` is `Sys.args()`, argv[0] included; `environ` is
 /// `Sys.environment()`, each entry already `NAME=value`. `libraries`, when
-/// given, maps each native library's name to its side module's bytes; they
-/// are loaded before the program runs (see [`super::dylink`]).
+/// given, maps each native library's name to its side module's bytes, or to
+/// what [`prepare_library`] made of them; they are loaded before the program
+/// runs (see [`super::dylink`]).
 #[wasm_bindgen]
 pub async fn run(
-    module: Uint8Array,
+    module: JsValue,
     args: Vec<String>,
     environ: Vec<String>,
     spawn: Option<Function>,
     libraries: Option<Object>,
 ) -> Result<Outcome, JsValue> {
-    let bytes = ash_wasm_link::waits::instrument(&module.to_vec())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let (program, limits) = program_parts(&module)?;
     // A threads build does not define its memory. It imports one, shared, so
     // that every thread instantiates against the same one -- and the host is
     // what makes it. See [`super::module::imported_memory`] for why the
     // limits are read out of the module rather than asked of the engine.
-    let shared = imported_memory(&bytes).map(shared_memory).transpose()?;
+    let shared = limits.map(shared_memory).transpose()?;
     let threaded = shared.is_some();
     let control = if shared.is_some() {
         super::control::Control::new()
@@ -93,7 +160,9 @@ pub async fn run(
     let threads = Rc::new(Threads::with_control(spawn, args, environ, control.clone()));
 
     let import_object = imports(&host, shared.as_ref(), &threads);
-    let (compiled, instance) = instantiate(&bytes, &import_object).await?;
+    let compiled = program;
+    let instance =
+        JsFuture::from(WebAssembly::instantiate_module(&compiled, &import_object)).await?;
     let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
 
     // The host functions need the memory, and the instance is the first thing
@@ -117,7 +186,11 @@ pub async fn run(
         threads.attach_libraries(loaded.layout());
         if !loaded.is_empty() {
             web_sys::console::log_1(
-                &format!("[ash] loaded native libraries: {}", loaded.names().join(", ")).into(),
+                &format!(
+                    "[ash] loaded native libraries: {}",
+                    loaded.names().join(", ")
+                )
+                .into(),
             );
         }
         *host.libraries.borrow_mut() = loaded;
@@ -158,17 +231,6 @@ pub async fn run(
     let memory = host.guest.borrow().as_ref().map(|g| g.memory().clone());
     control.finish(&outcome, memory.as_ref());
     Ok(control.outcome().unwrap_or(outcome))
-}
-
-/// Compile and instantiate, and keep both: the instance to run, and the
-/// module because a thread instantiates that same one again.
-async fn instantiate(
-    bytes: &[u8],
-    imports: &Object,
-) -> Result<(WebAssembly::Module, JsValue), JsValue> {
-    let result = JsFuture::from(WebAssembly::instantiate_buffer(bytes, imports)).await?;
-    let compiled: WebAssembly::Module = Reflect::get(&result, &"module".into())?.unchecked_into();
-    Ok((compiled, Reflect::get(&result, &"instance".into())?))
 }
 
 /// The memory a threads build imports: shared, and reserving the maximum it

@@ -12,7 +12,7 @@
 // Output is posted to the page rather than left in the console, because a
 // worker's console is not the page's document.
 
-import init, { run } from "./ash_browser.js";
+import init, { run, prepare_program, prepare_library } from "./ash_browser.js";
 
 const post = (kind, text) => self.postMessage({ kind, text });
 
@@ -48,10 +48,35 @@ for (const [name, kind] of [["log", "out"], ["error", "err"]]) {
 const idle = [];
 const agents = [];
 
+// Modules an agent has been asked to prepare, by request number.
+const preparing = new Map();
+let prepareCount = 0;
+
+function answerPrepare(data) {
+  const done = preparing.get(data.id);
+  preparing.delete(data.id);
+  if (done) done(data);
+}
+
+// Ask an idle agent to read, rewrite and compile what was downloaded, so the
+// work runs beside the other downloads and not on this thread, which has to
+// keep reading them. The answer carries `prepared` (or an `error`) and the
+// bytes back. Nothing when no agent is free; the caller prepares it here.
+function prepareOnAgent(what, bytes, threads) {
+  const agent = idle.pop();
+  if (!agent) return undefined;
+  const id = ++prepareCount;
+  return new Promise((resolve) => {
+    preparing.set(id, resolve);
+    agent.postMessage({ kind: "prepare", what, id, bytes: bytes.buffer, threads }, [bytes.buffer]);
+  });
+}
+
 function adoptAgents(ports) {
   for (const port of ports) {
     port.onmessage = ({ data }) => {
-      if (data.kind === "agent" && data.state === "idle") idle.push(port);
+      if (data.kind === "prepared") answerPrepare(data);
+      else if (data.kind === "agent" && data.state === "idle") idle.push(port);
     };
     idle.push(port);
   }
@@ -65,6 +90,10 @@ async function warmAgents(count) {
     let settle;
     ready.push(new Promise((resolve) => (settle = resolve)));
     worker.onmessage = ({ data }) => {
+      if (data.kind === "prepared") {
+        answerPrepare(data);
+        return;
+      }
       if (data.kind !== "agent") {
         self.postMessage(data);
         return;
@@ -157,7 +186,13 @@ self.ashAgent = ({ name, memory, address }) => {
 // Every library is requested as soon as the manifest names it, together and
 // alongside the program's own download, not after it. `since` stamps each
 // step with the milliseconds since the load began.
-async function fetchLibraries(module, since) {
+//
+// Each is also read, rewritten and compiled the moment its bytes are in
+// (`ready` is the host finishing its own start-up, which that needs), so the
+// work happens while the rest of the program is still downloading instead of
+// after the last byte. A library that will not prepare is handed on as bytes,
+// and the host reports why when it loads it.
+async function fetchLibraries(module, since, ready) {
   const base = new URL(module, self.location.href);
   let names = [];
   try {
@@ -167,6 +202,10 @@ async function fetchLibraries(module, since) {
     return undefined;
   }
   if (!Array.isArray(names) || names.length === 0) return undefined;
+  // A program built with threads needs shared memory, which only a page that
+  // is cross-origin isolated has; the module a thread's instance uses is
+  // made now for any page that could run one.
+  const threads = self.crossOriginIsolated === true;
   const fetched = await Promise.all(
     names.map(async (name) => {
       const response = await fetch(new URL(`${name}.wasm`, base));
@@ -176,11 +215,40 @@ async function fetchLibraries(module, since) {
       }
       const bytes = new Uint8Array(await response.arrayBuffer());
       post("meta", `loaded library ${name}, ${bytes.length.toLocaleString()} bytes, at ${since()}`);
-      return [name, bytes];
+      const size = bytes.length;
+      return [name, await prepared("library", name, bytes, threads, ready, since, size)];
     }),
   );
   // Listed order, whichever finished first.
   return Object.fromEntries(fetched.filter(Boolean));
+}
+
+// A downloaded module, prepared on an idle agent, or here when there is none,
+// and handed on as its bytes when it will not prepare: the host reports why
+// when it loads it.
+async function prepared(what, name, bytes, threads, ready, since, size) {
+  await ready;
+  const began = performance.now();
+  const done = (where) =>
+    post("meta", `prepared ${what} ${name} (${size.toLocaleString()} bytes) ${where} in ${Math.round(performance.now() - began)}ms, at ${since()}`);
+  const asked = prepareOnAgent(what, bytes, threads);
+  if (asked) {
+    const answer = await asked;
+    if (answer.error === undefined) {
+      done("on an agent");
+      return answer.prepared;
+    }
+    post("meta", `preparing ${what} ${name}: ${answer.error}; handing it on as bytes`);
+    return new Uint8Array(answer.bytes);
+  }
+  try {
+    const result = what === "program" ? prepare_program(bytes) : prepare_library(bytes, threads);
+    done("here");
+    return result;
+  } catch (e) {
+    post("meta", `preparing ${what} ${name}: ${e && e.message ? e.message : e}; handing it on as bytes`);
+    return bytes;
+  }
 }
 
 self.onmessage = async (event) => {
@@ -194,30 +262,41 @@ self.onmessage = async (event) => {
     const since = () => `${Math.round(performance.now() - begun)}ms`;
     post("meta", `fetching ${module} and its libraries`);
     const initialising = init();
-    const programRequest = fetch(module);
-    const libraryRequest = fetchLibraries(module, since);
+    // The agents the work below borrows are made once the host has started.
+    const agentsReady = (async () => {
+      await initialising;
+      post("meta", `host ready at ${since()}`);
+      // Before the program runs, and before it can ask for a thread.
+      const count = Array.isArray(ports)
+        ? adoptAgents(ports)
+        : await warmAgents(Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+      post("meta", `${count} agents ready at ${since()}`);
+      return count;
+    })();
+    // The body is read as it arrives, not when the program gets to it: a
+    // response nobody reads stalls the download behind it.
+    const programRequest = fetch(module).then(async (response) => {
+      if (!response.ok) throw new Error(`fetching ${module}: ${response.status}`);
+      const body = new Uint8Array(await response.arrayBuffer());
+      post("meta", `loaded ${module}, ${body.length.toLocaleString()} bytes, at ${since()}`);
+      return body;
+    });
+    const libraryRequest = fetchLibraries(module, since, agentsReady);
     // Settled by the awaits below; this only keeps an early failure from
     // being reported twice.
-    for (const pending of [initialising, programRequest, libraryRequest]) {
+    for (const pending of [initialising, agentsReady, programRequest, libraryRequest]) {
       pending.catch(() => {});
     }
 
-    await initialising;
-    post("meta", `host ready at ${since()}`);
-    // Before the program runs, and before it can ask for a thread.
-    const ready = Array.isArray(ports)
-      ? adoptAgents(ports)
-      : await warmAgents(Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
-    post("meta", `${ready} agents ready at ${since()}`);
-    const response = await programRequest;
-    if (!response.ok) throw new Error(`fetching ${module}: ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    post("meta", `loaded ${module}, ${bytes.length.toLocaleString()} bytes, at ${since()}`);
+    await agentsReady;
+    const bytes = await programRequest;
+    // Rewritten and compiled now, before the libraries are waited for.
+    const program = await prepared("program", module, bytes, false, agentsReady, since, bytes.length);
     const libraries = await libraryRequest;
     post("meta", `starting the program at ${since()}`);
 
     const started = performance.now();
-    const outcome = await run(bytes, args ?? [module], environ ?? [], spawn, libraries);
+    const outcome = await run(program, args ?? [module], environ ?? [], spawn, libraries);
     const took = Math.round(performance.now() - started);
 
     if (outcome.trapped) post("err", `trapped: ${outcome.trapped}`);

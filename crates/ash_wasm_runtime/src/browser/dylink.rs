@@ -132,19 +132,25 @@ pub fn load(
         let Ok(bytes) = Reflect::get(libraries, &name.as_str().into()) else {
             continue;
         };
-        let Some(bytes) = bytes.dyn_ref::<Uint8Array>() else {
-            report(&format!("[ash] cannot load {name}: its bytes are not a Uint8Array"));
-            continue;
+        let ready = match Prepared::from_js(&bytes, for_threads) {
+            Ok(ready) => ready,
+            Err(e) => {
+                report(&format!("[ash] cannot load {name}: {}", describe(&e)));
+                continue;
+            }
         };
-        let bytes = bytes.to_vec();
-        match load_one(&bytes, main_exports, host_imports) {
+        match load_one(&ready, main_exports, host_imports) {
             Ok((exports, table, placement)) => {
                 out.table = Some(table);
                 order.push(name.clone());
                 if for_threads {
+                    let module = match ready.thread {
+                        Some(module) => module,
+                        None => thread_module(&ready.bytes)?,
+                    };
                     placed.push(Placed {
                         name: name.clone(),
-                        module: thread_module(&bytes)?,
+                        module,
                         placement,
                     });
                 }
@@ -196,6 +202,90 @@ pub fn load(
     Ok(out)
 }
 
+/// A library read, rewritten and compiled, and not yet placed in a program.
+///
+/// Everything here depends on the library's bytes alone, so a page can make
+/// one the moment the bytes arrive, while the rest of the program is still
+/// downloading. [`prepare_library`] hands one to JavaScript as a plain object
+/// and `load` takes it back, or takes bare bytes and prepares them there.
+struct Prepared {
+    memory_size: u32,
+    table_size: u32,
+    module: WebAssembly::Module,
+    /// The module a thread's instance is made from, when it was made ahead.
+    thread: Option<WebAssembly::Module>,
+    bytes: Vec<u8>,
+}
+
+const PREPARED_LIBRARY: &str = "ash-prepared-library";
+
+impl Prepared {
+    fn from_bytes(bytes: Vec<u8>, with_thread_module: bool) -> Result<Prepared, JsValue> {
+        let side = ash_wasm_link::read_side_module(&bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?
+            .ok_or_else(|| JsValue::from_str("it is not a side module (no dylink.0 section)"))?;
+        let rewritten = ash_wasm_link::waits::instrument(&bytes)
+            .and_then(|b| ash_wasm_link::dylink::expose_tls_base(&b))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let module = WebAssembly::Module::new(&Uint8Array::from(rewritten.as_slice()))?;
+        let thread = if with_thread_module {
+            Some(thread_module(&bytes)?)
+        } else {
+            None
+        };
+        Ok(Prepared {
+            memory_size: side.memory_size,
+            table_size: side.table_size,
+            module,
+            thread,
+            bytes,
+        })
+    }
+
+    /// Bare bytes are prepared here; an object [`prepare_library`] made is
+    /// read back.
+    fn from_js(value: &JsValue, with_thread_module: bool) -> Result<Prepared, JsValue> {
+        if let Some(bytes) = value.dyn_ref::<Uint8Array>() {
+            return Prepared::from_bytes(bytes.to_vec(), with_thread_module);
+        }
+        let kind = Reflect::get(value, &"kind".into())?.as_string();
+        if kind.as_deref() != Some(PREPARED_LIBRARY) {
+            return Err("its bytes are not a Uint8Array".into());
+        }
+        let number = |key: &str| -> Result<u32, JsValue> {
+            Ok(Reflect::get(value, &key.into())?.as_f64().unwrap_or(0.0) as u32)
+        };
+        let thread = Reflect::get(value, &"thread".into())?;
+        Ok(Prepared {
+            memory_size: number("memory_size")?,
+            table_size: number("table_size")?,
+            module: Reflect::get(value, &"module".into())?.dyn_into()?,
+            thread: thread.dyn_into().ok(),
+            bytes: Reflect::get(value, &"bytes".into())?
+                .dyn_into::<Uint8Array>()?
+                .to_vec(),
+        })
+    }
+}
+
+/// Prepare a library as soon as its bytes are in: read, rewrite and compile
+/// it, and for a program that may use threads the module those make too.
+/// Hand the result to `run` in place of the bytes.
+pub fn prepare_library(bytes: &Uint8Array, with_thread_module: bool) -> Result<Object, JsValue> {
+    let ready = Prepared::from_bytes(bytes.to_vec(), with_thread_module)?;
+    let out = Object::new();
+    let set = |key: &str, value: JsValue| Reflect::set(&out, &key.into(), &value).map(|_| ());
+    set("kind", PREPARED_LIBRARY.into())?;
+    set("memory_size", ready.memory_size.into())?;
+    set("table_size", ready.table_size.into())?;
+    set("module", ready.module.into())?;
+    if let Some(thread) = ready.thread {
+        set("thread", thread.into())?;
+    }
+    set("bytes", bytes.clone().into())?;
+    Ok(out)
+}
+
 /// A library compiled for a thread's instance: no initial data, see
 /// [`Placed::module`].
 fn thread_module(bytes: &[u8]) -> Result<WebAssembly::Module, JsValue> {
@@ -214,17 +304,12 @@ enum GotKind {
 }
 
 fn load_one(
-    bytes: &[u8],
+    ready: &Prepared,
     main_exports: &Object,
     host_imports: &Object,
 ) -> Result<(Object, WebAssembly::Table, Placement), JsValue> {
-    let side = ash_wasm_link::read_side_module(bytes)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?
-        .ok_or_else(|| JsValue::from_str("it is not a side module (no dylink.0 section)"))?;
-    let bytes = ash_wasm_link::waits::instrument(bytes)
-        .and_then(|b| ash_wasm_link::dylink::expose_tls_base(&b))
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let module = WebAssembly::Module::new(&Uint8Array::from(bytes.as_slice()))?;
+    let side = ready;
+    let module = ready.module.clone();
 
     let (memory, table) = program_memory_and_table(main_exports)?;
 

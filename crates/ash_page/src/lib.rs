@@ -240,6 +240,25 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_and_agents_use_what_the_host_exports() {
+        // The page's scripts and the host are built together; a name one asks
+        // of the other must be there.
+        for name in ["run", "run_thread", "prepare_program", "prepare_library"] {
+            assert!(
+                HOST_JS.contains(&format!("export function {name}"))
+                    || HOST_JS.contains(&format!("export async function {name}")),
+                "the host does not export {name}"
+            );
+        }
+        assert!(WORKER_JS.contains("prepare_program, prepare_library"));
+        assert!(THREAD_JS.contains("prepare_program, prepare_library"));
+        // A downloaded body is read as it arrives, not when the program
+        // reaches it, and the host's own module is requested first.
+        assert!(WORKER_JS.contains("await response.arrayBuffer()"));
+        assert!(WORKER_JS.find("init()") < WORKER_JS.find("fetch(module)"));
+    }
+
+    #[test]
     fn the_log_pane_is_hidden_unless_debugging() {
         // Hidden rather than absent: a page runner reads its textContent.
         assert!(INDEX_HTML.contains("<pre id=\"out\" hidden></pre>"));

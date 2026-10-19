@@ -224,12 +224,14 @@ impl Prepared {
         let side = ash_wasm_link::read_side_module(&bytes)
             .map_err(|e| JsValue::from_str(&e.to_string()))?
             .ok_or_else(|| JsValue::from_str("it is not a side module (no dylink.0 section)"))?;
-        let rewritten = ash_wasm_link::waits::instrument(&bytes)
-            .and_then(|b| ash_wasm_link::dylink::expose_tls_base(&b))
+        // Instrumented once: both modules are made from it.
+        let instrumented = ash_wasm_link::waits::instrument(&bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rewritten = ash_wasm_link::dylink::expose_tls_base(&instrumented)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let module = WebAssembly::Module::new(&Uint8Array::from(rewritten.as_slice()))?;
         let thread = if with_thread_module {
-            Some(thread_module(&bytes)?)
+            Some(thread_module_of(&instrumented)?)
         } else {
             None
         };
@@ -289,8 +291,14 @@ pub fn prepare_library(bytes: &Uint8Array, with_thread_module: bool) -> Result<O
 /// A library compiled for a thread's instance: no initial data, see
 /// [`Placed::module`].
 fn thread_module(bytes: &[u8]) -> Result<WebAssembly::Module, JsValue> {
-    let bytes = ash_wasm_link::dylink::without_initial_data(bytes)
-        .and_then(|b| ash_wasm_link::waits::instrument(&b))
+    let instrumented =
+        ash_wasm_link::waits::instrument(bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    thread_module_of(&instrumented)
+}
+
+/// [`thread_module`] of a library that has already been instrumented.
+fn thread_module_of(instrumented: &[u8]) -> Result<WebAssembly::Module, JsValue> {
+    let bytes = ash_wasm_link::dylink::without_initial_data(instrumented)
         .and_then(|b| ash_wasm_link::dylink::expose_tls_base(&b))
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     WebAssembly::Module::new(&Uint8Array::from(bytes.as_slice()))

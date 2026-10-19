@@ -221,6 +221,16 @@ struct ExposeMemory;
 impl Reencode for ExposeMemory {
     type Error = std::convert::Infallible;
 
+    /// Functions are not what this changes; they are copied as they are.
+    fn parse_function_body(
+        &mut self,
+        code: &mut wasm_encoder::CodeSection,
+        body: wasmparser::FunctionBody<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        code.raw(body.as_bytes());
+        Ok(())
+    }
+
     fn parse_export_section(
         &mut self,
         exports: &mut wasm_encoder::ExportSection,
@@ -319,6 +329,16 @@ struct ExposeTlsBase {
 impl Reencode for ExposeTlsBase {
     type Error = std::convert::Infallible;
 
+    /// Functions are not what this changes; they are copied as they are.
+    fn parse_function_body(
+        &mut self,
+        code: &mut wasm_encoder::CodeSection,
+        body: wasmparser::FunctionBody<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        code.raw(body.as_bytes());
+        Ok(())
+    }
+
     fn parse_export_section(
         &mut self,
         exports: &mut wasm_encoder::ExportSection,
@@ -348,6 +368,16 @@ struct WithoutInitialData;
 
 impl Reencode for WithoutInitialData {
     type Error = std::convert::Infallible;
+
+    /// Functions are not what this changes; they are copied as they are.
+    fn parse_function_body(
+        &mut self,
+        code: &mut wasm_encoder::CodeSection,
+        body: wasmparser::FunctionBody<'_>,
+    ) -> Result<(), reencode::Error<Self::Error>> {
+        code.raw(body.as_bytes());
+        Ok(())
+    }
 
     fn parse_data_section(
         &mut self,
@@ -505,7 +535,10 @@ mod tests {
         let side = read_side_module(&module.finish()).unwrap().unwrap();
         assert_eq!(side.functions, ["hlp_alloc_bytes"]);
         assert_eq!(side.host_functions, ["ash_host_agent", "ash_host_watch"]);
-        assert_eq!((side.memory_size, side.memory_align, side.table_size), (16, 2, 1));
+        assert_eq!(
+            (side.memory_size, side.memory_align, side.table_size),
+            (16, 2, 1)
+        );
     }
 
     /// The reference the rest of this is checked against: a side module built

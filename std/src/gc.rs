@@ -219,6 +219,10 @@ const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
 /// usually a handle to native memory the trigger cannot see, so a run of
 /// small handles still reaches a collection and their finalizers run.
 const FINALIZER_CHARGE: usize = 4096;
+/// The least new allocation a collection waits for however small the live
+/// set, so the bound of two live sets does not collect a small program
+/// continuously.
+const HEADROOM_FLOOR: usize = 128 * 1024 * 1024;
 /// Adaptive threshold bounds: live*growth clamped to [floor, ceiling].
 const DEFAULT_TRIGGER_FLOOR: usize = 8 * 1024 * 1024;
 /// Bounds on the machine-derived ceiling (see `trigger_ceiling_bytes`).
@@ -2000,6 +2004,17 @@ fn gc_share_target() -> f64 {
             .unwrap_or(5.0)
             / 100.0
     })
+}
+
+/// New allocation allowed before the next collection: the live set times the
+/// growth factor, within [floor, ceiling]. It is also held to about two live
+/// sets (never below `HEADROOM_FLOOR`): a live set of 130MB otherwise lets
+/// 512MB of garbage pile up between collections and the footprint reaches
+/// four times it. Small live sets are unaffected, since four times them is
+/// already under the bound.
+fn trigger_bytes(live: usize, growth: f64, floor: usize, ceiling: usize) -> usize {
+    let headroom = (2 * live).max(HEADROOM_FLOOR);
+    ((live as f64 * growth) as usize).clamp(floor, ceiling.min(headroom).max(floor))
 }
 
 /// The interval multiplier after a collection: wider while the pause is a
@@ -5368,8 +5383,7 @@ impl ImmixAllocator {
         let target = gc_share_target();
         let base = growth_factor() as f64;
         self.heap.growth = next_growth(self.heap.growth, base, share, target, origin == 6);
-        let scaled = (live_bytes as f64 * self.heap.growth) as usize;
-        self.heap.trigger_threshold = scaled.clamp(floor, ceiling);
+        self.heap.trigger_threshold = trigger_bytes(live_bytes, self.heap.growth, floor, ceiling);
 
         self.heap.bytes_since_gc = 0;
         self.heap.external_since_gc = 0;
@@ -8532,6 +8546,21 @@ pub(crate) unsafe fn gc_swap_exc_state(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mid_size_live_set_gets_about_one_more_of_headroom_not_four() {
+        const MB: usize = 1024 * 1024;
+        let (floor, ceiling) = (8 * MB, 512 * MB);
+        // 130MB live: four times it would be capped only by the ceiling.
+        assert_eq!(trigger_bytes(130 * MB, 4.0, floor, ceiling), 260 * MB);
+        // A small live set keeps its multiple.
+        assert_eq!(trigger_bytes(17 * MB, 4.0, floor, ceiling), 68 * MB);
+        // The least headroom holds for a tiny one, and the ceiling still binds.
+        assert_eq!(trigger_bytes(MB, 4.0, floor, ceiling), 8 * MB);
+        assert_eq!(trigger_bytes(300 * MB, 4.0, floor, ceiling), 512 * MB);
+        // A live set past the ceiling is still allowed one more of itself.
+        assert_eq!(trigger_bytes(700 * MB, 4.0, floor, 700 * MB), 700 * MB);
+    }
+
     #[test]
     fn widened_stack_scan_start_preserves_word_alignment() {
         // The wasm AOT main's i8 anchor and the observed suspended SP.

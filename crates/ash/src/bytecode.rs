@@ -126,7 +126,15 @@ impl BytecodeDecoder {
             }
 
             let len = buffer.len();
-            reader.consume(len.saturating_sub(2));
+            // Two bytes are kept in case the magic straddles a refill; with
+            // no more than that left, nothing can follow.
+            if len <= 2 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Could not find HashLink bytecode magic header",
+                ));
+            }
+            reader.consume(len - 2);
         }
 
         // Read the header
@@ -2179,4 +2187,20 @@ pub(crate) fn enum_construct_layout(
         offset += size;
     }
     (offsets, offset as i32)
+}
+
+#[cfg(test)]
+mod magic_tests {
+    use super::BytecodeDecoder;
+
+    /// A file that is not bytecode is refused, however its last bytes fall.
+    #[test]
+    fn a_file_without_the_magic_header_is_an_error_not_a_hang() {
+        for len in [0, 1, 2, 3, 100, 70_000] {
+            let mut file = vec![0xCF, 0xFA, 0xED, 0xFE];
+            file.resize(len, 7);
+            let error = BytecodeDecoder::decode_slice(&file, 8).err();
+            assert!(error.is_some(), "{len} bytes decoded");
+        }
+    }
 }

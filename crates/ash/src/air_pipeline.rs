@@ -1162,12 +1162,21 @@ type CacheKey = (usize, u64, i32, AirConfigKey);
 static OPTIMIZED: OnceLock<Mutex<crate::air_cache::BodyCache<CacheKey, Optimized>>> = OnceLock::new();
 
 fn optimized_cache() -> &'static Mutex<crate::air_cache::BodyCache<CacheKey, Optimized>> {
-    OPTIMIZED.get_or_init(|| Mutex::new(crate::air_cache::BodyCache::new(8 * 1024 * 1024)))
+    OPTIMIZED.get_or_init(|| {
+        // `ASH_AIR_CACHE_MB` sets the budget in megabytes; `0` keeps no body
+        // beyond the users that hold one. Smaller is less memory held and
+        // more optimizing again.
+        let mb = std::env::var("ASH_AIR_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8);
+        Mutex::new(crate::air_cache::BodyCache::new(mb * 1024 * 1024))
+    })
 }
 
 /// The optimized AIR for `f`, computing it on first ask.
 ///
-/// Recent bodies have an 8 MiB strong reuse budget. Weak index entries keep
+/// Recent bodies have an 8 MiB strong reuse budget (`ASH_AIR_CACHE_MB`). Weak index entries keep
 /// active interpreter/compiler bodies canonical after eviction; an unused
 /// evicted body is released. Bytecode identity is part of the key.
 ///
@@ -1240,7 +1249,7 @@ pub fn cache_report() -> Vec<String> {
     });
     vec![format!(
         "[air-cache] bodies={bodies} live_bytes={live} resident_bytes={resident} budget_bytes={} hits={} misses={} evictions={} ir_bytes={ir_bytes} layout_bytes={serialized_bytes} instructions={instructions} markers={markers}",
-        8 * 1024 * 1024, cache.hits, cache.misses, cache.evictions,
+        cache.budget(), cache.hits, cache.misses, cache.evictions,
     )]
 }
 

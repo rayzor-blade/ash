@@ -107,6 +107,10 @@ impl<K: Copy + Eq + Hash, V> BodyCache<K, V> {
 
     /// Includes bodies kept alive by interpreters/compilers, separately from
     /// the bounded strong reuse cache. Conservative heap-storage estimates.
+    pub(crate) fn budget(&self) -> usize {
+        self.budget
+    }
+
     pub(crate) fn storage(&self) -> (usize, usize, usize) {
         let live = self.entries.values().filter(|e| e.weak.strong_count() != 0);
         live.fold((0, 0, self.resident_bytes), |(n, bytes, resident), e| {

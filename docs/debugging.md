@@ -62,6 +62,7 @@ being taken:
 | `ASH_SROA_WHY` | `1` reports why each allocation the optimiser looked at was kept in memory, including ash-simd slots |
 | `ASH_TREE_FUSION_SURVEY` | `only` reports recursive tree producer/consumer candidates and blockers, then exits without executing the program |
 | `ASH_AIR_CACHE_STATS` | report live canonical AIR storage, bounded strong-cache residency, hits, misses and evictions at exit (conservative owned-storage bytes, not RSS) |
+| `ASH_AIR_CACHE_MB` | megabytes of optimized AIR kept for reuse after its last user lets go (default 8). Smaller holds less memory and optimizes a function again when a tier asks for it a second time; `0` keeps nothing beyond the bodies something still holds. Safe with any value |
 | `ASH_DECODE_STATS` | `1` reports at exit how many function bodies the run decoded. The decoder checks every body at load, then leaves it encoded until something reads it: most functions a `.hl` carries never run |
 | `ASH_DECODE_EAGER` | `1` keeps every function body decoded from load instead. Safe to run with; for comparing memory |
 | `ASH_DECODE_CHUNKED_OPS` | bodies with at least this many ops (default 2048) are decoded a chunk of 256 ops at a time by the interpreter after their first call, so a call that returns early decodes only the chunks it reaches. Safe to run with any value; `1` puts every body on that path |
@@ -138,6 +139,11 @@ must remain available while the program uses them. Counts include vector
 capacity and nested operands with conservative allocation overhead; they
 exclude executable code, GC pages, GPU resources and allocator fragmentation.
 Use an allocation profiler or physical-footprint measurement for those.
+
+`ASH_AIR_CACHE_MB` sets the reuse budget. An application with thousands of
+functions that wants a lower resident floor can reduce it, at the price of
+running the pipeline again for bodies the tiers or an OSR entry ask for after
+they were evicted; the bodies an active call holds are kept whatever it is.
 
 LLVM reads an immutable view of the same decoded type table. Reverse native
 type conversion detaches that view only when it needs to fill missing metadata.

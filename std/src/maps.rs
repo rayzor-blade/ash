@@ -667,6 +667,10 @@ use std::collections::HashMap;
 
 #[repr(C)]
 struct RootedMap {
+    /// The collector's finalizer for this block ([`release_index`]); word
+    /// zero of a finalizable block. A function address, so the tracer
+    /// ignores it.
+    finalize: usize,
     /// GC array of GC pointers. Int maps use one slot per entry (the value);
     /// object maps use two (key, then value).
     slots: *mut *mut hl::vdynamic,
@@ -706,12 +710,35 @@ unsafe fn gc_alloc_zeroed(bytes: usize) -> *mut u8 {
 
 unsafe fn rooted_alloc<K: std::hash::Hash + Eq>() -> *mut c_void {
     unsafe {
-        let hdr = gc_alloc_zeroed(mem::size_of::<RootedMap>()) as *mut RootedMap;
+        // Finalizable, so that the malloc-heap index goes when the map does.
+        let hdr = crate::rt::alloc_with_finalizer(mem::size_of::<RootedMap>(), release_index::<K>)
+            as *mut RootedMap;
         if hdr.is_null() {
             return ptr::null_mut();
         }
         (*hdr).index = Box::into_raw(Box::new(SlotIndex::<K>::new())) as *mut c_void;
+        #[cfg(test)]
+        LIVE_INDEXES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         hdr as *mut c_void
+    }
+}
+
+/// Slot indexes made and not yet freed, for the test that a dropped map
+/// gives its index back.
+#[cfg(test)]
+static LIVE_INDEXES: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Frees a map's slot index once nothing can reach the map. The index holds
+/// no GC pointer, so it is only malloc memory to give back.
+unsafe extern "C" fn release_index<K>(block: *mut c_void) {
+    unsafe {
+        let map = block as *mut RootedMap;
+        let index = std::mem::replace(&mut (*map).index, ptr::null_mut());
+        if !index.is_null() {
+            drop(Box::from_raw(index as *mut SlotIndex<K>));
+            #[cfg(test)]
+            LIVE_INDEXES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -1276,6 +1303,27 @@ mod hi64_tests {
     /// Injective, so a key/value pairing that drifted by one slot shows up.
     fn payload(key: i64) -> i64 {
         key.wrapping_mul(31).wrapping_add(7)
+    }
+
+    #[test]
+    fn a_dropped_map_gives_back_its_malloc_index() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _mutator = Mutator::enter();
+        let before = LIVE_INDEXES.load(Relaxed);
+        unsafe {
+            for k in 0..3000 {
+                let m = hlp_hialloc();
+                hlp_hiset(m, k, dyn_i64(k as i64));
+                std::hint::black_box(m);
+            }
+            crate::gc::hlp_gc_major();
+            crate::gc::hlp_gc_major();
+            // A finalizer runs when the collector's lock next comes free.
+            std::hint::black_box(hlp_hialloc());
+        }
+        // Collections ran during the loop too, so some were freed already.
+        let left = LIVE_INDEXES.load(Relaxed) - before;
+        assert!(left < 500, "{left} of 3000 indexes still held after collecting");
     }
 
     #[test]

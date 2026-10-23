@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1792772791,"nonce":"o6SDslkRDDiYfqt5u3oFVP9rH4c=","status":2}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1792772791,"nonce":"SBR15+P9z4sUTW86BEbEc8f6pg4=","message":"Confirmed by ashui on the rebuilt binary: MapFree footprint peaks at 112 MB and falls to 64 MB by cycle 5 (it plateaued at 146 MB before). Closed; fix 58c779b7.","files":null}]}

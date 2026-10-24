@@ -366,20 +366,48 @@ fn rebuild_symbol() -> Option<FnRebuild> {
     Some(unsafe { std::mem::transmute::<_, FnRebuild>(rebuild) })
 }
 
-/// Ask the runtime for the spare bytes, and say how many it will give: none
-/// when a class was laid out already, since objects of it would not have them.
-fn request_object_room() -> usize {
-    let room = std::env::var("ASH_RELOAD_ROOM")
+fn wanted_object_room() -> usize {
+    std::env::var("ASH_RELOAD_ROOM")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(OBJECT_ROOM);
-    let Ok(set) = crate::native_lib::NativeFunctionResolver::new()
-        .resolve_function("std", "hlp_set_object_room")
-    else {
-        return 0;
+        .unwrap_or(OBJECT_ROOM)
+}
+
+fn runtime_fn(name: &str) -> Option<*mut std::ffi::c_void> {
+    crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", name)
+        .ok()
+}
+
+/// Reserve the spare bytes now, for a host that registers classes before it
+/// enables reload: the interpreter lays those out, and a layout made before
+/// the reservation cannot be given the room. Call it before the interpreter is
+/// made. `false` when a class was laid out already.
+pub fn reserve_object_room() -> bool {
+    let Some(set) = runtime_fn("hlp_set_object_room") else {
+        return false;
     };
     let set: unsafe extern "C" fn(usize) -> bool = unsafe { std::mem::transmute(set) };
-    if unsafe { set(room) } {
+    unsafe { set(wanted_object_room()) }
+}
+
+/// Ask the runtime for the spare bytes, and say how many it will give: none
+/// when a class was laid out already, since objects of it would not have them.
+/// Room reserved earlier counts as given.
+fn request_object_room() -> usize {
+    let room = wanted_object_room();
+    if room == 0 {
+        return 0;
+    }
+    let Some(get) = runtime_fn("hlp_object_room") else {
+        return 0;
+    };
+    let get: unsafe extern "C" fn() -> usize = unsafe { std::mem::transmute(get) };
+    let held = unsafe { get() };
+    if held != 0 {
+        return held;
+    }
+    if reserve_object_room() {
         room
     } else {
         eprintln!(

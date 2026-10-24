@@ -2276,7 +2276,18 @@ pub(crate) fn osr_plan_for(
         .iter()
         .filter_map(|&h| optimized.ser.block_pcs.get(h as usize).copied())
         .collect();
-    let sites: Vec<usize> = pcs.into_iter().filter(|pc| eligible.contains(pc)).collect();
+    // A site with an entry already staged (Cranelift's, for a function that
+    // went through that tier) has left the interpreter; an LLVM entry would
+    // only upgrade it, and the retier exits already do that.
+    let staged = ctx
+        .osr_image_regs
+        .lock()
+        .expect("osr_image_regs mutex poisoned");
+    let sites: Vec<usize> = pcs
+        .into_iter()
+        .filter(|pc| eligible.contains(pc) && !staged.contains_key(&(findex, *pc as u64)))
+        .collect();
+    drop(staged);
     if !plan.eligible() || sites.is_empty() {
         return None;
     }

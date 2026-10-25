@@ -38,6 +38,7 @@ libloading = "0.8.5"
 ash_std = { path = "../../std" }
 once_cell = {workspace=true}
 tempfile = "3.2"
+shlex = "1.3"
 memchr = "2.7.4"
 byteorder = {workspace=true}
 ash_macro = {workspace=true}

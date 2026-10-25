@@ -142,10 +142,12 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "build")]
     runtime: Option<PathBuf>,
 
-    /// Target triple for --build/--emit-aot. Defaults to this machine.
+    /// Target triple for --build/--emit-aot. Defaults to this machine, built
+    /// for this machine's CPU.
     ///
-    /// A non-native triple is cross-compiled for a generic CPU, because the
-    /// host's features cannot be assumed of a machine we cannot ask.
+    /// Naming a target, this machine's included, builds for a generic CPU, so
+    /// the output runs on any machine of that architecture: the host's
+    /// features cannot be assumed of a machine we cannot ask.
     #[arg(long, value_name = "TRIPLE")]
     target: Option<String>,
 

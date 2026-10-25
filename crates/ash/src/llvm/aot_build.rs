@@ -100,12 +100,19 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         }
     }
 
-    let triple = target.unwrap_or_else(|| {
-        inkwell::targets::TargetMachine::get_default_triple()
-            .as_str()
-            .to_string_lossy()
-            .into_owned()
-    });
+    // A target the caller named is built for a generic CPU, the host's own
+    // triple included; with none named, the host CPU is the point of building
+    // here. Reset on every call: a process may build several programs.
+    let named = target.is_some();
+    let _cpu_policy = crate::target_abi::CpuPolicy::enter(named);
+    let triple = target
+        .map(|t| crate::target_abi::normalize_triple(&t))
+        .unwrap_or_else(|| {
+            inkwell::targets::TargetMachine::get_default_triple()
+                .as_str()
+                .to_string_lossy()
+                .into_owned()
+        });
 
     // Leaked on purpose: the module borrows the context for as long as it
     // exists, and this one lives until the process ends.
@@ -335,13 +342,15 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         }
         if exe.is_some() {
             crate::progress::note(&format!(
-                "[ash] compiled {} object bytes for {triple}",
-                bytes
+                "[ash] compiled {} object bytes for {triple}, cpu {}",
+                bytes,
+                crate::target_abi::cpu_for(&triple)
             ));
         } else {
             crate::progress::note(&format!(
-                "[ash] wrote {} ({bytes} bytes) for {triple}",
-                out.display()
+                "[ash] wrote {} ({bytes} bytes) for {triple}, cpu {}",
+                out.display(),
+                crate::target_abi::cpu_for(&triple)
             ));
         }
         if shared_runtime && !triple.starts_with("wasm") {

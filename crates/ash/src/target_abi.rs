@@ -420,9 +420,119 @@ pub fn all_targets_build() -> bool {
 }
 
 #[cfg(feature = "llvm")]
+static GENERIC_CPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Restore the previous CPU policy after an AOT request, including errors.
+#[cfg(feature = "llvm")]
+pub(crate) struct CpuPolicy(bool);
+
+#[cfg(feature = "llvm")]
+impl CpuPolicy {
+    pub(crate) fn enter(generic: bool) -> Self {
+        Self(GENERIC_CPU.swap(generic, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+#[cfg(feature = "llvm")]
+impl Drop for CpuPolicy {
+    fn drop(&mut self) {
+        GENERIC_CPU.store(self.0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn generic_cpu_requested() -> bool {
+    GENERIC_CPU.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Accept release asset names and Rust's RISC-V architecture spelling.
+pub fn normalize_triple(triple: &str) -> String {
+    let triple = match triple {
+        "linux-x86_64" => "x86_64-unknown-linux-gnu",
+        "linux-aarch64" => "aarch64-unknown-linux-gnu",
+        "macos-x86_64" => "x86_64-apple-darwin",
+        "macos-aarch64" => "aarch64-apple-darwin",
+        "windows-x86_64" => "x86_64-pc-windows-msvc",
+        "windows-aarch64" => "aarch64-pc-windows-msvc",
+        other => other,
+    };
+    triple
+        .replace("riscv64gc-", "riscv64-")
+        .replace("riscv32gc-", "riscv32-")
+}
+
+#[cfg(feature = "llvm")]
+pub(crate) fn machine_cache_key(triple: &str) -> String {
+    format!(
+        "{triple}\0{}\0{:?}\0{:?}",
+        generic_cpu_requested(),
+        std::env::var("ASH_TARGET_FEATURES").ok(),
+        std::env::var("ASH_WASM_SIMD").ok()
+    )
+}
+
+/// Native runtime compatibility ignores vendor and Darwin version spelling.
+pub(crate) fn same_native_abi(a: &str, b: &str) -> bool {
+    fn key(triple: &str) -> Option<(String, String)> {
+        let arch = match triple.split('-').next()? {
+            "arm64" => "aarch64",
+            "amd64" => "x86_64",
+            other => other,
+        }
+        .to_string();
+        let platform = if triple.contains("darwin") || triple.contains("apple-macos") {
+            "darwin".to_string()
+        } else if triple.contains("linux") || triple.contains("windows") {
+            let os = if triple.contains("linux") {
+                "linux"
+            } else {
+                "windows"
+            };
+            format!("{os}-{}", triple.rsplit('-').next()?)
+        } else {
+            return None;
+        };
+        Some((arch, platform))
+    }
+    key(a).is_some() && key(a) == key(b)
+}
+
+#[cfg(feature = "llvm")]
+pub(crate) fn is_host_triple(triple: &str) -> bool {
+    same_native_abi(
+        triple,
+        &TargetMachine::get_default_triple()
+            .as_str()
+            .to_string_lossy(),
+    )
+}
+
+/// The CPU a build for `triple` targets: the host's when `triple` is this
+/// machine's and no target was named, otherwise `generic`.
+#[cfg(feature = "llvm")]
+pub fn cpu_for(triple: &str) -> String {
+    initialize_targets();
+    let native = is_host_triple(triple) && !generic_cpu_requested();
+    if native {
+        TargetMachine::get_host_cpu_name().to_string()
+    } else {
+        "generic".to_string()
+    }
+}
+
+#[cfg(feature = "llvm")]
 pub(crate) fn target_machine(
     triple: &str,
     opt: OptimizationLevel,
+) -> Result<(TargetTriple, TargetMachine)> {
+    target_machine_for(triple, opt, generic_cpu_requested())
+}
+
+#[cfg(feature = "llvm")]
+pub(crate) fn target_machine_for(
+    triple: &str,
+    opt: OptimizationLevel,
+    generic: bool,
 ) -> Result<(TargetTriple, TargetMachine)> {
     initialize_targets();
     let tt = TargetTriple::create(triple);
@@ -437,8 +547,7 @@ pub(crate) fn target_machine(
             )
         }
     })?;
-    let host = TargetMachine::get_default_triple();
-    let native = tt == host;
+    let native = is_host_triple(triple) && !generic;
     let cpu = if native {
         TargetMachine::get_host_cpu_name().to_string()
     } else {
@@ -486,6 +595,90 @@ pub(crate) fn target_machine(
 #[cfg(test)]
 mod tests {
     use super::TargetAbi;
+
+    /// Naming the host's own triple still builds for the host CPU unless the
+    /// caller asked for a generic one.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn a_named_host_triple_can_be_built_for_a_generic_cpu() {
+        use inkwell::OptimizationLevel::Aggressive;
+        use inkwell::targets::TargetMachine;
+        let host = TargetMachine::get_default_triple()
+            .as_str()
+            .to_string_lossy()
+            .into_owned();
+        let (_, native) = super::target_machine_for(&host, Aggressive, false).unwrap();
+        let (_, generic) = super::target_machine_for(&host, Aggressive, true).unwrap();
+        assert_eq!(
+            native.get_cpu().to_string(),
+            TargetMachine::get_host_cpu_name().to_string()
+        );
+        assert_eq!(generic.get_cpu().to_string(), "generic");
+        assert_eq!(generic.get_feature_string().to_string_lossy(), "");
+    }
+
+    #[test]
+    fn distribution_names_and_rust_riscv_names_normalize() {
+        assert!(super::same_native_abi(
+            "arm64-apple-darwin25.6.0",
+            "aarch64-apple-darwin"
+        ));
+        assert!(!super::same_native_abi(
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl"
+        ));
+        assert_eq!(
+            super::normalize_triple("linux-x86_64"),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            super::normalize_triple("macos-aarch64"),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            super::normalize_triple("windows-x86_64"),
+            "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(
+            super::normalize_triple("riscv64gc-unknown-linux-gnu"),
+            "riscv64-unknown-linux-gnu"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cpu_policy_is_restored_and_separates_cached_machines() {
+        const CHILD: &str = "ASH_TEST_CPU_POLICY";
+        if std::env::var_os(CHILD).is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "target_abi::tests::cpu_policy_is_restored_and_separates_cached_machines",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            return;
+        }
+        let host = inkwell::targets::TargetMachine::get_default_triple()
+            .as_str()
+            .to_string_lossy()
+            .into_owned();
+        let key = super::machine_cache_key(&host);
+        let attempt = || -> anyhow::Result<()> {
+            let _policy = super::CpuPolicy::enter(true);
+            assert_eq!(super::cpu_for(&host), "generic");
+            assert_ne!(key, super::machine_cache_key(&host));
+            anyhow::bail!("leave through error")
+        };
+        assert!(attempt().is_err());
+        assert_eq!(key, super::machine_cache_key(&host));
+    }
 
     #[test]
     fn wasm32_hashlink_layouts() {

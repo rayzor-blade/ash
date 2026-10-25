@@ -75,7 +75,7 @@ HL/C produce; those fuse different pairs.
 |--------|---|---|
 | `--build <OUT>` | path | compile and link an executable (or a `.wasm` for a wasm target) |
 | `--emit-aot <OUT.o>` | path | the same compile, stopping at the object file |
-| `--target <TRIPLE>` | triple | target; defaults to the host. A non-host triple is compiled for a generic CPU |
+| `--target <TRIPLE>` | triple | target; defaults to the host, built for this machine's CPU. Naming a target, the host's included, builds for a generic CPU (`ASH_TARGET_FEATURES` replaces its default features) |
 | `--runtime <PATH>` | path | the runtime library or object to link, instead of searching |
 | `--abi-version <N>` | 1 or 2 | which `libhl.N.dylib` name the program's HDLLs import (default 1) |
 | `--allow-refused` | flag | emit even when a function could not be lowered; each becomes a throw |
@@ -118,3 +118,46 @@ covers threads, fibers and native libraries.
 
 Tuning flags beyond these, environment variables and the profiler are in
 [debugging.md](debugging.md).
+
+### Native cross builds
+
+`--target` accepts LLVM triples, Rust's `riscv64gc`/`riscv32gc` spellings, and
+release names such as `linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
+`macos-aarch64`, `windows-x86_64` and `windows-aarch64`. An explicit target
+uses a generic CPU even when it names the build machine. With no target, AOT
+uses the host CPU. This policy ends when the build finishes.
+
+A foreign executable requires an Ash runtime and system link libraries built
+for its target. Install `libash_std.a` (or the target shared/import library)
+in `<ash-directory>/<triple>/`, `../lib/<triple>/`, or
+`$ASH_RUNTIME_DIR/<triple>/`; alternatively pass `--runtime PATH` or set
+`ASH_RUNTIME_<triple_with_underscores>`. Cross builds never extract the host's
+embedded runtime. Build a target runtime with Cargo and that target's C SDK:
+
+```sh
+cargo build --release -p ash_std --target x86_64-unknown-linux-gnu
+ASH_LINKER_x86_64_unknown_linux_gnu=clang \
+ASH_SYSROOT_x86_64_unknown_linux_gnu=/opt/sysroots/linux-x86_64 \
+ash --build app-linux --target linux-x86_64 \
+  --runtime /opt/ash-runtimes/x86_64-unknown-linux-gnu/libash_std.a app.hl
+```
+
+`ASH_LINKER_<triple>` takes a driver command with optional quoted arguments;
+`CARGO_TARGET_<UPPERCASE_TRIPLE>_LINKER` and `CC_<triple>` also work. Global
+`ASH_LINKER` and `CC` apply when no target-specific setting exists. Otherwise
+Ash looks for a target GCC driver, then Clang (Clang-CL for Windows MSVC).
+Clang receives `--target` and uses LLD for a cross link; Zig receives its
+`cc -target` arguments. Install the matching linker alongside the driver.
+`ASH_SYSROOT_<triple>` selects the target libc/SDK (`/winsysroot` for Clang-CL).
+For Windows MSVC, provide the Windows SDK/UCRT and MSVC libraries through that
+SDK and `LIB`, or include their search paths in `ASH_LINK_ARGS_<triple>`.
+`ASH_LINK_ARGS_<triple>` appends shell-quoted arguments without invoking a
+shell. The global forms of these settings also work. Missing target resources
+are reported explicitly; `--emit-aot` needs neither a runtime nor a linker.
+
+Shared-runtime builds stage the target library under its platform's HashLink
+names beside the output. A Windows HDLL program must link an import library
+for `libhl.dll`; the corresponding DLL must be beside that import library.
+Native executable linking covers Linux, macOS and Windows targets with an
+installed toolchain; object emission covers the additional architectures in
+the cross-target gate. Apple targets from a non-Apple host need an Apple SDK.

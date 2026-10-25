@@ -1,8 +1,8 @@
 //! What ash can compile *for*, as opposed to what it runs on.
 //!
 //! Linking an executable needs the target platform's linker and system
-//! libraries, so `--build` is host-only for native targets. Emitting the
-//! object is not: since the ABI is chosen before anything is decoded, every
+//! libraries plus a driver for that target. `aot_distribution` exercises
+//! configured foreign executable builds. Emitting the object needs neither: since the ABI is chosen before anything is decoded, every
 //! layout, call and constant comes out for the named target rather than for
 //! the machine doing the compiling. That is what this checks, across a
 //! deliberately wide set.

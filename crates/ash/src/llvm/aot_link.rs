@@ -43,6 +43,7 @@ enum Dialect {
 struct Driver {
     program: String,
     dialect: Dialect,
+    args: Vec<String>,
 }
 
 fn newest(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -60,11 +61,16 @@ fn newest(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
 /// What cargo calls the runtime here. MSVC produces `ash_std.lib` and, for the
 /// shared build, an import library beside the DLL; everyone else uses the
 /// `lib` prefix.
-fn runtime_file_names(kind: Runtime) -> Vec<&'static str> {
-    match (kind, std::env::consts::OS) {
+fn runtime_file_names_for(kind: Runtime, os: &str) -> Vec<&'static str> {
+    match (kind, os) {
         (Runtime::Static, "windows") => vec!["ash_std.lib", "libash_std.a"],
         (Runtime::Static, _) => vec!["libash_std.a"],
-        (Runtime::Shared, "windows") => vec!["ash_std.dll.lib", "libash_std.dll.a"],
+        (Runtime::Shared, "windows") => vec![
+            "libhl.dll.lib",
+            "libhl.dll.a",
+            "ash_std.dll.lib",
+            "libash_std.dll.a",
+        ],
         (Runtime::Shared, "macos") => vec!["libash_std.dylib"],
         (Runtime::Shared, _) => vec!["libash_std.so"],
     }
@@ -96,7 +102,11 @@ fn runtime_candidates(kind: Runtime) -> Vec<PathBuf> {
     }
     roots
         .into_iter()
-        .flat_map(|r| runtime_file_names(kind).into_iter().map(move |n| r.join(n)))
+        .flat_map(|r| {
+            runtime_file_names_for(kind, std::env::consts::OS)
+                .into_iter()
+                .map(move |n| r.join(n))
+        })
         .collect()
 }
 
@@ -144,42 +154,212 @@ pub fn find_runtime(kind: Runtime) -> Result<PathBuf> {
     })
 }
 
-fn driver() -> Result<Driver> {
-    let mut tried: Vec<String> = Vec::new();
-    let preferred: Vec<String> = if cfg!(target_os = "windows") {
+fn target_os(triple: &str) -> Result<&'static str> {
+    if triple.contains("windows") {
+        Ok("windows")
+    } else if triple.contains("darwin") || triple.contains("apple-macos") {
+        Ok("macos")
+    } else if triple.contains("linux") {
+        Ok("linux")
+    } else {
+        bail!(
+            "native executable linking is not configured for {triple}; use --emit-aot or a supported Linux, macOS or Windows target"
+        )
+    }
+}
+
+fn cross_target(triple: &str) -> bool {
+    !crate::target_abi::is_host_triple(triple)
+}
+
+fn rust_runtime_triple(triple: &str) -> String {
+    triple
+        .replacen("riscv64-", "riscv64gc-", 1)
+        .replacen("riscv32-", "riscv32gc-", 1)
+}
+
+fn target_override(name: &str, triple: &str) -> Option<String> {
+    for spelling in [triple.to_string(), rust_runtime_triple(triple)] {
+        let key = spelling.replace('-', "_");
+        for key in [key.clone(), key.to_ascii_uppercase()] {
+            if let Ok(value) = std::env::var(format!("{name}_{key}")) {
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn target_setting(name: &str, triple: &str) -> Option<String> {
+    target_override(name, triple).or_else(|| std::env::var(name).ok().filter(|v| !v.is_empty()))
+}
+
+fn target_runtime_candidates(kind: Runtime, triple: &str, os: &str) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("ASH_RUNTIME_DIR") {
+        roots.push(PathBuf::from(dir).join(triple));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.join(triple));
+            roots.push(dir.join("../lib").join(triple));
+        }
+    }
+    roots.push(PathBuf::from("/usr/local/lib/ash").join(triple));
+    roots.push(PathBuf::from("/usr/lib/ash").join(triple));
+    roots
+        .into_iter()
+        .flat_map(|r| {
+            runtime_file_names_for(kind, os)
+                .into_iter()
+                .map(move |n| r.join(n))
+        })
+        .collect()
+}
+
+fn find_target_runtime(kind: Runtime, triple: &str, os: &str) -> Result<PathBuf> {
+    if let Some(explicit) = target_setting("ASH_RUNTIME", triple) {
+        let p = PathBuf::from(explicit);
+        if p.is_file() {
+            return Ok(p);
+        }
+        bail!("runtime for {triple} is not a file: {}", p.display());
+    }
+    if let Some(p) = newest(target_runtime_candidates(kind, triple, os)) {
+        return Ok(p);
+    }
+    if !cross_target(triple) {
+        return find_runtime(kind);
+    }
+    let rust_target = rust_runtime_triple(triple);
+    bail!(
+        "no {kind:?} runtime for {triple}; install {} in <ash-directory>/{triple}/ or ASH_RUNTIME_DIR/{triple}/, or use --runtime PATH. Build the target runtime with `cargo build --release -p ash_std --target {rust_target}`. The compiler's embedded runtime belongs to its host and cannot be used for a cross build",
+        runtime_file_names_for(kind, os).join(" or ")
+    )
+}
+
+fn driver_for(triple: &str, os: &str) -> Result<Driver> {
+    let cross = cross_target(triple);
+    let key = triple.replace('-', "_").to_ascii_uppercase();
+    let rust_key = rust_runtime_triple(triple)
+        .replace('-', "_")
+        .to_ascii_uppercase();
+    let explicit = target_override("ASH_LINKER", triple)
+        .or_else(|| std::env::var(format!("CARGO_TARGET_{key}_LINKER")).ok())
+        .or_else(|| std::env::var(format!("CARGO_TARGET_{rust_key}_LINKER")).ok())
+        .or_else(|| target_override("CC", triple))
+        .or_else(|| std::env::var("ASH_LINKER").ok())
+        .or_else(|| std::env::var("CC").ok());
+    let preferred = if cross && triple.contains("windows-msvc") {
+        vec!["clang-cl".into(), "clang".into()]
+    } else if cross {
+        vec![
+            format!("{triple}-gcc"),
+            format!("{}-gcc", triple.replace("-unknown-", "-")),
+            "clang".into(),
+        ]
+    } else if os == "windows" {
         vec!["clang-cl".into(), "cl".into(), "clang".into(), "gcc".into()]
     } else {
         vec!["cc".into(), "clang".into(), "gcc".into()]
     };
-    for candidate in std::env::var("CC").ok().into_iter().chain(preferred) {
-        if candidate.is_empty() {
+    let candidates = if let Some(explicit) = explicit {
+        vec![explicit]
+    } else {
+        preferred
+    };
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        let mut words = if Path::new(&candidate).is_file() {
+            vec![candidate.clone()]
+        } else {
+            shlex::split(&candidate)
+                .ok_or_else(|| anyhow!("invalid quoting in linker command: {candidate}"))?
+        };
+        if words.is_empty() {
             continue;
         }
-        let msvc_style = candidate.ends_with("cl") && !candidate.ends_with("clang-cl")
-            || candidate.ends_with("clang-cl");
-        // `cl` has no --version; it prints its banner and fails on no input.
-        let probe = if msvc_style { "/?" } else { "--version" };
-        let ok = Command::new(&candidate)
-            .arg(probe)
+        let program = words.remove(0);
+        let name = Path::new(&program)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&program);
+        let msvc = name == "cl" || name == "clang-cl";
+        let mut args = words;
+        if cross {
+            if name.contains("clang") {
+                args.push(format!("--target={triple}"));
+                args.push("-fuse-ld=lld".into());
+            } else if name == "zig" {
+                if args.first().map(String::as_str) != Some("cc") {
+                    args.insert(0, "cc".into());
+                }
+                let arch = triple.split('-').next().unwrap();
+                let abi = if triple.ends_with("-musl") {
+                    "-musl"
+                } else if triple.ends_with("-gnu") {
+                    "-gnu"
+                } else if triple.ends_with("-msvc") {
+                    "-msvc"
+                } else {
+                    ""
+                };
+                args.extend(["-target".into(), format!("{arch}-{os}{abi}")]);
+            } else {
+                let probe = Command::new(&program)
+                    .args(&args)
+                    .arg("-dumpmachine")
+                    .output();
+                if !probe.is_ok_and(|p| {
+                    p.status.success()
+                        && compatible_driver(String::from_utf8_lossy(&p.stdout).trim(), triple)
+                }) {
+                    tried.push(format!("{candidate} (does not target {triple})"));
+                    continue;
+                }
+            }
+        }
+        if let Some(sysroot) = target_setting("ASH_SYSROOT", triple) {
+            args.push(if msvc {
+                format!("/winsysroot:{sysroot}")
+            } else {
+                format!("--sysroot={sysroot}")
+            });
+        } else if cross && os == "macos" && cfg!(target_os = "macos") {
+            if let Ok(sdk) = Command::new("xcrun").arg("--show-sdk-path").output() {
+                if sdk.status.success() {
+                    args.push(format!(
+                        "--sysroot={}",
+                        String::from_utf8_lossy(&sdk.stdout).trim()
+                    ));
+                }
+            }
+        }
+        let ok = Command::new(&program)
+            .arg(if msvc { "/?" } else { "--version" })
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            .is_ok_and(|o| o.status.success());
         if ok {
             return Ok(Driver {
-                program: candidate,
-                dialect: if msvc_style {
-                    Dialect::Msvc
-                } else {
-                    Dialect::Unix
-                },
+                program,
+                args,
+                dialect: if msvc { Dialect::Msvc } else { Dialect::Unix },
             });
         }
         tried.push(candidate);
     }
     bail!(
-        "no C driver found (tried {}); set CC to one",
-        tried.join(", ")
+        "no linker driver for {triple} (tried {}); set ASH_LINKER_{}, and ASH_SYSROOT_{} when the driver needs a target SDK/libc",
+        tried.join(", "),
+        triple.replace('-', "_"),
+        triple.replace('-', "_")
     )
+}
+
+fn compatible_driver(driver: &str, triple: &str) -> bool {
+    crate::target_abi::same_native_abi(driver, triple)
 }
 
 /// The system libraries a Rust staticlib needs, and the search paths an HDLL
@@ -194,8 +374,8 @@ fn driver() -> Result<Driver> {
 ///
 /// `ASH_LINK_ARGS` is appended verbatim, for a platform whose system libraries
 /// have moved since this was written.
-fn platform_args(dialect: Dialect) -> Vec<String> {
-    let base: &[&str] = match (dialect, std::env::consts::OS) {
+fn platform_args(dialect: Dialect, os: &str, triple: &str) -> Result<Vec<String>> {
+    let base: &[&str] = match (dialect, os) {
         (Dialect::Msvc, _) => &[
             // The C runtime is named rather than selected with `/MD`. That
             // flag picks a runtime for a COMPILATION, and this invocation
@@ -253,10 +433,12 @@ fn platform_args(dialect: Dialect) -> Vec<String> {
         ],
     };
     let mut args: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
-    if let Ok(extra) = std::env::var("ASH_LINK_ARGS") {
-        args.extend(extra.split_whitespace().map(str::to_string));
+    if let Some(extra) = target_setting("ASH_LINK_ARGS", triple) {
+        args.extend(
+            shlex::split(&extra).ok_or_else(|| anyhow!("invalid quoting in ASH_LINK_ARGS"))?,
+        );
     }
-    args
+    Ok(args)
 }
 
 fn run(command: &mut Command, what: &str) -> Result<()> {
@@ -307,8 +489,8 @@ fn rendered(command: &Command) -> String {
 /// The layouts are the same across those releases (see
 /// `crates/ash/tests/hl_abi.rs`), so one runtime can answer to either -- but
 /// only under the name the loader actually asks for.
-fn staged_runtime_names(abi: u32) -> Vec<String> {
-    match std::env::consts::OS {
+fn staged_runtime_names(abi: u32, os: &str) -> Vec<String> {
+    match os {
         "macos" => vec!["libhl.dylib".into(), format!("libhl.{abi}.dylib")],
         "windows" => vec!["libhl.dll".into(), format!("libhl.{abi}.dll")],
         _ => vec!["libhl.so".into(), format!("libhl.so.{abi}")],
@@ -322,10 +504,10 @@ fn staged_runtime_names(abi: u32) -> Vec<String> {
 /// was built carrying `@rpath/libhl.dylib` (`libhl.so`) as its own identity,
 /// so every copy already answers to the name the loader will ask for, and
 /// dyld treats them as the one image they are.
-fn stage_runtime(runtime: &Path, beside: &Path, abi: u32, quiet: bool) -> Result<()> {
+fn stage_runtime(runtime: &Path, beside: &Path, abi: u32, quiet: bool, os: &str) -> Result<()> {
     // On Windows the linker was given an import library; the library to stage
     // is the DLL beside it.
-    let source = if cfg!(target_os = "windows") {
+    let source = if os == "windows" {
         let dll = runtime.with_extension("").with_extension("dll");
         if dll.is_file() {
             dll
@@ -336,7 +518,7 @@ fn stage_runtime(runtime: &Path, beside: &Path, abi: u32, quiet: bool) -> Result
         runtime.to_path_buf()
     };
     let dir = beside.parent().unwrap_or(Path::new("."));
-    let names = staged_runtime_names(abi);
+    let names = staged_runtime_names(abi, os);
     for name in &names {
         let dest = dir.join(name);
         if dest == source {
@@ -652,33 +834,26 @@ pub fn link_executable(
     if is_wasm_triple(triple) {
         return link_wasm_module(objects, out, triple, kind, runtime, wasm_fibers, quiet);
     }
-    let runtime = match (runtime, kind) {
-        (Some(p), _) if p.is_file() => p.to_path_buf(),
-        (Some(p), _) => bail!("runtime {} does not exist", p.display()),
-        (None, Runtime::Static) => find_runtime(kind)?,
-        // Nothing to install and nothing to build: this binary carries the
-        // shared runtime, so if the machine has none, unpack ours.
-        (None, Runtime::Shared) => match find_runtime(kind) {
+    let os = target_os(triple)?;
+    let cross = cross_target(triple);
+    let runtime = match runtime {
+        Some(p) if p.is_file() => p.to_path_buf(),
+        Some(p) => bail!("runtime {} does not exist", p.display()),
+        None => match find_target_runtime(kind, triple, os) {
             Ok(found) => found,
-            Err(_) => {
+            Err(_)
+                if !cross
+                    && kind == Runtime::Shared
+                    && target_setting("ASH_RUNTIME", triple).is_none() =>
+            {
                 let dest = embedded_runtime_path(out);
-                crate::native_lib::write_embedded_runtime(&dest).map_err(|e| {
-                    anyhow!(
-                        "unpack the runtime this binary carries to {}: {e}",
-                        dest.display()
-                    )
-                })?;
-                if !quiet {
-                    crate::progress::note(&format!(
-                        "[ash] no runtime installed; wrote the embedded one to {}",
-                        dest.display()
-                    ));
-                }
+                crate::native_lib::write_embedded_runtime(&dest)?;
                 dest
             }
+            Err(e) => return Err(e),
         },
     };
-    let driver = driver()?;
+    let driver = driver_for(triple, os)?;
 
     // On Windows an executable names the DLL it imports from, and that name
     // comes from the import library it was linked against. An HDLL's imports
@@ -686,7 +861,7 @@ pub fn link_executable(
     // runtimes in the process -- the very thing the shared runtime exists to
     // prevent. Say so rather than produce it.
     if kind == Runtime::Shared
-        && cfg!(target_os = "windows")
+        && os == "windows"
         && !runtime
             .file_name()
             .map(|n| n.to_string_lossy().starts_with("libhl"))
@@ -703,7 +878,7 @@ pub fn link_executable(
 
     crate::progress::begin("linking", 0);
     let mut cmd = Command::new(&driver.program);
-    cmd.args(objects).arg(&runtime);
+    cmd.args(&driver.args).args(objects).arg(&runtime);
     match driver.dialect {
         Dialect::Unix => {
             cmd.arg("-o").arg(out);
@@ -712,11 +887,11 @@ pub fn link_executable(
             cmd.arg(format!("/Fe:{}", out.display()));
         }
     }
-    cmd.args(platform_args(driver.dialect));
+    cmd.args(platform_args(driver.dialect, os, triple)?);
     run(&mut cmd, &format!("{} (link)", driver.program))?;
 
     if kind == Runtime::Shared {
-        stage_runtime(&runtime, out, abi, quiet)?;
+        stage_runtime(&runtime, out, abi, quiet, os)?;
     }
     if !quiet {
         let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
@@ -727,4 +902,61 @@ pub fn link_executable(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cross_link_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_names_and_loader_paths_follow_the_output_platform() {
+        assert_eq!(
+            runtime_file_names_for(Runtime::Shared, "macos"),
+            ["libash_std.dylib"]
+        );
+        assert_eq!(
+            runtime_file_names_for(Runtime::Shared, "linux"),
+            ["libash_std.so"]
+        );
+        assert!(runtime_file_names_for(Runtime::Shared, "windows").contains(&"libhl.dll.lib"));
+        assert_eq!(
+            staged_runtime_names(2, "windows"),
+            ["libhl.dll", "libhl.2.dll"]
+        );
+        let linux = platform_args(Dialect::Unix, "linux", "x86_64-unknown-linux-gnu").unwrap();
+        assert!(linux.contains(&"-Wl,-rpath,$ORIGIN".into()));
+        assert!(!linux.contains(&"-framework".into()));
+        let mac = platform_args(Dialect::Unix, "macos", "aarch64-apple-darwin").unwrap();
+        assert!(mac.contains(&"CoreFoundation".into()));
+        assert!(!mac.contains(&"-ldl".into()));
+    }
+
+    #[test]
+    fn a_host_driver_is_not_a_cross_linker() {
+        assert!(!compatible_driver(
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu"
+        ));
+        assert!(!compatible_driver(
+            "x86_64-linux-gnu",
+            "x86_64-unknown-linux-musl"
+        ));
+        assert!(!compatible_driver(
+            "x86_64-w64-mingw32",
+            "x86_64-pc-windows-msvc"
+        ));
+        assert!(compatible_driver(
+            "x86_64-linux-gnu",
+            "x86_64-unknown-linux-gnu"
+        ));
+        assert!(target_os("riscv64-unknown-elf").is_err());
+    }
+
+    #[test]
+    fn foreign_runtime_search_stays_inside_target_directories() {
+        let triple = "x86_64-unknown-linux-gnu";
+        let paths = target_runtime_candidates(Runtime::Static, triple, "linux");
+        assert!(!paths.is_empty());
+        assert!(paths.iter().all(|p| p.parent().unwrap().ends_with(triple)));
+    }
 }

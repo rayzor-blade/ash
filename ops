@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1792926222,"nonce":"97LsztKiufD+45jrq/qraVyC0P8=","message":"The application preset's jit_threshold is now 10: landed in 3f75b694 on main.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1792926223,"nonce":"TgLUiLnnLMVk/50NrndL2w0TvSc=","status":2}]}

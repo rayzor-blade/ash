@@ -60,6 +60,15 @@ jobs:
       - name: Test ash_core
         run: cargo test -p ash_core --lib
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Channel ring and page transport contracts
+        run: |
+          cargo test -p ash_hdll_channel
+          node --test haxelib/ash-channel/js/channel-agent.test.mjs
+
       # What ash can compile FOR, as opposed to what it runs on. Emitting an
       # object for a 32-bit or big-endian target is the only thing that
       # exercises those TargetAbi paths outside a wasm build, and the check is

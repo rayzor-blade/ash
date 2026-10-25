@@ -228,6 +228,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_hdll_channel"
+version = "0.1.0"
+dependencies = [
+ "ash_future_abi",
+ "hl_abi",
+]
+
+[[package]]
 name = "ash_hdll_future"
 version = "0.1.0"
 dependencies = [

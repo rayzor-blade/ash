@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { serve } from "./channel-agent.mjs";
+import { serve, start } from "./channel-agent.mjs";
 
 const FLAGS = 11, HEAD = 6, TAIL = 7, EHEAD = 4, ETAIL = 5;
 function fixture() {
@@ -109,4 +109,11 @@ test("block bounds and shared memory are required", () => {
   assert.throws(() => serve({ ...f, address: -8 }, {}));
   Atomics.store(f.words(), f.w + 2, 1);
   assert.throws(() => serve(f, {}));
+});
+
+test("an unregistered default transport closes waiting receivers", async () => {
+  const f = fixture();
+  await start(f);
+  assert.ok(Atomics.load(f.words(), f.w + FLAGS) & 2);
+  assert.deepEqual(events(f), [3]);
 });

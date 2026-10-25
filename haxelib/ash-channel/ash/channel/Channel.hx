@@ -37,7 +37,7 @@ class Channel {
 		Open a channel served by the page agent `agent`: letters, digits, `_`
 		and `-`, at most 64. `capacity` is the size of each of the two rings in
 		bytes, a power of two from 4096 to 67108864; one message may take at
-		most half of it, less 8 bytes. Throws if the page would not start the
+		most half of it, less 8 bytes, capped at 16777204 bytes. Throws if the page would not start the
 		agent: no `ashAgent` hook, or memory that is not shared.
 	**/
 	public static function open(agent:String, capacity:Int = 65536):Channel {
@@ -84,7 +84,7 @@ class Channel {
 		return raw.toBytes(4 + n).sub(4, n);
 	}
 
-	/** The same, as a future, for a program that waits on several things. */
+	/** A future of raw bytes: a little-endian u32 message length, then the message. */
 	public function recvAsync():ash.Future<hl.Bytes>
 		return nativeRecv(handle);
 

@@ -244,6 +244,7 @@ export function start(ask) {
     new Uint8Array(ask.memory.buffer).slice(ask.address + NAME_AT, ask.address + NAME_AT + length),
   );
   const transport = globalThis.ashChannels && globalThis.ashChannels[name];
-  if (!transport) throw new Error(`no transport registered for channel "${name}" (globalThis.ashChannels)`);
-  return serve(ask, transport);
+  return serve(ask, transport ?? (() => {
+    throw new Error(`no transport registered for channel "${name}" (globalThis.ashChannels)`);
+  }));
 }

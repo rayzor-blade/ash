@@ -8320,11 +8320,11 @@ unsafe fn census_write(gc: &ImmixAllocator, heap_base: usize, w: &mut dyn FnMut(
 ///
 /// The mark is a real one (it is what makes the per-block census mean
 /// anything), but nothing is swept: a dump must not change what the program
-/// can still reach. The bits it sets are left standing rather than cleared —
-/// a mark bit only ever *retains* a block, and the next sweep clears them all
-/// — so the cost of dumping is at most one extra conservative cycle. Clearing
-/// them would be the unsafe direction: it would also drop the marks
-/// allocation-time marking had already set.
+/// can still reach. Its marks must not outlive it: a later mark phase stops at
+/// an object it finds marked, so what that object points to after the dump
+/// would go unmarked and be freed. Without generations every mark is dead
+/// outside a collection, so they are cleared here; with them marks are sticky,
+/// so the next collection is made a major, which clears them first.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     unsafe {
@@ -8448,6 +8448,13 @@ pub(crate) unsafe extern "C" fn gc_dump_memory(filename: *mut hl::vbyte) {
         w("end".into());
 
         drop(roots);
+        if marked {
+            if generational() {
+                gc.heap.since_major = major_every();
+            } else {
+                gc.clear_all_marks();
+            }
+        }
         let _ = out.flush();
     }
 }

@@ -1092,6 +1092,12 @@ pub unsafe extern "C" fn ash_host_watch(
     WAKE.as_ptr() as *const u32
 }
 
+/// The process-lifetime word page agents notify after publishing completions.
+#[unsafe(no_mangle)]
+pub extern "C" fn ash_host_wake_word() -> *const u32 {
+    WAKE.as_ptr() as *const u32
+}
+
 /// Run the handler of every watched word that changed since it was last
 /// seen. Handlers run outside the lock: one may register another watch.
 unsafe fn poll_watches() {
@@ -1773,6 +1779,7 @@ pub(crate) unsafe extern "C" fn host_wait(timeout: f64, wake: unsafe extern "C" 
             .host_wake
             .store(wake as *mut (), Ordering::Release);
     });
+    unsafe { poll_watches() };
     let ran = unsafe { crate::rt::schedule_step() };
     SCHEDULER.with(|scheduler| {
         let scheduler = scheduler.borrow();
@@ -1898,6 +1905,20 @@ mod host_wait_tests {
             token: 4,
         }));
         assert_eq!(NOTIFIED.load(Ordering::Acquire), before + 1);
+    }
+
+    #[test]
+    fn host_wait_delivers_page_completions_before_sleeping() {
+        static WORD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static CALLED: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn completed(_: *mut c_void) { CALLED.fetch_add(1, Ordering::Release); }
+        unsafe {
+            assert_eq!(ash_host_watch(WORD.as_ptr(), completed, ptr::null_mut()), ash_host_wake_word());
+            WORD.fetch_add(1, Ordering::Release);
+            host_wait(0.0, notify);
+            host_resumed();
+        }
+        assert_eq!(CALLED.load(Ordering::Acquire), 1);
     }
 
     #[test]

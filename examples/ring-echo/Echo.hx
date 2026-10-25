@@ -101,6 +101,7 @@ class Echo {
 		// 6. State, then close: a recv after close throws ChannelClosed.
 		check(channel.isOpen, "isOpen");
 		channel.close();
+		check(!channel.isOpen && channel.isClosed, "closed state");
 		var closed = false;
 		try {
 			channel.recv();

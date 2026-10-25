@@ -93,7 +93,7 @@ class Channel {
 		nativeClose(handle);
 
 	function get_isOpen():Bool
-		return nativeState(handle) & 1 != 0;
+		return nativeState(handle) & 7 == 1;
 
 	function get_isClosed():Bool
 		return nativeState(handle) & 6 != 0;

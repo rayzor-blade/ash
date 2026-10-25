@@ -302,7 +302,8 @@ struct Staged {
     kept: fields::Kept,
 }
 
-/// Spare bytes in every object, for the fields a reload adds to a class.
+/// Spare bytes in every instance of the program's classes (not the runtime's),
+/// for the fields a reload adds to a class.
 /// `ASH_RELOAD_ROOM=<bytes>` sets it; 0 leaves a class only the padding at its
 /// end to grow into. Safe to change between runs.
 const OBJECT_ROOM: usize = 64;

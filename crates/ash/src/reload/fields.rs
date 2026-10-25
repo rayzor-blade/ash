@@ -3,7 +3,8 @@
 //! An object keeps the layout it was made with, and compiled code reads a
 //! field at a fixed offset from it, so a field can only be added where the
 //! objects made before the reload have room for it. `--hot-reload` allocates
-//! every object with spare bytes at its end (`hlp_set_object_room`). A field
+//! every instance of the program's classes with spare bytes at its end
+//! (`hlp_set_object_room`). A field
 //! the new program adds to a class is laid out after the fields the class
 //! has, in that room, and reads as zero in the objects made before the
 //! reload: the constructor's initialiser has not run for them.

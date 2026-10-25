@@ -208,9 +208,70 @@ impl std::hash::Hasher for AddressHasher {
 
 type ByAddress = std::hash::BuildHasherDefault<AddressHasher>;
 
-/// Spare bytes `hlp_alloc_obj` leaves at the end of every instance of a class,
-/// for the fields a hot reload adds to the class.
+/// Spare bytes `hlp_alloc_obj` leaves at the end of every instance of the
+/// program's classes, for the fields a hot reload adds to the class.
 static OBJECT_ROOM: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the instances of `t` carry the spare bytes. The runtime's own
+/// classes never gain a field in a reload, so only the program's classes pay.
+/// Decided by name and remembered in a small per-thread table keyed by type
+/// address, so an allocation does not read the name each time.
+fn wants_room(t: *mut hl_type, obj: *const hl::hl_type_obj) -> bool {
+    use std::cell::Cell;
+    const SLOTS: usize = 64;
+    thread_local! {
+        static DECIDED: [Cell<(usize, bool)>; SLOTS] =
+            const { [const { Cell::new((0, false)) }; SLOTS] };
+    }
+    let key = t as usize;
+    DECIDED.with(|table| {
+        let slot = &table[(key >> 4) % SLOTS];
+        let (known, wants) = slot.get();
+        if known == key {
+            return wants;
+        }
+        let mut name = [0u8; 40];
+        let mut len = 0;
+        let mut ascii = true;
+        let mut at = unsafe { (*obj).name };
+        while !at.is_null() && len < name.len() {
+            let unit = unsafe { *at };
+            if unit == 0 {
+                break;
+            }
+            if unit >= 0x80 {
+                ascii = false;
+                break;
+            }
+            name[len] = unit as u8;
+            len += 1;
+            at = unsafe { at.add(1) };
+        }
+        let wants = !(ascii && is_runtime_class(&name[..len]));
+        slot.set((key, wants));
+        wants
+    })
+}
+
+/// The classes of the Haxe standard library and the HashLink runtime, by
+/// name (a long name is cut, which only keeps its prefix).
+fn is_runtime_class(name: &[u8]) -> bool {
+    const EXACT: &[&str] = &[
+        "String", "Array", "Date", "StringBuf", "Math", "Reflect", "Type", "Std", "Sys", "EReg",
+    ];
+    const PACKAGES: &[&str] = &[
+        "hl.",
+        "sys.",
+        "haxe.ds.",
+        "haxe.io.",
+        "haxe.iterators.",
+        "haxe.format.",
+        "haxe.crypto.",
+        "haxe.exceptions.",
+    ];
+    EXACT.iter().any(|n| n.as_bytes() == name)
+        || PACKAGES.iter().any(|p| name.starts_with(p.as_bytes()))
+}
 
 /// Whether a class has been laid out. The room is promised to every instance,
 /// so it can only be asked for before the first.
@@ -361,10 +422,10 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
             return ptr::null_mut();
         }
 
-        let room = if (*t).kind == hl::hl_type_kind_HOBJ {
-            OBJECT_ROOM.load(Ordering::Relaxed)
-        } else {
-            0
+        let room = match OBJECT_ROOM.load(Ordering::Relaxed) {
+            0 => 0,
+            room if (*t).kind == hl::hl_type_kind_HOBJ && wants_room(t, obj) => room,
+            _ => 0,
         };
         let size = (*rt).size as usize + object_tail(t) + room;
         // let has_ptr = (*rt).hasPtr;
@@ -3882,6 +3943,43 @@ pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_contex
                 let pos = *indexes.add(i) as u32 / HL_WSIZE;
                 *mark.add((pos >> 5) as usize) |= 1 << (pos & 31);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod room_tests {
+    use super::is_runtime_class;
+
+    #[test]
+    fn the_runtime_classes_get_no_room_and_the_programs_do() {
+        for name in [
+            "String",
+            "Array",
+            "StringBuf",
+            "hl.types.ArrayObj",
+            "hl.types.ArrayBytes_Float",
+            "haxe.io.Bytes",
+            "haxe.ds.StringMap",
+            "haxe.iterators.ArrayIterator",
+            "haxe.format.JsonParser",
+            "sys.thread.Thread",
+        ] {
+            assert!(is_runtime_class(name.as_bytes()), "{name}");
+        }
+        for name in [
+            "Main",
+            "chimpmonk.physics.core.World",
+            "ashui.ui.Button",
+            // A library that lives under `haxe.` but is the program's to edit.
+            "haxe.ui.core.Component",
+            "haxe.Exception",
+            // Names that only begin like a runtime class.
+            "StringTools2",
+            "Arrays",
+            "hlx.Thing",
+        ] {
+            assert!(!is_runtime_class(name.as_bytes()), "{name}");
         }
     }
 }

@@ -20,6 +20,18 @@ const MAX_FUNCTIONS: usize = 4096;
 const MAX_SURVEYS: usize = 128;
 const MAX_CALLER_AIR: usize = 8 * 1024 * 1024;
 
+static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn tree fusion off for this process, for the `--no-tree-fusion` switch.
+pub fn disable() {
+    DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`disable`] has not been called.
+pub fn enabled() -> bool {
+    !DISABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Only the standalone CLI before guest execution may establish this contract.
 /// The linked Ash runtime has no replaceable allocator/plugin loader; native
 /// host code, registration hooks, and reload would void that assumption.

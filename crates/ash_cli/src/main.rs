@@ -1438,6 +1438,9 @@ fn run() -> Result<()> {
 
     #[cfg(feature = "llvm")]
     if cli.emit_aot.is_some() || cli.build.is_some() {
+        if cli.no_tree_fusion {
+            ash_core::tree_fusion::disable();
+        }
         // With only `--build`, the object is scratch: it is named after the
         // binary, beside it, and removed once linked.
         let exe = cli.build.clone();

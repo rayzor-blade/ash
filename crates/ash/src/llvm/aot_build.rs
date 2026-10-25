@@ -118,15 +118,32 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     crate::air_pipeline::set_shadow_frames(
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
-    let mut jit = crate::llvm::module::JITModule::new_aot_with_host(
-        context,
-        file,
-        &triple,
-        &exports,
-        &closures,
-        &object_tails,
-        &object_drops,
-    )?;
+    // A one-command build of a native executable nothing else registers into
+    // is a fresh standalone program, which is what tree fusion's contract
+    // needs; an object a host links, or a wasm module, is not.
+    let standalone = exe.is_some()
+        && runtime.is_none()
+        && links.is_empty()
+        && language_objects.is_empty()
+        && exports.is_empty()
+        && closures.is_empty()
+        && object_tails.is_empty()
+        && object_drops.is_empty()
+        && !triple.starts_with("wasm")
+        && crate::tree_fusion::enabled();
+    let mut jit = if standalone {
+        crate::llvm::module::JITModule::new_aot_standalone(context, file, &triple)?
+    } else {
+        crate::llvm::module::JITModule::new_aot_with_host(
+            context,
+            file,
+            &triple,
+            &exports,
+            &closures,
+            &object_tails,
+            &object_drops,
+        )?
+    };
 
     let findexes: Vec<usize> = jit
         .bytecode_functions()

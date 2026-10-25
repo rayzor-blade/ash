@@ -156,3 +156,53 @@ fn default_execution_is_quiet_and_export_uses_original_contract() {
         assert!(!String::from_utf8_lossy(&result.output.stderr).contains("[tree-fusion]"));
     }
 }
+
+/// A standalone executable `--build` writes is the program in its final form,
+/// so it gets the same fusion a run does; `--no-tree-fusion` leaves it as is.
+#[cfg(feature = "llvm")]
+#[test]
+fn a_built_executable_is_fused_unless_fusion_is_turned_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = tests_dir().join("bench_binary_trees.hl");
+    let mut outputs = Vec::new();
+    for (name, flags) in [("fused", &[][..]), ("plain", &["--no-tree-fusion"][..])] {
+        let exe = dir.path().join(name);
+        let mut build = Command::new(ash_cli_bin());
+        build
+            .arg("--quiet")
+            .args(flags)
+            .arg("--build")
+            .arg(&exe)
+            .arg(&input);
+        let built = run_with_timeout(build, Duration::from_secs(300));
+        assert!(
+            !built.timed_out && built.output.status.success(),
+            "{}",
+            render_output(&built.output)
+        );
+        let mut run = Command::new(&exe);
+        run.env("ASH_GC_STATS", "1").env("ASH_GC_TLAB", "0");
+        let ran = run_with_timeout(run, Duration::from_secs(120));
+        assert!(
+            !ran.timed_out && ran.output.status.success(),
+            "{}",
+            render_output(&ran.output)
+        );
+        outputs.push(ran.output);
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&outputs[0].stdout).trim(),
+        "Checksum: -104864"
+    );
+    assert_eq!(outputs[0].stdout, outputs[1].stdout);
+    assert!(
+        (3.9..5.0).contains(&allocation(&outputs[0])),
+        "{}",
+        render_output(&outputs[0])
+    );
+    assert!(
+        allocation(&outputs[1]) > 800.0,
+        "{}",
+        render_output(&outputs[1])
+    );
+}

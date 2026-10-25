@@ -404,7 +404,7 @@ fn timing_enabled() -> bool {
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
         let abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
-        Self::build(context, path, false, abi, &[], &[], &[], &[])
+        Self::build(context, path, false, abi, &[], &[], &[], &[], false)
             .expect("Failed to build JIT module")
     }
 
@@ -416,7 +416,7 @@ impl<'ctx> JITModule<'ctx> {
     /// the switch would already have an address baked into it.
     pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::host()?;
-        Self::build(context, path, true, abi, &[], &[], &[], &[])
+        Self::build(context, path, true, abi, &[], &[], &[], &[], false)
     }
 
     pub fn new_aot_for_target(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
@@ -444,7 +444,16 @@ impl<'ctx> JITModule<'ctx> {
             closures,
             object_tails,
             object_drops,
+            false,
         )
+    }
+
+    /// An AOT module for a program that becomes a standalone executable, with
+    /// no host to register anything: tree fusion may rewrite it first, as it
+    /// does for a program the CLI runs.
+    pub fn new_aot_standalone(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
+        let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
+        Self::build(context, path, true, abi, &[], &[], &[], &[], true)
     }
 
     fn build(
@@ -456,6 +465,7 @@ impl<'ctx> JITModule<'ctx> {
         closures: &[crate::host_export::HostClosure],
         object_tails: &[(String, usize)],
         object_drops: &[String],
+        fuse: bool,
     ) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
@@ -464,6 +474,17 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut bytecode =
             BytecodeDecoder::decode_for_abi(path, &target_abi).expect("Failed to decode bytecode");
+        if fuse {
+            // Refused (external natives, hosted modules, a runtime that is not
+            // linked in) leaves the program as decoded.
+            let fused = match crate::tree_fusion::prepare_standalone(&bytecode) {
+                Ok((std::borrow::Cow::Owned(prepared), _)) => Some(prepared),
+                _ => None,
+            };
+            if let Some(prepared) = fused {
+                bytecode = prepared;
+            }
+        }
         let aot_exports = bytecode.add_host_exports(exports)?;
         let aot_closures = bytecode.add_host_closures(closures)?;
         let object_tails = bytecode.object_tails(object_tails)?;

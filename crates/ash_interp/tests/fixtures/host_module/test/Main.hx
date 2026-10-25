@@ -29,6 +29,12 @@ package test;
 		return null;
 	}
 
+	/** A function the host makes that throws when called: the throw has to
+		reach the `try` around the call. */
+	@:hlNative("host", "greeter_thrower") public static function thrower():Int->Int {
+		return null;
+	}
+
 	/** A native the host takes by record: an object, a float and a bool
 		in, a float out, through one C entry that unpacks by kind. */
 	@:hlNative("host", "greeter_scale") public static function scale(g:Greeter, by:Float, on:Bool):Float {
@@ -57,5 +63,11 @@ class Main {
 		Sys.println(Greeter.scale(g, 1.5, true) + Greeter.scale(g, 0.5, false));
 		// A class the host adds is found by name like the program's own.
 		Sys.println(Type.resolveClass("host.Greeters") != null);
+		var thrown = Greeter.thrower();
+		try {
+			Sys.println(thrown(1));
+		} catch (e:Dynamic) {
+			Sys.println("caught " + e);
+		}
 	}
 }

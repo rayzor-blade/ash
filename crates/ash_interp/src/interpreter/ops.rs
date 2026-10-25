@@ -1698,18 +1698,41 @@ impl HLInterpreter {
                                 ));
                             }
                             let array = packed.as_ptr() as *mut hl::varray;
-                            let result = if (*wrapped).hasValue != 0 {
-                                let f: unsafe extern "C" fn(
-                                    *mut c_void,
-                                    *mut hl::varray,
-                                )
-                                    -> *mut hl::vdynamic = std::mem::transmute(wrapped_fun);
-                                f((*wrapped).value, array)
-                            } else {
-                                let f: unsafe extern "C" fn(*mut hl::varray) -> *mut hl::vdynamic =
-                                    std::mem::transmute(wrapped_fun);
-                                f(array)
-                            };
+                            // Under a trap, as a bytecode native is: a throw
+                            // from the entry must reach the interpreted `try`
+                            // around this call, not the outermost C trap.
+                            let stack_depth = self.stack.len();
+                            let mut result = std::ptr::null_mut();
+                            let jumped = run_with_hl_trap(
+                                self.fn_setup_trap_jit,
+                                self.fn_remove_trap_jit,
+                                || {
+                                    result = if (*wrapped).hasValue != 0 {
+                                        let f: unsafe extern "C" fn(
+                                            *mut c_void,
+                                            *mut hl::varray,
+                                        )
+                                            -> *mut hl::vdynamic =
+                                            std::mem::transmute(wrapped_fun);
+                                        f((*wrapped).value, array)
+                                    } else {
+                                        let f: unsafe extern "C" fn(
+                                            *mut hl::varray,
+                                        )
+                                            -> *mut hl::vdynamic =
+                                            std::mem::transmute(wrapped_fun);
+                                        f(array)
+                                    };
+                                },
+                            );
+                            if jumped != 0 {
+                                return Err(self.longjmp_error(
+                                    Some(bytecode),
+                                    stack_depth,
+                                    "Native longjmp without exception value: var-args closure"
+                                        .to_owned(),
+                                ));
+                            }
                             let ret = if result.is_null() {
                                 NanBoxedValue::null()
                             } else {

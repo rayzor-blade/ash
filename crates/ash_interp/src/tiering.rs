@@ -199,7 +199,7 @@ impl TierPreset {
             // loops that can amortise its compilation and retained metadata.
             TierPreset::Application => TieredConfig {
                 enabled: true,
-                jit_threshold: 100,
+                jit_threshold: 10,
                 opt_threshold: 10_000,
                 ..base
             },

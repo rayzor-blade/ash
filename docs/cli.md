@@ -22,7 +22,7 @@ ash --build mygame.wasm --target wasm32-wasip1 main.hl
 |--------|--------|---------|---|
 | `--mode` | `interp`, `hybrid`, `jit` | `hybrid` | see below |
 | `--preset` | `script`, `application`, `game`, `server`, `benchmark`, `development`, `interpreter` | `application` | promotion thresholds for the program's shape |
-| `--jit-threshold` | integer | 100 | calls before Cranelift compiles a function |
+| `--jit-threshold` | integer | set by the preset (`application`: 10) | calls before Cranelift compiles a function |
 | `--opt-threshold` | integer | 10,000 | calls before LLVM recompiles it; counted on interpreted calls only |
 | `--jit-tier` | `auto`, `cranelift`, `llvm`, `off` | `auto` | restrict the ladder to one compiler, or disable promotion |
 | `--jit-log` | flag | | log every promotion, decline and tier transfer to stderr |

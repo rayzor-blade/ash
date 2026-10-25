@@ -8,7 +8,7 @@ can be seen. Everyday options are in [cli.md](cli.md).
 | Option | Values | |
 |--------|--------|---|
 | `--jit-tier` | `auto`, `cranelift`, `llvm`, `off` | restrict the ladder to one compiler (default `auto`) |
-| `--jit-threshold` | integer | calls before Cranelift promotion (default 100) |
+| `--jit-threshold` | integer | calls before Cranelift promotion (the preset's; `application`: 10) |
 | `--opt-threshold` | integer | interpreted calls before LLVM promotion (default 1000) |
 | `--jit-min-ops` | integer | minimum opcode count before a function is promoted (0 disables) |
 | `--jit-max-args` | integer | widest signature that is promoted (default 32) |

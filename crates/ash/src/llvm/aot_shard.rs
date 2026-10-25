@@ -122,23 +122,13 @@ pub fn shard_count() -> usize {
 /// optimizer over 1.7MB of bytecode as one module on one core, forty
 /// minutes against the sharded native build's four.
 pub fn shard_count_for(triple: &str) -> usize {
-    if TargetTriple::create(triple) != TargetMachine::get_default_triple()
-        && !super::aot_link::is_wasm_triple(triple)
-    {
+    if !crate::target_abi::is_host_triple(triple) && !super::aot_link::is_wasm_triple(triple) {
         return 1;
     }
     shard_count()
 }
 
-/// The back end for an object file targeting `triple`.
-///
-/// Emitting for THIS machine means naming it. `generic` on x86-64 is baseline
-/// SSE2 -- no FMA3, no AVX2 -- and codegen for it cost nbody 3.9x against the
-/// same IR run by the JIT, which stamps the host CPU on every function. The
-/// middle end already optimizes for the host, so a generic back end also
-/// leaves the two halves disagreeing about what the machine can do.
-/// Cross-compiling keeps `generic`, which is the only safe answer for a
-/// machine we cannot ask.
+/// Code generation uses the AOT request's CPU policy and target features.
 pub(crate) fn object_target_machine(triple: &str) -> Result<(TargetTriple, TargetMachine)> {
     crate::target_abi::target_machine(triple, inkwell::OptimizationLevel::Aggressive)
 }

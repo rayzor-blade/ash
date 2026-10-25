@@ -382,7 +382,7 @@ pub(crate) fn run_middle_end_at(
     }
     MACHINES.with(|cell| -> Result<()> {
         let mut machines = cell.borrow_mut();
-        let machine = match machines.entry(triple.clone()) {
+        let machine = match machines.entry(crate::target_abi::machine_cache_key(&triple)) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(v) => {
                 let abi = crate::target_abi::TargetAbi::for_triple(&triple)?;

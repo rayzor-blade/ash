@@ -250,11 +250,15 @@ pub fn retier_enabled() -> bool {
     *ON.get_or_init(|| !std::env::var("ASH_CL_RETIER").is_ok_and(|v| v == "0"))
 }
 
+/// The exits for one compile. `own_header` is the loop an OSR entry is rooted
+/// at: the frame that runs the entry is in that loop, so it carries an exit
+/// when the loop is a leaf, nested or not.
 pub(super) fn retier_state_for(
     findex: usize,
     program: usize,
     opt: &std::sync::Arc<crate::air_pipeline::Optimized>,
     poll_epoch: usize,
+    own_header: Option<u32>,
 ) -> HashMap<u32, std::sync::Arc<crate::retier::Site>> {
     use std::sync::Arc;
     if !retier_enabled() {
@@ -289,7 +293,8 @@ pub(super) fn retier_state_for(
         .or_default();
     let mut exits = HashMap::new();
     for h in plan.entry_headers {
-        if !retier_worth_polling(&forest, h) {
+        if !retier_worth_polling(&forest, h) && !(own_header == Some(h) && is_leaf_loop(&forest, h))
+        {
             // A straight-line entry has no loop to name.
             if log && forest.loops.iter().any(|l| l.header.0 == h) {
                 eprintln!("[retier] findex={findex} header={h}: no exit, not an un-nested leaf loop");
@@ -334,6 +339,14 @@ pub(super) fn retier_state_for(
         exits.insert(h, site);
     }
     exits
+}
+
+fn is_leaf_loop(forest: &air::v2::LoopForest, header: u32) -> bool {
+    forest
+        .innermost_first()
+        .into_iter()
+        .find(|&l| forest.get(l).header.0 == header)
+        .is_some_and(|l| forest.get(l).children.is_empty())
 }
 
 /// Whether a loop header should carry a re-tier exit.
@@ -487,6 +500,7 @@ fn lower_air_codegen(
         ctx.bytecode() as *const _ as usize,
         &opt,
         ctx.fiber_poll_epoch_address().unwrap_or(0),
+        None,
     );
     let result = super::codegen::lower_air_function(backend, ctx, findex, &opt.ir, &osr_exits);
     if let Err(error) = &result {

@@ -235,6 +235,37 @@ fn a_loop_inside_a_loop_is_entered_mid_flight() {
     }
 }
 
+/// A frame that entered a loop nested in another is in that loop, so the entry
+/// carries the exit for it: the hand-off to the top tier is taken from there.
+#[test]
+fn a_frame_in_a_nested_loop_leaves_through_its_own_loops_exit() {
+    let hl = fixture("TestOsrNested");
+    let (interp, _) = run_for(&hl, &["--mode", "interp"], &[], "nested=");
+    let (answer, log) = run_for(
+        &hl,
+        &[
+            "--mode",
+            "hybrid",
+            "--jit-threshold",
+            "1",
+            "--opt-threshold",
+            "10000",
+        ],
+        &[
+            ("ASH_CL_RETIER", "1"),
+            ("ASH_TEST_RETIER_AFTER", "4096"),
+            ("ASH_OSR_LOG", "1"),
+        ],
+        "nested=",
+    );
+    assert_eq!(answer, interp, "{log}");
+    assert!(
+        log.lines()
+            .any(|l| l.starts_with("[retier] taken ") && l.ends_with("source=osr")),
+        "no frame left its nested loop for the top tier\n{log}"
+    );
+}
+
 /// A `continue` is a second jump back to the loop header. Both entry builders
 /// take the loop's state from the interpreter and run whichever blocks come
 /// next, so a loop with several ways back is entered like any other and gives

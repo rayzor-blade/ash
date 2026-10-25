@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1792894646,"nonce":"7wztCZOwSnCpUcZuAagxyOQ1oPg=","message":"Found by the caribou session, whose heap copied the same note. Verified here: ASH_GC_GEN=0 loses 20000 of 20000 before the fix and 0 after; default collector 0 both ways.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1792914630,"nonce":"0B4oLDCAnlMg2h+BsvHzI2L/hRA=","message":"Landed in 40894c76 on main.","files":null}]}

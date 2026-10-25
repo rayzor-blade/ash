@@ -709,6 +709,13 @@ pub(crate) struct TieredSharedCtx {
     /// Registered with `adapter` so a baseline with a re-tier site can be
     /// queued for the top tier.
     pub(crate) worker_beads: Mutex<HashMap<usize, TieredBound>>,
+    /// The interpreter's bead for each registered function, so compiled loops
+    /// can propose the top tier for a function they have run long enough.
+    pub(crate) hot_bounds: Mutex<HashMap<usize, TieredBound>>,
+    /// Functions a compiled loop has already proposed.
+    pub(crate) loops_proposed: Mutex<HashSet<usize>>,
+    /// Loop iterations in compiled code that count as one top-tier proposal.
+    pub(crate) loop_threshold: u64,
     /// The runtime's adapter. Weak: dropping it joins the broker threads, and
     /// a queued compile holds this context.
     pub(crate) adapter: std::sync::Weak<TieredAdapter>,
@@ -938,6 +945,14 @@ impl TieredSharedCtx {
         self.worker_beads
             .lock()
             .expect("worker_beads mutex poisoned")
+            .clear();
+        self.hot_bounds
+            .lock()
+            .expect("hot_bounds mutex poisoned")
+            .clear();
+        self.loops_proposed
+            .lock()
+            .expect("loops_proposed mutex poisoned")
             .clear();
         // The closures a body hands to native code were scanned in the bodies
         // before the reload.
@@ -1562,7 +1577,7 @@ pub(crate) fn compile_with_cranelift(
                 // published by `enable_tiered`; the arrays are the shared
                 // runtime tables that outlive every tier.
                 let tables = ctx.tables();
-                let cl_ctx = unsafe {
+                let mut cl_ctx = unsafe {
                     ash_core::cranelift::CraneliftTierContext::new(
                         &backend,
                         &bytecode,
@@ -1573,6 +1588,15 @@ pub(crate) fn compile_with_cranelift(
                         &tables.c_types,
                     )?
                 };
+                if ctx.mode == TierMode::Auto && !ctx.compiled_only {
+                    // Weak, so the leaked word never keeps the context alive.
+                    let weak = Arc::downgrade(ctx);
+                    cl_ctx.set_loop_hot(
+                        loops_hot,
+                        std::sync::Weak::into_raw(weak) as usize,
+                        ctx.loop_threshold,
+                    );
+                }
                 if ctx.log_promotions {
                     eprintln!(
                         "[tiered] cranelift backend ready in {:.1}ms ({} native symbols registered)",
@@ -1709,6 +1733,54 @@ pub(crate) fn compile_with_cranelift(
             remember_tier0_refusal(findex);
             std::ptr::null_mut()
         }
+    }
+}
+
+/// Called from Cranelift loops once a function's loops have run
+/// `loop_threshold` iterations: compiled callers do not tick the callee, so
+/// this is how a function that is called seldom and loops long reaches the
+/// top tier. `arg` is a leaked `Weak<TieredSharedCtx>`.
+unsafe extern "C" fn loops_hot(arg: usize, findex: usize) {
+    let weak = std::mem::ManuallyDrop::new(unsafe {
+        std::sync::Weak::from_raw(arg as *const TieredSharedCtx)
+    });
+    let Some(ctx) = weak.upgrade() else {
+        return;
+    };
+    if ctx
+        .llvm_done
+        .lock()
+        .expect("llvm_done mutex poisoned")
+        .contains(&findex)
+        || !ctx
+            .loops_proposed
+            .lock()
+            .expect("loops_proposed mutex poisoned")
+            .insert(findex)
+    {
+        return;
+    }
+    let Some(bound) = ctx
+        .hot_bounds
+        .lock()
+        .expect("hot_bounds mutex poisoned")
+        .get(&findex)
+        .cloned()
+    else {
+        return;
+    };
+    let Some(adapter) = ctx.adapter.upgrade() else {
+        return;
+    };
+    if bound.generation() != 0 {
+        return;
+    }
+    let promote_ctx = Arc::clone(&ctx);
+    let submitted = adapter.force_promote(&bound, 1, move |b| {
+        tiered_compile_tier(&promote_ctx, 1, findex, b, true, u32::MAX)
+    });
+    if submitted && ctx.tier_log {
+        eprintln!("[tier] loops propose findex={findex} tier=llvm");
     }
 }
 

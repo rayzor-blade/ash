@@ -1399,6 +1399,9 @@ impl HLInterpreter {
             osr_image_regs: Mutex::new(HashMap::new()),
             uniform_entries: Mutex::new(HashMap::new()),
             worker_beads: Mutex::new(HashMap::new()),
+            hot_bounds: Mutex::new(HashMap::new()),
+            loops_proposed: Mutex::new(HashSet::new()),
+            loop_threshold: config.opt_threshold,
             adapter: Arc::downgrade(&adapter),
             worker_compile_lock: Mutex::new(()),
             worker_closure_deps: Mutex::new(HashMap::new()),
@@ -4744,6 +4747,12 @@ impl HLInterpreter {
                 match Self::tierable_reason(bytecode, func_idx, &tiered.config) {
                     Ok(()) => {
                         let bound = tiered.adapter.register(findex as beadie::CoreHandle, None);
+                        tiered
+                            .shared_ctx
+                            .hot_bounds
+                            .lock()
+                            .expect("hot_bounds mutex poisoned")
+                            .insert(findex, bound.clone());
                         tiered.beads[findex] = Some(bound);
                         let f = &bytecode.functions[func_idx];
                         if let Some(tf) = bytecode.types[f.type_.0].fun.as_ref() {

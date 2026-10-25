@@ -36,3 +36,33 @@ fn a_loop_owner_with_few_heavy_iterations_is_compiled() {
         "main was never compiled\n{stderr}"
     );
 }
+
+/// pidigits' arithmetic helpers are called from compiled code, which does not
+/// count their calls; their own loops are what gets them to the top tier.
+#[test]
+fn a_function_called_from_compiled_code_is_promoted_by_its_loops() {
+    let mut command = Command::new(ash_cli_bin());
+    command
+        .args(["--mode", "hybrid"])
+        .arg(tests_dir().join("bench_pidigits.hl"))
+        .env("ASH_TIER_LOG", "1")
+        .env_remove("ASH_NO_PROMOTE")
+        .env_remove("ASH_STD_LINKAGE");
+    let result = run_with_timeout(command, Duration::from_secs(120));
+    assert!(
+        !result.timed_out && result.output.status.success(),
+        "{}",
+        render_output(&result.output)
+    );
+    let stderr = String::from_utf8_lossy(&result.output.stderr);
+    assert!(
+        stderr.lines().any(|l| l.starts_with("[tier] loops propose ")),
+        "no loop proposed a promotion\n{stderr}"
+    );
+    assert!(
+        stderr.lines().any(|l| l.starts_with("[tier] install ")
+            && l.contains("BMPidigitsCode.mulSmall ")
+            && l.contains("tier=llvm")),
+        "mulSmall never reached the top tier\n{stderr}"
+    );
+}

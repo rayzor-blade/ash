@@ -29,6 +29,7 @@
 //! instruction requires classifying it before this backend will build.
 
 use anyhow::{Context, Result, anyhow, bail};
+
 use std::collections::HashMap;
 
 use beadie::CraneliftFunctionDef;
@@ -279,6 +280,7 @@ pub fn lower_air_function(
             is_osr: false,
             retier_test_count: None,
             fiber_poll_epoch_slot: None,
+            outer_headers: Vec::new(),
             pos_chains: Vec::new(),
             pos_index: HashMap::new(),
             vars: Vec::new(),
@@ -390,6 +392,7 @@ pub fn compile_osr_entry(
             is_osr: true,
             retier_test_count: None,
             fiber_poll_epoch_slot: None,
+            outer_headers: Vec::new(),
             pos_chains: Vec::new(),
             pos_index: HashMap::new(),
             vars: Vec::new(),
@@ -615,6 +618,10 @@ struct AirCodegen<'a, 'b> {
     retier_test_count: Option<StackSlot>,
     /// Last runtime poll generation handled by this compiled activation.
     fiber_poll_epoch_slot: Option<StackSlot>,
+    /// Headers of loops that no other loop encloses: the only ones that count.
+    /// An enclosed header's iterations are work its outer header already
+    /// reports, and counting them would tax the tight inner loops.
+    outer_headers: Vec<bool>,
     /// The frames behind each srcloc this body sets, indexed by srcloc minus
     /// one: a `Pos` marker becomes `SourceLoc::new(index + 1)`, and the
     /// emitted runs are mapped back through this table.
@@ -828,13 +835,67 @@ impl AirCodegen<'_, '_> {
                     self.b.set_cold_block(poll);
                     self.b.ins().brif(low, body, &[], poll, &[]);
                     self.b.switch_to_block(poll);
+                    self.emit_loop_tick(bid, i64::from(air::v2::passes::stripmine::STRIP))?;
                     self.emit_fiber_poll(folded.as_ref())?;
                     self.b.ins().jump(body, &[]);
                     self.b.switch_to_block(body);
                 }
-                None => self.emit_fiber_poll(folded.as_ref())?,
+                None => {
+                    self.emit_loop_tick(bid, 1)?;
+                    self.emit_fiber_poll(folded.as_ref())?;
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Count `weight` iterations of an outermost loop toward the function's
+    /// promotion, and report the function once the total reaches the
+    /// threshold. Compiled callers do not tick the callee, so a function
+    /// called seldom but looping long would otherwise never be proposed for
+    /// the top tier. The count lives in memory: only outermost headers tick,
+    /// so it is not on a tight loop's critical path, and no value stays live
+    /// across the function.
+    fn emit_loop_tick(&mut self, bid: air::v2::ir::BlockId, weight: i64) -> Result<()> {
+        let Some(hot) = self.ctx.loop_hot() else {
+            return Ok(());
+        };
+        if !self.outer_headers.get(bid.idx()).copied().unwrap_or(false)
+            || self.retier_test_count.is_some()
+        {
+            return Ok(());
+        }
+        let counter = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.loop_counter(self.findex) as i64);
+        let n = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), counter, 0);
+        let n = self.b.ins().iadd_imm(n, weight);
+        self.b.ins().store(MemFlagsData::new(), n, counter, 0);
+        let due = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, hot.threshold as i64);
+        let report = self.b.create_block();
+        let body = self.b.create_block();
+        self.b.set_cold_block(report);
+        self.b.ins().brif(due, report, &[], body, &[]);
+        self.b.switch_to_block(report);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.ins().store(MemFlagsData::new(), zero, counter, 0);
+        let mut sig = Signature::new(self.ctx.call_conv());
+        sig.params
+            .extend([AbiParam::new(types::I64), AbiParam::new(types::I64)]);
+        let sig = self.b.import_signature(sig);
+        let hook = self.b.ins().iconst(types::I64, hot.hook as i64);
+        let arg = self.b.ins().iconst(types::I64, hot.arg as i64);
+        let findex = self.b.ins().iconst(types::I64, self.findex as i64);
+        self.b.ins().call_indirect(sig, hook, &[arg, findex]);
+        self.b.ins().jump(body, &[]);
+        self.b.switch_to_block(body);
         Ok(())
     }
 
@@ -1350,6 +1411,17 @@ impl AirCodegen<'_, '_> {
             .load(types::I64, MemFlagsData::new(), epoch_addr, 0);
         self.b.ins().stack_store(types::I64, initial, slot, 0);
         self.fiber_poll_epoch_slot = Some(slot);
+        if self.ctx.loop_hot().is_some() {
+            let cfg = air::v2::CfgInfo::build(self.f);
+            let loops = air::v2::LoopForest::analyze(self.f, &cfg);
+            let mut outer = vec![false; self.f.blocks.len()];
+            for lp in &loops.loops {
+                if lp.parent.is_none() {
+                    outer[lp.header.idx()] = true;
+                }
+            }
+            self.outer_headers = outer;
+        }
         Ok(())
     }
 

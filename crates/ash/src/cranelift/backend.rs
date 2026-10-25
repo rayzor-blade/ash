@@ -318,6 +318,13 @@ pub struct LoweredMeta {
 /// asserted below because the referenced memory is (a) immutable for the
 /// bytecode and (b) the same shared arrays the interpreter and the LLVM tier
 /// already read and write from multiple threads.
+#[derive(Clone, Copy)]
+pub(super) struct LoopHot {
+    pub(super) hook: usize,
+    pub(super) arg: usize,
+    pub(super) threshold: u64,
+}
+
 pub struct CraneliftTierContext {
     bytecode: *const DecodedBytecode,
     globals_data: usize,
@@ -428,6 +435,12 @@ pub struct CraneliftTierContext {
     /// Address of ash_std's monotonically increasing poll epoch. Loop headers
     /// compare it with the last generation handled by this activation.
     fiber_poll_epoch: usize,
+    /// Called as `hook(arg, findex)` when the loops of a function have
+    /// iterated `threshold` times in total; set by the tiering runtime.
+    loop_hot: Option<LoopHot>,
+    /// One iteration counter per function, leaked: every body compiled for a
+    /// function (the function itself and its OSR entries) counts into it.
+    loop_counters: Mutex<HashMap<usize, usize>>,
     call_conv: CallConv,
     /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
     /// path touches it. Building it is O(functions + natives), so it is held
@@ -612,9 +625,35 @@ impl CraneliftTierContext {
             get_obj_proto,
             fiber_poll,
             fiber_poll_epoch,
+            loop_hot: None,
+            loop_counters: Mutex::new(HashMap::new()),
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
         })
+    }
+
+    /// Have compiled loops report to `hook(arg, findex)` once a function's
+    /// loops have run `threshold` iterations.
+    pub fn set_loop_hot(&mut self, hook: unsafe extern "C" fn(usize, usize), arg: usize, threshold: u64) {
+        self.loop_hot = Some(LoopHot {
+            hook: hook as usize,
+            arg,
+            threshold,
+        });
+    }
+
+    pub(super) fn loop_hot(&self) -> Option<LoopHot> {
+        self.loop_hot
+    }
+
+    /// The address of `findex`'s iteration counter.
+    pub(super) fn loop_counter(&self, findex: usize) -> usize {
+        *self
+            .loop_counters
+            .lock()
+            .expect("loop counters mutex poisoned")
+            .entry(findex)
+            .or_insert_with(|| Box::into_raw(Box::new(0u64)) as usize)
     }
 
     pub fn bytecode(&self) -> &DecodedBytecode {

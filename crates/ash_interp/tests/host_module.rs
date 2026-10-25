@@ -57,10 +57,12 @@ fn main() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         // The third line: whether Type.resolveClass sees the host's own
         // class, which only exists when it was appended rather than bound.
+        // The fourth line: a throw from a host function reached the `try`
+        // around the call.
         let want = if mode.starts_with("bind-") {
-            "45\n70\nfalse"
+            "45\n70\nfalse\ncaught 7"
         } else {
-            "45\n70\ntrue"
+            "45\n70\ntrue\ncaught 7"
         };
         let ok = out.status.success() && stdout.trim() == want;
         println!(
@@ -146,6 +148,7 @@ static DYN_TYPE: AtomicUsize = AtomicUsize::new(0);
 static ARRAY_TYPE: AtomicUsize = AtomicUsize::new(0);
 static I32_TYPE: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_DYNAMIC: AtomicUsize = AtomicUsize::new(0);
+static THROW: AtomicUsize = AtomicUsize::new(0);
 
 /// The C entry behind the adder: its bound value is the amount to add,
 /// as a pointer-sized integer, and `args` the array Haxe's call was
@@ -167,8 +170,35 @@ extern "C" fn adder_entry(
     out
 }
 
+/// The C entry behind the thrower: it throws the Int 7, as a host's function
+/// does when the guest code it runs raises.
+extern "C" fn thrower_entry(
+    _bound: *mut c_void,
+    _args: *mut ash_core::hl_bindings::varray,
+) -> *mut ash_core::hl_bindings::vdynamic {
+    use ash_core::hl_bindings::{hl_type, vdynamic};
+    type AllocDynamic = unsafe extern "C" fn(*mut hl_type) -> *mut vdynamic;
+    type Throw = unsafe extern "C" fn(*mut vdynamic);
+    let alloc: AllocDynamic = unsafe { std::mem::transmute(ALLOC_DYNAMIC.load(Ordering::Acquire)) };
+    let throw: Throw = unsafe { std::mem::transmute(THROW.load(Ordering::Acquire)) };
+    let seven = unsafe { alloc(I32_TYPE.load(Ordering::Acquire) as *mut hl_type) };
+    unsafe { (*seven).v.i = 7 };
+    unsafe { throw(seven) };
+    std::ptr::null_mut()
+}
+
 /// The var-args closure over `adder_entry`, adding 10.
 extern "C" fn greeter_adder() -> *mut c_void {
+    var_args_over(adder_entry as *mut c_void, 10)
+}
+
+/// The var-args closure over `thrower_entry`.
+extern "C" fn greeter_thrower() -> *mut c_void {
+    var_args_over(thrower_entry as *mut c_void, 0)
+}
+
+/// A var-args closure over the C `entry`, with `bound` as its bound value.
+fn var_args_over(entry: *mut c_void, bound: usize) -> *mut c_void {
     use ash_core::hl_bindings::{
         hl_type, hl_type__bindgen_ty_1, hl_type_fun, hl_type_kind_HFUN, hl_type_kind_HVOID,
     };
@@ -196,7 +226,7 @@ extern "C" fn greeter_adder() -> *mut c_void {
     let alloc: AllocClosurePtr =
         unsafe { std::mem::transmute(ALLOC_CLOSURE_PTR.load(Ordering::Acquire)) };
     let make: MakeVarArgs = unsafe { std::mem::transmute(MAKE_VAR_ARGS.load(Ordering::Acquire)) };
-    let inner = unsafe { alloc(t, adder_entry as *mut c_void, 10usize as *mut c_void) };
+    let inner = unsafe { alloc(t, entry, bound as *mut c_void) };
     unsafe { make(inner) }
 }
 
@@ -233,6 +263,15 @@ fn host_module() -> HostModule {
                     params: vec![],
                     ret: HostType::Fun,
                     func: greeter_adder as *const c_void,
+                    context: std::ptr::null(),
+                    record: false,
+                },
+                HostMethod {
+                    name: "thrower".into(),
+                    symbol: "greeter_thrower".into(),
+                    params: vec![],
+                    ret: HostType::Fun,
+                    func: greeter_thrower as *const c_void,
                     context: std::ptr::null(),
                     record: false,
                 },
@@ -311,6 +350,7 @@ fn child(mode: &str) -> ! {
         (&ALLOC_CLOSURE_PTR, "hlp_alloc_closure_ptr"),
         (&MAKE_VAR_ARGS, "hlp_make_var_args"),
         (&ALLOC_DYNAMIC, "hlp_alloc_dynamic"),
+        (&THROW, "hlp_throw"),
     ] {
         let addr = resolver.resolve_function("std", name).expect(name) as usize;
         slot.store(addr, Ordering::Release);

@@ -367,6 +367,7 @@ pub fn compile_osr_entry(
         ctx.bytecode() as *const _ as usize,
         opt,
         ctx.fiber_poll_epoch_address().unwrap_or(0),
+        Some(header as u32),
     );
     // Capture before `builder()` takes a mutable borrow of `def`.
     let fcfg = def.frontend_config();

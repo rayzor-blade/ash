@@ -2637,7 +2637,9 @@ pub(crate) unsafe extern "C" fn gc_print_stats() {
 /// without running them. A no-op unless `ASH_GC_STATS` asked for it, so it is
 /// safe to call unconditionally on the way out.
 pub fn print_stats_if_enabled() {
-    if gc_stats_enabled() {
+    // A copy of the runtime that served no allocation has nothing to report;
+    // the program ran on another copy, which the host asks for its own.
+    if gc_stats_enabled() && GC_STATS.bytes_allocated.load(Ordering::Relaxed) != 0 {
         print_gc_stats_report();
     }
 }

@@ -493,7 +493,27 @@ unsafe extern "C" fn run_llvm_constructors() {
 /// share one implementation in the runtime crate.
 #[cfg(not(windows))]
 fn exit_without_atexit(code: i32) -> ! {
+    print_runtime_gc_stats();
     ash_std::sys::exit_process(code)
+}
+
+/// A program that loads HDLLs runs on the runtime library, whose collector is
+/// not this binary's. Its report is asked for by name; this binary's own copy
+/// prints nothing when it served no allocation.
+#[cfg(not(windows))]
+fn print_runtime_gc_stats() {
+    if !std::env::var("ASH_GC_STATS").is_ok_and(|v| v != "0" && !v.is_empty()) {
+        return;
+    }
+    let Ok(print) = ash_core::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_gc_print_stats")
+    else {
+        return;
+    };
+    if print as usize != ash_std::gc::hlp_gc_print_stats as extern "C" fn() as usize {
+        let print: extern "C" fn() = unsafe { std::mem::transmute(print) };
+        print();
+    }
 }
 
 /// Windows counterpart. `ExitProcess` terminates all threads and does not

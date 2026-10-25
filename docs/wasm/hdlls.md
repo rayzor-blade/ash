@@ -159,10 +159,13 @@ has.
 
 - The browser loader. The steps above run against `WebAssembly.instantiate`;
   fetching a library only when the program uses it is the reason to do it.
-- Threaded programs. A `wasm32-wasip1-threads` program's memory is shared,
-  so a library built for `wasm32-wasip1` is refused at load, and a Rust
-  library built for the threads target does not link as a side module: its
-  `std` reaches `errno` through a TLS relocation against an imported symbol.
+- Threaded programs by `build_wasm_hdll.py`. A `wasm32-wasip1-threads`
+  program's memory is shared, so a library built for `wasm32-wasip1` is
+  refused at load. A Rust library built for the threads target links as a side
+  module once it defines its own `errno` slot (its `std` reaches `errno`
+  through a TLS relocation against an imported symbol) and is linked
+  `--shared-memory`; `scripts/build_wasm_channel.sh` is the recipe, and
+  `haxelib/ash-channel` the worked example.
 - Lazy loading: everything beside the program is loaded at start-up.
 - Unloading.
 - `fmt` stays compiled into the runtime: its digests and zlib streams are

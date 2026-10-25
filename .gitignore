@@ -36,3 +36,6 @@ examples/browser/ash_browser_bg.wasm.d.ts
 examples/browser/worker.js
 examples/browser/thread.js
 examples/browser/display.js
+
+# The ring-echo example's build output.
+/examples/ring-echo/out/

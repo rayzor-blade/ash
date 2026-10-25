@@ -1,0 +1,17 @@
+[package]
+name = "ash_hdll_channel"
+version = "0.1.0"
+edition = "2024"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "ash_channel: byte messages between a program and a page agent, as a wasm side module"
+publish = false
+
+# Deliberately NOT ash_std: a native library reaches the runtime through the C
+# ABI, as an HDLL reaches libhl. See docs/wasm/hdlls.md.
+[dependencies]
+hl_abi = { workspace = true }
+ash_future_abi = { path = "../ash_future_abi" }
+
+[lib]
+crate-type = ["staticlib", "rlib"]

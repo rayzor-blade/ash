@@ -1,0 +1,13 @@
+{
+  "name": "ash-channel",
+  "url": "https://github.com/rayzor-blade/ash",
+  "contributors": ["rayzor", "darmie"],
+  "license": "MIT",
+  "tags": ["hashlink", "ash", "wasm", "async"],
+  "description": "Byte messages between an Ash wasm program and a page agent, over shared memory",
+  "version": "0.1.0",
+  "releasenote": "First version: open, send, recv and close over the ash_channel wasm side module",
+  "dependencies": {
+    "ash-future": ""
+  }
+}

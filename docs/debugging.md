@@ -568,7 +568,10 @@ These options leave the separate 8 MiB in-process AIR budget unchanged.
 writes, evictions and time spent computing identity, reading, writing,
 lowering, running AIR passes and verifying. AOT also reports wall time for
 decode/preparation, module setup, LLVM IR emission, LLVM optimization/codegen
-and linking. LLVM shard logs split their middle end and codegen time further.
+and linking. The WASM link timer is split into input reading/parsing, symbol
+resolution, layout/reachability, relocation, module emission and fiber rewriting.
+On Unix the report also includes the process peak RSS. LLVM shard logs split
+their middle end and codegen time further.
 `ASH_TIERED_TIMING=1` provides the existing detailed module setup phases.
 Environment equivalents are `ASH_AIR_DISK_CACHE=0`, `ASH_AIR_DISK_CACHE_DIR`,
 `ASH_AIR_DISK_CACHE_MB` and `ASH_AIR_DISK_CACHE_STATS=1`.

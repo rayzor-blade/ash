@@ -383,19 +383,41 @@ struct Layout {
 }
 
 /// Link `objects` into a module.
-pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
+pub fn link(objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
+    Ok(link_with_timings(objects, opts)?.0)
+}
+
+/// Wall time spent in each linker stage, including the optional fiber rewrite.
+#[derive(Debug, Default)]
+pub struct LinkTimings {
+    pub resolve: std::time::Duration,
+    pub layout: std::time::Duration,
+    pub relocations: std::time::Duration,
+    pub emit: std::time::Duration,
+    pub fibers: std::time::Duration,
+}
+
+pub fn link_with_timings(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<(Vec<u8>, LinkTimings)> {
+    let began = std::time::Instant::now();
     refuse_unsupported(&objects)?;
 
     let defs = resolve_definitions(&objects)?;
     check_hdll_imports(&defs, opts)?;
     let opts = &with_runtime_host_functions(opts, &defs);
+    let mut timings = LinkTimings { resolve: began.elapsed(), ..Default::default() };
+    let began = std::time::Instant::now();
     let layout = plan(&objects, &defs, opts)?;
     report_unresolved(&objects, &defs, &layout)?;
+    timings.layout = began.elapsed();
     // Patching mutates each object's kept payloads in place.
+    let began = std::time::Instant::now();
     apply_relocations(&mut objects, &defs, &layout)?;
+    timings.relocations = began.elapsed();
+    let began = std::time::Instant::now();
     let module = emit(&objects, &defs, &layout, opts)?;
+    timings.emit = began.elapsed();
     if !opts.fibers {
-        return Ok(module);
+        return Ok((module, timings));
     }
     // Only here, and never earlier. A relocation names an absolute byte
     // offset into a body and is written into a fixed-width slot; re-encoding
@@ -403,7 +425,9 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
     // of `apply_relocations` would leave every later patch landing across an
     // opcode boundary in a module that still validates. By this point every
     // relocation has been spent and nothing reads an offset again.
+    let began = std::time::Instant::now();
     let (module, dispatch) = crate::fiber::instrument(&module)?;
+    timings.fibers = began.elapsed();
     // What the transform actually did, which was computed and then dropped.
     // `refused` and `unsavable` are the numbers that matter: a function the
     // transform declined cannot suspend, so a fiber that tries to suspend
@@ -421,7 +445,7 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
             dispatch.traps,
         );
     }
-    Ok(module)
+    Ok((module, timings))
 }
 
 /// Say no to what has not been implemented, rather than producing a module

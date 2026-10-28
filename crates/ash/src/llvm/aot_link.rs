@@ -697,6 +697,7 @@ fn link_wasm_module(
     fibers: bool,
     quiet: bool,
 ) -> Result<()> {
+    let began = std::time::Instant::now();
     // A program that names an HDLL is not refused. A library shipped as a
     // `.wasm` side module beside the output is loaded at run time; any other
     // library's primitives resolve to the stub that raises when one is
@@ -730,6 +731,7 @@ fn link_wasm_module(
             .unwrap_or_else(|| path.display().to_string());
         inputs.push(ash_wasm_link::read(&name, &bytes)?);
     }
+    crate::air_disk_cache::stage("wasm_inputs", began.elapsed());
     // Fibers are opt-in and off by default, so a normal build gets a module
     // byte-identical to the one it got before the transform existed. Turning
     // them on refuses loudly if the program has no suspend point rather than
@@ -797,7 +799,12 @@ fn link_wasm_module(
              module. It gets bigger and every call in the suspend set pays a check.",
         );
     }
-    let module = ash_wasm_link::link(inputs, &opts)?;
+    let (module, times) = ash_wasm_link::link_with_timings(inputs, &opts)?;
+    for (name, elapsed) in [
+        ("wasm_resolve", times.resolve), ("wasm_layout", times.layout),
+        ("wasm_relocations", times.relocations), ("wasm_emit", times.emit),
+        ("wasm_fibers", times.fibers),
+    ] { crate::air_disk_cache::stage(name, elapsed); }
     std::fs::write(out, &module).map_err(|e| anyhow!("writing {}: {e}", out.display()))?;
 
     if !quiet {

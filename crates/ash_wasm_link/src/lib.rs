@@ -60,7 +60,7 @@ pub mod suspend;
 pub mod waits;
 
 pub use dylink::{SIDE_MODULE_PREFIX, SideModule, looks_like_side_module, read_side_module};
-pub use link::{LinkOptions, link};
+pub use link::{LinkOptions, LinkTimings, link, link_with_timings};
 pub use object::{Object, Symbol, SymbolTarget, read};
 
 /// What a patch site held before the linker touched it, and what the symbol

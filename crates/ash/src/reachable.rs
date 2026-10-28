@@ -7,9 +7,8 @@
 //! Nothing is *wrong* with compiling the other 320 — they are correct code that
 //! never runs — but two things quietly pay for them:
 //!
-//! * **Whole-program compilation.** AOT seeds from the entrypoint, so it is
-//!   already demand-driven, but any pass that iterates `bc.functions`
-//!   directly is doing ~17x the necessary work.
+//! * **Whole-program compilation.** AOT currently iterates `bc.functions`;
+//!   this diagnostic analysis does not authorize deleting reflected targets.
 //! * **Reports.** [`crate::air_pipeline::osr_report`] and the AIR sweep both
 //!   walk every declared function, so a denominator like "58 of 341 eligible"
 //!   is mostly counting loops in code that cannot execute. That reads as a
@@ -108,7 +107,6 @@ fn subtree(children: &HashMap<usize, Vec<usize>>, root: usize) -> Vec<usize> {
     out
 }
 
-/// Upper bound on the functions a program can enter, from the entrypoint out.
 /// Upper bound on the functions a program can enter, from the entrypoint out.
 pub fn analyze(bc: &DecodedBytecode) -> Reachability {
     let mut r = Reachability {

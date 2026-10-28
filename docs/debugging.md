@@ -563,6 +563,8 @@ disk budget; `--no-air-cache` disables disk reads and writes for a build.
 `ash air-cache` reports location, compiler revision and storage;
 `ash air-cache --clear` removes entries while coordinating with writers.
 These options leave the separate 8 MiB in-process AIR budget unchanged.
+AOT functions share lookup tables, frameless answers and the bounded 2 MiB
+lowered-body workspace within a build, including when disk reuse is disabled.
 
 `--air-cache-stats` reports lowered/optimized hits, misses, invalid entries,
 writes, evictions and time spent computing identity, reading, writing,

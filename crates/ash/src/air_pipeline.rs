@@ -88,27 +88,28 @@ pub struct AshModule<'b> {
 
 impl<'b> AshModule<'b> {
     pub fn new(bc: &'b DecodedBytecode) -> Self {
+        let disk = crate::air_disk_cache::ModuleCache::for_module(bc);
         AshModule {
             bc,
             tree_elision: false,
-            native_at: Arc::new(
+            native_at: disk.as_ref().map(|d| Arc::clone(&d.native_at)).unwrap_or_else(|| Arc::new(
                 bc.natives
                     .iter()
                     .enumerate()
                     .map(|(i, n)| (n.findex as usize, i))
                     .collect(),
-            ),
-            function_at: Arc::new(
+            )),
+            function_at: disk.as_ref().map(|d| Arc::clone(&d.function_at)).unwrap_or_else(|| Arc::new(
                 bc.functions
                     .iter()
                     .enumerate()
                     .map(|(i, f)| (f.findex as usize, i))
                     .collect(),
-            ),
+            )),
             callees: CalleeView::All,
-            lowered: Arc::new(Mutex::new(crate::air_cache::BodyCache::new(2 * 1024 * 1024))),
-            frameless: Arc::new(Mutex::new(HashMap::new())),
-            disk: crate::air_disk_cache::ModuleCache::for_module(bc),
+            lowered: disk.as_ref().map(|d| Arc::clone(&d.lowered)).unwrap_or_else(|| Arc::new(Mutex::new(crate::air_cache::BodyCache::new(2 * 1024 * 1024)))),
+            frameless: disk.as_ref().map(|d| Arc::clone(&d.frameless)).unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new()))),
+            disk,
             dependencies: None,
         }
     }
@@ -595,8 +596,10 @@ impl AshModule<'_> {
             let body = air::v2::lower::lower_with_positions(f.ops(), &reg_types_of(f), &bare, positions_of(f))?;
             if let Some(disk) = &self.disk {
                 disk.timing(began.elapsed().as_nanos(), 0, 0);
-                air::v2::verify(&body)?;
-                disk.save(disk_key.unwrap(), &body, []);
+                if disk.enabled() {
+                    air::v2::verify(&body)?;
+                    disk.save(disk_key.unwrap(), &body, []);
+                }
             }
             body
         };
@@ -1255,9 +1258,9 @@ pub fn optimized_with_config(
             (ser, ir)
         }
     } else {
-        if module.disk.is_some() { module.dependencies = Some(Arc::new(Mutex::new(Default::default()))); }
+        if module.disk.as_ref().is_some_and(|disk| disk.enabled()) { module.dependencies = Some(Arc::new(Mutex::new(Default::default()))); }
         let (ser, ir, _) = optimize_full(&module, f, cfg.level, &opts)?;
-        if let Some(disk) = &module.disk {
+        if let Some(disk) = &module.disk && disk.enabled() {
             let dependencies = module.dependencies.as_ref().unwrap().lock().unwrap();
             disk.save(disk_key.unwrap(), &ir, dependencies.iter().copied());
         }

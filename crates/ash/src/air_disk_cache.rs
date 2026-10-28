@@ -358,14 +358,15 @@ impl Drop for BuildGuard {
 /// An AOT build's target/ABI/profile/host contract, established before bytecode preparation.
 pub(crate) fn enter(contract: &impl Debug, allowed: bool) -> BuildGuard {
     let opts = options();
-    let session = if allowed && (opts.stats || (opts.enabled && opts.budget_bytes != 0)) {
-        opts.directory.map(|root| {
+    let enabled = opts.enabled && opts.budget_bytes != 0 && opts.directory.is_some();
+    let session = if allowed {
+        Some({
             Arc::new(Session {
                 store: Arc::new(Store {
-                    root,
+                    root: opts.directory.unwrap_or_default(),
                     budget: opts.budget_bytes,
                 }),
-                enabled: opts.enabled && opts.budget_bytes != 0,
+                enabled,
                 identity: hash_debug(&(SCHEMA, env!("ASH_AIR_REVISION"), contract)),
                 stats: Arc::new(Mutex::new(Stats::default())),
                 report: opts.stats,
@@ -384,8 +385,47 @@ pub(crate) struct ModuleCache {
     stats: Arc<Mutex<Stats>>,
     identity: Hash,
     functions: BTreeMap<usize, Hash>,
+    pub(crate) native_at: Arc<HashMap<usize, usize>>,
+    pub(crate) function_at: Arc<HashMap<usize, usize>>,
+    pub(crate) lowered: Arc<Mutex<crate::air_cache::BodyCache<usize, Function>>>,
+    pub(crate) frameless: Arc<Mutex<HashMap<usize, bool>>>,
 }
 impl ModuleCache {
+    fn new(
+        session: &Session,
+        bc: &DecodedBytecode,
+        identity: Hash,
+        functions: BTreeMap<usize, Hash>,
+    ) -> Self {
+        Self {
+            store: Arc::clone(&session.store),
+            enabled: session.enabled,
+            stats: Arc::clone(&session.stats),
+            identity,
+            functions,
+            native_at: Arc::new(
+                bc.natives
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.findex as usize, i))
+                    .collect(),
+            ),
+            function_at: Arc::new(
+                bc.functions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.findex as usize, i))
+                    .collect(),
+            ),
+            lowered: Arc::new(Mutex::new(crate::air_cache::BodyCache::new(
+                2 * 1024 * 1024,
+            ))),
+            frameless: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
     pub(crate) fn for_module(bc: &DecodedBytecode) -> Option<Arc<Self>> {
         SESSION.with(|current| {
             let session = current.borrow().clone()?;
@@ -402,13 +442,7 @@ impl ModuleCache {
                 return Some(Arc::clone(module));
             }
             if !session.enabled {
-                let module = Arc::new(Self {
-                    store: Arc::clone(&session.store),
-                    enabled: false,
-                    stats: Arc::clone(&session.stats),
-                    identity: [0; 32],
-                    functions: BTreeMap::new(),
-                });
+                let module = Arc::new(Self::new(&session, bc, [0; 32], BTreeMap::new()));
                 modules.insert(key, Arc::clone(&module));
                 return Some(module);
             }
@@ -436,6 +470,7 @@ impl ModuleCache {
                 )
             )
             .unwrap();
+            writer.0.update((bc.floats.len() as u64).to_le_bytes());
             for f in &bc.floats {
                 writer.0.update(f.to_bits().to_le_bytes());
             }
@@ -463,13 +498,12 @@ impl ModuleCache {
                     )
                 })
                 .collect();
-            let module = Arc::new(Self {
-                store: Arc::clone(&session.store),
-                enabled: true,
-                stats: Arc::clone(&session.stats),
-                identity: writer.0.finalize().into(),
+            let module = Arc::new(Self::new(
+                &session,
+                bc,
+                writer.0.finalize().into(),
                 functions,
-            });
+            ));
             session.stats.lock().unwrap().identity_ns += began.elapsed().as_nanos();
             modules.insert(key, Arc::clone(&module));
             Some(module)
@@ -838,6 +872,76 @@ mod tests {
             air_pipeline::optimized_with_config(&module, &edited.functions[2], cfg).unwrap();
             assert_eq!(stats().0, 1);
         }
+    }
+
+    #[test]
+    fn build_views_share_bounded_state_and_release_it_at_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let bc = program();
+        let weak = {
+            let _guard = activate(dir.path(), "native");
+            let first = AshModule::new(&bc);
+            let second = AshModule::new(&bc);
+            let a = first.lowered_body(1).unwrap();
+            let b = second.lowered_body(1).unwrap();
+            assert!(Arc::ptr_eq(&a, &b));
+            let module = ModuleCache::for_module(&bc).unwrap();
+            let (_, _, resident) = module.lowered.lock().unwrap().storage();
+            assert!(resident <= 2 * 1024 * 1024);
+            Arc::downgrade(&module)
+        };
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn cached_frameless_refusal_records_transitive_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bc = program();
+        bc.types.push(HLType {
+            kind: crate::hl::hl_type_kind_HDYN,
+            ..Default::default()
+        });
+        bc.functions[1].set_ops(vec![
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(2),
+                arg0: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ]);
+        bc.functions[2].regs = vec![TypeRef(1), TypeRef(1), TypeRef(3)];
+        bc.functions[2].set_ops(vec![
+            Opcode::Null { dst: Reg(2) },
+            Opcode::Throw { exc: Reg(2) },
+        ]);
+        let cfg = AirConfigKey {
+            callees: air_pipeline::CalleeView::Frameless,
+            ..AirConfigKey::standard()
+        };
+        let first = {
+            let _guard = activate(dir.path(), "wasm");
+            let module = AshModule::new(&bc);
+            assert!(!module.frameless(1));
+            air_pipeline::invalidate_optimized();
+            let body = air_pipeline::optimized_with_config(&module, &bc.functions[0], cfg).unwrap();
+            format!("{:?}", body.ir)
+        };
+        let mut edited = bc.clone();
+        edited.functions[2].set_ops(vec![
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Ret { ret: Reg(0) },
+        ]);
+        edited.body_facts.take();
+        let _guard = activate(dir.path(), "wasm");
+        let module = AshModule::new(&edited);
+        assert!(module.frameless(1));
+        air_pipeline::invalidate_optimized();
+        let body = air_pipeline::optimized_with_config(&module, &edited.functions[0], cfg).unwrap();
+        assert_ne!(first, format!("{:?}", body.ir));
+        assert_eq!(stats().0, 0);
     }
 
     #[test]

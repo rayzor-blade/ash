@@ -83,6 +83,9 @@ for invalidation details and environment equivalents.
 
 ### Optimization options
 
+The [LLVM WASM research](wasm/llvm-build-times.md) records source findings,
+codegen CPU measurements, module sizes and browser validation.
+
 `-O0`, `-O1`, `-O2`, `-O3`, `-Os` and `-Oz` select LLVM IR optimization
 and its matching codegen level. The long form is `--opt-level`.
 `-Os` and `-Oz` set size attributes and use codegen level 2.

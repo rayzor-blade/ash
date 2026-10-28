@@ -1,0 +1,201 @@
+{
+  "compiler_commit": "ff20945c",
+  "llvm": "21.1.2",
+  "host": "macOS arm64",
+  "target": "wasm32-wasip1-threads",
+  "air_level": 3,
+  "llvm_ir_level": 3,
+  "llvm_shards": 5,
+  "fibers": true,
+  "input_sha256": "52be8fc49e9fbaf2c3701d9435cd6040254969fcaf311af6d6f88dfd1889a7ea",
+  "full_application": [
+    {
+      "run": 0,
+      "warmup": true,
+      "codegen": 3,
+      "wall_s": 22.415020667016506,
+      "bytes": 16202426,
+      "decode_prepare_ms": 31.848,
+      "module_setup_ms": 237.422,
+      "llvm_ir_ms": 8469.704,
+      "llvm_backend_ms": 12268.741,
+      "wasm_inputs_ms": 53.318,
+      "wasm_resolve_ms": 57.859,
+      "wasm_layout_ms": 306.139,
+      "wasm_relocations_ms": 81.564,
+      "wasm_emit_ms": 60.346,
+      "wasm_fibers_ms": 590.026,
+      "link_ms": 1164.594,
+      "peak_rss_bytes": 1952940032.0
+    },
+    {
+      "run": 1,
+      "warmup": false,
+      "codegen": 3,
+      "wall_s": 34.22946354118176,
+      "bytes": 16202426,
+      "decode_prepare_ms": 29.903,
+      "module_setup_ms": 193.056,
+      "llvm_ir_ms": 12056.738,
+      "llvm_backend_ms": 20661.215,
+      "wasm_inputs_ms": 50.931,
+      "wasm_resolve_ms": 57.513,
+      "wasm_layout_ms": 310.077,
+      "wasm_relocations_ms": 76.908,
+      "wasm_emit_ms": 47.923,
+      "wasm_fibers_ms": 580.315,
+      "link_ms": 1149.958,
+      "peak_rss_bytes": 1640562688.0
+    },
+    {
+      "run": 2,
+      "warmup": false,
+      "codegen": 0,
+      "wall_s": 25.612401999998838,
+      "bytes": 19742401,
+      "decode_prepare_ms": 29.898,
+      "module_setup_ms": 193.408,
+      "llvm_ir_ms": 7695.183,
+      "llvm_backend_ms": 15763.755,
+      "wasm_inputs_ms": 60.781,
+      "wasm_resolve_ms": 74.899,
+      "wasm_layout_ms": 370.102,
+      "wasm_relocations_ms": 99.968,
+      "wasm_emit_ms": 58.636,
+      "wasm_fibers_ms": 948.914,
+      "link_ms": 1677.285,
+      "peak_rss_bytes": 1470267392.0
+    },
+    {
+      "run": 3,
+      "warmup": false,
+      "codegen": 0,
+      "wall_s": 21.93952591600828,
+      "bytes": 19742401,
+      "decode_prepare_ms": 33.383,
+      "module_setup_ms": 251.992,
+      "llvm_ir_ms": 8660.389,
+      "llvm_backend_ms": 10910.16,
+      "wasm_inputs_ms": 58.828,
+      "wasm_resolve_ms": 65.356,
+      "wasm_layout_ms": 312.551,
+      "wasm_relocations_ms": 92.435,
+      "wasm_emit_ms": 46.801,
+      "wasm_fibers_ms": 1007.556,
+      "link_ms": 1621.024,
+      "peak_rss_bytes": 1446100992.0
+    },
+    {
+      "run": 4,
+      "warmup": false,
+      "codegen": 3,
+      "wall_s": 35.60743608302437,
+      "bytes": 16202426,
+      "decode_prepare_ms": 59.292,
+      "module_setup_ms": 258.113,
+      "llvm_ir_ms": 10545.546,
+      "llvm_backend_ms": 23427.948,
+      "wasm_inputs_ms": 37.259,
+      "wasm_resolve_ms": 51.88,
+      "wasm_layout_ms": 287.747,
+      "wasm_relocations_ms": 68.959,
+      "wasm_emit_ms": 40.639,
+      "wasm_fibers_ms": 554.071,
+      "link_ms": 1059.765,
+      "peak_rss_bytes": 1385742336.0
+    }
+  ],
+  "isolated_codegen_without_timers": [
+    {
+      "run": 0,
+      "level": 3,
+      "wall_s": 3.002392750000581,
+      "cpu_s": 2.722951,
+      "bytes": 2211275
+    },
+    {
+      "run": 1,
+      "level": 0,
+      "wall_s": 1.2599224580917507,
+      "cpu_s": 0.9527310000000001,
+      "bytes": 2427185
+    },
+    {
+      "run": 2,
+      "level": 0,
+      "wall_s": 1.580663374857977,
+      "cpu_s": 1.0402749999999996,
+      "bytes": 2427185
+    },
+    {
+      "run": 3,
+      "level": 3,
+      "wall_s": 2.5620101247914135,
+      "cpu_s": 2.547124,
+      "bytes": 2211275
+    }
+  ],
+  "isolated_codegen_with_pass_timers": [
+    {
+      "run": 0,
+      "level": 3,
+      "wall_s": 5.859931374900043,
+      "cpu_s": 5.823095,
+      "bytes": 2211275
+    },
+    {
+      "run": 1,
+      "level": 1,
+      "wall_s": 5.6511990840081125,
+      "cpu_s": 5.633808,
+      "bytes": 2222134
+    },
+    {
+      "run": 2,
+      "level": 0,
+      "wall_s": 2.2408735419157892,
+      "cpu_s": 2.230715000000001,
+      "bytes": 2427185
+    },
+    {
+      "run": 3,
+      "level": 2,
+      "wall_s": 5.6751138342078775,
+      "cpu_s": 5.658056000000003,
+      "bytes": 2211275
+    },
+    {
+      "run": 4,
+      "level": 2,
+      "wall_s": 5.689265040913597,
+      "cpu_s": 5.671417999999997,
+      "bytes": 2211275
+    },
+    {
+      "run": 5,
+      "level": 0,
+      "wall_s": 2.325922792078927,
+      "cpu_s": 2.303991999999999,
+      "bytes": 2427185
+    },
+    {
+      "run": 6,
+      "level": 1,
+      "wall_s": 5.990656499983743,
+      "cpu_s": 5.875327999999994,
+      "bytes": 2222134
+    },
+    {
+      "run": 7,
+      "level": 3,
+      "wall_s": 5.8452403750270605,
+      "cpu_s": 5.8054120000000005,
+      "bytes": 2211275
+    }
+  ],
+  "notes": [
+    "Whole-application timings encountered unrelated machine activity and are indicative, not CI performance results.",
+    "Standalone LLVM input was the optimized final shard, with invalid personalities removed from declarations; Ash now performs that correction directly.",
+    "Pass timers add overhead; use the untimed CPU measurements for isolated comparisons."
+  ]
+}

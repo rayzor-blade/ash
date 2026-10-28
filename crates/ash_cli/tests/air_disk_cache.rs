@@ -115,6 +115,65 @@ fn persistent_cache_across_processes_edits_corruption_and_disable() {
 }
 
 #[test]
+fn text_only_edits_reuse_air_and_codegen_uses_current_literals() {
+    if !haxe_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("AirCacheText.hx");
+    let hl = dir.path().join("text.hl");
+    let binary = dir.path().join("text");
+    let wasm = dir.path().join("text.wasm");
+    let runtime = repo_root().join("target/release/wasm32-wasip1/ash_runtime.o");
+    let cache = dir.path().join("cache");
+    for message in ["old label", "new label"] {
+        std::fs::write(
+            &source,
+            format!(
+                "class AirCacheText {{ static function main() Sys.println(\"{message}\"); }}\n"
+            ),
+        )
+        .unwrap();
+        let mut command = Command::new("haxe");
+        command
+            .arg("-cp")
+            .arg(dir.path())
+            .args(["-main", "AirCacheText", "-hl"])
+            .arg(&hl);
+        run(command);
+        let result = build(&hl, &binary, &cache, &[]);
+        if message == "new label" {
+            assert!(count(&result, "optimized_hits") > 0);
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&run(Command::new(&binary)).stdout).trim(),
+            message
+        );
+        if runtime.is_file() {
+            let mut command = Command::new(ash_cli_bin());
+            command
+                .args(["--quiet", "--air-cache-stats", "--air-cache-dir"])
+                .arg(&cache)
+                .arg("--build")
+                .arg(&wasm)
+                .args(["--target", "wasm32-wasip1"])
+                .arg(&hl)
+                .env("ASH_RUNTIME", &runtime);
+            let result = run(command);
+            if message == "new label" {
+                assert!(count(&result, "optimized_hits") > 0);
+            }
+            let mut command = Command::new(ash_cli_bin());
+            command.arg("run").arg(&wasm);
+            assert_eq!(
+                String::from_utf8_lossy(&run(command).stdout).trim(),
+                message
+            );
+        }
+    }
+}
+
+#[test]
 fn wasm_cache_is_separate_from_native_and_preserves_output() {
     if !haxe_available() {
         return;
@@ -155,4 +214,9 @@ fn wasm_cache_is_separate_from_native_and_preserves_output() {
     let mut command = Command::new(ash_cli_bin());
     command.arg("run").arg(&wasm);
     assert_eq!(String::from_utf8_lossy(&run(command).stdout).trim(), "20");
+    compile(dir.path(), "*", &hl);
+    assert!(count(&wasm_build(), "optimized_hits") > 0);
+    let mut command = Command::new(ash_cli_bin());
+    command.arg("run").arg(&wasm);
+    assert_eq!(String::from_utf8_lossy(&run(command).stdout).trim(), "30");
 }

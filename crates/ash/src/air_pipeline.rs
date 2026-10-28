@@ -84,6 +84,7 @@ pub struct AshModule<'b> {
     frameless: Arc<Mutex<HashMap<usize, bool>>>,
     disk: Option<Arc<crate::air_disk_cache::ModuleCache>>,
     dependencies: Option<Arc<Mutex<std::collections::BTreeSet<usize>>>>,
+    integer_dependencies: Option<Arc<Mutex<BTreeMap<usize, Option<i32>>>>>,
 }
 
 impl<'b> AshModule<'b> {
@@ -111,6 +112,7 @@ impl<'b> AshModule<'b> {
             frameless: disk.as_ref().map(|d| Arc::clone(&d.frameless)).unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new()))),
             disk,
             dependencies: None,
+            integer_dependencies: None,
         }
     }
 
@@ -152,6 +154,7 @@ impl<'b> AshModule<'b> {
             frameless: Arc::clone(&self.frameless),
             disk: self.disk.clone(),
             dependencies: self.dependencies.clone(),
+            integer_dependencies: self.integer_dependencies.clone(),
         }
     }
 
@@ -279,7 +282,11 @@ impl<'b> ModuleInfo for AshModule<'b> {
     }
 
     fn int_value(&self, idx: usize) -> Option<i32> {
-        self.bc.ints.get(idx).copied()
+        let value = self.bc.ints.get(idx).copied();
+        if let Some(dependencies) = &self.integer_dependencies {
+            dependencies.lock().unwrap().insert(idx, value);
+        }
+        value
     }
 
     fn int_pool_len(&self) -> usize {
@@ -598,7 +605,7 @@ impl AshModule<'_> {
                 disk.timing(began.elapsed().as_nanos(), 0, 0);
                 if disk.enabled() {
                     air::v2::verify(&body)?;
-                    disk.save(disk_key.unwrap(), &body, []);
+                    disk.save(disk_key.unwrap(), &body, [], &BTreeMap::new());
                 }
             }
             body
@@ -1258,11 +1265,15 @@ pub fn optimized_with_config(
             (ser, ir)
         }
     } else {
-        if module.disk.as_ref().is_some_and(|disk| disk.enabled()) { module.dependencies = Some(Arc::new(Mutex::new(Default::default()))); }
+        if module.disk.as_ref().is_some_and(|disk| disk.enabled()) {
+            module.dependencies = Some(Arc::new(Mutex::new(Default::default())));
+            module.integer_dependencies = Some(Arc::new(Mutex::new(Default::default())));
+        }
         let (ser, ir, _) = optimize_full(&module, f, cfg.level, &opts)?;
         if let Some(disk) = &module.disk && disk.enabled() {
             let dependencies = module.dependencies.as_ref().unwrap().lock().unwrap();
-            disk.save(disk_key.unwrap(), &ir, dependencies.iter().copied());
+            let integers = module.integer_dependencies.as_ref().unwrap().lock().unwrap();
+            disk.save(disk_key.unwrap(), &ir, dependencies.iter().copied(), &integers);
         }
         (ser, ir)
     };

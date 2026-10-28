@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::bytecode::DecodedBytecode;
 use crate::types::HLFunction;
 
-const SCHEMA: u32 = 1;
-const MAGIC: &[u8; 8] = b"ASHAIR01";
+const SCHEMA: u32 = 2;
+const MAGIC: &[u8; 8] = b"ASHAIR02";
 const MAX_ENTRY: u64 = 16 * 1024 * 1024;
 type Hash = [u8; 32];
 
@@ -205,7 +205,8 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        if file.metadata()?.len() > MAX_ENTRY {
+        let metadata = file.metadata()?;
+        if metadata.len() > MAX_ENTRY {
             return Err(io::Error::other("oversized AIR entry"));
         }
         let mut bytes = Vec::new();
@@ -222,7 +223,16 @@ impl Store {
         if !rest.is_empty() || entry.schema != SCHEMA || &entry.key != key {
             return Err(io::Error::other("incompatible AIR entry"));
         }
-        let _ = file.set_modified(SystemTime::now());
+        // A preview rebuild should read cache entries without dirtying every inode.
+        let now = SystemTime::now();
+        if metadata
+            .modified()
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= std::time::Duration::from_secs(60))
+        {
+            let _ = file.set_modified(now);
+        }
         Ok(Some(entry))
     }
     fn store(&self, entry: &impl Serialize, key: &Hash) -> io::Result<(bool, usize)> {
@@ -282,6 +292,7 @@ struct Entry {
     schema: u32,
     key: Hash,
     dependencies: Vec<(usize, Hash)>,
+    integers: Vec<(usize, Option<i32>)>,
     ir: Function,
 }
 
@@ -290,6 +301,7 @@ struct EntryRef<'a> {
     schema: u32,
     key: Hash,
     dependencies: Vec<(usize, Hash)>,
+    integers: Vec<(usize, Option<i32>)>,
     ir: &'a Function,
 }
 
@@ -385,6 +397,7 @@ pub(crate) struct ModuleCache {
     stats: Arc<Mutex<Stats>>,
     identity: Hash,
     functions: BTreeMap<usize, Hash>,
+    integers: Arc<[i32]>,
     pub(crate) native_at: Arc<HashMap<usize, usize>>,
     pub(crate) function_at: Arc<HashMap<usize, usize>>,
     pub(crate) lowered: Arc<Mutex<crate::air_cache::BodyCache<usize, Function>>>,
@@ -403,6 +416,7 @@ impl ModuleCache {
             stats: Arc::clone(&session.stats),
             identity,
             functions,
+            integers: bc.ints.clone().into(),
             native_at: Arc::new(
                 bc.natives
                     .iter()
@@ -448,20 +462,17 @@ impl ModuleCache {
             }
             let began = Instant::now();
             let mut writer = HashWriter(Sha256::new());
+            // Backends emit pool/global payloads afresh; integer proofs are per-entry reads.
             write!(
                 writer,
                 "{:?}",
                 (
                     &session.identity,
-                    &bc.ints,
-                    &bc.strings,
-                    &bc.bytes_pos,
-                    &bc.bytes_data,
+                    bc.ints.len(),
                     (
                         &bc.types,
                         &bc.globals,
                         &bc.natives,
-                        &bc.constants,
                         &bc.debug_files,
                         bc.has_debug,
                         bc.entrypoint,
@@ -470,10 +481,6 @@ impl ModuleCache {
                 )
             )
             .unwrap();
-            writer.0.update((bc.floats.len() as u64).to_le_bytes());
-            for f in &bc.floats {
-                writer.0.update(f.to_bits().to_le_bytes());
-            }
             let mut stack_readers: Vec<_> = bc.body_facts().stack_readers.iter().copied().collect();
             stack_readers.sort_unstable();
             write!(writer, "{stack_readers:?}").unwrap();
@@ -557,6 +564,10 @@ impl ModuleCache {
             .dependencies
             .iter()
             .any(|(id, hash)| self.functions.get(id) != Some(hash))
+            || entry
+                .integers
+                .iter()
+                .any(|(idx, value)| self.integers.get(*idx).copied() != *value)
             || entry.ir.findex != findex
         {
             self.stats.lock().unwrap().misses += 1;
@@ -585,6 +596,7 @@ impl ModuleCache {
         key: Hash,
         ir: &Function,
         dependencies: impl IntoIterator<Item = usize>,
+        integers: &BTreeMap<usize, Option<i32>>,
     ) {
         if !self.enabled {
             return;
@@ -599,6 +611,7 @@ impl ModuleCache {
                 schema: SCHEMA,
                 key,
                 dependencies,
+                integers: integers.iter().map(|(idx, value)| (*idx, *value)).collect(),
                 ir,
             },
             &key,
@@ -643,6 +656,7 @@ mod tests {
             schema: SCHEMA,
             key: [id; 32],
             dependencies: Vec::new(),
+            integers: Vec::new(),
             ir: body(),
         }
     }
@@ -762,6 +776,28 @@ mod tests {
         store.store(&old, &old.key).unwrap();
         assert!(store.load(&old.key).is_err());
         assert!(store.load(&[2; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn lru_touches_are_coalesced_within_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            root: dir.path().into(),
+            budget: 4096,
+        };
+        let entry = entry(1);
+        store.store(&entry, &entry.key).unwrap();
+        let path = store.path(&entry.key);
+        let original = fs::metadata(&path).unwrap().modified().unwrap();
+        store.load(&entry.key).unwrap().unwrap();
+        assert_eq!(original, fs::metadata(&path).unwrap().modified().unwrap());
+        let old = SystemTime::now() - std::time::Duration::from_secs(120);
+        File::open(&path).unwrap().set_modified(old).unwrap();
+        store.load(&entry.key).unwrap().unwrap();
+        let refreshed = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(refreshed > old);
+        store.load(&entry.key).unwrap().unwrap();
+        assert_eq!(refreshed, fs::metadata(&path).unwrap().modified().unwrap());
     }
 
     #[test]
@@ -945,6 +981,33 @@ mod tests {
     }
 
     #[test]
+    fn only_observed_integer_values_invalidate_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bc = program();
+        bc.ints.push(11);
+        let first_key;
+        {
+            let _guard = activate(dir.path(), "native");
+            let module = ModuleCache::for_module(&bc).unwrap();
+            first_key = module.key(&bc.functions[0], &"observed");
+            module.save(first_key, &body(), [], &BTreeMap::from([(0, Some(7))]));
+            let other = module.key(&bc.functions[0], &"unrelated");
+            module.save(other, &body(), [], &BTreeMap::from([(1, Some(11))]));
+        }
+        let mut edited = bc.clone();
+        edited.ints[0] = -1;
+        edited.strings.push("a new UI label".into());
+        edited.bytes_data.extend_from_slice(b"new asset contents");
+        edited.floats.push(1.25);
+        let _guard = activate(dir.path(), "native");
+        let module = ModuleCache::for_module(&edited).unwrap();
+        assert_eq!(first_key, module.key(&edited.functions[0], &"observed"));
+        assert!(module.load(&first_key, None, false).is_none());
+        let other = module.key(&edited.functions[0], &"unrelated");
+        assert!(module.load(&other, None, false).is_some());
+    }
+
+    #[test]
     fn keys_cover_metadata_target_profile_and_pipeline() {
         let dir = tempfile::tempdir().unwrap();
         let bc = program();
@@ -960,7 +1023,7 @@ mod tests {
         assert_ne!(base, key(&bc, "native/abi1/profile2", "O3"));
         assert_ne!(base, key(&bc, "native/abi1/profile1", "O2"));
         let mut edited = bc.clone();
-        edited.ints[0] += 1;
+        edited.ints.push(11);
         assert_ne!(base, key(&edited, "native/abi1/profile1", "O3"));
         let mut edited = bc.clone();
         edited.types[1].kind = crate::hl::hl_type_kind_HF32;
@@ -986,7 +1049,7 @@ mod tests {
         let key = module.key(&bc.functions[0], &"bad");
         let mut ir = body();
         ir.blocks.clear();
-        module.save(key, &ir, []);
+        module.save(key, &ir, [], &BTreeMap::new());
         assert!(module.load(&key, None, false).is_none());
         let mut function = bc.functions[1].clone();
         let original = function.body().cache_digest();

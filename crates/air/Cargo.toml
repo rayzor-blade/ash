@@ -9,3 +9,7 @@ keywords = ["IR", "JIT", "Compiler", "Optimizer"]
 
 [dependencies]
 anyhow = {workspace=true}
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]

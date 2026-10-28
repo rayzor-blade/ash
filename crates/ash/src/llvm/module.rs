@@ -498,6 +498,7 @@ impl<'ctx> JITModule<'ctx> {
                 !crate::native_lib::is_runtime_lib(&n.lib)
                     && crate::native_lib::host_link(&n.lib, &n.name).is_none()
             });
+        crate::air_disk_cache::stage("decode_prepare", t.elapsed());
         phase_timer!(timing, "decode", t);
         t = std::time::Instant::now();
 

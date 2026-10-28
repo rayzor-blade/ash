@@ -267,6 +267,7 @@ pub const CHUNK_OPS: usize = 256;
 /// a time, for a caller that reads only the chunks it reaches.
 #[derive(Debug, Default)]
 pub struct FunctionBody {
+    cache_digest: std::sync::OnceLock<[u8; 32]>,
     ops: std::sync::OnceLock<Vec<Opcode>>,
     debug: std::sync::OnceLock<Vec<i32>>,
     chunks: std::sync::OnceLock<Box<[std::sync::OnceLock<Box<[Opcode]>>]>>,
@@ -280,6 +281,7 @@ impl Clone for FunctionBody {
     /// never decodes the original's.
     fn clone(&self) -> Self {
         FunctionBody {
+            cache_digest: self.cache_digest.clone(),
             ops: self.ops.clone(),
             debug: self.debug.clone(),
             chunks: std::sync::OnceLock::new(),
@@ -363,7 +365,15 @@ impl FunctionBody {
     }
 
     pub(crate) fn encoded(body: EncodedBody, shape: BodyShape) -> Self {
+        use sha2::Digest;
+        let mut hash = sha2::Sha256::new();
+        hash.update(b"encoded");
+        hash.update((body.nops as u64).to_le_bytes());
+        hash.update([u8::from(body.has_debug)]);
+        hash.update(&body.bytes);
+        let digest: [u8; 32] = hash.finalize().into();
         FunctionBody {
+            cache_digest: std::sync::OnceLock::from(digest),
             encoded: std::sync::Mutex::new(Some(body)),
             shape: Some(shape),
             ..FunctionBody::default()
@@ -438,6 +448,7 @@ impl FunctionBody {
     fn get_mut(&mut self) -> (&mut Vec<Opcode>, &mut Vec<i32>) {
         self.ops();
         self.debug();
+        self.cache_digest.take();
         (
             self.ops.get_mut().expect("decoded just above"),
             self.debug.get_mut().expect("decoded just above"),
@@ -468,6 +479,13 @@ impl FunctionBody {
             return None;
         }
         self.lock_encoded().as_ref().map(|e| e.nops)
+    }
+
+    /// Stable across deferred decoding; mutations invalidate it before exposing the body.
+    pub(crate) fn cache_digest(&self) -> [u8; 32] {
+        *self.cache_digest.get_or_init(|| {
+            crate::air_disk_cache::hash_debug(&("decoded", self.ops(), self.debug()))
+        })
     }
 }
 

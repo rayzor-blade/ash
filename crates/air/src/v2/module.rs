@@ -18,7 +18,7 @@
 //! function at a time and has no view of the module's function pool, so the
 //! embedder answers with the callee's body.
 //!
-//! `air` stays dependency-free: [`ModuleInfo`] is a trait the embedder
+//! `air` stays independent of the VM: [`ModuleInfo`] is a trait the embedder
 //! implements (or a prebuilt [`ModuleTables`] it fills in), never a
 //! dependency on the bytecode crate.
 
@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 ///
 /// One declaration per `findex`, produced once during lowering and consumed
 /// verbatim by every backend.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeImport {
     /// Function index in the module's function/native pool. This is the key
@@ -75,6 +76,7 @@ impl NativeImport {
 /// (so backends can emit declarations deterministically), and conflicting
 /// re-declarations of the same `findex` rejected rather than silently
 /// overwritten.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NativeTable {
     imports: Vec<NativeImport>,

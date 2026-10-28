@@ -82,6 +82,8 @@ pub struct AshModule<'b> {
     lowered: Arc<Mutex<crate::air_cache::BodyCache<usize, Function>>>,
     /// [`Self::is_frameless`] answers, by findex.
     frameless: Arc<Mutex<HashMap<usize, bool>>>,
+    disk: Option<Arc<crate::air_disk_cache::ModuleCache>>,
+    dependencies: Option<Arc<Mutex<std::collections::BTreeSet<usize>>>>,
 }
 
 impl<'b> AshModule<'b> {
@@ -106,6 +108,8 @@ impl<'b> AshModule<'b> {
             callees: CalleeView::All,
             lowered: Arc::new(Mutex::new(crate::air_cache::BodyCache::new(2 * 1024 * 1024))),
             frameless: Arc::new(Mutex::new(HashMap::new())),
+            disk: crate::air_disk_cache::ModuleCache::for_module(bc),
+            dependencies: None,
         }
     }
 
@@ -145,6 +149,8 @@ impl<'b> AshModule<'b> {
             callees,
             lowered: Arc::clone(&self.lowered),
             frameless: Arc::clone(&self.frameless),
+            disk: self.disk.clone(),
+            dependencies: self.dependencies.clone(),
         }
     }
 
@@ -159,7 +165,7 @@ impl<'b> AshModule<'b> {
 
     fn is_frameless(&self, findex: usize, visiting: &mut HashSet<usize>) -> bool {
         use air::v2::ir::{Effect, Instr, Terminator};
-        if let Some(&known) = self
+        if self.dependencies.is_none() && let Some(&known) = self
             .frameless
             .lock()
             .expect("frameless cache poisoned")
@@ -232,6 +238,9 @@ impl<'b> AshModule<'b> {
     /// The bytecode function with this `findex`, if it is a bytecode function
     /// (natives and unknown indices answer `None`).
     pub fn function(&self, findex: usize) -> Option<&'b HLFunction> {
+        if let Some(dependencies) = &self.dependencies {
+            dependencies.lock().unwrap().insert(findex);
+        }
         self.function_at
             .get(&findex)
             .map(|&i| &self.bc.functions[i])
@@ -563,22 +572,37 @@ impl AshModule<'_> {
     /// markers the inliner copies still say which line of the callee a frame
     /// is stopped on.
     pub(crate) fn lowered_body(&self, findex: usize) -> Option<Arc<Function>> {
+        let f = self.function(findex)?;
+        self.lower_cached(f).ok()
+    }
+
+    fn lower_cached(&self, f: &HLFunction) -> anyhow::Result<Arc<Function>> {
+        let findex = f.findex as usize;
         let cached = self
             .lowered
             .lock()
             .expect("callee cache poisoned")
             .get(&findex);
         if cached.is_some() {
-            return cached;
+            return Ok(cached.unwrap());
         }
-        let f = self.function(findex)?;
         let bare = self.without_callees_view();
-        let mut body =
-            air::v2::lower::lower_with_positions(f.ops(), &reg_types_of(f), &bare, positions_of(f))
-                .ok()?;
+        let disk_key = self.disk.as_ref().map(|disk| disk.key(f, &"lowered"));
+        let hit = self.disk.as_ref().zip(disk_key.as_ref())
+            .and_then(|(disk, key)| disk.load(key, None, false));
+        let mut body = if let Some(body) = hit { body } else {
+            let began = std::time::Instant::now();
+            let body = air::v2::lower::lower_with_positions(f.ops(), &reg_types_of(f), &bare, positions_of(f))?;
+            if let Some(disk) = &self.disk {
+                disk.timing(began.elapsed().as_nanos(), 0, 0);
+                air::v2::verify(&body)?;
+                disk.save(disk_key.unwrap(), &body, []);
+            }
+            body
+        };
         body.shrink_to_fit();
         let bytes = body.allocated_bytes();
-        Some(
+        Ok(
             self.lowered
                 .lock()
                 .expect("callee cache poisoned")
@@ -1220,7 +1244,25 @@ pub fn optimized_with_config(
     // The pipeline runs outside the lock: it is the expensive part, and holding
     // a process-wide lock across it would serialize the brokers against the
     // interpreter.
-    let (mut ser, mut ir, _report) = optimize_full(m, f, cfg.level, &opts)?;
+    let mut module = m.view(cfg.callees);
+    let disk_key = module.disk.as_ref().map(|disk| disk.key(f, &("optimized", cfg, opts)));
+    let hit = module.disk.as_ref().zip(disk_key.as_ref())
+        .and_then(|(disk, key)| disk.load(key, Some(f.findex as usize), true));
+    let (mut ser, mut ir) = if let Some(ir) = hit {
+        let ser = guard(|| serialize(&ir)).ok().and_then(Result::ok);
+        if let Some(ser) = ser { (ser, ir) } else {
+            let (ser, ir, _) = optimize_full(&module, f, cfg.level, &opts)?;
+            (ser, ir)
+        }
+    } else {
+        if module.disk.is_some() { module.dependencies = Some(Arc::new(Mutex::new(Default::default()))); }
+        let (ser, ir, _) = optimize_full(&module, f, cfg.level, &opts)?;
+        if let Some(disk) = &module.disk {
+            let dependencies = module.dependencies.as_ref().unwrap().lock().unwrap();
+            disk.save(disk_key.unwrap(), &ir, dependencies.iter().copied());
+        }
+        (ser, ir)
+    };
     ir.shrink_to_fit();
     ser.shrink_to_fit();
     let ser = air::v2::SerializedLayout::from(ser);
@@ -1368,12 +1410,14 @@ pub fn optimize_full(
 
     let mut ir = stage!(
         Stage::Lower,
-        lower_with_positions(f.ops(), &reg_types_of(f), m, positions_of(f))
+        m.lower_cached(f).map(|body| (*body).clone())
     )
     .with_findex(f.findex as usize);
 
     let pm = PassManager::with_module(level, m).with_options(*opts);
+    let began = std::time::Instant::now();
     let report = stage!(Stage::Optimize, pm.run(&mut ir));
+    if let Some(disk) = &m.disk { disk.timing(0, began.elapsed().as_nanos(), 0); }
     record_pass_time(&report);
     // Inert unless ASH_DEVIRT_SURVEY asks: how reachable is each closure
     // target AFTER the passes have run, which is the IR a devirtualisation
@@ -1383,9 +1427,11 @@ pub fn optimize_full(
     // Verify before serializing: a serializer fed invalid IR emits
     // plausible-looking opcodes, and the corruption only surfaces as a wrong
     // answer at run time in whichever engine consumed them.
+    let began = std::time::Instant::now();
     stage!(Stage::Verify, verify(&ir));
 
     let out = stage!(Stage::Serialize, serialize(&ir));
+    if let Some(disk) = &m.disk { disk.timing(0, 0, began.elapsed().as_nanos()); }
     Ok((out, ir, report))
 }
 

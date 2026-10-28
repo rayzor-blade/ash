@@ -83,6 +83,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     crate::callsite_profile::clear_profile();
     crate::native_lib::set_host_links(&links);
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
+    let mut profile_identity = None;
     if let Some(pgo) = &pgo {
         let path = if pgo.is_empty() {
             file.with_extension("prof")
@@ -91,6 +92,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
+                profile_identity = Some(crate::air_disk_cache::hash_debug(&text));
                 let n = crate::callsite_profile::load_profile(&text);
                 if !quiet {
                     eprintln!("[ash] pgo: loaded {n} caller(s) from {}", path.display());
@@ -113,6 +115,12 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
                 .to_string_lossy()
                 .into_owned()
         });
+    let _air_cache = crate::air_disk_cache::enter(
+        &(&triple, abi_version, named, wasm_fibers,
+            std::env::var_os("ASH_WASM_FIBERS"), profile_identity),
+        runtime.is_none() && links.is_empty() && language_objects.is_empty()
+            && exports.is_empty() && closures.is_empty() && object_tails.is_empty() && object_drops.is_empty(),
+    );
 
     // Leaked on purpose: the module borrows the context for as long as it
     // exists, and this one lives until the process ends.
@@ -138,6 +146,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         && object_drops.is_empty()
         && !triple.starts_with("wasm")
         && crate::tree_fusion::enabled();
+    let began = std::time::Instant::now();
     let mut jit = if standalone {
         crate::llvm::module::JITModule::new_aot_standalone(context, file, &triple)?
     } else {
@@ -152,6 +161,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         )?
     };
 
+    crate::air_disk_cache::stage("module_setup", began.elapsed());
     let findexes: Vec<usize> = jit
         .bytecode_functions()
         .iter()
@@ -173,6 +183,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(500);
     let mut slowest: Vec<(u128, usize)> = Vec::new();
+    let began = std::time::Instant::now();
     for fx in &findexes {
         let began = std::time::Instant::now();
         let outcome = jit.promote_function_strict(*fx);
@@ -235,6 +246,8 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     jit.finalize_aot_data()?;
     jit.emit_late_init()?;
     jit.emit_main()?;
+    crate::air_disk_cache::stage("llvm_ir", began.elapsed());
+    let backend_began = std::time::Instant::now();
     let shared_runtime = jit.aot_needs_shared_runtime();
     // More than one shard splits the middle end and codegen across threads
     // (see `aot_shard`); one shard is the single-module path, which also
@@ -313,6 +326,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
 
     // The stages are over; what follows is the summary, and a bar under it
     // would be a finished stage left on screen.
+    crate::air_disk_cache::stage("llvm_backend", backend_began.elapsed());
     crate::progress::finish();
     if !quiet {
         crate::progress::note(&format!(
@@ -381,6 +395,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         };
         let scratch_objects = objects.clone();
         objects.extend(language_objects);
+        let began = std::time::Instant::now();
         let linked = crate::llvm::aot_link::link_executable(
             &objects,
             exe,
@@ -404,6 +419,7 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
             }
         }
         linked?;
+        crate::air_disk_cache::stage("link", began.elapsed());
     }
     Ok(())
 }

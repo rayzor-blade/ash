@@ -42,7 +42,7 @@ shlex = "1.3"
 memchr = "2.7.4"
 byteorder = {workspace=true}
 ash_macro = {workspace=true}
-air = { path = "../air" }
+air = { path = "../air", features = ["serde"] }
 libc = "0.2.158"
 # Reading the line table MCJIT loads beside a promoted body (llvm/lines.rs).
 # The same version wasmtime already pins, so no second copy.
@@ -56,6 +56,8 @@ beadie = { workspace = true }
 # through its C exports rather than the typed Rust API.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+sha2 = "0.10"
 # Same wasmtime git rev as beadie-cranelift pins, so exactly ONE cranelift
 # resolves into the graph. A crates.io copy alongside the git one compiles as
 # a second, incompatible crate and none of beadie's cranelift types match.
@@ -73,6 +75,7 @@ cranelift-module   = { git = "https://github.com/bytecodealliance/wasmtime", rev
 [build-dependencies]
 bindgen = "0.70.1"
 cc = "1"
+sha2 = "0.10"
 
 [[example]]
 name = "aot_spike"

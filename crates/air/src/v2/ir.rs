@@ -5,6 +5,7 @@ use super::module::NativeTable;
 use std::fmt;
 
 /// Reference to a type in the module type table.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeRef(pub u32);
 
@@ -12,6 +13,7 @@ pub struct TypeRef(pub u32);
 ///
 /// `repr(transparent)`: a consumer that addresses a frame by value index
 /// reads a `&[ValueId]` as the `&[Reg]` its register-indexed paths take.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct ValueId(pub u32);
@@ -24,6 +26,7 @@ impl ValueId {
 }
 
 /// Index into [`Function::blocks`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u32);
 
@@ -37,6 +40,7 @@ impl BlockId {
 /// Index into [`Function::cells`]. A cell is a pinned HL register that keeps
 /// memory semantics (multiple assignments, address-taken) instead of being
 /// promoted to SSA values.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CellId(pub u32);
 
@@ -48,6 +52,7 @@ impl CellId {
 }
 
 /// Why a register was pinned to a cell instead of being SSA-promoted.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinReason {
     /// Its address is taken by `Ref`.
@@ -63,6 +68,7 @@ pub enum PinReason {
 
 /// Per-value metadata: the HL type of the value and the HL register it
 /// originates from (which is also its de-SSA register assignment).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct ValueData {
     pub ty: TypeRef,
@@ -88,6 +94,7 @@ impl ValueData {
 }
 
 /// A pinned register modeled as a memory cell.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct CellData {
     /// The HL register backing this cell.
@@ -97,6 +104,7 @@ pub struct CellData {
 }
 
 /// Binary arithmetic / bitwise operations (all same-typed in HL).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -121,6 +129,7 @@ impl BinOp {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
@@ -134,6 +143,7 @@ pub enum UnOp {
 }
 
 /// Conversion / cast kinds, mirroring the HL conversion opcodes.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastKind {
     ToDyn,
@@ -146,6 +156,7 @@ pub enum CastKind {
 }
 
 /// Raw memory / array access widths.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemAccess {
     I8,
@@ -158,6 +169,7 @@ pub enum MemAccess {
 
 /// Conditional-jump condition kinds, mirroring the HL `J*` opcodes exactly
 /// (including the NaN-aware `NotLt`/`NotGte` forms).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CondKind {
     True,
@@ -200,6 +212,7 @@ impl CondKind {
 ///   matters).
 /// * `ClobberAll` — may read/write anything and throw (calls, region markers,
 ///   inline asm).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Effect {
     Pure,
@@ -224,6 +237,7 @@ pub enum Effect {
 /// `RoundHalfUp` is `floor(x + 0.5)` (HashLink's rounding, not IEEE's), and
 /// the `..ToI32` conversions saturate with NaN → 0 (Rust `as`), which is
 /// why backends emit saturating conversions.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntrinsicKind {
     /// `sqrt(x)` — f64 → f64.
@@ -266,6 +280,7 @@ impl IntrinsicKind {
 
 /// One `simd` primitive: the lane type and the operation. The lane count is
 /// whatever fills 16 bytes. Carried by [`Instr::VecOp`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VecIntrinsic {
     pub elem: VecElem,
@@ -274,6 +289,7 @@ pub struct VecIntrinsic {
 
 /// Lane type of a `simd` primitive. `I64` is the shape the bitwise
 /// operations use, which do not care about lanes at all.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VecElem {
     F32,
@@ -312,6 +328,7 @@ impl VecElem {
 /// the natives: `(dst, di, a, ai[, b, bi[, c, ci]])` for the slot forms,
 /// `(dst, di, x)` for splat, `(dst, di, a, ai, n)` for shifts, `(a, ai)` for
 /// reductions, and the array forms take the array and an element index.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VecOp {
     Add,
@@ -360,6 +377,7 @@ pub enum VecOp {
 }
 
 /// An operand of [`Instr::VecOp`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VecArg {
     /// A vector value: `Int` lanes, four of them, reinterpreted as the
@@ -398,6 +416,7 @@ impl VecArg {
 }
 
 /// Where [`Instr::VecOp`] puts its result.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VecOut {
     /// `dst` is the vector value.
@@ -440,6 +459,7 @@ impl VecOut {
 }
 
 /// How one operand of a `simd` native is passed.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgShape {
     /// `(bytes, byte offset)`: two call arguments.
@@ -531,6 +551,7 @@ impl VecOp {
 /// A phi instruction at a block head: `dst = phi[(pred, value), ...]`.
 /// `incoming` has exactly one entry per predecessor block (set semantics;
 /// order is not significant).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct Phi {
     pub dst: ValueId,
@@ -546,6 +567,7 @@ pub struct Phi {
 ///   `FieldGet`/`FieldSet` with the `this` value explicit.
 /// * `VirtualClosure.field` is an immediate proto index (the v1
 ///   `opcode_info::reads` treats it as a register read, which is wrong).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub enum Instr {
     /// Value of HL register `reg` at function entry (argument or default
@@ -1369,6 +1391,7 @@ impl Instr {
 }
 
 /// Block terminators. Every block ends with exactly one.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub enum Terminator {
     Ret {
@@ -1498,6 +1521,7 @@ impl Terminator {
 }
 
 /// A basic block owning its phis, instructions and terminator.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct Block {
     pub phis: Vec<Phi>,
@@ -1512,6 +1536,7 @@ pub struct Block {
 ///
 /// Block 0 is the entry block (synthetic: `Param` definitions plus a `Jump`
 /// to the first lowered block; it emits no code).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct Function {
     pub values: Vec<ValueData>,
@@ -1575,6 +1600,7 @@ pub struct Function {
 /// loop steps by a constant, and the stepped value the latch hands back.
 /// A backend tests the low bits of whichever of the two is defined where
 /// its poll sits.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StripTest {
     pub header: BlockId,
@@ -1584,6 +1610,7 @@ pub struct StripTest {
 
 /// How the flat form gets a 16-byte scratch slot back for a vector value:
 /// the `alloc_bytes` native and the types of a bytes pointer and an `Int`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimdScratch {
     pub alloc_fun: usize,
@@ -1596,6 +1623,7 @@ pub struct SimdScratch {
 /// for a body inlined into inlined code; `None` means the function's own
 /// code. Following `parent` to the root yields the frames a stack walk
 /// would have found had nothing been inlined.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InlineSite {
     pub callee: u32,

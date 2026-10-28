@@ -552,3 +552,41 @@ poll and then waits up to 30 seconds for publication, aborting on timeout.
 cargo test -p ash_core --lib retier::tests
 cargo test --release -p ash --test osr_retier -- --nocapture
 ```
+
+## Persistent AIR cache for AOT
+
+Native and WASM AOT builds reuse lowered and optimized AIR on disk. The default
+budget is 512 MiB in the system cache directory (`ash/air` under
+`$XDG_CACHE_HOME`, `~/Library/Caches` on macOS, or `%LOCALAPPDATA%` on Windows).
+`--air-cache-dir PATH` selects an isolated cache. `--air-cache-mb N` changes its
+disk budget; `--no-air-cache` disables disk reads and writes for a build.
+`ash air-cache` reports location, compiler revision and storage;
+`ash air-cache --clear` removes entries while coordinating with writers.
+These options leave the separate 8 MiB in-process AIR budget unchanged.
+
+`--air-cache-stats` reports lowered/optimized hits, misses, invalid entries,
+writes, evictions and time spent computing identity, reading, writing,
+lowering, running AIR passes and verifying. AOT also reports wall time for
+decode/preparation, module setup, LLVM IR emission, LLVM optimization/codegen
+and linking. LLVM shard logs split their middle end and codegen time further.
+`ASH_TIERED_TIMING=1` provides the existing detailed module setup phases.
+Environment equivalents are `ASH_AIR_DISK_CACHE=0`, `ASH_AIR_DISK_CACHE_DIR`,
+`ASH_AIR_DISK_CACHE_MB` and `ASH_AIR_DISK_CACHE_STATS=1`.
+
+Each optimized entry records the bytecode bodies consulted by the inliner and
+its eligibility checks, including rejected candidates and recursive frameless
+checks. A changed dependency invalidates its callers. Unrelated function-body
+edits can reuse entries; pool, type, signature, native, global and debug-table
+changes conservatively invalidate the module. Keys include the compiler source
+fingerprint, wire schema, target, ABI/runtime convention, profile contents and
+AIR options. Builds with custom host registrations, layouts, linked objects or
+an explicit runtime bypass disk reuse. No backend code, process addresses or
+host pointers are persisted.
+
+Entries are checksummed, schema checked and structurally verified before use.
+Corrupt, incomplete or incompatible entries are misses. Writers publish by
+atomic rename under a cross-process file lock and evict the least recently
+used entries to the disk budget. An interrupted writer leaves an invalid
+accounting record, which the next writer reconstructs. Cache failures never
+make compilation fail. Only a function being loaded or written is held for
+persistence; the disk cache does not retain whole-module AIR in memory.

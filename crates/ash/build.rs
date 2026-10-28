@@ -334,6 +334,7 @@ fn build_wasm_exception_shim() {
 }
 
 fn main() {
+    air_cache_revision();
     pin_libclang();
     // The shim is LLVM C++; without the feature nothing links LLVM.
     if env::var_os("CARGO_FEATURE_LLVM").is_some() {
@@ -353,6 +354,45 @@ fn main() {
     if env::var_os("CARGO_FEATURE_EMBEDDED_RUNTIME").is_some() {
         embed_runtime(&out_dir, &target);
     }
+}
+
+fn air_cache_revision() {
+    use sha2::{Digest, Sha256};
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    let mut files = Vec::new();
+    fn collect(path: PathBuf, files: &mut Vec<PathBuf>) {
+        if path.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                collect(entry.unwrap().path(), files);
+            }
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    for dir in ["crates/air", "crates/ash/src", "crates/ash/cpp", "std/src", "crates/hl_abi/src", "crates/ash_macro/src"] {
+        let path = root.join(dir);
+        println!("cargo:rerun-if-changed={}", path.display());
+        collect(path, &mut files);
+    }
+    for name in ["Cargo.toml", "Cargo.lock", "crates/ash/build.rs", "crates/ash/Cargo.toml", "std/hl.h", "std/ash_future.h"] {
+        let path = root.join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        files.push(path);
+    }
+    files.sort();
+    let mut hash = Sha256::new();
+    for file in files {
+        let name = file.strip_prefix(&root).unwrap().to_string_lossy();
+        let bytes = fs::read(&file).unwrap();
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let mut options: Vec<_> = env::vars().filter(|(k, _)| k.starts_with("CARGO_FEATURE_") || k == "TARGET").collect();
+    options.sort();
+    hash.update(format!("{options:?}"));
+    println!("cargo:rustc-env=ASH_AIR_REVISION={:x}", hash.finalize());
 }
 
 /// Copy the ash_std cdylib into `OUT_DIR` for `include_bytes!`.

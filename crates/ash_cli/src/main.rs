@@ -12,6 +12,12 @@ use std::sync::OnceLock;
 /// What `ash` can do besides run bytecode.
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Inspect or clear the persistent AOT AIR cache.
+    AirCache {
+        /// Remove all stored AIR entries.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Read a WebAssembly module: what it is, and what it still needs.
     ///
     /// With no flag it reports. `--validate` answers one question instead:
@@ -75,6 +81,18 @@ const VERSION: &str = env!("ASH_BUILD_VERSION");
         .multiple(true)
 ))]
 struct Cli {
+    /// Disable persistent AIR reuse for this build.
+    #[arg(long)]
+    no_air_cache: bool,
+    /// Directory for persistent AOT AIR entries.
+    #[arg(long)]
+    air_cache_dir: Option<PathBuf>,
+    /// Persistent AIR disk budget in MiB (default 512).
+    #[arg(long)]
+    air_cache_mb: Option<u64>,
+    /// Report persistent AIR hits, misses and stage timings.
+    #[arg(long)]
+    air_cache_stats: bool,
     /// Disable recursive tree allocation elimination.
     #[arg(long, conflicts_with = "dev_tree_fusion")]
     no_tree_fusion: bool,
@@ -1061,6 +1079,20 @@ fn refuse_llvm_flags(cli: &Cli) -> Result<()> {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let mut cache = ash_core::air_disk_cache::options();
+    if cli.no_air_cache { cache.enabled = false; }
+    if let Some(dir) = &cli.air_cache_dir { cache.directory = Some(dir.clone()); }
+    if let Some(mb) = cli.air_cache_mb { cache.budget_bytes = mb.saturating_mul(1024 * 1024); }
+    cache.stats |= cli.air_cache_stats;
+    ash_core::air_disk_cache::configure(cache);
+    if let Some(Command::AirCache { clear }) = &cli.command {
+        if *clear { ash_core::air_disk_cache::clear()?; }
+        let cache = ash_core::air_disk_cache::inspect()?;
+        println!("directory={} enabled={} entries={} bytes={} budget_bytes={} compiler={}",
+            cache.directory.as_deref().map_or_else(|| "unavailable".into(), |p| p.display().to_string()),
+            cache.enabled, cache.entries, cache.bytes, cache.budget_bytes, cache.compiler_revision);
+        return Ok(());
+    }
     // Only a program run on the interpreter or the hybrid ladder leaves
     // LLVM's constructors until a compile needs them (see
     // `ash_core::llvm_init`). Everything else may reach LLVM from any thread

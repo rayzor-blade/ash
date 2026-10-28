@@ -5,6 +5,7 @@
 #![allow(non_snake_case)]
 
 mod air_cache;
+pub mod air_disk_cache;
 pub mod air_pipeline;
 pub mod bytecode;
 pub mod bytecode_encode;

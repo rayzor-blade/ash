@@ -67,6 +67,20 @@ Memory scales with shard count for the same reason.
 The default is half the machine's cores, clamped to [2, 6]. `ASH_AOT_SHARDS=2`
 on a memory-constrained machine; `1` for the smallest footprint.
 
+### Persistent AIR reuse
+
+Native and WASM builds cache lowered and optimized AIR per function on disk,
+under a 512 MiB budget. `--air-cache-stats` reports reuse and stage timings;
+`--air-cache-dir PATH` selects a directory, `--air-cache-mb N` changes the
+budget, and `--no-air-cache` disables persistence. `ash air-cache` inspects the
+cache; `ash air-cache --clear` clears it. Compiler, target, ABI, profile,
+options and dependencies participate in invalidation.
+
+LLVM IR emission, optimization, code generation and linking still run on each
+build. The [Ashui measurements](wasm/air-cache-build-times.md) show their cost
+separately. See [the cache contract](debugging.md#persistent-air-cache-for-aot)
+for invalidation details and environment equivalents.
+
 ### Dials
 
 | variable | effect |
@@ -83,8 +97,8 @@ on a memory-constrained machine; `1` for the smallest footprint.
 Flags:
 
 - `--target <triple>` cross-compiles. A non-host target is built for a
-  generic CPU and always with one shard, because shards are joined by the
-  host's `ld`, which reads one object format. See
+  generic CPU. Native cross targets use one shard because the host's `ld`
+  reads one object format; WASM can use several shards through Ash's linker. See
   [Cross-compiling](#cross-compiling) for which triples a build accepts.
 - `--allow-refused` emits even when some functions could not be lowered; each
   becomes a throw at the point it is reached. Without it a refusal stops the

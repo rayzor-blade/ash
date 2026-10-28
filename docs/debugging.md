@@ -584,7 +584,7 @@ checks. A changed dependency invalidates its callers. Unrelated function-body
 edits can reuse entries. Integer values consulted by AIR passes are recorded
 and validated separately. Code generation resolves string, float and byte
 literals from the current bytecode, allowing text and asset edits to reuse AIR.
-Integer-pool size, type, signature, native, global and debug-table changes
+Integer-pool size, type, signature, native, global-declaration and debug-table changes
 conservatively invalidate the module. Keys include the compiler source
 fingerprint, wire schema, target, ABI/runtime convention, profile contents and
 AIR options. Builds with custom host registrations, layouts, linked objects or
@@ -596,7 +596,6 @@ Corrupt, incomplete or incompatible entries are misses. Writers publish by
 atomic rename under a cross-process file lock and evict the least recently
 used entries to the disk budget, coalescing access-time updates to one per
 minute so rapid rebuilds do not rewrite every cache inode. An interrupted
-writer leaves an invalid
-accounting record, which the next writer reconstructs. Cache failures never
+writer leaves an invalid accounting record, which the next writer reconstructs. Cache failures never
 make compilation fail. Only a function being loaded or written is held for
 persistence; the disk cache does not retain whole-module AIR in memory.

@@ -24,6 +24,9 @@ def main():
     parser.add_argument("--shards", type=int)
     parser.add_argument("--keep-outputs", action="store_true")
     parser.add_argument("--llvm-passes")
+    parser.add_argument("--codegen-opt-level", "--codegen-level", dest="codegen_level", type=int, choices=range(4))
+    parser.add_argument("--opt-level", choices=["0", "1", "2", "3", "s", "z"])
+    parser.add_argument("--air-opt-level", type=int, choices=range(4))
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -41,6 +44,12 @@ def main():
     base = [str(args.ash.resolve()), "--air-cache-dir", str(cache.resolve()), "--air-cache-stats", "--air-cache-mb", "512", "--build", str(output.resolve())]
     if args.target:
         base += ["--target", args.target]
+    if args.opt_level is not None:
+        base += ["-O" + args.opt_level]
+    if args.air_opt_level is not None:
+        base += ["--air-opt-level", str(args.air_opt_level)]
+    if args.codegen_level is not None:
+        base += ["--codegen-opt-level", str(args.codegen_level)]
     rows = []
     for name, source, flags in [("disabled", args.original, ["--no-air-cache"]),
                                 ("cold", args.original, []), ("warm", args.original, []),
@@ -72,6 +81,9 @@ def main():
             "command": base, "cache": str(cache), "runs": rows,
             "llvm_passes": env.get("ASH_LLVM_PASSES", "default"),
             "fibers": args.wasm_fibers,
+            "llvm_opt_level": args.opt_level,
+            "air_opt_level": args.air_opt_level,
+            "codegen_level": args.codegen_level,
         }, indent=2) + "\n")
     if len({row["sha256"] for row in rows[:3]}) != 1:
         raise SystemExit("disabled/cold/warm output hashes disagree")

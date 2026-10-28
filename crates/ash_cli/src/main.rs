@@ -81,6 +81,15 @@ const VERSION: &str = env!("ASH_BUILD_VERSION");
         .multiple(true)
 ))]
 struct Cli {
+    /// LLVM IR and codegen optimization: 0, 1, 2, 3, s or z. AIR is independent.
+    #[arg(short = 'O', long, value_enum, ignore_case = true, requires = "aot_output")]
+    opt_level: Option<ash_core::aot_options::LlvmOptLevel>,
+    /// Override the AOT AIR pass level (default 3).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3), requires = "aot_output")]
+    air_opt_level: Option<u8>,
+    /// Override AOT codegen effort, independently of LLVM IR optimization.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3), requires = "aot_output")]
+    codegen_opt_level: Option<u8>,
     /// Disable persistent AIR reuse for this build.
     #[arg(long)]
     no_air_cache: bool,
@@ -1488,7 +1497,7 @@ fn run() -> Result<()> {
             .as_ref()
             .filter(|_| cli.target.as_deref().is_some_and(|t| t.starts_with("wasm")))
             .cloned();
-        ash_core::llvm::aot_build::emit_aot(ash_core::llvm::aot_build::AotRequest {
+        ash_core::llvm::aot_build::emit_aot_with_options(ash_core::llvm::aot_build::AotRequest {
             file: &hl_path,
             out: &out,
             exe: exe.as_deref(),
@@ -1505,6 +1514,8 @@ fn run() -> Result<()> {
             closures: Vec::new(),
             object_tails: Vec::new(),
             object_drops: Vec::new(),
+        }, ash_core::aot_options::AotOptions {
+            llvm: cli.opt_level, air: cli.air_opt_level, codegen: cli.codegen_opt_level,
         })?;
         if let Some(module) = wasm_page {
             web::write_page(&module, cli.quiet)?;

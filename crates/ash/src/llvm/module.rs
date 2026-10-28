@@ -342,7 +342,8 @@ pub(crate) fn run_middle_end_at(
     // Functions that can catch are excluded upstream — see
     // `shield_trap_functions_from_optimization`, which is what makes running
     // this safe at all.
-    let spec = std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| default_spec.to_string());
+    let spec = crate::aot_options::pass_pipeline(default_spec);
+    super::aot_shard::apply_size_attributes(module);
     if spec == "off" {
         return Ok(());
     }
@@ -871,6 +872,7 @@ impl<'ctx> JITModule<'ctx> {
 
     pub fn emit_object(&self, triple: &str, path: &std::path::Path) -> Result<u64> {
         use inkwell::targets::FileType;
+        super::aot_shard::apply_size_attributes(&self.module);
         let (tt, machine) = super::aot_shard::object_target_machine(triple)?;
         self.module.set_triple(&tt);
         self.module

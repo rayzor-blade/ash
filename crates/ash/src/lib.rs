@@ -7,6 +7,7 @@
 mod air_cache;
 pub mod air_disk_cache;
 pub mod air_pipeline;
+pub mod aot_options;
 pub mod bytecode;
 pub mod bytecode_encode;
 pub mod c_types;

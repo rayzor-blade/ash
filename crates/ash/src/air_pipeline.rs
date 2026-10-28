@@ -848,6 +848,7 @@ fn positions_of(f: &HLFunction) -> Option<&[i32]> {
 /// pay -- inlining, scalar replacement, allocation hoisting -- are the ones O3
 /// adds. Shipping the level that loses was a decision nobody made.
 pub fn default_level() -> OptLevel {
+    if let Some(level) = crate::aot_options::air_level() { return level; }
     static CELL: OnceLock<OptLevel> = OnceLock::new();
     *CELL.get_or_init(|| match std::env::var("ASH_AIR_LEVEL") {
         Ok(s) if !s.is_empty() => parse_level(&s).unwrap_or_else(|| {

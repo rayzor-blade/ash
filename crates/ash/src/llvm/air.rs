@@ -79,8 +79,7 @@ pub(crate) fn prepare_llvm(
 /// escape-loop iteration visible in the IR). The top tier was optimizing
 /// less than the middle one.
 fn level() -> AirOptLevel {
-    static LEVEL: OnceLock<AirOptLevel> = OnceLock::new();
-    *LEVEL.get_or_init(air_pipeline::default_level)
+    air_pipeline::default_level()
 }
 
 /// v2 pass options. Only the FMA peephole is exposed, via `--no-fma`,

@@ -81,11 +81,49 @@ build. The [Ashui measurements](wasm/air-cache-build-times.md) show their cost
 separately. See [the cache contract](debugging.md#persistent-air-cache-for-aot)
 for invalidation details and environment equivalents.
 
+### Optimization options
+
+`-O0`, `-O1`, `-O2`, `-O3`, `-Os` and `-Oz` select LLVM IR optimization
+and its matching codegen level. The long form is `--opt-level`.
+`-Os` and `-Oz` set size attributes and use codegen level 2.
+AIR keeps its own level, normally 3, so its inlining and allocation removal
+remain available independently of LLVM’s settings.
+
+| Option | Controls |
+|---|---|
+| `-O`, `--opt-level 0\|1\|2\|3\|s\|z` | LLVM IR pipeline and matching codegen effort |
+| `--air-opt-level 0\|1\|2\|3` | AIR lowering/optimization configuration |
+| `--codegen-opt-level 0\|1\|2\|3` | Override machine codegen effort independently of `-O` |
+
+For a WASM preview with strong IR optimization and faster codegen:
+
+```sh
+ash -O3 --codegen-opt-level 0 --build app.wasm \
+  --target wasm32-wasip1-threads app.hl
+```
+
+Other examples:
+
+```sh
+ash -O1 --build app.wasm --target wasm32-wasip1-threads app.hl
+ash -Oz --build app.wasm --target wasm32-wasip1-threads app.hl
+ash -O0 --air-opt-level 0 --build app.wasm --target wasm32-wasip1-threads app.hl
+```
+
+Explicit options override the corresponding environment settings. With no
+options, the existing defaults and environment variables apply. A selected
+`-O` also overrides `ASH_AOT_CODEGEN_LEVEL` unless `--codegen-opt-level` is
+specified. Options apply to `--build` and `--emit-aot`, including native AOT.
+The settings belong to one build and are inherited by shard workers. Library
+callers can use `emit_aot_with_options` without changing existing `AotRequest`
+values or `emit_aot` calls.
+
 ### Dials
 
 | variable | effect |
 |---|---|
 | `ASH_AOT_SHARDS=N` | shard count. `1` is the single-module path, and the first thing to try when a sharded build misbehaves |
+| `ASH_AOT_CODEGEN_LEVEL=0..3` | LLVM machine-codegen effort (default 3), independent of AIR and IR optimization. `0` uses the faster WASM stackification path; measure size and runtime for preview builds |
 | `ASH_AOT_NO_OPT=1` | skip the optimiser: fast builds, readable stacks, much slower code |
 | `ASH_AOT_DUMP_IR=<path>` | write the LLVM IR. A directory takes `module.ll`; anything else is the file. Each shard's IR lands beside it |
 | `ASH_LLVM_PASSES=<spec>` | replace the optimiser pipeline (`default<O2>`, …); `off` skips it |

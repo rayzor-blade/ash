@@ -130,7 +130,25 @@ pub fn shard_count_for(triple: &str) -> usize {
 
 /// Code generation uses the AOT request's CPU policy and target features.
 pub(crate) fn object_target_machine(triple: &str) -> Result<(TargetTriple, TargetMachine)> {
-    crate::target_abi::target_machine(triple, inkwell::OptimizationLevel::Aggressive)
+    let level = match crate::aot_options::codegen_level()? {
+        0 => inkwell::OptimizationLevel::None,
+        1 => inkwell::OptimizationLevel::Less,
+        2 => inkwell::OptimizationLevel::Default,
+        _ => inkwell::OptimizationLevel::Aggressive,
+    };
+    crate::target_abi::target_machine(triple, level)
+}
+
+pub(crate) fn apply_size_attributes(module: &Module<'_>) {
+    let Some(size) = crate::aot_options::current().and_then(|s| s.size) else { return; };
+    let optnone = Attribute::get_named_enum_kind_id("optnone");
+    for f in module.get_functions() {
+        if f.count_basic_blocks() == 0 || f.get_enum_attribute(AttributeLoc::Function, optnone).is_some() { continue; }
+        for name in ["optsize", "minsize"] {
+            if name == "minsize" && size != crate::aot_options::LlvmOptLevel::MinSize { continue; }
+            f.add_attribute(AttributeLoc::Function, module.get_context().create_enum_attribute(Attribute::get_named_enum_kind_id(name), 0));
+        }
+    }
 }
 
 fn instruction_count(f: FunctionValue<'_>) -> usize {
@@ -182,8 +200,58 @@ fn strip_body(f: FunctionValue<'_>) {
             }
             LLVMDeleteBasicBlock(bb);
         }
+        LLVMSetPersonalityFn(fref, std::ptr::null_mut());
     }
     f.set_linkage(Linkage::External);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stripped_exception_body_is_a_valid_declaration() {
+        crate::llvm_init::ensure();
+        let context = Context::create();
+        let module = context.create_module("strip-eh");
+        let personality = module.add_function("personality", context.i32_type().fn_type(&[], true), None);
+        let f = module.add_function("body", context.void_type().fn_type(&[], false), None);
+        f.set_personality_function(personality);
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(f, "entry"));
+        builder.build_return(None).unwrap();
+        module.verify().unwrap();
+        strip_body(f);
+        assert_eq!(f.count_basic_blocks(), 0);
+        assert!(!f.has_personality_function());
+        module.verify().unwrap();
+    }
+
+    #[test]
+    fn size_attributes_preserve_shielded_functions() {
+        crate::llvm_init::ensure();
+        let _options = crate::aot_options::enter(crate::aot_options::AotOptions {
+            llvm: Some(crate::aot_options::LlvmOptLevel::MinSize), ..Default::default()
+        }).unwrap();
+        let context = Context::create();
+        let module = context.create_module("size-eh");
+        let builder = context.create_builder();
+        for name in ["ordinary", "shielded"] {
+            let f = module.add_function(name, context.void_type().fn_type(&[], false), None);
+            builder.position_at_end(context.append_basic_block(f, "entry"));
+            builder.build_return(None).unwrap();
+            if name == "shielded" {
+                for attr in ["optnone", "noinline"] {
+                    f.add_attribute(AttributeLoc::Function, context.create_enum_attribute(Attribute::get_named_enum_kind_id(attr), 0));
+                }
+            }
+        }
+        apply_size_attributes(&module);
+        let minsize = Attribute::get_named_enum_kind_id("minsize");
+        assert!(module.get_function("ordinary").unwrap().get_enum_attribute(AttributeLoc::Function, minsize).is_some());
+        assert!(module.get_function("shielded").unwrap().get_enum_attribute(AttributeLoc::Function, minsize).is_none());
+        module.verify().unwrap();
+    }
 }
 
 /// A global whose initializer is a plain scalar -- an `Int_7`, a `Float_`.
@@ -587,10 +655,12 @@ impl<'ctx> JITModule<'ctx> {
                     let owned = &owned[k];
                     let part = parts[k].clone();
                     let dump_ir = dump_ir.clone();
+                    let optimization = crate::aot_options::current();
                     std::thread::Builder::new()
                         .name(format!("ash-aot-shard-{k}"))
                         .stack_size(SHARD_STACK_BYTES)
                         .spawn_scoped(scope, move || -> Result<()> {
+                            let _optimization = crate::aot_options::inherit(optimization);
                             emit_shard(
                                 k,
                                 triple,
@@ -737,6 +807,7 @@ fn emit_shard(
 
     let began = std::time::Instant::now();
     let (tt, machine) = object_target_machine(triple)?;
+    apply_size_attributes(&module);
     module.set_triple(&tt);
     module.set_data_layout(&machine.get_target_data().get_data_layout());
     machine
@@ -746,7 +817,7 @@ fn emit_shard(
     crate::progress::advance(1);
     if !quiet {
         crate::progress::detail(&format!(
-            "[aot] shard {k}: kept {kept}, carried {carried}, stripped {stripped}, swept {swept}, folded {folded}, declared {declared}; prepare {prepared_ms}ms, middle end {opt_ms}ms, codegen {codegen_ms}ms"
+            "[aot] shard {k}: kept {kept}, carried {carried}, stripped {stripped}, swept {swept}, folded {folded}, declared {declared}; prepare {prepared_ms}ms, middle end {opt_ms}ms, codegen {codegen_ms}ms, codegen_level={}", crate::aot_options::codegen_level()?
         ));
     }
     Ok(())

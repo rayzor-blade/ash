@@ -57,6 +57,15 @@ pub struct AotRequest<'a> {
 /// and `ash_module_init` and imports the runtime by symbol, so linking it
 /// against libash_std.a produces a binary with no bytecode in it.
 pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
+    emit_aot_with_options(request, crate::aot_options::AotOptions::default())
+}
+
+pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_options::AotOptions) -> anyhow::Result<()> {
+    let _options = crate::aot_options::enter(options)?;
+    if !request.quiet {
+        eprintln!("[aot] optimization: air={:?} llvm={} codegen={}",
+            crate::air_pipeline::default_level(), crate::aot_options::pass_pipeline("default<O3>"), crate::aot_options::codegen_level()?);
+    }
     let AotRequest {
         file,
         out,

@@ -155,6 +155,12 @@ jobs:
 
       - uses: ./.github/actions/llvm21
 
+      # The dynamic-throw regression compiles its fixture on Linux x86-64.
+      - uses: krdlab/setup-haxe@v1
+        if: matrix.os == 'ubuntu-24.04'
+        with:
+          haxe-version: "4.3.6"
+
       # ash_std first: its cdylib is embedded by ash's build script.
       - name: Build the runtime
         shell: bash
@@ -183,7 +189,7 @@ jobs:
 
       - name: AOT binaries match the JIT
         shell: bash
-        run: cargo test -p ash --test aot_smoke --test aot_distribution -- --nocapture
+        run: cargo test -p ash --test aot_smoke --test aot_distribution --test aot_dynamic_throw -- --nocapture
 
   hdll-callbacks:
     # The corpus links real shared libraries, resolves primitives by name from

@@ -409,41 +409,8 @@ pub unsafe extern "C" fn ash_static_call(
             }
         }
 
-        let result: usize;
-        let fresult: f64;
-
-        core::arch::asm!(
-            // The spilled words at the bottom of the caller's stack, the first
-            // at `[rsp]`; thirty-two bytes keep `rsp` aligned for the call.
-            "sub rsp, 32",
-            "mov [rsp], {s0}",
-            "mov [rsp + 8], {s1}",
-            "mov [rsp + 16], {s2}",
-            "mov [rsp + 24], {s3}",
-            "call r10",
-            "add rsp, 32",
-            s0 = in(reg) stack[0],
-            s1 = in(reg) stack[1],
-            s2 = in(reg) stack[2],
-            s3 = in(reg) stack[3],
-            in("r10") fun,
-            out("rax") result,
-            in("rdi") ivals[0],
-            in("rsi") ivals[1],
-            in("rdx") ivals[2],
-            in("rcx") ivals[3],
-            in("r8") ivals[4],
-            in("r9") ivals[5],
-            inout("xmm0") fvals[0] => fresult,
-            in("xmm1") fvals[1],
-            in("xmm2") fvals[2],
-            in("xmm3") fvals[3],
-            in("xmm4") fvals[4],
-            in("xmm5") fvals[5],
-            in("xmm6") fvals[6],
-            in("xmm7") fvals[7],
-            clobber_abi("C"),
-        );
+        let StaticCallResult { result, fresult } =
+            call_sysv(fun, ivals.as_ptr(), fvals.as_ptr(), stack.as_ptr());
 
         // Handle return value
         let ret_kind = (*ft.ret).kind;
@@ -468,6 +435,68 @@ pub unsafe extern "C" fn ash_static_call(
             _ => result as *mut c_void,
         }
     }
+}
+
+// System V returns these two eight-byte fields in rax and xmm0 respectively.
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+#[repr(C)]
+struct StaticCallResult {
+    result: usize,
+    fresult: f64,
+}
+
+/// Keep the outgoing stack arguments and their unwind description together.
+/// Adjusting rsp inside ordinary inline asm leaves Rust's CFA unchanged, so
+/// capturing an exception stack inside the callee reads argument words as
+/// return addresses. A frame based on rbp stays valid throughout the call.
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+#[unsafe(naked)]
+unsafe extern "C" fn call_sysv(
+    _fun: *mut c_void,
+    _ivals: *const usize,
+    _fvals: *const f64,
+    _stack: *const usize,
+) -> StaticCallResult {
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        "push rbp",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset rbp, -16",
+        "mov rbp, rsp",
+        ".cfi_def_cfa_register rbp",
+        "sub rsp, 32",
+        "mov r10, rdi",
+        "mov r11, rsi",
+        "mov rax, [rcx]",
+        "mov [rsp], rax",
+        "mov rax, [rcx + 8]",
+        "mov [rsp + 8], rax",
+        "mov rax, [rcx + 16]",
+        "mov [rsp + 16], rax",
+        "mov rax, [rcx + 24]",
+        "mov [rsp + 24], rax",
+        "movsd xmm0, [rdx]",
+        "movsd xmm1, [rdx + 8]",
+        "movsd xmm2, [rdx + 16]",
+        "movsd xmm3, [rdx + 24]",
+        "movsd xmm4, [rdx + 32]",
+        "movsd xmm5, [rdx + 40]",
+        "movsd xmm6, [rdx + 48]",
+        "movsd xmm7, [rdx + 56]",
+        "mov rdi, [r11]",
+        "mov rsi, [r11 + 8]",
+        "mov rdx, [r11 + 16]",
+        "mov rcx, [r11 + 24]",
+        "mov r8, [r11 + 32]",
+        "mov r9, [r11 + 40]",
+        "call r10",
+        "add rsp, 32",
+        "pop rbp",
+        ".cfi_def_cfa rsp, 8",
+        ".cfi_restore rbp",
+        "ret",
+        ".cfi_endproc",
+    );
 }
 
 /// Dynamic function call for x86_64 Windows.

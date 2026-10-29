@@ -112,6 +112,12 @@ also passed.
 
 ## Further work
 
+The [Pocket Studio investigation](rayde-demo-build-times.md) subsequently found
+that AOT inherited the JIT promotion cap, inflating the IR-stage time with
+whole-module scans and table trampolines. Bypassing that cap cuts the demo's
+NUC build from 20.53 to 6.98 seconds at codegen 0. Use that corrected baseline
+when prioritizing further LLVM work.
+
 The instruction-only baseline gives the last shard 5,882 of 8,922 LLVM bodies.
 Optimizing WASM codegen now includes a per-body cost in its partition weights;
 [the NUC comparison](shard-build-times.md) measures a 9.1% backend improvement

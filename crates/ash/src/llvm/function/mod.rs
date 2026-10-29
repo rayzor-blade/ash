@@ -1163,12 +1163,16 @@ impl<'ctx> JITModule<'ctx> {
             self.add_pending_compilation(findex);
         }
 
-        // The root first, then what is queued, up to the room the cap leaves
-        // and no more than `CALLEE_BODIES_PER_COMPILE`.
-        let budget = Self::promote_module_cap().map(|cap| {
-            cap.saturating_sub(self.shared_module_bodies())
-                .min(CALLEE_BODIES_PER_COMPILE)
-        });
+        // AOT emits every body: JIT caps would repeatedly walk the module
+        // and replace future definitions with unnecessary table trampolines.
+        let budget = if self.aot {
+            None
+        } else {
+            Self::promote_module_cap().map(|cap| {
+                cap.saturating_sub(self.shared_module_bodies())
+                    .min(CALLEE_BODIES_PER_COMPILE)
+            })
+        };
         let lowered = self
             .compile_function(findex)
             .and_then(|()| self.compile_pending_within(findex, budget));

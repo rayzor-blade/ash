@@ -1,0 +1,1055 @@
+{
+  "input": {
+    "source": "/Users/amaterasu/Vibranium/RayDE/site/demo",
+    "libraries": "published Ashui/components/icons 0.2.2; existing managed Haxelib repository",
+    "haxe_command": [
+      "haxe",
+      "bench.hxml"
+    ],
+    "hxml": "-cp src\n-L ashui:0.2.2\n-L ashui-components:0.2.2\n-L ashui-icons:0.2.2\n-D ashui_css=styles/app.css\n-main Main\n-dce full\n-hl /tmp/ash-rayde-demo-20261029/app/pocket-studio.hl\n\n-D wasm\n-cp /Users/amaterasu/Vibranium/RayDE/preview/haxe\n",
+    "edit": "BoardStore.add: var id = 1 -> var id = 2 (same source path and line count)",
+    "haxe_edit_s": 11.877098208060488,
+    "files": {
+      "original.hl": {
+        "bytes": 2138419,
+        "sha256": "3f7903172336a0e49ceae291c4104982dec9f7050ac60bbd26ebde4014322e72"
+      },
+      "edited.hl": {
+        "bytes": 2138419,
+        "sha256": "0a1758894b3165ddebe72b5d35640a106b6cc66680329f23c709570c56ff30a4"
+      }
+    }
+  },
+  "baseline_commit": "7e105d9e",
+  "host": {
+    "cpu": "Intel Core i5-1250P; 12 cores / 16 threads",
+    "ram_gib": 6.8,
+    "llvm": "21.1.8",
+    "rust": "1.101.0-nightly (c36f14571 2026-10-01)",
+    "compiler_profile": "release O3, ThinLTO, 16 codegen units",
+    "shards": 6,
+    "machine_codegen": 0,
+    "air": 3,
+    "llvm_ir": 3,
+    "fibers": true
+  },
+  "final_provenance": {
+    "compiler_sha256": "2a1eecdf0c9dc2510f2a228945ef860ef42c8254b09b99b2669b0403d40a73f5",
+    "source_sha256": "0bf9b469eed092fd149029992ccaeb1607a89218b4ff690db603a6469c7c3baf",
+    "runtime_sha256": "1327f8ef42d565c84bfb4d0528cc13f020a62399d8fcbdf8e079621c5c36087b",
+    "side_modules": {
+      "xgpu.wasm": "748b170078f1e4123c2fb8e4af83e307e32459afe1285f07007de54c3d70f0b8",
+      "ash_channel.wasm": "b79177daf8ff13c141e81a4ee8b10ffe714a4a3112439ba537cc5480fed776e1",
+      "blinc_abi.wasm": "66756772b56014fd2368164b9fb0cc99f757b05ae884d25820f55c50d266ee25",
+      "xwindow.wasm": "f771e78664b2c68c185a69f4206ebe95563e404b6e9c97fc8fc72899f07c3403"
+    }
+  },
+  "comparison": {
+    "host": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "cores": 16,
+    "input_sha256": "3f7903172336a0e49ceae291c4104982dec9f7050ac60bbd26ebde4014322e72",
+    "compiler_sha256": {
+      "baseline": "8987c433656b3f8654d4efbf4f54d67f8b6a3bdc04fed9e97c28ca9207b76110",
+      "candidate": "2a1eecdf0c9dc2510f2a228945ef860ef42c8254b09b99b2669b0403d40a73f5"
+    },
+    "runtime_sha256": "1327f8ef42d565c84bfb4d0528cc13f020a62399d8fcbdf8e079621c5c36087b",
+    "target": "wasm32-wasip1-threads",
+    "shards": 6,
+    "fibers": true,
+    "air_level": 3,
+    "llvm_ir_level": 3,
+    "runs": [
+      {
+        "run": 0,
+        "warmup": true,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 21.330174186034128,
+        "cpu_s": 40.91783,
+        "bytes": 18621509,
+        "load_before": [
+          1.41845703125,
+          1.72119140625,
+          1.2685546875
+        ],
+        "log": "0-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 5,
+          "pswpout": 164
+        },
+        "decode_prepare_ms": 16.84,
+        "module_setup_ms": 110.094,
+        "llvm_ir_ms": 15401.073,
+        "llvm_backend_ms": 4845.93,
+        "wasm_inputs_ms": 46.6,
+        "wasm_resolve_ms": 24.253,
+        "wasm_layout_ms": 108.419,
+        "wasm_relocations_ms": 31.889,
+        "wasm_emit_ms": 26.949,
+        "wasm_fibers_ms": 600.17,
+        "link_ms": 861.669,
+        "peak_rss_bytes": 2411544576.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 344,
+            "prepare_ms": 1207,
+            "opt_ms": 1877,
+            "codegen_ms": 451
+          },
+          {
+            "id": 3,
+            "kept": 352,
+            "prepare_ms": 1149,
+            "opt_ms": 1943,
+            "codegen_ms": 473
+          },
+          {
+            "id": 2,
+            "kept": 536,
+            "prepare_ms": 1158,
+            "opt_ms": 2099,
+            "codegen_ms": 505
+          },
+          {
+            "id": 5,
+            "kept": 4402,
+            "prepare_ms": 1037,
+            "opt_ms": 2116,
+            "codegen_ms": 709
+          },
+          {
+            "id": 0,
+            "kept": 970,
+            "prepare_ms": 1165,
+            "opt_ms": 2592,
+            "codegen_ms": 482
+          },
+          {
+            "id": 1,
+            "kept": 556,
+            "prepare_ms": 1268,
+            "opt_ms": 2503,
+            "codegen_ms": 472
+          }
+        ]
+      },
+      {
+        "run": 1,
+        "warmup": true,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 8.092989269061945,
+        "cpu_s": 26.504082999999998,
+        "bytes": 18580879,
+        "load_before": [
+          1.9609375,
+          1.82177734375,
+          1.31103515625
+        ],
+        "log": "1-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 1,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 17.836,
+        "module_setup_ms": 130.813,
+        "llvm_ir_ms": 2002.978,
+        "llvm_backend_ms": 4897.256,
+        "wasm_inputs_ms": 35.556,
+        "wasm_resolve_ms": 17.77,
+        "wasm_layout_ms": 85.317,
+        "wasm_relocations_ms": 31.888,
+        "wasm_emit_ms": 22.857,
+        "wasm_fibers_ms": 616.924,
+        "link_ms": 823.267,
+        "peak_rss_bytes": 2361540608.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 333,
+            "prepare_ms": 993,
+            "opt_ms": 1829,
+            "codegen_ms": 429
+          },
+          {
+            "id": 3,
+            "kept": 364,
+            "prepare_ms": 1042,
+            "opt_ms": 2107,
+            "codegen_ms": 462
+          },
+          {
+            "id": 0,
+            "kept": 969,
+            "prepare_ms": 1205,
+            "opt_ms": 1951,
+            "codegen_ms": 510
+          },
+          {
+            "id": 1,
+            "kept": 550,
+            "prepare_ms": 1049,
+            "opt_ms": 2075,
+            "codegen_ms": 596
+          },
+          {
+            "id": 5,
+            "kept": 1669,
+            "prepare_ms": 1078,
+            "opt_ms": 2102,
+            "codegen_ms": 590
+          },
+          {
+            "id": 2,
+            "kept": 528,
+            "prepare_ms": 1262,
+            "opt_ms": 2590,
+            "codegen_ms": 424
+          }
+        ]
+      },
+      {
+        "run": 2,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 21.33090550394263,
+        "cpu_s": 41.937433999999996,
+        "bytes": 18621509,
+        "load_before": [
+          1.81298828125,
+          1.79443359375,
+          1.30712890625
+        ],
+        "log": "2-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 17.255,
+        "module_setup_ms": 102.83,
+        "llvm_ir_ms": 15145.04,
+        "llvm_backend_ms": 5066.835,
+        "wasm_inputs_ms": 32.727,
+        "wasm_resolve_ms": 25.886,
+        "wasm_layout_ms": 109.125,
+        "wasm_relocations_ms": 32.828,
+        "wasm_emit_ms": 26.412,
+        "wasm_fibers_ms": 601.568,
+        "link_ms": 933.414,
+        "peak_rss_bytes": 2410135552.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 344,
+            "prepare_ms": 1051,
+            "opt_ms": 2011,
+            "codegen_ms": 668
+          },
+          {
+            "id": 2,
+            "kept": 536,
+            "prepare_ms": 1170,
+            "opt_ms": 2136,
+            "codegen_ms": 710
+          },
+          {
+            "id": 0,
+            "kept": 970,
+            "prepare_ms": 1235,
+            "opt_ms": 2065,
+            "codegen_ms": 764
+          },
+          {
+            "id": 5,
+            "kept": 4402,
+            "prepare_ms": 1044,
+            "opt_ms": 2153,
+            "codegen_ms": 931
+          },
+          {
+            "id": 1,
+            "kept": 556,
+            "prepare_ms": 1064,
+            "opt_ms": 2548,
+            "codegen_ms": 734
+          },
+          {
+            "id": 3,
+            "kept": 352,
+            "prepare_ms": 1280,
+            "opt_ms": 2794,
+            "codegen_ms": 395
+          }
+        ]
+      },
+      {
+        "run": 3,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 7.186360472929664,
+        "cpu_s": 26.812795999999995,
+        "bytes": 18580879,
+        "load_before": [
+          2.2373046875,
+          1.8896484375,
+          1.34912109375
+        ],
+        "log": "3-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 16.932,
+        "module_setup_ms": 101.602,
+        "llvm_ir_ms": 933.276,
+        "llvm_backend_ms": 5074.588,
+        "wasm_inputs_ms": 31.605,
+        "wasm_resolve_ms": 17.677,
+        "wasm_layout_ms": 83.6,
+        "wasm_relocations_ms": 33.088,
+        "wasm_emit_ms": 20.133,
+        "wasm_fibers_ms": 611.265,
+        "link_ms": 979.188,
+        "peak_rss_bytes": 2363486208.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 333,
+            "prepare_ms": 963,
+            "opt_ms": 1869,
+            "codegen_ms": 438
+          },
+          {
+            "id": 5,
+            "kept": 1669,
+            "prepare_ms": 980,
+            "opt_ms": 1960,
+            "codegen_ms": 633
+          },
+          {
+            "id": 3,
+            "kept": 364,
+            "prepare_ms": 1137,
+            "opt_ms": 2265,
+            "codegen_ms": 610
+          },
+          {
+            "id": 1,
+            "kept": 550,
+            "prepare_ms": 1212,
+            "opt_ms": 2105,
+            "codegen_ms": 725
+          },
+          {
+            "id": 0,
+            "kept": 969,
+            "prepare_ms": 1193,
+            "opt_ms": 2283,
+            "codegen_ms": 649
+          },
+          {
+            "id": 2,
+            "kept": 528,
+            "prepare_ms": 1253,
+            "opt_ms": 2837,
+            "codegen_ms": 402
+          }
+        ]
+      },
+      {
+        "run": 4,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 6.834320539957844,
+        "cpu_s": 26.807726999999986,
+        "bytes": 18580879,
+        "load_before": [
+          2.5390625,
+          1.9580078125,
+          1.37451171875
+        ],
+        "log": "4-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 1,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 16.717,
+        "module_setup_ms": 101.861,
+        "llvm_ir_ms": 927.998,
+        "llvm_backend_ms": 4772.661,
+        "wasm_inputs_ms": 32.185,
+        "wasm_resolve_ms": 17.564,
+        "wasm_layout_ms": 84.199,
+        "wasm_relocations_ms": 31.979,
+        "wasm_emit_ms": 19.66,
+        "wasm_fibers_ms": 614.946,
+        "link_ms": 897.861,
+        "peak_rss_bytes": 2363633664.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 364,
+            "prepare_ms": 996,
+            "opt_ms": 1933,
+            "codegen_ms": 618
+          },
+          {
+            "id": 5,
+            "kept": 1669,
+            "prepare_ms": 974,
+            "opt_ms": 1898,
+            "codegen_ms": 807
+          },
+          {
+            "id": 1,
+            "kept": 550,
+            "prepare_ms": 1016,
+            "opt_ms": 2070,
+            "codegen_ms": 786
+          },
+          {
+            "id": 4,
+            "kept": 333,
+            "prepare_ms": 1207,
+            "opt_ms": 2533,
+            "codegen_ms": 392
+          },
+          {
+            "id": 0,
+            "kept": 969,
+            "prepare_ms": 1212,
+            "opt_ms": 2415,
+            "codegen_ms": 511
+          },
+          {
+            "id": 2,
+            "kept": 528,
+            "prepare_ms": 1188,
+            "opt_ms": 2505,
+            "codegen_ms": 479
+          }
+        ]
+      },
+      {
+        "run": 5,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 20.525248504942283,
+        "cpu_s": 41.235214000000006,
+        "bytes": 18621509,
+        "load_before": [
+          2.70263671875,
+          2.00927734375,
+          1.39697265625
+        ],
+        "log": "5-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 3,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 17.97,
+        "module_setup_ms": 103.172,
+        "llvm_ir_ms": 14125.306,
+        "llvm_backend_ms": 5229.994,
+        "wasm_inputs_ms": 33.506,
+        "wasm_resolve_ms": 24.106,
+        "wasm_layout_ms": 108.779,
+        "wasm_relocations_ms": 31.62,
+        "wasm_emit_ms": 28.115,
+        "wasm_fibers_ms": 612.266,
+        "link_ms": 954.563,
+        "peak_rss_bytes": 2405806080.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 344,
+            "prepare_ms": 1028,
+            "opt_ms": 1905,
+            "codegen_ms": 464
+          },
+          {
+            "id": 0,
+            "kept": 970,
+            "prepare_ms": 1115,
+            "opt_ms": 2099,
+            "codegen_ms": 790
+          },
+          {
+            "id": 5,
+            "kept": 4402,
+            "prepare_ms": 1028,
+            "opt_ms": 2174,
+            "codegen_ms": 961
+          },
+          {
+            "id": 3,
+            "kept": 352,
+            "prepare_ms": 1200,
+            "opt_ms": 2525,
+            "codegen_ms": 482
+          },
+          {
+            "id": 2,
+            "kept": 536,
+            "prepare_ms": 1155,
+            "opt_ms": 2649,
+            "codegen_ms": 503
+          },
+          {
+            "id": 1,
+            "kept": 556,
+            "prepare_ms": 1294,
+            "opt_ms": 2858,
+            "codegen_ms": 471
+          }
+        ]
+      },
+      {
+        "run": 6,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 20.175587196019478,
+        "cpu_s": 39.890610999999986,
+        "bytes": 18621509,
+        "load_before": [
+          2.69921875,
+          2.04296875,
+          1.419921875
+        ],
+        "log": "6-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 3,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 17.184,
+        "module_setup_ms": 102.339,
+        "llvm_ir_ms": 14085.892,
+        "llvm_backend_ms": 4953.335,
+        "wasm_inputs_ms": 33.381,
+        "wasm_resolve_ms": 23.898,
+        "wasm_layout_ms": 107.319,
+        "wasm_relocations_ms": 31.884,
+        "wasm_emit_ms": 25.831,
+        "wasm_fibers_ms": 608.483,
+        "link_ms": 925.381,
+        "peak_rss_bytes": 2409312256.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 344,
+            "prepare_ms": 1041,
+            "opt_ms": 2047,
+            "codegen_ms": 487
+          },
+          {
+            "id": 3,
+            "kept": 352,
+            "prepare_ms": 1033,
+            "opt_ms": 2076,
+            "codegen_ms": 501
+          },
+          {
+            "id": 5,
+            "kept": 4402,
+            "prepare_ms": 1073,
+            "opt_ms": 2125,
+            "codegen_ms": 722
+          },
+          {
+            "id": 1,
+            "kept": 556,
+            "prepare_ms": 1062,
+            "opt_ms": 2309,
+            "codegen_ms": 566
+          },
+          {
+            "id": 2,
+            "kept": 536,
+            "prepare_ms": 1298,
+            "opt_ms": 2227,
+            "codegen_ms": 487
+          },
+          {
+            "id": 0,
+            "kept": 970,
+            "prepare_ms": 1292,
+            "opt_ms": 2602,
+            "codegen_ms": 462
+          }
+        ]
+      },
+      {
+        "run": 7,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 6.983610045979731,
+        "cpu_s": 26.906582000000036,
+        "bytes": 18580879,
+        "load_before": [
+          2.75244140625,
+          2.0908203125,
+          1.44873046875
+        ],
+        "log": "7-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 17.079,
+        "module_setup_ms": 101.97,
+        "llvm_ir_ms": 943.374,
+        "llvm_backend_ms": 4922.194,
+        "wasm_inputs_ms": 31.909,
+        "wasm_resolve_ms": 17.344,
+        "wasm_layout_ms": 85.651,
+        "wasm_relocations_ms": 32.825,
+        "wasm_emit_ms": 19.828,
+        "wasm_fibers_ms": 610.544,
+        "link_ms": 898.979,
+        "peak_rss_bytes": 2362613760.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 333,
+            "prepare_ms": 1013,
+            "opt_ms": 1754,
+            "codegen_ms": 641
+          },
+          {
+            "id": 5,
+            "kept": 1669,
+            "prepare_ms": 987,
+            "opt_ms": 1925,
+            "codegen_ms": 831
+          },
+          {
+            "id": 0,
+            "kept": 969,
+            "prepare_ms": 983,
+            "opt_ms": 2298,
+            "codegen_ms": 604
+          },
+          {
+            "id": 2,
+            "kept": 528,
+            "prepare_ms": 1083,
+            "opt_ms": 2475,
+            "codegen_ms": 478
+          },
+          {
+            "id": 1,
+            "kept": 550,
+            "prepare_ms": 1251,
+            "opt_ms": 2465,
+            "codegen_ms": 521
+          },
+          {
+            "id": 3,
+            "kept": 364,
+            "prepare_ms": 1253,
+            "opt_ms": 2702,
+            "codegen_ms": 382
+          }
+        ]
+      }
+    ]
+  },
+  "before_cache_matrix": {
+    "command": [
+      "/home/raikage/ash-wasm-compile-20261029/ash-candidate",
+      "--air-cache-dir",
+      "/home/raikage/ash-wasm-compile-20261029/rayde-demo/app/cache-ud5tjl06",
+      "--air-cache-stats",
+      "--air-cache-mb",
+      "512",
+      "--build",
+      "/home/raikage/ash-wasm-compile-20261029/rayde-demo/app/application.wasm",
+      "--target",
+      "wasm32-wasip1-threads",
+      "-O3",
+      "--codegen-opt-level",
+      "0"
+    ],
+    "cache": "/home/raikage/ash-wasm-compile-20261029/rayde-demo/app/cache-ud5tjl06",
+    "runs": [
+      {
+        "run": "disabled",
+        "wall_s": 20.118056,
+        "log": "app/disabled.log",
+        "sha256": "599acfb3b7f139828fb8dcbcb149b2454bd5451a29cc450968b8140155337978",
+        "decode_prepare_ms": 8.686,
+        "module_setup_ms": 89.977,
+        "llvm_ir_ms": 14018.477,
+        "llvm_backend_ms": 4988.743,
+        "wasm_inputs_ms": 56.396,
+        "wasm_resolve_ms": 24.265,
+        "wasm_layout_ms": 107.628,
+        "wasm_relocations_ms": 32.196,
+        "wasm_emit_ms": 27.836,
+        "wasm_fibers_ms": 622.304,
+        "link_ms": 923.33,
+        "peak_rss_bytes": 2410348544,
+        "cache": {
+          "enabled": "false",
+          "lower_hits": 0,
+          "optimized_hits": 0,
+          "misses": 0,
+          "invalid": 0,
+          "written": 0,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 0.0,
+          "read_ms": 0.0,
+          "write_ms": 0.0,
+          "lower_ms": 93.354,
+          "passes_ms": 631.634,
+          "verify_ms": 43.006
+        }
+      },
+      {
+        "run": "cold",
+        "wall_s": 21.42485,
+        "log": "app/cold.log",
+        "sha256": "599acfb3b7f139828fb8dcbcb149b2454bd5451a29cc450968b8140155337978",
+        "decode_prepare_ms": 17.732,
+        "module_setup_ms": 114.352,
+        "llvm_ir_ms": 15336.531,
+        "llvm_backend_ms": 4929.907,
+        "wasm_inputs_ms": 46.387,
+        "wasm_resolve_ms": 23.384,
+        "wasm_layout_ms": 106.714,
+        "wasm_relocations_ms": 30.768,
+        "wasm_emit_ms": 26.009,
+        "wasm_fibers_ms": 605.605,
+        "link_ms": 935.703,
+        "peak_rss_bytes": 2407690240,
+        "cache": {
+          "enabled": "true",
+          "lower_hits": 1185,
+          "optimized_hits": 0,
+          "misses": 5398,
+          "invalid": 0,
+          "written": 5398,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 17.082,
+          "read_ms": 89.379,
+          "write_ms": 473.434,
+          "lower_ms": 79.807,
+          "passes_ms": 748.358,
+          "verify_ms": 52.529
+        }
+      },
+      {
+        "run": "warm",
+        "wall_s": 19.978278,
+        "log": "app/warm.log",
+        "sha256": "599acfb3b7f139828fb8dcbcb149b2454bd5451a29cc450968b8140155337978",
+        "decode_prepare_ms": 17.586,
+        "module_setup_ms": 106.123,
+        "llvm_ir_ms": 13999.322,
+        "llvm_backend_ms": 4851.946,
+        "wasm_inputs_ms": 33.467,
+        "wasm_resolve_ms": 24.573,
+        "wasm_layout_ms": 106.13,
+        "wasm_relocations_ms": 31.954,
+        "wasm_emit_ms": 26.434,
+        "wasm_fibers_ms": 618.434,
+        "link_ms": 938.194,
+        "peak_rss_bytes": 2410131456,
+        "cache": {
+          "enabled": "true",
+          "lower_hits": 2699,
+          "optimized_hits": 2699,
+          "misses": 0,
+          "invalid": 0,
+          "written": 0,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 16.267,
+          "read_ms": 104.402,
+          "write_ms": 0.0,
+          "lower_ms": 0.0,
+          "passes_ms": 0.0,
+          "verify_ms": 61.211
+        }
+      },
+      {
+        "run": "edit",
+        "wall_s": 19.875517,
+        "log": "app/edit.log",
+        "sha256": "5d4c8591c3afffa1ac95464381951d0a32decf4cbe853a5072e9ccd2a477fa37",
+        "decode_prepare_ms": 16.905,
+        "module_setup_ms": 102.232,
+        "llvm_ir_ms": 13859.284,
+        "llvm_backend_ms": 4895.307,
+        "wasm_inputs_ms": 33.847,
+        "wasm_resolve_ms": 25.089,
+        "wasm_layout_ms": 111.965,
+        "wasm_relocations_ms": 32.095,
+        "wasm_emit_ms": 26.571,
+        "wasm_fibers_ms": 604.319,
+        "link_ms": 936.056,
+        "peak_rss_bytes": 2410840064,
+        "cache": {
+          "enabled": "true",
+          "lower_hits": 2698,
+          "optimized_hits": 2697,
+          "misses": 3,
+          "invalid": 0,
+          "written": 3,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 16.74,
+          "read_ms": 89.408,
+          "write_ms": 8.021,
+          "lower_ms": 0.051,
+          "passes_ms": 0.271,
+          "verify_ms": 60.493
+        }
+      }
+    ],
+    "llvm_passes": "default",
+    "fibers": true,
+    "llvm_opt_level": "3",
+    "air_opt_level": null,
+    "codegen_level": 0
+  },
+  "fixed_cache_matrix": {
+    "command": [
+      "/home/raikage/ash-wasm-compile-20261029/rayde-demo/ash-fixed",
+      "--air-cache-dir",
+      "/home/raikage/ash-wasm-compile-20261029/rayde-demo/app-fixed/cache-lk9btwkd",
+      "--air-cache-stats",
+      "--air-cache-mb",
+      "512",
+      "--build",
+      "/home/raikage/ash-wasm-compile-20261029/rayde-demo/app-fixed/application.wasm",
+      "--target",
+      "wasm32-wasip1-threads",
+      "-O3",
+      "--codegen-opt-level",
+      "0"
+    ],
+    "cache": "/home/raikage/ash-wasm-compile-20261029/rayde-demo/app-fixed/cache-lk9btwkd",
+    "runs": [
+      {
+        "run": "disabled",
+        "wall_s": 7.283284,
+        "log": "app-fixed/disabled.log",
+        "sha256": "ed67b601aa40208952a41dd39a236a1cd79d99cb36110f295477a3a37daa3ef4",
+        "decode_prepare_ms": 8.796,
+        "module_setup_ms": 89.994,
+        "llvm_ir_ms": 1446.131,
+        "llvm_backend_ms": 4859.131,
+        "wasm_inputs_ms": 32.112,
+        "wasm_resolve_ms": 19.946,
+        "wasm_layout_ms": 87.729,
+        "wasm_relocations_ms": 32.933,
+        "wasm_emit_ms": 20.632,
+        "wasm_fibers_ms": 603.652,
+        "link_ms": 812.345,
+        "peak_rss_bytes": 2363334656,
+        "cache": {
+          "enabled": "false",
+          "lower_hits": 0,
+          "optimized_hits": 0,
+          "misses": 0,
+          "invalid": 0,
+          "written": 0,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 0.0,
+          "read_ms": 0.0,
+          "write_ms": 0.0,
+          "lower_ms": 57.512,
+          "passes_ms": 561.336,
+          "verify_ms": 32.72
+        }
+      },
+      {
+        "run": "cold",
+        "wall_s": 7.685442,
+        "log": "app-fixed/cold.log",
+        "sha256": "ed67b601aa40208952a41dd39a236a1cd79d99cb36110f295477a3a37daa3ef4",
+        "decode_prepare_ms": 16.758,
+        "module_setup_ms": 110.603,
+        "llvm_ir_ms": 1934.882,
+        "llvm_backend_ms": 4612.937,
+        "wasm_inputs_ms": 32.053,
+        "wasm_resolve_ms": 17.832,
+        "wasm_layout_ms": 84.243,
+        "wasm_relocations_ms": 32.075,
+        "wasm_emit_ms": 20.152,
+        "wasm_fibers_ms": 603.721,
+        "link_ms": 892.168,
+        "peak_rss_bytes": 2364526592,
+        "cache": {
+          "enabled": "true",
+          "lower_hits": 997,
+          "optimized_hits": 0,
+          "misses": 5398,
+          "invalid": 0,
+          "written": 5398,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 16.409,
+          "read_ms": 42.821,
+          "write_ms": 307.366,
+          "lower_ms": 53.745,
+          "passes_ms": 699.085,
+          "verify_ms": 41.214
+        }
+      },
+      {
+        "run": "warm",
+        "wall_s": 7.186815,
+        "log": "app-fixed/warm.log",
+        "sha256": "ed67b601aa40208952a41dd39a236a1cd79d99cb36110f295477a3a37daa3ef4",
+        "decode_prepare_ms": 18.768,
+        "module_setup_ms": 110.319,
+        "llvm_ir_ms": 937.898,
+        "llvm_backend_ms": 5142.757,
+        "wasm_inputs_ms": 32.055,
+        "wasm_resolve_ms": 17.279,
+        "wasm_layout_ms": 84.03,
+        "wasm_relocations_ms": 32.216,
+        "wasm_emit_ms": 20.95,
+        "wasm_fibers_ms": 606.468,
+        "link_ms": 898.387,
+        "peak_rss_bytes": 2362863616,
+        "cache": {
+          "enabled": "true",
+          "lower_hits": 2699,
+          "optimized_hits": 2699,
+          "misses": 0,
+          "invalid": 0,
+          "written": 0,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 17.579,
+          "read_ms": 51.684,
+          "write_ms": 0.0,
+          "lower_ms": 0.0,
+          "passes_ms": 0.0,
+          "verify_ms": 43.35
+        }
+      },
+      {
+        "run": "edit",
+        "wall_s": 7.23543,
+        "log": "app-fixed/edit.log",
+        "sha256": "365de14f658196f5c991b54de3b4bbb0b3a7b4278cd4644d163c89f1ae3f4f7b",
+        "decode_prepare_ms": 17.102,
+        "module_setup_ms": 102.513,
+        "llvm_ir_ms": 939.52,
+        "llvm_backend_ms": 5175.397,
+        "wasm_inputs_ms": 32.327,
+        "wasm_resolve_ms": 17.162,
+        "wasm_layout_ms": 89.363,
+        "wasm_relocations_ms": 33.651,
+        "wasm_emit_ms": 19.204,
+        "wasm_fibers_ms": 613.635,
+        "link_ms": 930.515,
+        "peak_rss_bytes": 2363920384,
+        "cache": {
+          "enabled": "true",
+          "lower_hits": 2700,
+          "optimized_hits": 2697,
+          "misses": 3,
+          "invalid": 0,
+          "written": 3,
+          "evictions": 0,
+          "errors": 0,
+          "identity_ms": 16.759,
+          "read_ms": 48.166,
+          "write_ms": 8.112,
+          "lower_ms": 0.036,
+          "passes_ms": 0.297,
+          "verify_ms": 43.274
+        }
+      }
+    ],
+    "llvm_passes": "default",
+    "fibers": true,
+    "llvm_opt_level": "3",
+    "air_opt_level": null,
+    "codegen_level": 0
+  },
+  "diagnostics": [
+    {
+      "label": "phases",
+      "wall_s": 20.05805236089509,
+      "sha256": "599acfb3b7f139828fb8dcbcb149b2454bd5451a29cc450968b8140155337978",
+      "decode_prepare_ms": 17.332,
+      "module_setup_ms": 105.254,
+      "llvm_ir_ms": 14002.952,
+      "llvm_backend_ms": 4985.405,
+      "wasm_inputs_ms": 32.686,
+      "wasm_resolve_ms": 23.862,
+      "wasm_layout_ms": 109.045,
+      "wasm_relocations_ms": 31.503,
+      "wasm_emit_ms": 25.62,
+      "wasm_fibers_ms": 606.852,
+      "link_ms": 848.12,
+      "peak_rss_bytes": 2410975232.0
+    },
+    {
+      "label": "cap-off",
+      "wall_s": 6.6839131460292265,
+      "sha256": "ed67b601aa40208952a41dd39a236a1cd79d99cb36110f295477a3a37daa3ef4",
+      "decode_prepare_ms": 16.861,
+      "module_setup_ms": 104.628,
+      "llvm_ir_ms": 946.139,
+      "llvm_backend_ms": 4726.046,
+      "wasm_inputs_ms": 31.6,
+      "wasm_resolve_ms": 18.071,
+      "wasm_layout_ms": 85.659,
+      "wasm_relocations_ms": 32.842,
+      "wasm_emit_ms": 20.088,
+      "wasm_fibers_ms": 607.573,
+      "link_ms": 811.671,
+      "peak_rss_bytes": 2370179072.0
+    }
+  ],
+  "phase_profiles": {
+    "phases.log": "[ash] the target cannot load libraries, so ash_channel, blinc_abi, fmt, xgpu, xwindow is not loaded; any primitive from it raises when reached\n[aot] optimization: air=O3 llvm=default<O3> codegen=0\n[aot-time] decode_prepare_ms=17.332\n[ash] JIT natives: 607 resolved, 558 tree-shaken/skipped (of 1165 total)\n[aot-time] module_setup_ms=105.254\n[aot] lowering 12665ms total; slowest:\n[aot]   findex=144 23ms (0.2% of lowering)\n[aot]   findex=2441 11ms (0.1% of lowering)\n[aot]   findex=1545 11ms (0.1% of lowering)\n[aot]   findex=3809 11ms (0.1% of lowering)\n[aot]   findex=2885 11ms (0.1% of lowering)\n[aot] 1102 call trampolines\n[aot-time] llvm_ir_ms=14002.952\n[aot] sharding: 7160 bodies, 6 shards, shielded 0, stream 21 MB, prepared in 548ms\n[aot] data object: 7160 bodies stripped; prepare 220ms, codegen 312ms\n[aot] shard 3: kept 352, carried 5145, stripped 1663, swept 20105, folded 9125, declared 25425; prepare 1148ms, middle end 1937ms, codegen 467ms, codegen_level=0\n[aot] shard 2: kept 536, carried 4954, stripped 1670, swept 19696, folded 9386, declared 25464; prepare 1067ms, middle end 2216ms, codegen 515ms, codegen_level=0\n[aot] shard 5: kept 4402, carried 1121, stripped 1637, swept 13407, folded 12131, declared 26010; prepare 1007ms, middle end 2152ms, codegen 718ms, codegen_level=0\n[aot] shard 4: kept 344, carried 5127, stripped 1689, swept 19541, folded 9783, declared 25396; prepare 1009ms, middle end 2447ms, codegen 469ms, codegen_level=0\n[aot] shard 1: kept 556, carried 4956, stripped 1648, swept 20019, folded 9117, declared 25441; prepare 1268ms, middle end 2163ms, codegen 554ms, codegen_level=0\n[aot] shard 0: kept 970, carried 4767, stripped 1423, swept 20272, folded 8791, declared 25399; prepare 1275ms, middle end 2684ms, codegen 440ms, codegen_level=0\n[aot-time] llvm_backend_ms=4985.405\n[ash] lowered 2699/2699 functions, 0 refused\n[ash] compiled 15617778 object bytes for wasm32-wasip1-threads, cpu generic\n[aot-time] wasm_inputs_ms=32.686\n[ash] 4 native libraries beside the output will be loaded at run time, so this module exports the memory, table and 97 runtime functions they import.\n[ash] fibers are on: instrumenting so a fiber can suspend inside this module. It gets bigger and every call in the suspend set pays a check.\n[aot-time] wasm_resolve_ms=23.862\n[aot-time] wasm_layout_ms=109.045\n[aot-time] wasm_relocations_ms=31.503\n[aot-time] wasm_emit_ms=25.620\n[aot-time] wasm_fibers_ms=606.852\n[ash] linked /home/raikage/ash-wasm-compile-20261029/rayde-demo/app/phases.wasm (18621509 bytes) against /home/raikage/ash-wasm-compile-20261029/runtime/ash_runtime.o\n[ash] this is a wasm module, not a command: it exports `main` and `ash_module_init`, and imports WASI plus what a sandbox cannot do for itself: suspending a fiber, and sockets. Whatever embeds it supplies those.\n[aot-time] link_ms=848.120\n[air-disk-cache] enabled=true lower_hits=2699 optimized_hits=2698 misses=1 invalid=0 written=1 evictions=0 errors=0 identity_ms=16.813 read_ms=108.698 write_ms=0.161 lower_ms=0.000 passes_ms=0.041 verify_ms=60.289\n[aot-time] peak_rss_bytes=2410975232\n[ash] wrote a page for it beside phases.wasm (your index.html kept); `ash serve /home/raikage/ash-wasm-compile-20261029/rayde-demo/app` opens it\n\n\u2500\u2500\u2500 phases \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nwall 19988.7ms\nphase                                          total ms    self ms    calls  % wall\nmain\n  llvm promote                                 13981.82   13078.73     2699   69.9%\n    AIR v2 -> LLVM                               903.10     903.10     4226    4.5%\n  emit_module_init                                32.59      32.59        1    0.2%\n  emit_aot_data                                   22.64      22.64        1    0.1%\n  compile entrypoint (AIR v2 -> LLVM)             19.99      19.99        1    0.1%\n  AIR v2 -> LLVM                                  19.97      19.97        1    0.1%\n  decode                                          17.35      17.35        1    0.1%\n  decode bytecode                                 10.43      10.43        1    0.1%\n  const globals                                    5.00       5.00        1    0.0%\n  init_indexes                                     3.32       3.32        1    0.0%\n  init_natives                                     2.97       2.97        1    0.0%\n  initialize_globals                               0.65       0.65        1    0.0%\n  method names                                     0.24       0.24        1    0.0%\n  discover_libraries                               0.15       0.15        1    0.0%\n  engine                                           0.12       0.12        1    0.0%\n  load hdlls                                       0.05       0.05        1    0.0%\n  init stdlib                                      0.00       0.00        1    0.0%\n  resolver+types view                              0.00       0.00        1    0.0%\n\n\u2500\u2500\u2500 counters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ndevirt method aot-arm                                49\nllvm promotions                                    2699\ntable trampolines                                  2747\n",
+    "cap-off.log": "[ash] the target cannot load libraries, so ash_channel, blinc_abi, fmt, xgpu, xwindow is not loaded; any primitive from it raises when reached\n[aot] optimization: air=O3 llvm=default<O3> codegen=0\n[aot-time] decode_prepare_ms=16.861\n[ash] JIT natives: 607 resolved, 558 tree-shaken/skipped (of 1165 total)\n[aot-time] module_setup_ms=104.628\n[aot] findex=25 took 547ms\n[aot] lowering 695ms total; slowest:\n[aot]   findex=25 547ms (78.7% of lowering)\n[aot]   findex=2204 25ms (3.6% of lowering)\n[aot]   findex=1443 21ms (3.0% of lowering)\n[aot]   findex=58 14ms (2.0% of lowering)\n[aot]   findex=2938 13ms (1.9% of lowering)\n[aot] 1102 call trampolines\n[aot-time] llvm_ir_ms=946.139\n[aot] sharding: 4413 bodies, 6 shards, shielded 0, stream 21 MB, prepared in 535ms\n[aot] data object: 4413 bodies stripped; prepare 264ms, codegen 393ms\n[aot] shard 4: kept 333, carried 2385, stripped 1695, swept 17398, folded 9741, declared 25393; prepare 1001ms, middle end 1757ms, codegen 407ms, codegen_level=0\n[aot] shard 0: kept 969, carried 2020, stripped 1424, swept 18373, folded 8760, declared 25399; prepare 1071ms, middle end 1881ms, codegen 513ms, codegen_level=0\n[aot] shard 3: kept 364, carried 2392, stripped 1657, swept 17970, folded 9132, declared 25430; prepare 1134ms, middle end 1999ms, codegen 455ms, codegen_level=0\n[aot] shard 2: kept 528, carried 2212, stripped 1673, swept 17693, folded 9372, declared 25467; prepare 1156ms, middle end 2133ms, codegen 488ms, codegen_level=0\n[aot] shard 1: kept 550, carried 2210, stripped 1653, swept 17972, folded 9126, declared 25436; prepare 1077ms, middle end 2320ms, codegen 528ms, codegen_level=0\n[aot] shard 5: kept 1669, carried 1116, stripped 1628, swept 13334, folded 12201, declared 26013; prepare 1282ms, middle end 2368ms, codegen 499ms, codegen_level=0\n[aot-time] llvm_backend_ms=4726.046\n[ash] lowered 2699/2699 functions, 0 refused\n[ash] compiled 15200987 object bytes for wasm32-wasip1-threads, cpu generic\n[aot-time] wasm_inputs_ms=31.600\n[ash] 4 native libraries beside the output will be loaded at run time, so this module exports the memory, table and 97 runtime functions they import.\n[ash] fibers are on: instrumenting so a fiber can suspend inside this module. It gets bigger and every call in the suspend set pays a check.\n[aot-time] wasm_resolve_ms=18.071\n[aot-time] wasm_layout_ms=85.659\n[aot-time] wasm_relocations_ms=32.842\n[aot-time] wasm_emit_ms=20.088\n[aot-time] wasm_fibers_ms=607.573\n[ash] linked /home/raikage/ash-wasm-compile-20261029/rayde-demo/app/cap-off.wasm (18580879 bytes) against /home/raikage/ash-wasm-compile-20261029/runtime/ash_runtime.o\n[ash] this is a wasm module, not a command: it exports `main` and `ash_module_init`, and imports WASI plus what a sandbox cannot do for itself: suspending a fiber, and sockets. Whatever embeds it supplies those.\n[aot-time] link_ms=811.671\n[air-disk-cache] enabled=true lower_hits=2699 optimized_hits=2699 misses=0 invalid=0 written=0 evictions=0 errors=0 identity_ms=16.252 read_ms=52.447 write_ms=0.000 lower_ms=0.000 passes_ms=0.000 verify_ms=43.569\n[aot-time] peak_rss_bytes=2370179072\n[ash] wrote a page for it beside cap-off.wasm (your index.html kept); `ash serve /home/raikage/ash-wasm-compile-20261029/rayde-demo/app` opens it\n\n\u2500\u2500\u2500 phases \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nwall 6634.4ms\nphase                                          total ms    self ms    calls  % wall\nmain\n  llvm promote                                   926.67     252.30     2699   14.0%\n    AIR v2 -> LLVM                               674.37     674.37     6696   10.2%\n  emit_module_init                                32.28      32.28        1    0.5%\n  emit_aot_data                                   23.53      23.53        1    0.4%\n  compile entrypoint (AIR v2 -> LLVM)             20.04      20.04        1    0.3%\n  AIR v2 -> LLVM                                  20.02      20.02        1    0.3%\n  decode                                          16.88      16.88        1    0.3%\n  decode bytecode                                 11.23      11.23        1    0.2%\n  const globals                                    4.92       4.92        1    0.1%\n  init_indexes                                     3.08       3.08        1    0.0%\n  init_natives                                     2.58       2.58        1    0.0%\n  initialize_globals                               0.61       0.61        1    0.0%\n  method names                                     0.31       0.31        1    0.0%\n  discover_libraries                               0.13       0.13        1    0.0%\n  engine                                           0.13       0.13        1    0.0%\n  load hdlls                                       0.05       0.05        1    0.0%\n  init stdlib                                      0.00       0.00        1    0.0%\n  resolver+types view                              0.00       0.00        1    0.0%\n\n\u2500\u2500\u2500 counters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ndevirt method aot-arm                                49\nllvm promotions                                    2699\n",
+    "fixed-phases.log": "[ash] the target cannot load libraries, so ash_channel, blinc_abi, fmt, xgpu, xwindow is not loaded; any primitive from it raises when reached\n[aot] optimization: air=O3 llvm=default<O3> codegen=0\n[aot-time] decode_prepare_ms=17.211\n[ash] JIT natives: 607 resolved, 558 tree-shaken/skipped (of 1165 total)\n[aot-time] module_setup_ms=102.481\n[aot] findex=25 took 540ms\n[aot] lowering 683ms total; slowest:\n[aot]   findex=25 540ms (79.1% of lowering)\n[aot]   findex=2204 25ms (3.7% of lowering)\n[aot]   findex=1443 20ms (2.9% of lowering)\n[aot]   findex=58 14ms (2.0% of lowering)\n[aot]   findex=2938 13ms (1.9% of lowering)\n[aot] 1102 call trampolines\n[aot-time] llvm_ir_ms=931.335\n[aot] sharding: 4413 bodies, 6 shards, shielded 0, stream 21 MB, prepared in 543ms\n[aot] data object: 4413 bodies stripped; prepare 220ms, codegen 302ms\n[aot] shard 4: kept 333, carried 2385, stripped 1695, swept 17398, folded 9741, declared 25393; prepare 976ms, middle end 1763ms, codegen 417ms, codegen_level=0\n[aot] shard 5: kept 1669, carried 1116, stripped 1628, swept 13334, folded 12201, declared 26013; prepare 1014ms, middle end 1908ms, codegen 602ms, codegen_level=0\n[aot] shard 2: kept 528, carried 2212, stripped 1673, swept 17693, folded 9372, declared 25467; prepare 1062ms, middle end 2099ms, codegen 516ms, codegen_level=0\n[aot] shard 3: kept 364, carried 2392, stripped 1657, swept 17970, folded 9132, declared 25430; prepare 1196ms, middle end 2110ms, codegen 436ms, codegen_level=0\n[aot] shard 0: kept 969, carried 2020, stripped 1424, swept 18373, folded 8760, declared 25399; prepare 1148ms, middle end 2278ms, codegen 475ms, codegen_level=0\n[aot] shard 1: kept 550, carried 2210, stripped 1653, swept 17972, folded 9126, declared 25436; prepare 1257ms, middle end 2503ms, codegen 466ms, codegen_level=0\n[aot-time] llvm_backend_ms=4809.094\n[ash] lowered 2699/2699 functions, 0 refused\n[ash] compiled 15200987 object bytes for wasm32-wasip1-threads, cpu generic\n[aot-time] wasm_inputs_ms=33.846\n[ash] 4 native libraries beside the output will be loaded at run time, so this module exports the memory, table and 97 runtime functions they import.\n[ash] fibers are on: instrumenting so a fiber can suspend inside this module. It gets bigger and every call in the suspend set pays a check.\n[aot-time] wasm_resolve_ms=17.370\n[aot-time] wasm_layout_ms=85.109\n[aot-time] wasm_relocations_ms=31.942\n[aot-time] wasm_emit_ms=20.272\n[aot-time] wasm_fibers_ms=605.919\n[ash] linked /home/raikage/ash-wasm-compile-20261029/rayde-demo/app-fixed/profile.wasm (18580879 bytes) against /home/raikage/ash-wasm-compile-20261029/runtime/ash_runtime.o\n[ash] this is a wasm module, not a command: it exports `main` and `ash_module_init`, and imports WASI plus what a sandbox cannot do for itself: suspending a fiber, and sockets. Whatever embeds it supplies those.\n[aot-time] link_ms=812.800\n[air-disk-cache] enabled=true lower_hits=2699 optimized_hits=2698 misses=1 invalid=0 written=1 evictions=0 errors=0 identity_ms=16.173 read_ms=54.847 write_ms=0.156 lower_ms=0.000 passes_ms=0.047 verify_ms=43.394\n[aot-time] peak_rss_bytes=2363240448\n[ash] wrote a page for it beside profile.wasm; `ash serve /home/raikage/ash-wasm-compile-20261029/rayde-demo/app-fixed` opens it\n\n\u2500\u2500\u2500 phases \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nwall 6692.6ms\nphase                                          total ms    self ms    calls  % wall\nmain\n  llvm promote                                   911.74     241.42     2699   13.6%\n    AIR v2 -> LLVM                               670.31     670.31     6696   10.0%\n  emit_module_init                                30.77      30.77        1    0.5%\n  emit_aot_data                                   22.62      22.62        1    0.3%\n  compile entrypoint (AIR v2 -> LLVM)             19.82      19.82        1    0.3%\n  AIR v2 -> LLVM                                  19.80      19.80        1    0.3%\n  decode                                          17.23      17.23        1    0.3%\n  decode bytecode                                 10.40      10.40        1    0.2%\n  const globals                                    4.98       4.98        1    0.1%\n  init_indexes                                     3.14       3.14        1    0.0%\n  init_natives                                     2.64       2.64        1    0.0%\n  initialize_globals                               0.60       0.60        1    0.0%\n  method names                                     0.21       0.21        1    0.0%\n  engine                                           0.14       0.14        1    0.0%\n  discover_libraries                               0.12       0.12        1    0.0%\n  load hdlls                                       0.06       0.06        1    0.0%\n  init stdlib                                      0.00       0.00        1    0.0%\n  resolver+types view                              0.00       0.00        1    0.0%\n\n\u2500\u2500\u2500 counters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ndevirt method aot-arm                                49\nllvm promotions                                    2699\n"
+  },
+  "browser": [
+    {
+      "variant": "baseline",
+      "status": 0,
+      "output": "fetching http://127.0.0.1:8139/app/pocket-studio.wasm and its libraries\nhost ready at 6ms\n9 agents ready at 6ms\nloaded library ash_channel, 50,610 bytes, at 18ms\nloaded library xwindow, 298,101 bytes, at 18ms\nloaded library xgpu, 646,141 bytes, at 24ms\nprepared library ash_channel (50,610 bytes) on an agent in 18ms, at 35ms\nprepared library xwindow (298,101 bytes) on an agent in 19ms, at 37ms\nprepared library xgpu (646,141 bytes) on an agent in 24ms, at 48ms\nloaded library blinc_abi, 4,746,236 bytes, at 213ms\nprepared library blinc_abi (4,746,236 bytes) on an agent in 49ms, at 262ms\nloaded http://127.0.0.1:8139/app/pocket-studio.wasm, 18,621,509 bytes, at 539ms\nprepared program http://127.0.0.1:8139/app/pocket-studio.wasm (18,621,509 bytes) on an agent in 107ms, at 646ms\nstarting the program at 646ms\n[ash] loaded native libraries: ash_channel, blinc_abi, xgpu, xwindow\nashui: ready\npage title: Pocket Studio\npage: PASS\n"
+    },
+    {
+      "variant": "fixed",
+      "status": 0,
+      "output": "fetching http://127.0.0.1:8139/app/pocket-studio.wasm and its libraries\nhost ready at 5ms\n9 agents ready at 5ms\nloaded library ash_channel, 50,610 bytes, at 14ms\nloaded library xgpu, 646,141 bytes, at 15ms\nloaded library xwindow, 298,101 bytes, at 15ms\nprepared library ash_channel (50,610 bytes) on an agent in 17ms, at 31ms\nprepared library xwindow (298,101 bytes) on an agent in 20ms, at 35ms\nprepared library xgpu (646,141 bytes) on an agent in 22ms, at 37ms\nloaded library blinc_abi, 4,746,236 bytes, at 43ms\nprepared library blinc_abi (4,746,236 bytes) on an agent in 54ms, at 97ms\nloaded http://127.0.0.1:8139/app/pocket-studio.wasm, 18,580,879 bytes, at 541ms\nprepared program http://127.0.0.1:8139/app/pocket-studio.wasm (18,580,879 bytes) on an agent in 113ms, at 655ms\nstarting the program at 655ms\n[ash] loaded native libraries: ash_channel, blinc_abi, xgpu, xwindow\nashui: ready\npage title: Pocket Studio\npage: PASS\n"
+    },
+    {
+      "variant": "edited",
+      "status": 0,
+      "output": "fetching http://127.0.0.1:8139/app/pocket-studio.wasm and its libraries\nhost ready at 7ms\n9 agents ready at 7ms\nloaded library ash_channel, 50,610 bytes, at 18ms\nloaded library xwindow, 298,101 bytes, at 24ms\nloaded library xgpu, 646,141 bytes, at 24ms\nprepared library ash_channel (50,610 bytes) on an agent in 16ms, at 34ms\nprepared library xwindow (298,101 bytes) on an agent in 18ms, at 42ms\nprepared library xgpu (646,141 bytes) on an agent in 24ms, at 48ms\nloaded library blinc_abi, 4,746,236 bytes, at 67ms\nprepared library blinc_abi (4,746,236 bytes) on an agent in 55ms, at 122ms\nloaded http://127.0.0.1:8139/app/pocket-studio.wasm, 18,580,879 bytes, at 559ms\nprepared program http://127.0.0.1:8139/app/pocket-studio.wasm (18,580,879 bytes) on an agent in 107ms, at 666ms\nstarting the program at 666ms\n[ash] loaded native libraries: ash_channel, blinc_abi, xgpu, xwindow\nashui: ready\npage title: Pocket Studio\npage: PASS\n"
+    }
+  ],
+  "screenshot_sha256": {
+    "baseline": "32162fded7eaa567ac4741f2b579e07822c3c7baad7363806b185b25642e6bfb",
+    "fixed": "32162fded7eaa567ac4741f2b579e07822c3c7baad7363806b185b25642e6bfb",
+    "edited": "32162fded7eaa567ac4741f2b579e07822c3c7baad7363806b185b25642e6bfb"
+  },
+  "validation": {
+    "nuc_regression": "warning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_window/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n 9 ~ [dependencies]\n10 + [lints]\n11 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n 9 ~ [dependencies]\n10 + [lints]\n   |\nwarning: `ash_window` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/tinysdl/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n24 ~ test = false\n25 + [lints]\n26 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n24 ~ test = false\n25 + [lints]\n   |\nwarning: `tinysdl` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n   --> crates/ash/Cargo.toml\n    = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n    |\n104 ~ ] }\n105 + [lints]\n106 + workspace = true\n    |\nhelp: to clarify your intent to not inherit, add:\n    |\n104 ~ ] }\n105 + [lints]\n    |\nwarning: `ash_core` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_hdll_channel/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n17 ~ crate-type = [\"staticlib\", \"rlib\"]\n18 + [lints]\n19 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n17 ~ crate-type = [\"staticlib\", \"rlib\"]\n18 + [lints]\n   |\nwarning: `ash_hdll_channel` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> std/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n74 ~ ash_trace = { path = \"../crates/ash_trace\" }\n75 + [lints]\n76 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n74 ~ ash_trace = { path = \"../crates/ash_trace\" }\n75 + [lints]\n   |\nwarning: `ash_std` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_hdll_future/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n17 ~ stock-test-prims = []\n18 + [lints]\n19 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n17 ~ stock-test-prims = []\n18 + [lints]\n   |\nwarning: `ash_hdll_future` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_wasm_runtime/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n72 ~ tempfile = \"3\"\n73 + [lints]\n74 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n72 ~ tempfile = \"3\"\n73 + [lints]\n   |\nwarning: `ash_wasm_runtime` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/air/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n15 ~ serde = [\"dep:serde\"]\n16 + [lints]\n17 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n15 ~ serde = [\"dep:serde\"]\n16 + [lints]\n   |\nwarning: `air` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_hdll_simd/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n16 ~ crate-type = [\"cdylib\", \"staticlib\"]\n17 + [lints]\n18 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n16 ~ crate-type = [\"cdylib\", \"staticlib\"]\n17 + [lints]\n   |\nwarning: `ash_hdll_simd` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_macro/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n12 ~ proc-macro2 = \"1.0\"\n13 + [lints]\n14 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n12 ~ proc-macro2 = \"1.0\"\n13 + [lints]\n   |\nwarning: `ash_macro` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_interp/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n36 ~ harness = false\n37 + [lints]\n38 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n36 ~ harness = false\n37 + [lints]\n   |\nwarning: `ash_interp` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_simd/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n16 ~ crate-type = [\"rlib\"]\n17 + [lints]\n18 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n16 ~ crate-type = [\"rlib\"]\n17 + [lints]\n   |\nwarning: `ash_simd` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_cli/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n53 ~ tempfile = \"3.2\"\n54 + [lints]\n55 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n53 ~ tempfile = \"3.2\"\n54 + [lints]\n   |\nwarning: `ash` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_native_call/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n10 ~ [dependencies]\n11 + [lints]\n12 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n10 ~ [dependencies]\n11 + [lints]\n   |\nwarning: `ash_native_call` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_browser/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n20 ~ crate-type = [\"cdylib\", \"rlib\"]\n21 + [lints]\n22 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n20 ~ crate-type = [\"cdylib\", \"rlib\"]\n21 + [lints]\n   |\nwarning: `ash_browser` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_page/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n12 ~ wasm-bindgen-cli-support = \"=0.2.127\"\n13 + [lints]\n14 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n12 ~ wasm-bindgen-cli-support = \"=0.2.127\"\n13 + [lints]\n   |\nwarning: `ash_page` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_future_abi/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n 9 ~ hl_abi = { workspace = true }\n10 + [lints]\n11 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n 9 ~ hl_abi = { workspace = true }\n10 + [lints]\n   |\nwarning: `ash_future_abi` (manifest) generated 1 warning\nwarning: missing `[lints]` to inherit `[workspace.lints]`\n  --> crates/ash_hdll_sqlite/Cargo.toml\n   = note: `cargo::missing_lints_inheritance` is set to `warn` by default\nhelp: to inherit `workspace.lints, add:\n   |\n26 ~ test = false\n27 + [lints]\n28 + workspace = true\n   |\nhelp: to clarify your intent to not inherit, add:\n   |\n26 ~ test = false\n27 + [lints]\n   |\nwarning: `ash_hdll_sqlite` (manifest) generated 1 warning\n   Compiling ash_core v0.1.0 (/home/raikage/ash-wasm-compile-20261029/source/crates/ash)\n   Compiling ash_interp v0.1.0 (/home/raikage/ash-wasm-compile-20261029/source/crates/ash_interp)\n   Compiling ash v0.1.13 (/home/raikage/ash-wasm-compile-20261029/source/crates/ash_cli)\n    Finished `release` profile [optimized] target(s) in 2m 50s\n     Running tests/aot_promotion_cap.rs (/home/raikage/ash-wasm-compile-20261029/target/release/build/ash/07bec62a401b76d8/out/aot_promotion_cap-07bec62a401b76d8)\n\nrunning 1 test\ntest aot_ignores_jit_promotion_caps_and_preserves_calls ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.44s\n\n",
+    "mac_regression_and_smoke": "   Compiling ash_core v0.1.0 (/Users/amaterasu/Vibranium/ash/crates/ash)\n   Compiling ash v0.1.13 (/Users/amaterasu/Vibranium/ash/crates/ash_cli)\n   Compiling ash_interp v0.1.0 (/Users/amaterasu/Vibranium/ash/crates/ash_interp)\n    Finished `release` profile [optimized] target(s) in 3m 41s\n     Running tests/aot_promotion_cap.rs (target/release/build/ash/d135201b856348ed/out/aot_promotion_cap-d135201b856348ed)\n\nrunning 1 test\ntest aot_ignores_jit_promotion_caps_and_preserves_calls ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.62s\n\n     Running tests/aot_smoke.rs (target/release/build/ash/4dee97eee402dab9/out/aot_smoke-4dee97eee402dab9)\n\nrunning 1 test\ntest every_aot_binary_matches_the_jit ... bench_fib: building\nbench_fib: running under the jit\nbench_fib: running the binary\nbench_fib: ok\ntest_basic: building\ntest_basic: running under the jit\ntest_basic: running the binary\ntest_basic: ok\ntest_stdlib: building\ntest_stdlib: running under the jit\ntest_stdlib: running the binary\ntest_stdlib: ok\nbench_deltablue: building\nbench_deltablue: running under the jit\nbench_deltablue: running the binary\nbench_deltablue: ok\ntest_feature_typedef_anon: building\ntest_feature_typedef_anon: running under the jit\ntest_feature_typedef_anon: running the binary\ntest_feature_typedef_anon: ok\ntest_safe_cast_virtual: building\ntest_safe_cast_virtual: running under the jit\ntest_safe_cast_virtual: running the binary\ntest_safe_cast_virtual: ok\ntest_virtual_closure_inherited: building\ntest_virtual_closure_inherited: running under the jit\ntest_virtual_closure_inherited: running the binary\ntest_virtual_closure_inherited: ok\ntest_vec_array_addr: building\ntest_vec_array_addr: running under the jit\ntest_vec_array_addr: running the binary\ntest_vec_array_addr: ok\ntest_ref_offset: building\ntest_ref_offset: running under the jit\ntest_ref_offset: running the binary\ntest_ref_offset: ok\ntest_gettype_null: building\ntest_gettype_null: running under the jit\ntest_gettype_null: running the binary\ntest_gettype_null: ok\ntest_std_reflect_type: building\ntest_std_reflect_type: running under the jit\ntest_std_reflect_type: running the binary\ntest_std_reflect_type: ok\ntest_mandelbrot_small: building\ntest_mandelbrot_small: running under the jit\ntest_mandelbrot_small: running the binary\ntest_mandelbrot_small: ok\ntest_dyn_bytes: building\ntest_dyn_bytes: running under the jit\ntest_dyn_bytes: running the binary\ntest_dyn_bytes: ok\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.84s\n\n",
+    "clippy": "   Compiling ash_core v0.1.0 (/Users/amaterasu/Vibranium/ash/crates/ash)\n   Compiling ash v0.1.13 (/Users/amaterasu/Vibranium/ash/crates/ash_cli)\nwarning: ash_core@0.1.0: the ash_std cdylib at /Users/amaterasu/Vibranium/ash/crates/ash/../../target/debug/libash_std.dylib is OLDER than std/src. It is embedded as-is, so ash may emit calls to runtime helpers it does not export. Rebuild it: cargo build -p ash_std\n    Checking ash_interp v0.1.0 (/Users/amaterasu/Vibranium/ash/crates/ash_interp)\n    Finished `dev` profile [optimized + debuginfo] target(s) in 14.55s\n",
+    "bytecode_edit_changed_bytes": 1
+  }
+}

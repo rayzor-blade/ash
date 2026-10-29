@@ -112,10 +112,12 @@ also passed.
 
 ## Further work
 
-The last shard owns 5,882 of 8,922 LLVM bodies. The balancer uses instruction
-counts. Adding a measured per-function cost is a plausible next experiment;
-no speedup from that change is claimed here. Each shard also parses the entire
-23 MiB input stream before pruning its view.
+The instruction-only baseline gives the last shard 5,882 of 8,922 LLVM bodies.
+Optimizing WASM codegen now includes a per-body cost in its partition weights;
+[the NUC comparison](shard-build-times.md) measures a 9.1% backend improvement
+at codegen 3. Codegen 0 retains instruction-only weights after its experiment
+showed no reliable gain. Each shard still parses the entire 23 MiB input stream
+before pruning its view.
 
 Earlier elimination needs a sound root policy for reflection, function tables,
 trampolines and host entry points. The existing diagnostic reachability set

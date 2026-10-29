@@ -46,7 +46,7 @@
 //! to declare, stay wherever they are referenced -- they are literal
 //! constants, and a duplicate costs bytes, not correctness.
 //!
-//! Shards are contiguous findex ranges of equal instruction weight rather than
+//! Shards are contiguous findex ranges of equal compilation weight rather than
 //! round-robin: the compiler emits a class's methods together, and callers
 //! sit beside their callees more often than not, so a contiguous cut keeps
 //! more inlining inside a shard than any interleaving would.
@@ -55,19 +55,25 @@
 //! round-trip; it is the bisect switch if a sharded build ever misbehaves.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{ Path, PathBuf };
 
-use anyhow::{Result, anyhow};
+use anyhow::{ Result, anyhow };
 use inkwell::GlobalVisibility;
-use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::attributes::{ Attribute, AttributeLoc };
 use inkwell::context::Context;
 use inkwell::llvm_sys;
 use inkwell::memory_buffer::MemoryBuffer;
-use inkwell::module::{Linkage, Module};
+use inkwell::module::{ Linkage, Module };
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+    CodeModel,
+    FileType,
+    InitializationConfig,
+    RelocMode,
+    Target,
+    TargetMachine,
+    TargetTriple,
 };
-use inkwell::values::{AsValueRef, FunctionValue};
+use inkwell::values::{ AsValueRef, FunctionValue };
 
 use super::module::JITModule;
 
@@ -77,6 +83,9 @@ use super::module::JITModule;
 /// anything larger than this it would rarely take, and every body carried is
 /// parsed and simplified once per shard.
 const INLINE_CANDIDATE_INSTRUCTIONS: usize = 80;
+
+/// Optimizing WASM codegen also pays per body, including tiny wrappers.
+const WASM_BODY_WEIGHT: usize = 32;
 
 /// Stack for a shard's thread. The middle end recurses -- ScalarEvolution's
 /// `createSCEV` walks an expression tree one frame per node -- and on the
@@ -103,7 +112,8 @@ pub fn shard_count() -> usize {
             return n.max(1);
         }
     }
-    let cores = std::thread::available_parallelism()
+    let cores = std::thread
+        ::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
     (cores / 2).clamp(2, 6)
@@ -140,13 +150,27 @@ pub(crate) fn object_target_machine(triple: &str) -> Result<(TargetTriple, Targe
 }
 
 pub(crate) fn apply_size_attributes(module: &Module<'_>) {
-    let Some(size) = crate::aot_options::current().and_then(|s| s.size) else { return; };
+    let Some(size) = crate::aot_options::current().and_then(|s| s.size) else {
+        return;
+    };
     let optnone = Attribute::get_named_enum_kind_id("optnone");
     for f in module.get_functions() {
-        if f.count_basic_blocks() == 0 || f.get_enum_attribute(AttributeLoc::Function, optnone).is_some() { continue; }
+        if
+            f.count_basic_blocks() == 0 ||
+            f.get_enum_attribute(AttributeLoc::Function, optnone).is_some()
+        {
+            continue;
+        }
         for name in ["optsize", "minsize"] {
-            if name == "minsize" && size != crate::aot_options::LlvmOptLevel::MinSize { continue; }
-            f.add_attribute(AttributeLoc::Function, module.get_context().create_enum_attribute(Attribute::get_named_enum_kind_id(name), 0));
+            if name == "minsize" && size != crate::aot_options::LlvmOptLevel::MinSize {
+                continue;
+            }
+            f.add_attribute(
+                AttributeLoc::Function,
+                module
+                    .get_context()
+                    .create_enum_attribute(Attribute::get_named_enum_kind_id(name), 0)
+            );
         }
     }
 }
@@ -155,6 +179,10 @@ fn instruction_count(f: FunctionValue<'_>) -> usize {
     f.get_basic_block_iter()
         .map(|bb| bb.get_instructions().count())
         .sum()
+}
+
+fn compilation_weight(instructions: usize, body_weight: usize) -> usize {
+    instructions.saturating_add(body_weight)
 }
 
 /// Reduce `f` to a declaration.
@@ -203,55 +231,6 @@ fn strip_body(f: FunctionValue<'_>) {
         LLVMSetPersonalityFn(fref, std::ptr::null_mut());
     }
     f.set_linkage(Linkage::External);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stripped_exception_body_is_a_valid_declaration() {
-        crate::llvm_init::ensure();
-        let context = Context::create();
-        let module = context.create_module("strip-eh");
-        let personality = module.add_function("personality", context.i32_type().fn_type(&[], true), None);
-        let f = module.add_function("body", context.void_type().fn_type(&[], false), None);
-        f.set_personality_function(personality);
-        let builder = context.create_builder();
-        builder.position_at_end(context.append_basic_block(f, "entry"));
-        builder.build_return(None).unwrap();
-        module.verify().unwrap();
-        strip_body(f);
-        assert_eq!(f.count_basic_blocks(), 0);
-        assert!(!f.has_personality_function());
-        module.verify().unwrap();
-    }
-
-    #[test]
-    fn size_attributes_preserve_shielded_functions() {
-        crate::llvm_init::ensure();
-        let _options = crate::aot_options::enter(crate::aot_options::AotOptions {
-            llvm: Some(crate::aot_options::LlvmOptLevel::MinSize), ..Default::default()
-        }).unwrap();
-        let context = Context::create();
-        let module = context.create_module("size-eh");
-        let builder = context.create_builder();
-        for name in ["ordinary", "shielded"] {
-            let f = module.add_function(name, context.void_type().fn_type(&[], false), None);
-            builder.position_at_end(context.append_basic_block(f, "entry"));
-            builder.build_return(None).unwrap();
-            if name == "shielded" {
-                for attr in ["optnone", "noinline"] {
-                    f.add_attribute(AttributeLoc::Function, context.create_enum_attribute(Attribute::get_named_enum_kind_id(attr), 0));
-                }
-            }
-        }
-        apply_size_attributes(&module);
-        let minsize = Attribute::get_named_enum_kind_id("minsize");
-        assert!(module.get_function("ordinary").unwrap().get_enum_attribute(AttributeLoc::Function, minsize).is_some());
-        assert!(module.get_function("shielded").unwrap().get_enum_attribute(AttributeLoc::Function, minsize).is_none());
-        module.verify().unwrap();
-    }
 }
 
 /// A global whose initializer is a plain scalar -- an `Int_7`, a `Float_`.
@@ -341,12 +320,10 @@ fn sweep_unreachable(module: &Module<'_>) -> usize {
             continue;
         }
         unsafe {
-            let name = std::ffi::CStr::from_ptr(llvm_sys::core::LLVMGetValueName2(
-                v,
-                &mut 0usize as *mut usize,
-            ))
-            .to_string_lossy()
-            .into_owned();
+            let name = std::ffi::CStr
+                ::from_ptr(llvm_sys::core::LLVMGetValueName2(v, &mut 0usize as *mut usize))
+                .to_string_lossy()
+                .into_owned();
             if name.starts_with("llvm.") {
                 continue;
             }
@@ -382,7 +359,9 @@ fn release_module(module: &Module<'_>) {
     while let Some(g) = global {
         let next = g.get_next_global();
         if g.get_initializer().is_some() {
-            unsafe { llvm_sys::core::LLVMSetInitializer(g.as_value_ref(), std::ptr::null_mut()) };
+            unsafe {
+                llvm_sys::core::LLVMSetInitializer(g.as_value_ref(), std::ptr::null_mut());
+            }
         }
         global = next;
     }
@@ -397,11 +376,15 @@ fn has_attribute(f: FunctionValue<'_>, name: &str) -> bool {
 /// Cut `weights`, in order, into `shards` contiguous ranges of about equal
 /// total weight.
 fn partition(weights: &[(String, usize)], shards: usize) -> Vec<HashSet<String>> {
-    let total: u128 = weights.iter().map(|(_, w)| *w as u128).sum::<u128>().max(1);
+    let total: u128 = weights
+        .iter()
+        .map(|(_, w)| *w as u128)
+        .sum::<u128>()
+        .max(1);
     let mut owned: Vec<HashSet<String>> = (0..shards).map(|_| HashSet::new()).collect();
     let mut cumulative: u128 = 0;
     for (name, weight) in weights {
-        let shard = ((cumulative * shards as u128) / total) as usize;
+        let shard = ((cumulative * (shards as u128)) / total) as usize;
         owned[shard.min(shards - 1)].insert(name.clone());
         cumulative += *weight as u128;
     }
@@ -411,13 +394,15 @@ fn partition(weights: &[(String, usize)], shards: usize) -> Vec<HashSet<String>>
 impl<'ctx> JITModule<'ctx> {
     /// Give every body and every named data global a symbol another object
     /// can reference, and return the bodies in findex order with their
-    /// instruction weights.
-    fn promote_for_sharding(&self) -> Vec<(String, usize)> {
+    /// compilation weights.
+    fn promote_for_sharding(&self, body_weight: usize) -> Vec<(String, usize)> {
         let mut ordered: Vec<(String, usize)> = Vec::new();
         let mut recorded: HashSet<String> = HashSet::new();
 
-        let mut by_findex: Vec<(usize, FunctionValue<'ctx>)> =
-            self.func_cache.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut by_findex: Vec<(usize, FunctionValue<'ctx>)> = self.func_cache
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         by_findex.sort_by_key(|(k, _)| *k);
         for (findex, f) in by_findex {
             if f.count_basic_blocks() == 0 {
@@ -432,7 +417,7 @@ impl<'ctx> JITModule<'ctx> {
             }
             let name = f.get_name().to_string_lossy().into_owned();
             if recorded.insert(name.clone()) {
-                ordered.push((name, instruction_count(f)));
+                ordered.push((name, compilation_weight(instruction_count(f), body_weight)));
             }
         }
         let mut helper = 0usize;
@@ -453,7 +438,7 @@ impl<'ctx> JITModule<'ctx> {
             }
             let name = f.get_name().to_string_lossy().into_owned();
             if recorded.insert(name.clone()) {
-                ordered.push((name, instruction_count(f)));
+                ordered.push((name, compilation_weight(instruction_count(f), body_weight)));
             }
         }
 
@@ -461,9 +446,10 @@ impl<'ctx> JITModule<'ctx> {
         let mut global = self.module.get_first_global();
         while let Some(g) = global {
             let old = g.get_name().to_string_lossy().into_owned();
-            if g.get_initializer().is_some()
-                && g.get_linkage() == Linkage::Internal
-                && !old.is_empty()
+            if
+                g.get_initializer().is_some() &&
+                g.get_linkage() == Linkage::Internal &&
+                !old.is_empty()
             {
                 g.set_name(&format!("ash_d{data}.{old}"));
                 g.set_linkage(Linkage::External);
@@ -495,8 +481,7 @@ impl<'ctx> JITModule<'ctx> {
         let began = std::time::Instant::now();
         let (tt, machine) = object_target_machine(triple)?;
         self.module.set_triple(&tt);
-        self.module
-            .set_data_layout(&machine.get_target_data().get_data_layout());
+        self.module.set_data_layout(&machine.get_target_data().get_data_layout());
         // The data object holds every constant and the function table, and it
         // is the one artifact `ASH_AOT_DUMP_IR` did not cover: the shards carry
         // bodies, this carries the data those bodies read. Comparing a program
@@ -504,11 +489,13 @@ impl<'ctx> JITModule<'ctx> {
         if let Some(spec) = std::env::var_os("ASH_AOT_DUMP_IR") {
             let spec = spec.to_string_lossy().into_owned();
             if !spec.is_empty() && spec != "0" {
-                let base = std::path::PathBuf::from(if spec == "1" {
-                    "/tmp/ash_aot.ll".to_string()
-                } else {
-                    spec
-                });
+                let base = std::path::PathBuf::from(
+                    if spec == "1" {
+                        "/tmp/ash_aot.ll".to_string()
+                    } else {
+                        spec
+                    }
+                );
                 let stem = base
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
@@ -528,9 +515,11 @@ impl<'ctx> JITModule<'ctx> {
         release_module(&self.module);
         crate::progress::advance(1);
         if !quiet {
-            crate::progress::detail(&format!(
-                "[aot] data object: {stripped} bodies stripped; prepare {prepared_ms}ms, codegen {codegen_ms}ms"
-            ));
+            crate::progress::detail(
+                &format!(
+                    "[aot] data object: {stripped} bodies stripped; prepare {prepared_ms}ms, codegen {codegen_ms}ms"
+                )
+            );
         }
         Ok(())
     }
@@ -547,11 +536,12 @@ impl<'ctx> JITModule<'ctx> {
         triple: &str,
         out: &Path,
         shards: usize,
-        quiet: bool,
+        quiet: bool
     ) -> Result<u64> {
         let parts = self.emit_object_parts(triple, out, shards, quiet)?;
         let began = std::time::Instant::now();
-        let status = std::process::Command::new("ld")
+        let status = std::process::Command
+            ::new("ld")
             .arg("-r")
             .args(&parts)
             .arg("-o")
@@ -570,11 +560,13 @@ impl<'ctx> JITModule<'ctx> {
             let _ = std::fs::remove_file(p);
         }
         if !quiet {
-            crate::progress::detail(&format!(
-                "[aot] joined {} shards + data in {}ms",
-                shards,
-                began.elapsed().as_millis()
-            ));
+            crate::progress::detail(
+                &format!(
+                    "[aot] joined {} shards + data in {}ms",
+                    shards,
+                    began.elapsed().as_millis()
+                )
+            );
         }
         Ok(std::fs::metadata(out)?.len())
     }
@@ -586,7 +578,7 @@ impl<'ctx> JITModule<'ctx> {
         triple: &str,
         out: &Path,
         shards: usize,
-        quiet: bool,
+        quiet: bool
     ) -> Result<Vec<PathBuf>> {
         let shards = shards.max(1);
         let no_opt = std::env::var_os("ASH_AOT_NO_OPT").is_some();
@@ -595,7 +587,11 @@ impl<'ctx> JITModule<'ctx> {
         // shard's own IR lands beside it under the same stem.
         let dump_ir: Option<PathBuf> = std::env::var_os("ASH_AOT_DUMP_IR").map(|d| {
             let p = PathBuf::from(d);
-            if p.is_dir() { p.join("module.ll") } else { p }
+            if p.is_dir() {
+                p.join("module.ll")
+            } else {
+                p
+            }
         });
 
         let began = std::time::Instant::now();
@@ -603,7 +599,14 @@ impl<'ctx> JITModule<'ctx> {
         // local promoted out of memory has an indeterminate value after the
         // jump. Attributes survive the bitcode round-trip.
         let shielded = self.shield_trap_functions_from_optimization();
-        let weights = self.promote_for_sharding();
+        let body_weight = if super::aot_link::is_wasm_triple(triple)
+            && crate::aot_options::codegen_level()? != 0
+        {
+            WASM_BODY_WEIGHT
+        } else {
+            0
+        };
+        let weights = self.promote_for_sharding(body_weight);
         let owned = partition(&weights, shards);
         if let Some(dest) = &dump_ir {
             self.module
@@ -623,16 +626,18 @@ impl<'ctx> JITModule<'ctx> {
         // once here, every worker's own call finds them registered.
         crate::target_abi::initialize_targets();
         if !quiet {
-            crate::progress::detail(&format!(
-                "[aot] sharding: {} bodies, {} shards, shielded {shielded}, stream {} MB, prepared in {}ms",
-                weights.len(),
-                shards,
-                bitcode.len() >> 20,
-                began.elapsed().as_millis()
-            ));
+            crate::progress::detail(
+                &format!(
+                    "[aot] sharding: {} bodies, {} shards, shielded {shielded}, stream {} MB, prepared in {}ms",
+                    weights.len(),
+                    shards,
+                    bitcode.len() >> 20,
+                    began.elapsed().as_millis()
+                )
+            );
         }
         // One unit per shard, plus the data object this thread writes.
-        crate::progress::begin("compiling", shards as u64 + 1);
+        crate::progress::begin("compiling", (shards as u64) + 1);
 
         let stem = out
             .file_name()
@@ -656,22 +661,26 @@ impl<'ctx> JITModule<'ctx> {
                     let part = parts[k].clone();
                     let dump_ir = dump_ir.clone();
                     let optimization = crate::aot_options::current();
-                    std::thread::Builder::new()
+                    std::thread::Builder
+                        ::new()
                         .name(format!("ash-aot-shard-{k}"))
                         .stack_size(SHARD_STACK_BYTES)
-                        .spawn_scoped(scope, move || -> Result<()> {
-                            let _optimization = crate::aot_options::inherit(optimization);
-                            emit_shard(
-                                k,
-                                triple,
-                                bitcode,
-                                owned,
-                                &part,
-                                no_opt,
-                                dump_ir.as_deref(),
-                                quiet,
-                            )
-                        })
+                        .spawn_scoped(
+                            scope,
+                            move || -> Result<()> {
+                                let _optimization = crate::aot_options::inherit(optimization);
+                                emit_shard(
+                                    k,
+                                    triple,
+                                    bitcode,
+                                    owned,
+                                    &part,
+                                    no_opt,
+                                    dump_ir.as_deref(),
+                                    quiet
+                                )
+                            }
+                        )
                 })
                 .collect();
             // This thread takes the data object while those run. Nothing is
@@ -679,11 +688,11 @@ impl<'ctx> JITModule<'ctx> {
             let data = self.emit_data_object(triple, &parts[shards], quiet);
             let mut results: Vec<Result<()>> = handles
                 .into_iter()
-                .map(|h| match h {
-                    Ok(h) => h
-                        .join()
-                        .unwrap_or_else(|_| Err(anyhow!("shard thread panicked"))),
-                    Err(e) => Err(anyhow!("spawn shard thread: {e}")),
+                .map(|h| {
+                    match h {
+                        Ok(h) => h.join().unwrap_or_else(|_| Err(anyhow!("shard thread panicked"))),
+                        Err(e) => Err(anyhow!("spawn shard thread: {e}")),
+                    }
                 })
                 .collect();
             results.push(data);
@@ -691,11 +700,7 @@ impl<'ctx> JITModule<'ctx> {
         });
         for (k, r) in results.into_iter().enumerate() {
             r.map_err(|e| {
-                if k == shards {
-                    anyhow!("data object: {e}")
-                } else {
-                    anyhow!("shard {k}: {e}")
-                }
+                if k == shards { anyhow!("data object: {e}") } else { anyhow!("shard {k}: {e}") }
             })?;
         }
 
@@ -712,7 +717,7 @@ fn emit_shard(
     part: &Path,
     no_opt: bool,
     dump_ir: Option<&Path>,
-    quiet: bool,
+    quiet: bool
 ) -> Result<()> {
     let began = std::time::Instant::now();
     crate::llvm_init::ensure();
@@ -722,8 +727,9 @@ fn emit_shard(
     // module keeps no reference to it, and `thread::scope` already guarantees
     // the bytes outlive every shard.
     let buffer = MemoryBuffer::create_from_memory_range(bitcode, "ash-aot");
-    let module: Module<'_> = Module::parse_bitcode_from_buffer(&buffer, &context)
-        .map_err(|e| anyhow!("parse bitcode: {}", e.to_string()))?;
+    let module: Module<'_> = Module::parse_bitcode_from_buffer(&buffer, &context).map_err(|e|
+        anyhow!("parse bitcode: {}", e.to_string())
+    )?;
 
     let mut kept = 0usize;
     let mut carried = 0usize;
@@ -740,9 +746,10 @@ fn emit_shard(
         // A shielded body is `optnone`: it will never be inlined, so carrying
         // it buys nothing. Everything else small enough rides along for the
         // inliner, and the sweep below drops the ones this shard never calls.
-        if !no_opt
-            && instruction_count(f) <= INLINE_CANDIDATE_INSTRUCTIONS
-            && !has_attribute(f, "optnone")
+        if
+            !no_opt &&
+            instruction_count(f) <= INLINE_CANDIDATE_INSTRUCTIONS &&
+            !has_attribute(f, "optnone")
         {
             f.set_linkage(Linkage::AvailableExternally);
             carried += 1;
@@ -769,17 +776,18 @@ fn emit_shard(
         let mut global = module.get_first_global();
         while let Some(g) = global {
             let next = g.get_next_global();
-            if !g.get_name().to_bytes().is_empty()
-                && g.get_initializer().is_some()
-                && g.get_linkage() != Linkage::Private
+            if
+                !g.get_name().to_bytes().is_empty() &&
+                g.get_initializer().is_some() &&
+                g.get_linkage() != Linkage::Private
             {
                 if g.is_constant() && !no_opt {
                     g.set_linkage(Linkage::AvailableExternally);
                     folded += 1;
                 } else {
                     unsafe {
-                        llvm_sys::core::LLVMSetInitializer(g.as_value_ref(), std::ptr::null_mut())
-                    };
+                        llvm_sys::core::LLVMSetInitializer(g.as_value_ref(), std::ptr::null_mut());
+                    }
                     declared += 1;
                 }
             }
@@ -816,9 +824,127 @@ fn emit_shard(
     let codegen_ms = began.elapsed().as_millis();
     crate::progress::advance(1);
     if !quiet {
-        crate::progress::detail(&format!(
-            "[aot] shard {k}: kept {kept}, carried {carried}, stripped {stripped}, swept {swept}, folded {folded}, declared {declared}; prepare {prepared_ms}ms, middle end {opt_ms}ms, codegen {codegen_ms}ms, codegen_level={}", crate::aot_options::codegen_level()?
-        ));
+        crate::progress::detail(
+            &format!(
+                "[aot] shard {k}: kept {kept}, carried {carried}, stripped {stripped}, swept {swept}, folded {folded}, declared {declared}; prepare {prepared_ms}ms, middle end {opt_ms}ms, codegen {codegen_ms}ms, codegen_level={}",
+                crate::aot_options::codegen_level()?
+            )
+        );
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_partition_distributes_a_tail_of_small_helpers() {
+        let weights: Vec<_> = (0..16)
+            .map(|i| (format!("body{i}"), 512))
+            .chain((0..256).map(|i| (format!("helper{i}"), 1)))
+            .map(|(name, instructions)| (name, compilation_weight(instructions, WASM_BODY_WEIGHT)))
+            .collect();
+        let owned = partition(&weights, 4);
+        let total: usize = weights
+            .iter()
+            .map(|(_, weight)| weight)
+            .sum();
+        let largest = *weights
+            .iter()
+            .map(|(_, weight)| weight)
+            .max()
+            .unwrap();
+        for names in &owned {
+            let cost: usize = weights
+                .iter()
+                .filter(|(name, _)| names.contains(name))
+                .map(|(_, weight)| weight)
+                .sum();
+            assert!(cost.abs_diff(total / 4) <= largest);
+        }
+        assert!(
+            owned
+                .iter()
+                .filter(|names| names.iter().any(|name| name.starts_with("helper")))
+                .count() > 1
+        );
+        let mut previous = 0;
+        for (name, _) in weights {
+            let owners: Vec<_> = owned
+                .iter()
+                .enumerate()
+                .filter(|(_, names)| names.contains(&name))
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(owners.len(), 1, "{name}");
+            assert!(owners[0] >= previous);
+            previous = owners[0];
+        }
+    }
+
+    #[test]
+    fn stripped_exception_body_is_a_valid_declaration() {
+        crate::llvm_init::ensure();
+        let context = Context::create();
+        let module = context.create_module("strip-eh");
+        let personality = module.add_function(
+            "personality",
+            context.i32_type().fn_type(&[], true),
+            None
+        );
+        let f = module.add_function("body", context.void_type().fn_type(&[], false), None);
+        f.set_personality_function(personality);
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(f, "entry"));
+        builder.build_return(None).unwrap();
+        module.verify().unwrap();
+        strip_body(f);
+        assert_eq!(f.count_basic_blocks(), 0);
+        assert!(!f.has_personality_function());
+        module.verify().unwrap();
+    }
+
+    #[test]
+    fn size_attributes_preserve_shielded_functions() {
+        crate::llvm_init::ensure();
+        let _options = crate::aot_options
+            ::enter(crate::aot_options::AotOptions {
+                llvm: Some(crate::aot_options::LlvmOptLevel::MinSize),
+                ..Default::default()
+            })
+            .unwrap();
+        let context = Context::create();
+        let module = context.create_module("size-eh");
+        let builder = context.create_builder();
+        for name in ["ordinary", "shielded"] {
+            let f = module.add_function(name, context.void_type().fn_type(&[], false), None);
+            builder.position_at_end(context.append_basic_block(f, "entry"));
+            builder.build_return(None).unwrap();
+            if name == "shielded" {
+                for attr in ["optnone", "noinline"] {
+                    f.add_attribute(
+                        AttributeLoc::Function,
+                        context.create_enum_attribute(Attribute::get_named_enum_kind_id(attr), 0)
+                    );
+                }
+            }
+        }
+        apply_size_attributes(&module);
+        let minsize = Attribute::get_named_enum_kind_id("minsize");
+        assert!(
+            module
+                .get_function("ordinary")
+                .unwrap()
+                .get_enum_attribute(AttributeLoc::Function, minsize)
+                .is_some()
+        );
+        assert!(
+            module
+                .get_function("shielded")
+                .unwrap()
+                .get_enum_attribute(AttributeLoc::Function, minsize)
+                .is_none()
+        );
+        module.verify().unwrap();
+    }
 }

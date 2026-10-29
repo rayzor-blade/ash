@@ -1,0 +1,1641 @@
+{
+  "provenance": {
+    "baseline_commit": "a8f4140addf6a3bd32e1142073ae471de044eb28",
+    "candidate": "same source plus balance.patch",
+    "cpu": "Intel Core i5-1250P, 12 cores / 16 threads",
+    "llvm": "21.1.8",
+    "rust": "1.101.0-nightly (c36f14571 2026-10-01)",
+    "host_lto": "thin",
+    "host_codegen_units": 16,
+    "host_build_jobs": 2,
+    "runtime": "transferred unchanged wasm32-wasip1-threads/ash_runtime.o; source matches baseline and candidate",
+    "side_modules": [
+      "blinc_abi.wasm",
+      "xgpu.wasm",
+      "xwindow.wasm"
+    ],
+    "llvm_setup": "System LLVM 21.1.8 plus matching libpolly-21-dev extracted locally; private llvm-config library-directory overlay, no system package changes",
+    "candidate_strategy": "Initial experiment applied the 32-per-body cost at all WASM codegen levels; codegen 0 was rejected after measurements."
+  },
+  "experiment": {
+    "host": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "cores": 16,
+    "input_sha256": "52be8fc49e9fbaf2c3701d9435cd6040254969fcaf311af6d6f88dfd1889a7ea",
+    "compiler_sha256": {
+      "baseline": "cc00a8860398d9e5e7cb9d6d1c76073dc7cc11deb466170bedcc61f5a20dc0a9",
+      "candidate": "5cdcd430597acaa49739077b1a4df74aacfa4b2cc65be9c8db0e3debf473a62e"
+    },
+    "runtime_sha256": "1327f8ef42d565c84bfb4d0528cc13f020a62399d8fcbdf8e079621c5c36087b",
+    "target": "wasm32-wasip1-threads",
+    "shards": 5,
+    "fibers": true,
+    "air_level": 3,
+    "llvm_ir_level": 3,
+    "runs": [
+      {
+        "run": 0,
+        "warmup": true,
+        "variant": "baseline",
+        "codegen": 3,
+        "wall_s": 31.761312782997265,
+        "cpu_s": 55.856599,
+        "bytes": 16202426,
+        "load_before": [
+          2.44921875,
+          2.3974609375,
+          1.62841796875
+        ],
+        "log": "0-baseline-cg3.log",
+        "swap_pages": {
+          "pswpin": 1,
+          "pswpout": 3
+        },
+        "decode_prepare_ms": 19.708,
+        "module_setup_ms": 179.605,
+        "llvm_ir_ms": 21799.739,
+        "llvm_backend_ms": 8695.204,
+        "wasm_inputs_ms": 47.319,
+        "wasm_resolve_ms": 30.872,
+        "wasm_layout_ms": 174.136,
+        "wasm_relocations_ms": 42.342,
+        "wasm_emit_ms": 34.151,
+        "wasm_fibers_ms": 573.717,
+        "link_ms": 914.424,
+        "peak_rss_bytes": 2264305664.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1161,
+            "opt_ms": 2217,
+            "codegen_ms": 1740
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1050,
+            "opt_ms": 2466,
+            "codegen_ms": 2208
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1140,
+            "opt_ms": 2675,
+            "codegen_ms": 2170
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1346,
+            "opt_ms": 3202,
+            "codegen_ms": 2134
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1245,
+            "opt_ms": 2867,
+            "codegen_ms": 3889
+          }
+        ]
+      },
+      {
+        "run": 1,
+        "warmup": true,
+        "variant": "candidate",
+        "codegen": 3,
+        "wall_s": 31.113967987010255,
+        "cpu_s": 57.804198,
+        "bytes": 16221893,
+        "load_before": [
+          2.4755859375,
+          2.3896484375,
+          1.654296875
+        ],
+        "log": "1-candidate-cg3.log",
+        "swap_pages": {
+          "pswpin": 1,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 20.072,
+        "module_setup_ms": 177.861,
+        "llvm_ir_ms": 21782.614,
+        "llvm_backend_ms": 8159.588,
+        "wasm_inputs_ms": 35.99,
+        "wasm_resolve_ms": 32.194,
+        "wasm_layout_ms": 159.842,
+        "wasm_relocations_ms": 39.983,
+        "wasm_emit_ms": 31.222,
+        "wasm_fibers_ms": 573.072,
+        "link_ms": 885.061,
+        "peak_rss_bytes": 2252509184.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1124,
+            "opt_ms": 2702,
+            "codegen_ms": 2503
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1028,
+            "opt_ms": 2653,
+            "codegen_ms": 2708
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1082,
+            "opt_ms": 2638,
+            "codegen_ms": 2771
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1208,
+            "opt_ms": 2998,
+            "codegen_ms": 2540
+          },
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1195,
+            "opt_ms": 2020,
+            "codegen_ms": 4311
+          }
+        ]
+      },
+      {
+        "run": 2,
+        "warmup": true,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 27.298921338981017,
+        "cpu_s": 44.94710500000002,
+        "bytes": 19742401,
+        "load_before": [
+          2.34912109375,
+          2.35498046875,
+          1.6640625
+        ],
+        "log": "2-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 20.006,
+        "module_setup_ms": 131.799,
+        "llvm_ir_ms": 20553.037,
+        "llvm_backend_ms": 5534.899,
+        "wasm_inputs_ms": 38.414,
+        "wasm_resolve_ms": 31.508,
+        "wasm_layout_ms": 172.331,
+        "wasm_relocations_ms": 42.378,
+        "wasm_emit_ms": 33.075,
+        "wasm_fibers_ms": 637.128,
+        "link_ms": 970.071,
+        "peak_rss_bytes": 2260631552.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1059,
+            "opt_ms": 2221,
+            "codegen_ms": 497
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1057,
+            "opt_ms": 2419,
+            "codegen_ms": 614
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1176,
+            "opt_ms": 2704,
+            "codegen_ms": 591
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1029,
+            "opt_ms": 2611,
+            "codegen_ms": 931
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1319,
+            "opt_ms": 2990,
+            "codegen_ms": 555
+          }
+        ]
+      },
+      {
+        "run": 3,
+        "warmup": true,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 26.74647804698907,
+        "cpu_s": 44.29378899999999,
+        "bytes": 19763856,
+        "load_before": [
+          2.3681640625,
+          2.3447265625,
+          1.67724609375
+        ],
+        "log": "3-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 20.283,
+        "module_setup_ms": 149.43,
+        "llvm_ir_ms": 20096.543,
+        "llvm_backend_ms": 5355.784,
+        "wasm_inputs_ms": 38.925,
+        "wasm_resolve_ms": 30.173,
+        "wasm_layout_ms": 180.88,
+        "wasm_relocations_ms": 42.32,
+        "wasm_emit_ms": 34.224,
+        "wasm_fibers_ms": 650.011,
+        "link_ms": 996.882,
+        "peak_rss_bytes": 2241462272.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1095,
+            "opt_ms": 1820,
+            "codegen_ms": 674
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1051,
+            "opt_ms": 2641,
+            "codegen_ms": 649
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1121,
+            "opt_ms": 2661,
+            "codegen_ms": 676
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1217,
+            "opt_ms": 2752,
+            "codegen_ms": 641
+          },
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1140,
+            "opt_ms": 2978,
+            "codegen_ms": 556
+          }
+        ]
+      },
+      {
+        "run": 4,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 3,
+        "wall_s": 32.01005535398144,
+        "cpu_s": 55.599551999999996,
+        "bytes": 16202426,
+        "load_before": [
+          2.13623046875,
+          2.28173828125,
+          1.67626953125
+        ],
+        "log": "4-baseline-cg3.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.755,
+        "module_setup_ms": 131.959,
+        "llvm_ir_ms": 22359.956,
+        "llvm_backend_ms": 8428.14,
+        "wasm_inputs_ms": 52.278,
+        "wasm_resolve_ms": 30.893,
+        "wasm_layout_ms": 162.368,
+        "wasm_relocations_ms": 41.597,
+        "wasm_emit_ms": 33.755,
+        "wasm_fibers_ms": 567.062,
+        "link_ms": 976.761,
+        "peak_rss_bytes": 2263515136.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1045,
+            "opt_ms": 2276,
+            "codegen_ms": 1748
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1107,
+            "opt_ms": 2431,
+            "codegen_ms": 2149
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1094,
+            "opt_ms": 2694,
+            "codegen_ms": 2212
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1300,
+            "opt_ms": 3169,
+            "codegen_ms": 2277
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1045,
+            "opt_ms": 2643,
+            "codegen_ms": 4044
+          }
+        ]
+      },
+      {
+        "run": 5,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 3,
+        "wall_s": 30.10608056304045,
+        "cpu_s": 54.64747000000005,
+        "bytes": 16221893,
+        "load_before": [
+          2.29052734375,
+          2.2900390625,
+          1.69677734375
+        ],
+        "log": "5-candidate-cg3.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.403,
+        "module_setup_ms": 132.388,
+        "llvm_ir_ms": 21227.887,
+        "llvm_backend_ms": 7678.537,
+        "wasm_inputs_ms": 37.839,
+        "wasm_resolve_ms": 30.723,
+        "wasm_layout_ms": 161.709,
+        "wasm_relocations_ms": 40.788,
+        "wasm_emit_ms": 31.263,
+        "wasm_fibers_ms": 562.014,
+        "link_ms": 951.265,
+        "peak_rss_bytes": 2244337664.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1023,
+            "opt_ms": 2428,
+            "codegen_ms": 2184
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1127,
+            "opt_ms": 2710,
+            "codegen_ms": 2430
+          },
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1139,
+            "opt_ms": 1805,
+            "codegen_ms": 3338
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1166,
+            "opt_ms": 2962,
+            "codegen_ms": 2399
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1310,
+            "opt_ms": 3349,
+            "codegen_ms": 2365
+          }
+        ]
+      },
+      {
+        "run": 6,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 3,
+        "wall_s": 29.605429474962875,
+        "cpu_s": 55.315173999999985,
+        "bytes": 16221893,
+        "load_before": [
+          2.685546875,
+          2.36328125,
+          1.7392578125
+        ],
+        "log": "6-candidate-cg3.log",
+        "swap_pages": {
+          "pswpin": 213,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.227,
+        "module_setup_ms": 133.158,
+        "llvm_ir_ms": 20711.058,
+        "llvm_backend_ms": 7657.463,
+        "wasm_inputs_ms": 44.18,
+        "wasm_resolve_ms": 31.317,
+        "wasm_layout_ms": 163.187,
+        "wasm_relocations_ms": 40.616,
+        "wasm_emit_ms": 31.41,
+        "wasm_fibers_ms": 568.631,
+        "link_ms": 968.705,
+        "peak_rss_bytes": 2244399104.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1040,
+            "opt_ms": 2508,
+            "codegen_ms": 2243
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1152,
+            "opt_ms": 2653,
+            "codegen_ms": 2431
+          },
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1079,
+            "opt_ms": 1831,
+            "codegen_ms": 3375
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1033,
+            "opt_ms": 2974,
+            "codegen_ms": 2946
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1297,
+            "opt_ms": 3286,
+            "codegen_ms": 2427
+          }
+        ]
+      },
+      {
+        "run": 7,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 3,
+        "wall_s": 32.31730585300829,
+        "cpu_s": 56.80155600000006,
+        "bytes": 16202426,
+        "load_before": [
+          3.15869140625,
+          2.49267578125,
+          1.80126953125
+        ],
+        "log": "7-baseline-cg3.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.147,
+        "module_setup_ms": 130.305,
+        "llvm_ir_ms": 22589.224,
+        "llvm_backend_ms": 8529.721,
+        "wasm_inputs_ms": 45.528,
+        "wasm_resolve_ms": 34.363,
+        "wasm_layout_ms": 161.646,
+        "wasm_relocations_ms": 41.055,
+        "wasm_emit_ms": 31.709,
+        "wasm_fibers_ms": 563.227,
+        "link_ms": 968.967,
+        "peak_rss_bytes": 2263347200.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1106,
+            "opt_ms": 2235,
+            "codegen_ms": 2343
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1042,
+            "opt_ms": 2450,
+            "codegen_ms": 2364
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1109,
+            "opt_ms": 2582,
+            "codegen_ms": 2378
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1303,
+            "opt_ms": 3154,
+            "codegen_ms": 2349
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1033,
+            "opt_ms": 2690,
+            "codegen_ms": 4145
+          }
+        ]
+      },
+      {
+        "run": 8,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 3,
+        "wall_s": 29.8052691440098,
+        "cpu_s": 53.68485699999994,
+        "bytes": 16202426,
+        "load_before": [
+          2.763671875,
+          2.4482421875,
+          1.80810546875
+        ],
+        "log": "8-baseline-cg3.log",
+        "swap_pages": {
+          "pswpin": 4,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.383,
+        "module_setup_ms": 131.979,
+        "llvm_ir_ms": 20236.853,
+        "llvm_backend_ms": 8360.951,
+        "wasm_inputs_ms": 37.134,
+        "wasm_resolve_ms": 32.424,
+        "wasm_layout_ms": 163.406,
+        "wasm_relocations_ms": 40.538,
+        "wasm_emit_ms": 31.908,
+        "wasm_fibers_ms": 555.609,
+        "link_ms": 948.406,
+        "peak_rss_bytes": 2260414464.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1043,
+            "opt_ms": 2183,
+            "codegen_ms": 1748
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1125,
+            "opt_ms": 2433,
+            "codegen_ms": 2175
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1217,
+            "opt_ms": 2586,
+            "codegen_ms": 2159
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1147,
+            "opt_ms": 3126,
+            "codegen_ms": 2303
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1076,
+            "opt_ms": 2684,
+            "codegen_ms": 3947
+          }
+        ]
+      },
+      {
+        "run": 9,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 3,
+        "wall_s": 31.256224343087524,
+        "cpu_s": 56.05288499999999,
+        "bytes": 16221893,
+        "load_before": [
+          2.45556640625,
+          2.3916015625,
+          1.8095703125
+        ],
+        "log": "9-candidate-cg3.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.301,
+        "module_setup_ms": 130.128,
+        "llvm_ir_ms": 22376.23,
+        "llvm_backend_ms": 7662.18,
+        "wasm_inputs_ms": 36.495,
+        "wasm_resolve_ms": 31.368,
+        "wasm_layout_ms": 172.204,
+        "wasm_relocations_ms": 41.053,
+        "wasm_emit_ms": 30.526,
+        "wasm_fibers_ms": 555.546,
+        "link_ms": 973.857,
+        "peak_rss_bytes": 2243915776.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1049,
+            "opt_ms": 2482,
+            "codegen_ms": 2171
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1092,
+            "opt_ms": 2675,
+            "codegen_ms": 2319
+          },
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1074,
+            "opt_ms": 1843,
+            "codegen_ms": 3230
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1171,
+            "opt_ms": 3013,
+            "codegen_ms": 2613
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1315,
+            "opt_ms": 3453,
+            "codegen_ms": 2238
+          }
+        ]
+      },
+      {
+        "run": 10,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 27.04876888403669,
+        "cpu_s": 44.5412540000001,
+        "bytes": 19742401,
+        "load_before": [
+          2.40869140625,
+          2.380859375,
+          1.8271484375
+        ],
+        "log": "10-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 2,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 19.415,
+        "module_setup_ms": 128.745,
+        "llvm_ir_ms": 20274.903,
+        "llvm_backend_ms": 5464.448,
+        "wasm_inputs_ms": 37.329,
+        "wasm_resolve_ms": 31.537,
+        "wasm_layout_ms": 163.827,
+        "wasm_relocations_ms": 40.969,
+        "wasm_emit_ms": 32.671,
+        "wasm_fibers_ms": 637.44,
+        "link_ms": 1056.904,
+        "peak_rss_bytes": 2256629760.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1042,
+            "opt_ms": 2180,
+            "codegen_ms": 491
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1132,
+            "opt_ms": 2453,
+            "codegen_ms": 638
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1098,
+            "opt_ms": 2630,
+            "codegen_ms": 607
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1098,
+            "opt_ms": 2598,
+            "codegen_ms": 916
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1308,
+            "opt_ms": 2952,
+            "codegen_ms": 553
+          }
+        ]
+      },
+      {
+        "run": 11,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 29.507311700028367,
+        "cpu_s": 47.10144499999995,
+        "bytes": 19763856,
+        "load_before": [
+          2.43017578125,
+          2.38330078125,
+          1.841796875
+        ],
+        "log": "11-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 18.943,
+        "module_setup_ms": 128.785,
+        "llvm_ir_ms": 22600.383,
+        "llvm_backend_ms": 5586.988,
+        "wasm_inputs_ms": 44.98,
+        "wasm_resolve_ms": 30.578,
+        "wasm_layout_ms": 171.491,
+        "wasm_relocations_ms": 41.68,
+        "wasm_emit_ms": 31.973,
+        "wasm_fibers_ms": 644.251,
+        "link_ms": 1069.002,
+        "peak_rss_bytes": 2242805760.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1140,
+            "opt_ms": 2479,
+            "codegen_ms": 605
+          },
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1079,
+            "opt_ms": 2236,
+            "codegen_ms": 1014
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1071,
+            "opt_ms": 2680,
+            "codegen_ms": 724
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1185,
+            "opt_ms": 2648,
+            "codegen_ms": 656
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1188,
+            "opt_ms": 3110,
+            "codegen_ms": 603
+          }
+        ]
+      },
+      {
+        "run": 12,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 28.199279913911596,
+        "cpu_s": 44.89972200000001,
+        "bytes": 19763856,
+        "load_before": [
+          2.244140625,
+          2.33154296875,
+          1.84033203125
+        ],
+        "log": "12-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 20.01,
+        "module_setup_ms": 130.432,
+        "llvm_ir_ms": 21208.884,
+        "llvm_backend_ms": 5637.84,
+        "wasm_inputs_ms": 46.057,
+        "wasm_resolve_ms": 30.644,
+        "wasm_layout_ms": 173.153,
+        "wasm_relocations_ms": 41.643,
+        "wasm_emit_ms": 32.397,
+        "wasm_fibers_ms": 633.165,
+        "link_ms": 1066.988,
+        "peak_rss_bytes": 2242961408.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1062,
+            "opt_ms": 1805,
+            "codegen_ms": 668
+          },
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1171,
+            "opt_ms": 2463,
+            "codegen_ms": 652
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1077,
+            "opt_ms": 2670,
+            "codegen_ms": 650
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1027,
+            "opt_ms": 2803,
+            "codegen_ms": 646
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1304,
+            "opt_ms": 3093,
+            "codegen_ms": 584
+          }
+        ]
+      },
+      {
+        "run": 13,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 29.807996484916657,
+        "cpu_s": 48.19103700000002,
+        "bytes": 19742401,
+        "load_before": [
+          2.416015625,
+          2.36328125,
+          1.8662109375
+        ],
+        "log": "13-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 0,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 20.192,
+        "module_setup_ms": 133.822,
+        "llvm_ir_ms": 22911.696,
+        "llvm_backend_ms": 5434.092,
+        "wasm_inputs_ms": 44.95,
+        "wasm_resolve_ms": 30.991,
+        "wasm_layout_ms": 162.271,
+        "wasm_relocations_ms": 41.583,
+        "wasm_emit_ms": 32.168,
+        "wasm_fibers_ms": 629.423,
+        "link_ms": 1226.117,
+        "peak_rss_bytes": 2278817792.0,
+        "shards": [
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1161,
+            "opt_ms": 2531,
+            "codegen_ms": 647
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1057,
+            "opt_ms": 2626,
+            "codegen_ms": 957
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1260,
+            "opt_ms": 2819,
+            "codegen_ms": 665
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1102,
+            "opt_ms": 3021,
+            "codegen_ms": 629
+          },
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1321,
+            "opt_ms": 2835,
+            "codegen_ms": 637
+          }
+        ]
+      },
+      {
+        "run": 14,
+        "warmup": false,
+        "variant": "baseline",
+        "codegen": 0,
+        "wall_s": 29.300973171018995,
+        "cpu_s": 46.52563100000002,
+        "bytes": 19742401,
+        "load_before": [
+          2.52880859375,
+          2.392578125,
+          1.892578125
+        ],
+        "log": "14-baseline-cg0.log",
+        "swap_pages": {
+          "pswpin": 8,
+          "pswpout": 43
+        },
+        "decode_prepare_ms": 19.313,
+        "module_setup_ms": 131.578,
+        "llvm_ir_ms": 22308.63,
+        "llvm_backend_ms": 5704.519,
+        "wasm_inputs_ms": 46.377,
+        "wasm_resolve_ms": 30.906,
+        "wasm_layout_ms": 170.03,
+        "wasm_relocations_ms": 42.161,
+        "wasm_emit_ms": 32.612,
+        "wasm_fibers_ms": 632.844,
+        "link_ms": 1061.973,
+        "peak_rss_bytes": 2261221376.0,
+        "shards": [
+          {
+            "id": 3,
+            "kept": 421,
+            "prepare_ms": 1033,
+            "opt_ms": 2207,
+            "codegen_ms": 492
+          },
+          {
+            "id": 1,
+            "kept": 1081,
+            "prepare_ms": 1039,
+            "opt_ms": 2448,
+            "codegen_ms": 630
+          },
+          {
+            "id": 0,
+            "kept": 900,
+            "prepare_ms": 1158,
+            "opt_ms": 2872,
+            "codegen_ms": 603
+          },
+          {
+            "id": 4,
+            "kept": 5882,
+            "prepare_ms": 1059,
+            "opt_ms": 2636,
+            "codegen_ms": 967
+          },
+          {
+            "id": 2,
+            "kept": 638,
+            "prepare_ms": 1295,
+            "opt_ms": 3234,
+            "codegen_ms": 528
+          }
+        ]
+      },
+      {
+        "run": 15,
+        "warmup": false,
+        "variant": "candidate",
+        "codegen": 0,
+        "wall_s": 29.55861908697989,
+        "cpu_s": 46.58876000000001,
+        "bytes": 19763856,
+        "load_before": [
+          2.54443359375,
+          2.39501953125,
+          1.90673828125
+        ],
+        "log": "15-candidate-cg0.log",
+        "swap_pages": {
+          "pswpin": 8,
+          "pswpout": 0
+        },
+        "decode_prepare_ms": 20.913,
+        "module_setup_ms": 132.367,
+        "llvm_ir_ms": 22780.411,
+        "llvm_backend_ms": 5413.948,
+        "wasm_inputs_ms": 44.812,
+        "wasm_resolve_ms": 31.482,
+        "wasm_layout_ms": 169.061,
+        "wasm_relocations_ms": 40.727,
+        "wasm_emit_ms": 32.428,
+        "wasm_fibers_ms": 632.858,
+        "link_ms": 1117.625,
+        "peak_rss_bytes": 2242252800.0,
+        "shards": [
+          {
+            "id": 4,
+            "kept": 4675,
+            "prepare_ms": 1045,
+            "opt_ms": 1785,
+            "codegen_ms": 667
+          },
+          {
+            "id": 1,
+            "kept": 1135,
+            "prepare_ms": 1081,
+            "opt_ms": 2618,
+            "codegen_ms": 657
+          },
+          {
+            "id": 0,
+            "kept": 1045,
+            "prepare_ms": 1160,
+            "opt_ms": 2662,
+            "codegen_ms": 707
+          },
+          {
+            "id": 2,
+            "kept": 576,
+            "prepare_ms": 1072,
+            "opt_ms": 2883,
+            "codegen_ms": 647
+          },
+          {
+            "id": 3,
+            "kept": 1491,
+            "prepare_ms": 1276,
+            "opt_ms": 2941,
+            "codegen_ms": 552
+          }
+        ]
+      }
+    ]
+  },
+  "final_policy": "32 instruction equivalents per body only for WASM machine-codegen levels 1-3; instruction-only for codegen 0 and native targets",
+  "initial_experiment_patch": "diff --git a/crates/ash/src/llvm/aot_shard.rs b/crates/ash/src/llvm/aot_shard.rs\nindex 37afc860..95a90bbb 100644\n--- a/crates/ash/src/llvm/aot_shard.rs\n+++ b/crates/ash/src/llvm/aot_shard.rs\n@@ -46,7 +46,7 @@\n //! to declare, stay wherever they are referenced -- they are literal\n //! constants, and a duplicate costs bytes, not correctness.\n //!\n-//! Shards are contiguous findex ranges of equal instruction weight rather than\n+//! Shards are contiguous findex ranges of equal compilation weight rather than\n //! round-robin: the compiler emits a class's methods together, and callers\n //! sit beside their callees more often than not, so a contiguous cut keeps\n //! more inlining inside a shard than any interleaving would.\n@@ -78,6 +78,9 @@ use super::module::JITModule;\n /// parsed and simplified once per shard.\n const INLINE_CANDIDATE_INSTRUCTIONS: usize = 80;\n \n+/// WASM passes also pay per body, including tiny generated wrappers.\n+const WASM_BODY_WEIGHT: usize = 32;\n+\n /// Stack for a shard's thread. The middle end recurses -- ScalarEvolution's\n /// `createSCEV` walks an expression tree one frame per node -- and on the\n /// game's largest bodies it went past the 2 MB a spawned thread gets by\n@@ -157,6 +160,10 @@ fn instruction_count(f: FunctionValue<'_>) -> usize {\n         .sum()\n }\n \n+fn compilation_weight(instructions: usize, wasm: bool) -> usize {\n+    instructions.saturating_add(if wasm { WASM_BODY_WEIGHT } else { 0 })\n+}\n+\n /// Reduce `f` to a declaration.\n ///\n /// The C API has no `deleteBody`. Erasing instructions block by block is not\n@@ -209,6 +216,38 @@ fn strip_body(f: FunctionValue<'_>) {\n mod tests {\n     use super::*;\n \n+    #[test]\n+    fn wasm_partition_distributes_a_tail_of_small_helpers() {\n+        let weights: Vec<_> = (0..16)\n+            .map(|i| (format!(\"body{i}\"), 512))\n+            .chain((0..256).map(|i| (format!(\"helper{i}\"), 1)))\n+            .map(|(name, instructions)| (name, compilation_weight(instructions, true)))\n+            .collect();\n+        let owned = partition(&weights, 4);\n+        let total: usize = weights.iter().map(|(_, weight)| weight).sum();\n+        let largest = *weights.iter().map(|(_, weight)| weight).max().unwrap();\n+        for names in &owned {\n+            let cost: usize = weights.iter()\n+                .filter(|(name, _)| names.contains(name))\n+                .map(|(_, weight)| weight)\n+                .sum();\n+            assert!(cost.abs_diff(total / 4) <= largest);\n+        }\n+        assert!(owned.iter()\n+            .filter(|names| names.iter().any(|name| name.starts_with(\"helper\")))\n+            .count() > 1);\n+        let mut previous = 0;\n+        for (name, _) in weights {\n+            let owners: Vec<_> = owned.iter().enumerate()\n+                .filter(|(_, names)| names.contains(&name))\n+                .map(|(index, _)| index)\n+                .collect();\n+            assert_eq!(owners.len(), 1, \"{name}\");\n+            assert!(owners[0] >= previous);\n+            previous = owners[0];\n+        }\n+    }\n+\n     #[test]\n     fn stripped_exception_body_is_a_valid_declaration() {\n         crate::llvm_init::ensure();\n@@ -411,8 +450,8 @@ fn partition(weights: &[(String, usize)], shards: usize) -> Vec<HashSet<String>>\n impl<'ctx> JITModule<'ctx> {\n     /// Give every body and every named data global a symbol another object\n     /// can reference, and return the bodies in findex order with their\n-    /// instruction weights.\n-    fn promote_for_sharding(&self) -> Vec<(String, usize)> {\n+    /// compilation weights.\n+    fn promote_for_sharding(&self, wasm: bool) -> Vec<(String, usize)> {\n         let mut ordered: Vec<(String, usize)> = Vec::new();\n         let mut recorded: HashSet<String> = HashSet::new();\n \n@@ -432,7 +471,7 @@ impl<'ctx> JITModule<'ctx> {\n             }\n             let name = f.get_name().to_string_lossy().into_owned();\n             if recorded.insert(name.clone()) {\n-                ordered.push((name, instruction_count(f)));\n+                ordered.push((name, compilation_weight(instruction_count(f), wasm)));\n             }\n         }\n         let mut helper = 0usize;\n@@ -453,7 +492,7 @@ impl<'ctx> JITModule<'ctx> {\n             }\n             let name = f.get_name().to_string_lossy().into_owned();\n             if recorded.insert(name.clone()) {\n-                ordered.push((name, instruction_count(f)));\n+                ordered.push((name, compilation_weight(instruction_count(f), wasm)));\n             }\n         }\n \n@@ -603,7 +642,7 @@ impl<'ctx> JITModule<'ctx> {\n         // local promoted out of memory has an indeterminate value after the\n         // jump. Attributes survive the bitcode round-trip.\n         let shielded = self.shield_trap_functions_from_optimization();\n-        let weights = self.promote_for_sharding();\n+        let weights = self.promote_for_sharding(super::aot_link::is_wasm_triple(triple));\n         let owned = partition(&weights, shards);\n         if let Some(dest) = &dump_ir {\n             self.module\n",
+  "validation": {
+    "final_provenance": {
+      "compiler_sha256": "8987c433656b3f8654d4efbf4f54d67f8b6a3bdc04fed9e97c28ca9207b76110",
+      "source_sha256": "df3f8b7811bc44cfbfb93a93f40236e8e3091f161fd87db7bffbb4f5801e4a51",
+      "side_module_sha256": {
+        "blinc_abi.wasm": "e009ea3ada654ed8b57f7acb4364d32f646dd0d91ca90af0ac8ab930d49609b6",
+        "xgpu.wasm": "1c7eaa9bfc230410b1f86f968413ad4c0bba5b4ac47a1432f27ed1aa7a6cdba4",
+        "xwindow.wasm": "32ed9c987ecb361a2b2012c1996eadced399646ec88372fa784a61f36131f8db"
+      }
+    },
+    "artifact_equality": [
+      {
+        "codegen": 3,
+        "sha256": "d2fc6d2d9d5e55278bd8c42417aced1cf76abd7f6d6c1691749c6ba67ffd96bc",
+        "reference_sha256": "d2fc6d2d9d5e55278bd8c42417aced1cf76abd7f6d6c1691749c6ba67ffd96bc",
+        "same_bytes": true,
+        "bytes": 16221893
+      },
+      {
+        "codegen": 0,
+        "sha256": "87e171f8cdebc2f4a5ffa3b48a47eba4204640fbb92dcaf319ca054f55f3c205",
+        "reference_sha256": "87e171f8cdebc2f4a5ffa3b48a47eba4204640fbb92dcaf319ca054f55f3c205",
+        "same_bytes": true,
+        "bytes": 19742401
+      }
+    ],
+    "runtime": [
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 1.3418926750309765,
+        "kernel_s": 0.829143762588501,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 1.2615519940154627,
+        "kernel_s": 0.795229434967041,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 1.065164815983735,
+        "kernel_s": 0.800980091094971,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 1.052436466095969,
+        "kernel_s": 0.801920413970947,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 1.0614840369671583,
+        "kernel_s": 0.801894903182983,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 1.055076839053072,
+        "kernel_s": 0.79680871963501,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 1.0734335490269586,
+        "kernel_s": 0.820213317871094,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 1.0860628170194104,
+        "kernel_s": 0.829373359680176,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 1.084417424048297,
+        "kernel_s": 0.822872400283813,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 1.0504755530273542,
+        "kernel_s": 0.793049335479736,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 1.2389685430098325,
+        "kernel_s": 0.782409429550171,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 1.0530010929796845,
+        "kernel_s": 0.799057483673096,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 1.0231226739706472,
+        "kernel_s": 0.76964807510376,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 1.02151590003632,
+        "kernel_s": 0.766069412231445,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 1.0605690010124817,
+        "kernel_s": 0.798293352127075,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 1.058264220948331,
+        "kernel_s": 0.798413991928101,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 1.0333743329392746,
+        "kernel_s": 0.773936986923218,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 1.013277412042953,
+        "kernel_s": 0.763370037078857,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 1.0356317309197038,
+        "kernel_s": 0.780311346054077,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "cpu",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 1.0252388690132648,
+        "kernel_s": 0.772756099700928,
+        "checksum": "calls=39088169 numeric=9250034"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 0.4847197380149737,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 0.4938370460877195,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 0.28469415998551995,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 0.278264197986573,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 0.28242308099288493,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 0.2805431220913306,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 0.2782576900208369,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 0.2840834920061752,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "baseline",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 0.2848943721037358,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 3,
+        "variant": "candidate",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 0.28118980291765183,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 0.4925285109784454,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 0,
+        "warmup": true,
+        "wall_s": 0.28642817004583776,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 0.28153067908715457,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 1,
+        "warmup": false,
+        "wall_s": 0.2823829989647493,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 0.2888346950057894,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 2,
+        "warmup": false,
+        "wall_s": 0.2815692330477759,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 0.2857621969887987,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 3,
+        "warmup": false,
+        "wall_s": 0.27902468596585095,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "baseline",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 0.2789111089659855,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      },
+      {
+        "program": "bench_deltablue",
+        "codegen": 0,
+        "variant": "candidate",
+        "run": 4,
+        "warmup": false,
+        "wall_s": 0.2824669179972261,
+        "kernel_s": null,
+        "checksum": "Checksum: 14065400"
+      }
+    ],
+    "optimization_modes": [
+      {
+        "flags": [
+          "-O0"
+        ],
+        "codegen": 0,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-O1"
+        ],
+        "codegen": 1,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-O2"
+        ],
+        "codegen": 2,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-O3"
+        ],
+        "codegen": 3,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-Os"
+        ],
+        "codegen": 2,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-Oz"
+        ],
+        "codegen": 2,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-O3",
+          "--codegen-opt-level",
+          "0"
+        ],
+        "codegen": 0,
+        "output": "23"
+      },
+      {
+        "flags": [
+          "-O2",
+          "--air-opt-level",
+          "0",
+          "--codegen-opt-level",
+          "0"
+        ],
+        "codegen": 0,
+        "output": "23"
+      }
+    ],
+    "browser": [
+      {
+        "codegen": 3,
+        "frames": 233,
+        "exit": 0,
+        "host": "macOS Chrome; NUC-generated WASM"
+      },
+      {
+        "codegen": 0,
+        "frames": 224,
+        "exit": 0,
+        "host": "macOS Chrome; NUC-generated WASM"
+      }
+    ],
+    "local_checks": [
+      "3 llvm::aot_shard unit tests",
+      "WASM optimization CLI test (8 variants)",
+      "WASM object boundary test",
+      "cargo clippy -p ash --all-targets --offline -- -D warnings"
+    ],
+    "air_cache": "All 12 measured builds: 3552 optimized hits, zero misses/writes/lowering/passes."
+  }
+}

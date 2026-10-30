@@ -2769,6 +2769,33 @@ impl HLInterpreter {
                     return run(c, args, nargs);
                 }
                 let findex = fun.wrapping_sub(1);
+                // A worker lane has no interpreter of its own: the one
+                // `HLInterpreter` belongs to the main scheduler, so the body
+                // is compiled and run natively instead of re-entered.
+                if !ctx.fiber_is_worker_lane.is_null() && !ctx.jit_closure_runner.is_null() {
+                    let is_worker: unsafe extern "C" fn() -> bool =
+                        std::mem::transmute(ctx.fiber_is_worker_lane);
+                    if is_worker() {
+                        let compiled = ctx
+                            .compiled_stub_ctx
+                            .as_ref()
+                            .map_or(std::ptr::null_mut(), |shared| {
+                                resolve_worker_stub(shared, findex, true)
+                            });
+                        if compiled.is_null() {
+                            eprintln!(
+                                "[ash] worker fiber cannot compile closure function {findex}; refusing interpreter re-entry"
+                            );
+                            return std::ptr::null_mut();
+                        }
+                        type JitClosureRunner =
+                            unsafe extern "C" fn(*mut c_void, *mut *mut c_void, i32) -> *mut c_void;
+                        let run: JitClosureRunner = std::mem::transmute(ctx.jit_closure_runner);
+                        let mut compiled_cl = std::ptr::read(cl);
+                        compiled_cl.fun = compiled.cast();
+                        return run((&raw mut compiled_cl).cast(), args, nargs);
+                    }
+                }
                 let is_fiber_root = if ctx.fiber_is_root_closure.is_null() {
                     false
                 } else {

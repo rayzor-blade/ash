@@ -109,7 +109,7 @@ jobs:
           # serves arm64.
           - os: ubuntu-24.04-arm
             target: linux-aarch64
-          - os: macos-14
+          - os: macos-15
             target: macos-aarch64
           # macos-13 is retired: its jobs queue forever rather than failing,
           # which used to hold the whole release. macos-15-intel is the
@@ -123,7 +123,7 @@ jobs:
           - os: ubuntu-24.04
             target: linux-x86_64-dev
             features: all-targets
-          - os: macos-14
+          - os: macos-15
             target: macos-aarch64-dev
             features: all-targets
     steps:

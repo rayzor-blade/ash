@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1793472989,"nonce":"2ahe521itipVx/oYiE3CCoBG2+k=","added":["bug","area:interp"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1793473988,"nonce":"5ETTifJr+GACqhaFdN5Bbnjxsak=","message":"Fixed in ed103afa (on main): call_compiled_entry pads omitted nullable trailing arguments with null before marshalling. optional_dyn_call passes in a debug build.","files":null}]}

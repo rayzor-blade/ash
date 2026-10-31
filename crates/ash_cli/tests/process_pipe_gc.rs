@@ -1,4 +1,4 @@
-//! A thread blocked reading a child's pipe or standard input lets a
+//! A thread blocked reading a child's pipe, standard input or a socket lets a
 //! collection and the other fibers proceed.
 #![cfg(unix)]
 mod common;
@@ -104,4 +104,9 @@ fn blocked_pipe_reader_leaves_sibling_fiber_running() {
 #[test]
 fn blocked_stdin_reader_leaves_sibling_fiber_running() {
     assert_sibling_runs("TestStdinFibers", "test_stdin_fibers.hl");
+}
+
+#[test]
+fn blocked_socket_calls_leave_sibling_fiber_running() {
+    assert_sibling_runs("TestSocketFibers", "test_socket_fibers.hl");
 }

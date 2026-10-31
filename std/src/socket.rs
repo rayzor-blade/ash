@@ -1324,6 +1324,60 @@ pub struct hl_socket {
     sock: sys::Sock,
 }
 
+/// A raw pointer handed to a pool thread. The pointee is VM-owned bytes that
+/// the parked caller keeps alive and does not touch until the call returns.
+struct SendPtr<T>(*mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+
+impl<T> SendPtr<T> {
+    fn get(&self) -> *mut T {
+        self.0
+    }
+}
+
+/// True when a read or accept on `s` would block in the kernel: the socket is
+/// in blocking mode and nothing is pending. Such a call runs on a pool thread
+/// so only the calling fiber waits.
+#[cfg(unix)]
+fn would_park(s: sys::Sock) -> bool {
+    unsafe {
+        let mut p = libc::pollfd {
+            fd: s,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if libc::poll(&mut p, 1, 0) != 0 {
+            return false;
+        }
+        let fl = libc::fcntl(s, libc::F_GETFL);
+        fl >= 0 && fl & libc::O_NONBLOCK == 0
+    }
+}
+
+#[cfg(not(unix))]
+fn would_park(_s: sys::Sock) -> bool {
+    false
+}
+
+/// `recv` that returns the result with its error code, read on the thread
+/// that made the call.
+unsafe fn recv_io(s: sys::Sock, buf: *mut u8, len: c_int) -> (isize, c_int) {
+    unsafe {
+        let run = move |buf: *mut u8| {
+            let r = sys::recv(s, buf, len);
+            (r, if r < 0 { sys::block_error() } else { 0 })
+        };
+        if would_park(s) {
+            let b = SendPtr(buf);
+            return crate::offload::offload(move || run(b.get()));
+        }
+        hl_blocking(true);
+        let out = run(buf);
+        hl_blocking(false);
+        out
+    }
+}
+
 /// Copies `src` into GC memory with a trailing NUL. The host lookups return
 /// `_BYTES` that Haxe reads with `String.fromUTF8`, so the terminator is part
 /// of the contract, and the storage must be the VM's, not Rust's.
@@ -1482,11 +1536,8 @@ pub unsafe extern "C" fn hlp_socket_recv(
         if s.is_null() {
             return -2;
         }
-        hl_blocking(true);
-        let ret = sys::recv((*s).sock, buf.wrapping_offset(pos as isize), len);
-        hl_blocking(false);
+        let (ret, e) = recv_io((*s).sock, buf.wrapping_offset(pos as isize), len);
         if ret < 0 {
-            let e = sys::block_error();
             trace::io("recv", e);
             return e;
         }
@@ -1509,11 +1560,8 @@ pub unsafe extern "C" fn hlp_socket_recv_char(s: *mut hl_socket) -> c_int {
             return -2;
         }
         let mut byte: u8 = 0;
-        hl_blocking(true);
-        let ret = sys::recv((*s).sock, &mut byte, 1);
-        hl_blocking(false);
+        let (ret, e) = recv_io((*s).sock, &mut byte, 1);
         if ret < 0 {
-            let e = sys::block_error();
             trace::io("recv", e);
             return e;
         }
@@ -1736,9 +1784,15 @@ pub unsafe extern "C" fn hlp_socket_accept(s: *mut hl_socket) -> *mut hl_socket 
         if s.is_null() {
             return ptr::null_mut();
         }
-        hl_blocking(true);
-        let nsock = sys::accept((*s).sock);
-        hl_blocking(false);
+        let sock = (*s).sock;
+        let nsock = if would_park(sock) {
+            crate::offload::offload(move || sys::accept(sock))
+        } else {
+            hl_blocking(true);
+            let n = sys::accept(sock);
+            hl_blocking(false);
+            n
+        };
         if !sys::is_valid(nsock) {
             return ptr::null_mut();
         }
@@ -1900,15 +1954,26 @@ pub unsafe extern "C" fn hlp_socket_recv_from(
         if s.is_null() {
             return -2;
         }
-        let mut addr = sys::sockaddr_in(0, 0);
-        hl_blocking(true);
-        let r = sys::recv_from((*s).sock, data, len, &mut addr);
-        hl_blocking(false);
+        let addr = sys::sockaddr_in(0, 0);
+        let sock = (*s).sock;
+        let run = move |data: *mut vbyte, mut addr: sys::SockAddrIn| {
+            let r = sys::recv_from(sock, data, len, &mut addr);
+            let err = if r < 0 { sys::block_error() } else { 0 };
+            (r, err, r < 0 && sys::conn_reset(), addr)
+        };
+        let (r, err, reset, addr) = if would_park(sock) {
+            let d = SendPtr(data);
+            crate::offload::offload(move || run(d.get(), addr))
+        } else {
+            hl_blocking(true);
+            let out = run(data, addr);
+            hl_blocking(false);
+            out
+        };
         let received = if r < 0 {
             // Upstream folds Windows' WSAECONNRESET (an earlier datagram bounced)
             // into an empty read rather than an error.
-            let err = sys::block_error();
-            if err == -2 && sys::conn_reset() {
+            if err == -2 && reset {
                 0
             } else {
                 return err;
@@ -2043,9 +2108,18 @@ pub unsafe extern "C" fn hlp_socket_select(
 
         // A negative timeout means "block indefinitely".
         let deadline = if timeout < 0.0 { None } else { Some(timeout) };
-        hl_blocking(true);
-        let rc = sys::select(max + 1, rs.as_ref(), ws.as_ref(), es.as_ref(), deadline);
-        hl_blocking(false);
+        let rc = if timeout == 0.0 {
+            sys::select(max + 1, rs.as_ref(), ws.as_ref(), es.as_ref(), deadline)
+        } else {
+            // A wait: runs on a pool thread so only this fiber waits. The sets
+            // live in the caller's scratch bytes, which the parked fiber keeps.
+            let of = |set: &Option<sys::FdSet>| SendPtr(set as *const _ as *mut Option<sys::FdSet>);
+            let (pr, pw, pe) = (of(&rs), of(&ws), of(&es));
+            crate::offload::offload(move || {
+                let at = |p: &SendPtr<Option<sys::FdSet>>| (*p.get()).as_ref();
+                sys::select(max + 1, at(&pr), at(&pw), at(&pe), deadline)
+            })
+        };
         if rc < 0 {
             return false;
         }

@@ -351,7 +351,7 @@ unsafe fn state_of<'a>(f: *mut c_void) -> Option<&'a Mutex<FileState>> {
 /// conservatively scannable for the whole call — the same contract the socket
 /// primitives already use.
 #[inline]
-fn blocking_io<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn blocking_io<T>(f: impl FnOnce() -> T) -> T {
     // SAFETY: the primitive only touches this thread's mutator record.
     unsafe { crate::thread::hlp_blocking(true) };
     let out = f();

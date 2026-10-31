@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1793453999,"nonce":"uhdB5z0+pz+n4LthXKcZtmuGsTI=","added":["bug","area:std","priority:high"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1793473989,"nonce":"1weLGFKQZ5Kmb1gQmoVgFnEvRqM=","message":"Fixed in be17f1bd (on main, in nightly-20261031-d0df996). RayDE confirmed the idle-viewer stall is gone.","files":null}]}

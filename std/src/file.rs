@@ -41,6 +41,8 @@ struct Fdesc {
     finalize: Option<crate::rt::Finalizer>,
     magic: u64,
     state: *mut Mutex<FileState>,
+    /// Reads that wait on someone else: standard input.
+    waits_on_peer: bool,
 }
 
 // The collector reads the callback out of word zero, so `finalize` has to BE
@@ -321,6 +323,7 @@ unsafe fn alloc_handle(state: FileState) -> *mut c_void {
             return ptr::null_mut();
         }
         (*d).magic = FDESC_MAGIC;
+        (*d).waits_on_peer = matches!(state.backing, Backing::Stdin);
         (*d).state = Box::into_raw(Box::new(Mutex::new(state)));
         d as *mut c_void
     }
@@ -328,6 +331,10 @@ unsafe fn alloc_handle(state: FileState) -> *mut c_void {
 
 /// Lifetime is bounded by `file_close`, which the VM only reaches through a
 /// handle it is no longer using.
+unsafe fn waits_on_peer(f: *mut c_void) -> bool {
+    unsafe { !f.is_null() && (*(f as *const Fdesc)).waits_on_peer }
+}
+
 unsafe fn state_of<'a>(f: *mut c_void) -> Option<&'a Mutex<FileState>> {
     unsafe {
         if f.is_null() {
@@ -453,7 +460,12 @@ pub unsafe extern "C" fn hlp_file_read(
             return 0;
         }
         let out = std::slice::from_raw_parts_mut(buf.add(pos as usize), len as usize);
-        match blocking_io(|| lock(m).read(out)) {
+        let read = || lock(m).read(out);
+        match if waits_on_peer(f) {
+            crate::offload::offload(read)
+        } else {
+            blocking_io(read)
+        } {
             Ok(n) => n as c_int,
             Err(_) => 0,
         }
@@ -480,7 +492,12 @@ pub unsafe extern "C" fn hlp_file_read_char(f: *mut c_void) -> c_int {
             return -2;
         };
         let mut byte = [0u8; 1];
-        match blocking_io(|| lock(m).read(&mut byte)) {
+        let read = || lock(m).read(&mut byte);
+        match if waits_on_peer(f) {
+            crate::offload::offload(read)
+        } else {
+            blocking_io(read)
+        } {
             Ok(1) => byte[0] as c_int,
             _ => -2,
         }

@@ -47,6 +47,7 @@ pub mod hl_compat;
 pub mod maps;
 pub mod math;
 pub mod obj;
+pub mod offload;
 #[cfg(not(target_family = "wasm"))]
 pub mod process;
 // Same nine primitives, asked of the host instead of of fork.

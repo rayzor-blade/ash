@@ -32,8 +32,8 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitSta
 use std::ptr;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::file::blocking_io;
 use crate::hl::{hl_type_kind_HBYTES, varray, vbyte};
+use crate::offload::offload;
 use crate::types::hl_aptr;
 
 /// Tag stored in every handle. `hl.Abstract<"hl_process">` is an untyped
@@ -406,7 +406,7 @@ pub unsafe extern "C" fn hlp_process_stdout_read(
             return -1;
         }
         let out = std::slice::from_raw_parts_mut(str.add(pos as usize), len as usize);
-        blocking_io(|| {
+        offload(|| {
             let mut g = lock(&st.stdout);
             match g.as_mut() {
                 Some(r) => read_pipe(r, out),
@@ -432,7 +432,7 @@ pub unsafe extern "C" fn hlp_process_stderr_read(
             return -1;
         }
         let out = std::slice::from_raw_parts_mut(str.add(pos as usize), len as usize);
-        blocking_io(|| {
+        offload(|| {
             let mut g = lock(&st.stderr);
             match &mut *g {
                 StderrSrc::Pipe(r) => read_pipe(r, out),
@@ -458,17 +458,17 @@ pub unsafe extern "C" fn hlp_process_stdin_write(
         if str.is_null() || pos < 0 || len < 0 {
             return -1;
         }
-        let mut g = blocking_io(|| lock(&st.stdin));
-        // A closed or absent write end is upstream's fd -1, where write() fails
-        // with EBADF whatever the length.
-        let Some(w) = g.as_mut() else {
-            return -1;
-        };
-        if len == 0 {
-            return 0;
-        }
         let data = std::slice::from_raw_parts(str.add(pos as usize), len as usize);
-        blocking_io(|| {
+        offload(|| {
+            let mut g = lock(&st.stdin);
+            // A closed or absent write end is upstream's fd -1, where write()
+            // fails with EBADF whatever the length.
+            let Some(w) = g.as_mut() else {
+                return -1;
+            };
+            if len == 0 {
+                return 0;
+            }
             loop {
                 match w.write(data) {
                     Ok(n) => return n as c_int,
@@ -503,27 +503,33 @@ pub unsafe extern "C" fn hlp_process_exit(p: *mut c_void, running: *mut bool) ->
         let Some(st) = state_of(p) else {
             return -1;
         };
-        let mut slot = blocking_io(|| lock(&st.child));
+        if running.is_null() {
+            return offload(|| {
+                let mut slot = lock(&st.child);
+                let ChildSlot::Live(child) = &mut *slot else {
+                    // Upstream's doomed child called exit(1) before this could
+                    // be asked.
+                    return 1;
+                };
+                match child.wait() {
+                    Ok(s) => status_code(s),
+                    Err(_) => -1,
+                }
+            });
+        }
+        let mut slot = lock(&st.child);
         let ChildSlot::Live(child) = &mut *slot else {
-            // Upstream's doomed child called exit(1) before this could be asked.
             return 1;
         };
-        if running.is_null() {
-            match blocking_io(|| child.wait()) {
-                Ok(s) => status_code(s),
-                Err(_) => -1,
+        match child.try_wait() {
+            Ok(Some(s)) => status_code(s),
+            Ok(None) => {
+                *running = true;
+                0
             }
-        } else {
-            match child.try_wait() {
-                Ok(Some(s)) => status_code(s),
-                Ok(None) => {
-                    *running = true;
-                    0
-                }
-                // waitpid failing while `running` was asked for reports 0 with
-                // *running left false, not -1.
-                Err(_) => 0,
-            }
+            // waitpid failing while `running` was asked for reports 0 with
+            // *running left false, not -1.
+            Err(_) => 0,
         }
     }
 }

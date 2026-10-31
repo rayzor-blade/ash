@@ -2000,9 +2000,20 @@ impl<'ctx> JITModule<'ctx> {
                     self.func_cache.insert(fi, f);
                 }
             }
+            // The middle end changed these bodies' signatures (pruned and
+            // constant arguments, fastcc), so under their bytecode name
+            // `Fun_<n>` they would answer a by-name lookup for the function
+            // with another ABI. A name unique to this entry keeps them
+            // reachable by the engine and by the jit map, and unmistakable.
             for f in self.module.get_functions() {
                 if f.count_basic_blocks() > 0 && f.get_name().to_bytes() != name.as_bytes() {
                     f.set_linkage(inkwell::module::Linkage::External);
+                    if let Ok(old) = f.get_name().to_str()
+                        && old.starts_with("Fun_")
+                    {
+                        let unique = format!("{old}${name}");
+                        f.as_global_value().set_name(&unique);
+                    }
                 }
             }
         }

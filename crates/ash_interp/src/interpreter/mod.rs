@@ -5354,6 +5354,30 @@ impl HLInterpreter {
         entry: &CompiledFunctionEntry,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
+        // A call may leave out the trailing parameters that accept null. The
+        // compiled body reads a register for each, so each is passed as null.
+        let padded: Vec<NanBoxedValue>;
+        let args: &[NanBoxedValue] = {
+            let kinds = entry.args();
+            if args.len() < kinds.len()
+                && kinds[args.len()..]
+                    .iter()
+                    .all(|kind| *kind >= hl::hl_type_kind_HBYTES)
+            {
+                padded = args
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat_n(
+                        NanBoxedValue::null(),
+                        kinds.len() - args.len(),
+                    ))
+                    .collect();
+                &padded
+            } else {
+                args
+            }
+        };
+
         // A signature the fixed-arity ladder below cannot express is called
         // through the uniform entry the backend emitted for it: one word per
         // argument, unpacked and re-applied with the real ABI by code that

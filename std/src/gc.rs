@@ -7748,6 +7748,10 @@ const IDLE_DELAY: Duration = Duration::from_millis(300);
 const IDLE_DUTY: f64 = 0.05;
 /// How often the idle collector looks.
 const IDLE_TICK: Duration = Duration::from_millis(250);
+/// An idle collection that frees less than this share of the live heap earns
+/// the next one a longer wait, doubling from `IDLE_BACKOFF` up to `HEARTBEAT`.
+const IDLE_YIELD_DIVISOR: u64 = 8;
+const IDLE_BACKOFF: Duration = Duration::from_secs(2);
 /// Garbage worth an idle collection. Fixed rather than the trigger's floor,
 /// which `ASH_GC_TRIGGER_MB` raises to make the busy program collect less.
 const IDLE_MIN_BYTES: usize = 8 * 1024 * 1024;
@@ -7826,6 +7830,8 @@ fn idle_holdouts() -> Option<Vec<String>> {
 
 fn idle_collector() {
     let mut reported = Instant::now();
+    let mut unproductive = 0u32;
+    let mut not_before = Instant::now();
     #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     let mut malloc_peak = 0usize;
     loop {
@@ -7877,11 +7883,27 @@ fn idle_collector() {
         let worth = pressure >= IDLE_MIN_BYTES
             || resident_free >= IDLE_MIN_BYTES
             || ((pressure > 0 || resident_free > 0) && gc.heap.last_collect.elapsed() >= HEARTBEAT);
-        if !worth || !GC_ENABLED.load(Ordering::Relaxed) || !world_idle() {
+        if !worth
+            || !GC_ENABLED.load(Ordering::Relaxed)
+            || Instant::now() < not_before
+            || !world_idle()
+        {
             continue;
         }
         set_collect_origin(8); // "idle" — see ORIGIN_NAMES
+        let before = GC_STATS.blocks_reclaimed.load(Ordering::Relaxed);
+        let ran = GC_STATS.collections.load(Ordering::Relaxed);
         gc.collect_garbage();
+        if GC_STATS.collections.load(Ordering::Relaxed) == ran {
+            continue;
+        }
+        let freed = GC_STATS.blocks_reclaimed.load(Ordering::Relaxed) - before;
+        if freed * IDLE_YIELD_DIVISOR >= GC_STATS.live_blocks.load(Ordering::Relaxed) {
+            unproductive = 0;
+        } else {
+            unproductive = (unproductive + 1).min(16);
+            not_before = Instant::now() + (IDLE_BACKOFF * (1 << (unproductive - 1))).min(HEARTBEAT);
+        }
     }
 }
 

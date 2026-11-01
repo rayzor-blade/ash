@@ -3,7 +3,9 @@
 128-bit vector primitives for HashLink programs.
 
 - `ash.simd.Vec`: one static per primitive, operating memory to memory on
-  16-byte slots of `hl.Bytes` (`f32x4Add(dst, di, a, ai, b, bi)`, ...).
+  16-byte vectors in `hl.Bytes`, each named by the bytes and a byte offset
+  (`f32x4Add(dst, di, a, ai, b, bi)`, where `di`, `ai` and `bi` are byte
+  offsets, so consecutive vectors are 16 apart).
   Types: f32x4, f64x2, i32x4, i16x8, i8x16, u8x16.
 - `ash.simd.Float32x4`, `ash.simd.Int32x4`: value types over their own
   16-byte `hl.Bytes`, with operators.

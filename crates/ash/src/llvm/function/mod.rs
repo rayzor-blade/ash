@@ -1667,6 +1667,10 @@ impl<'ctx> JITModule<'ctx> {
         else {
             return Ok(());
         };
+        // A body with `$asm` machine code has no other tier to run in.
+        if raw.shape(&self.bytecode.types).has_asm {
+            return Ok(());
+        }
         let ceiling = super::air::llvm_ceiling(&self.bytecode, raw);
         if super::air::shared_promote_allows(ceiling) {
             return Ok(());

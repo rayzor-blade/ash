@@ -187,7 +187,7 @@ fn reg_untouched_between(f: &Function, b: usize, from: usize, to: usize, reg: u3
             {
                 return false;
             }
-            Instr::Asm { reg: r, .. } if *r == reg => return false,
+            Instr::Asm { cell: Some(cell), .. } if f.cells[cell.idx()].reg == reg => return false,
             _ => {}
         }
     }

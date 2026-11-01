@@ -1420,7 +1420,16 @@ fn tiered_compile_tier_inner(
         );
     }
     let code = match (ctx.mode, tier) {
-        (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
+        (TierMode::Cranelift, 0) => {
+            let cl = compile_with_cranelift(ctx, findex, bead);
+            // Cranelift cannot embed `$asm` bytes; LLVM can, and the function
+            // has no interpreter form to fall back on.
+            #[cfg(feature = "llvm")]
+            if cl.is_null() && has_asm(ctx, findex) {
+                return compile_with_llvm(ctx, 0, findex, true, Some(bead), calls);
+            }
+            cl
+        }
         #[cfg(feature = "llvm")]
         (TierMode::Llvm, 0) => {
             // Same memo the Auto tier-1 arm keeps, and for the same reason:
@@ -1445,7 +1454,8 @@ fn tiered_compile_tier_inner(
         (TierMode::Auto, 0) => {
             let cl = compile_with_cranelift(ctx, findex, bead);
             if cl.is_null() {
-                compile_with_llvm(ctx, 0, findex, may_block, Some(bead), calls)
+                let wait = may_block || has_asm(ctx, findex);
+                compile_with_llvm(ctx, 0, findex, wait, Some(bead), calls)
             } else {
                 cl
             }
@@ -1532,6 +1542,16 @@ fn tiered_compile_tier_inner(
     // the one metric that says whether the tier works was reporting
     // contention.
     code
+}
+
+/// Whether the function holds HashLink `$asm` machine code.
+#[cfg(feature = "llvm")]
+fn has_asm(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
+    let bc = ctx.bytecode();
+    bc.functions
+        .iter()
+        .find(|f| f.findex as usize == findex)
+        .is_some_and(|f| f.shape(&bc.types).has_asm)
 }
 
 /// Cranelift middle tier. Returns null when the function is outside the

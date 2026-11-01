@@ -1065,10 +1065,23 @@ impl<'ctx> JITModule<'ctx> {
                             lowering, registers, reg_types, cell_base, *value, *field, *mode,
                         )?;
                     }
-                    AirInstr::Asm { mode, value, reg } => {
-                        self.emit_air_asm(
-                            lowering, registers, reg_types, cell_base, *mode, *value, *reg,
-                        )?;
+                    AirInstr::Asm { .. } => {
+                        // The first op of a run emits the whole fragment; the
+                        // rest of the run was consumed with it.
+                        let continues =
+                            ii > 0 && matches!(block.instrs[ii - 1], AirInstr::Asm { .. });
+                        if !continues {
+                            let run: Vec<_> = block.instrs[ii..]
+                                .iter()
+                                .map_while(|i| match i {
+                                    AirInstr::Asm { mode, value, cell } => {
+                                        Some((*mode, *value, *cell))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            self.emit_air_asm_run(registers, reg_types, cell_base, &run)?;
+                        }
                     }
                     AirInstr::EndTrap { cell, flag } => {
                         self.emit_air_end_trap(

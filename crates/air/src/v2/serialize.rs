@@ -1365,10 +1365,10 @@ fn emit_instr(
             field: RefField(*field),
             mode: *mode,
         }),
-        Instr::Asm { mode, value, reg } => ops.push(Opcode::Asm {
+        Instr::Asm { mode, value, cell } => ops.push(Opcode::Asm {
             mode: *mode,
             value: *value,
-            reg: Reg(*reg),
+            reg: Reg(cell.map_or(0, |c| cr(c).0 + 1)),
         }),
     }
     Ok(())

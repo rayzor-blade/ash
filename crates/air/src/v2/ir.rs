@@ -64,6 +64,8 @@ pub enum PinReason {
     /// It is written inside a trap region (HL registers are memory slots
     /// across exceptional control flow).
     TrapWritten,
+    /// An `Asm` op moves it to or from a CPU register.
+    AsmOperand,
 }
 
 /// Per-value metadata: the HL type of the value and the HL register it
@@ -938,10 +940,12 @@ pub enum Instr {
         field: usize,
         mode: i32,
     },
+    /// HashLink `$asm`. Mode 0 emits byte `value`, 1 clobbers CPU register
+    /// `value`, 2 loads `cell` into it, 3 stores it to `cell`, 4 is naked.
     Asm {
         mode: i32,
         value: i32,
-        reg: u32,
+        cell: Option<CellId>,
     },
 }
 

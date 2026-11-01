@@ -9,7 +9,7 @@
 
 use air::v2::ir::{CellId, MemAccess as AirMemAccess, ValueId};
 use inkwell::AddressSpace;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, IntValue, PointerValue};
 
 use crate::llvm::module::JITModule;
@@ -804,50 +804,252 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// Inline assembly byte emission.
-    ///
-    /// HashLink OAsm modes:
-    ///   0 → emit raw byte (p2) into code stream
-    ///   1 → mark physical register (p2) as clobbered
-    ///   2 → load VM register into physical register (p2)
-    ///   3 → store physical register (p2) into VM register
-    ///   4 → naked function (strip prologue; must be first opcode)
-    ///
-    /// Modes 1-3 are register-allocator directives for HashLink's custom JIT;
-    /// LLVM handles register allocation automatically so these are no-ops.
-    /// Mode 0 emits raw bytes via `.byte` — works on all LLVM targets.
-    pub(super) fn emit_air_asm(
+    /// One run of consecutive HashLink `$asm` ops as a single inline-asm
+    /// block: the bytes are the template, each CPU register named by a mode
+    /// 1-3 op is a pinned in/out operand (loaded from its cell for mode 2,
+    /// stored back to it for mode 3), and the flags and memory are clobbered.
+    /// Modes 1 and 2 must precede the bytes and mode 3 follow them; a layout
+    /// that interleaves them, naked functions, and non-x86-64 targets are
+    /// refused, which leaves the function uncompiled.
+    pub(super) fn emit_air_asm_run(
         &mut self,
-        lowering: &HLFunction,
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
         cell_base: usize,
-        mode: i32,
-        value: i32,
-        reg: u32,
+        run: &[(i32, i32, Option<CellId>)],
     ) -> Result<()> {
-        let _ = reg;
-        match mode {
-            0 => {
-                let byte = value as u8;
-                let void_type = self.context.void_type();
-                let fn_type = void_type.fn_type(&[], false);
-                let asm_val = self.context.create_inline_asm(
-                    fn_type,
-                    format!(".byte 0x{byte:02x}"),
-                    String::new(),
-                    true,  // side effects
-                    false, // align stack
-                    Some(inkwell::InlineAsmDialect::ATT),
-                    false, // can_throw
-                );
-                self.builder
-                    .build_indirect_call(fn_type, asm_val, &[], "")?;
+        if !self.target_abi.triple().starts_with("x86_64") {
+            return Err(anyhow!(
+                "$asm carries x86-64 machine code; the target is {}",
+                self.target_abi.triple()
+            ));
+        }
+        const GPR32: [&str; 16] = [
+            "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d",
+            "r12d", "r13d", "r14d", "r15d",
+        ];
+        const GPR64: [&str; 16] = [
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+            "r12", "r13", "r14", "r15",
+        ];
+        #[derive(Clone, Copy, PartialEq)]
+        enum Class {
+            I32,
+            I64,
+            F32,
+            F64,
+        }
+        let class_of = |ty: BasicTypeEnum<'ctx>| -> Result<Class> {
+            Ok(match ty {
+                BasicTypeEnum::IntType(t) if t.get_bit_width() <= 32 => Class::I32,
+                BasicTypeEnum::IntType(t) if t.get_bit_width() == 64 => Class::I64,
+                BasicTypeEnum::PointerType(_) => Class::I64,
+                BasicTypeEnum::FloatType(t) if t == self.context.f32_type() => Class::F32,
+                BasicTypeEnum::FloatType(t) if t == self.context.f64_type() => Class::F64,
+                other => return Err(anyhow!("$asm cannot carry a {other:?} register")),
+            })
+        };
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut loads: Vec<(i32, CellId)> = Vec::new();
+        let mut stores: Vec<(i32, CellId)> = Vec::new();
+        let mut regs: Vec<(i32, Class)> = Vec::new();
+        let mut touch = |cpu: i32, class: Option<Class>| -> Result<()> {
+            if !(0..16).contains(&cpu) && !(16..32).contains(&cpu) {
+                return Err(anyhow!("$asm names CPU register {cpu}"));
             }
-            1 | 2 | 3 | 4 => {
-                // Register hints / naked: LLVM handles allocation automatically.
+            if cpu == 4 || cpu == 5 {
+                return Err(anyhow!("$asm may not name the stack or frame pointer"));
             }
-            _ => {}
+            match regs.iter_mut().find(|r| r.0 == cpu) {
+                Some(r) => match (r.1, class) {
+                    (_, None) => {}
+                    (Class::I32, Some(Class::I64)) | (Class::I64, Some(Class::I32)) => {
+                        r.1 = Class::I64
+                    }
+                    (a, Some(b)) if a == b => {}
+                    _ => return Err(anyhow!("$asm gives CPU register {cpu} two kinds")),
+                },
+                None => regs.push((
+                    cpu,
+                    class.unwrap_or(if cpu < 16 { Class::I64 } else { Class::F64 }),
+                )),
+            }
+            Ok(())
+        };
+        let mut body = false;
+        let mut after = false;
+        for (mode, value, cell) in run {
+            let class = match cell {
+                Some(c) => Some(class_of(reg_types[cell_base + c.idx()])?),
+                None => None,
+            };
+            match mode {
+                0 => {
+                    if after {
+                        return Err(anyhow!("$asm bytes after a register store"));
+                    }
+                    body = true;
+                    bytes.push(*value as u8);
+                }
+                1 => touch(*value, None)?,
+                2 => {
+                    if body {
+                        return Err(anyhow!("$asm register load after bytes"));
+                    }
+                    touch(*value, class)?;
+                    loads.push((
+                        *value,
+                        cell.ok_or_else(|| anyhow!("$asm load without a register"))?,
+                    ));
+                }
+                3 => {
+                    after = true;
+                    touch(*value, class)?;
+                    stores.push((
+                        *value,
+                        cell.ok_or_else(|| anyhow!("$asm store without a register"))?,
+                    ));
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "$asm mode {mode} is not supported (naked functions)"
+                    ));
+                }
+            }
+        }
+
+        let llvm_ty = |class: Class| -> BasicTypeEnum<'ctx> {
+            match class {
+                Class::I32 => self.context.i32_type().into(),
+                Class::I64 => self.context.i64_type().into(),
+                Class::F32 => self.context.f32_type().into(),
+                Class::F64 => self.context.f64_type().into(),
+            }
+        };
+        // A value of the cell's type, widened or narrowed to the register's class.
+        let to_class = |this: &Self,
+                        v: inkwell::values::BasicValueEnum<'ctx>,
+                        class: Class|
+         -> Result<inkwell::values::BasicValueEnum<'ctx>> {
+            Ok(match (v, class) {
+                (inkwell::values::BasicValueEnum::IntValue(i), Class::I32) => this
+                    .builder
+                    .build_int_z_extend_or_bit_cast(i, this.context.i32_type(), "asm_in")?
+                    .into(),
+                (inkwell::values::BasicValueEnum::IntValue(i), Class::I64) => this
+                    .builder
+                    .build_int_z_extend_or_bit_cast(i, this.context.i64_type(), "asm_in")?
+                    .into(),
+                (inkwell::values::BasicValueEnum::PointerValue(p), Class::I64) => this
+                    .builder
+                    .build_ptr_to_int(p, this.context.i64_type(), "asm_in")?
+                    .into(),
+                (v, _) => v,
+            })
+        };
+
+        let mut inputs: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        let mut out_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        let mut outs = String::new();
+        let mut ties = String::new();
+        for (i, (cpu, class)) in regs.iter().enumerate() {
+            let ty = llvm_ty(*class);
+            let value = match loads.iter().find(|l| l.0 == *cpu) {
+                Some((_, cell)) => {
+                    let slot = cell_base + cell.idx();
+                    let v =
+                        self.builder
+                            .build_load(reg_types[slot], registers[slot], "asm_cell")?;
+                    to_class(self, v, *class)?
+                }
+                None => ty.const_zero(),
+            };
+            let name = match class {
+                Class::I32 => GPR32[*cpu as usize].to_string(),
+                Class::I64 => GPR64[*cpu as usize].to_string(),
+                Class::F32 | Class::F64 => format!("xmm{}", cpu - 16),
+            };
+            if i > 0 {
+                outs.push(',');
+                ties.push(',');
+            }
+            outs.push_str(&format!("={{{name}}}"));
+            ties.push_str(&i.to_string());
+            inputs.push(value.into());
+            param_tys.push(ty.into());
+            out_tys.push(ty);
+        }
+        let ret = match out_tys.len() {
+            0 => None,
+            1 => Some(out_tys[0]),
+            _ => Some(self.context.struct_type(&out_tys, false).into()),
+        };
+        let fn_type = match ret {
+            Some(t) => t.fn_type(&param_tys, false),
+            None => self.context.void_type().fn_type(&param_tys, false),
+        };
+        let clobbers = "~{dirflag},~{fpsr},~{flags},~{memory}";
+        let constraints = if regs.is_empty() {
+            clobbers.to_string()
+        } else {
+            format!("{outs},{ties},{clobbers}")
+        };
+        let template = if bytes.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ".byte {}",
+                bytes
+                    .iter()
+                    .map(|b| format!("0x{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let asm = self.context.create_inline_asm(
+            fn_type,
+            template,
+            constraints,
+            true,
+            false,
+            Some(inkwell::InlineAsmDialect::ATT),
+            false,
+        );
+        let call = self
+            .builder
+            .build_indirect_call(fn_type, asm, &inputs, "asm_run")?;
+        for (cpu, cell) in &stores {
+            let Some(index) = regs.iter().position(|r| r.0 == *cpu) else {
+                continue;
+            };
+            let result = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| anyhow!("$asm produced no result"))?;
+            let out = if out_tys.len() == 1 {
+                result
+            } else {
+                self.builder.build_extract_value(
+                    result.into_struct_value(),
+                    index as u32,
+                    "asm_out",
+                )?
+            };
+            let slot = cell_base + cell.idx();
+            let target = reg_types[slot];
+            let stored: inkwell::values::BasicValueEnum<'ctx> = match (out, target) {
+                (inkwell::values::BasicValueEnum::IntValue(i), BasicTypeEnum::IntType(t)) => self
+                    .builder
+                    .build_int_truncate_or_bit_cast(i, t, "asm_store")?
+                    .into(),
+                (inkwell::values::BasicValueEnum::IntValue(i), BasicTypeEnum::PointerType(t)) => {
+                    self.builder.build_int_to_ptr(i, t, "asm_store")?.into()
+                }
+                (v, _) => v,
+            };
+            self.builder.build_store(registers[slot], stored)?;
         }
         Ok(())
     }

@@ -194,6 +194,19 @@ pub fn lower_with_positions(
             }
         }
     }
+    for (i, op) in ops.iter().enumerate() {
+        if !reachable[i] {
+            continue;
+        }
+        // The register operand is stored plus one; zero means none.
+        if let Opcode::Asm {
+            mode: 2 | 3, reg, ..
+        } = op
+            && reg.0 > 0
+        {
+            pin(reg.0 - 1, PinReason::AsmOperand, &mut pin_reason);
+        }
+    }
     let mut cells: Vec<CellData> = Vec::new();
     let mut cell_of: HashMap<u32, CellId> = HashMap::new();
     for (&r, &reason) in &pin_reason {
@@ -1587,10 +1600,15 @@ fn convert_ops(
                 });
             }
             Opcode::Asm { mode, value, reg } => {
+                let cell = if matches!(mode, 2 | 3) && reg.0 > 0 {
+                    Some(cell_for!(Reg(reg.0 - 1)))
+                } else {
+                    None
+                };
                 instrs.push(Instr::Asm {
                     mode: *mode,
                     value: *value,
-                    reg: reg.0,
+                    cell,
                 });
             }
             Opcode::IndirectCall { .. } => {

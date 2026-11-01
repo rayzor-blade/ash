@@ -301,6 +301,8 @@ pub struct BodyShape {
     pub float_mul: bool,
     /// A `Prefetch` or an `Asm`, which the JIT does not compile.
     pub jit_unsupported: bool,
+    /// An `Asm`: HashLink `$asm` machine code, which only a compiled body can run.
+    pub has_asm: bool,
 }
 
 impl BodyShape {
@@ -312,6 +314,7 @@ impl BodyShape {
                 .ops()
                 .iter()
                 .any(|op| matches!(op, Opcode::Prefetch { .. } | Opcode::Asm { .. })),
+            has_asm: f.ops().iter().any(|op| matches!(op, Opcode::Asm { .. })),
         }
     }
 }

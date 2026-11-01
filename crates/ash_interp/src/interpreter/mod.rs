@@ -4539,8 +4539,24 @@ impl HLInterpreter {
                 .tiered_runtime
                 .as_ref()
                 .is_some_and(|tiered| tiered.config.compiled_only);
-            if compiled_only {
-                let entry = self.compiled_only_entry(bytecode, findex, func_idx)?;
+            // A body with `$asm` machine code has no interpreter form, so it
+            // is compiled before its first call, as in `--mode jit`.
+            let needs_code = !compiled_only
+                && self.tiered_runtime.is_some()
+                && bytecode.functions[func_idx].shape(&bytecode.types).has_asm;
+            if compiled_only || needs_code {
+                let entry = self
+                    .compiled_only_entry(bytecode, findex, func_idx)
+                    .map_err(|e| {
+                        if needs_code {
+                            e.context(format!(
+                                "{} uses $asm, which needs the LLVM tier on an x86-64 host",
+                                bytecode.functions[func_idx].name()
+                            ))
+                        } else {
+                            e
+                        }
+                    })?;
                 let result = self.call_compiled_function(bytecode, func_idx, findex, &entry, args);
                 if result.is_ok()
                     && let Some(tiered) = self.tiered_runtime.as_mut()
@@ -5189,7 +5205,7 @@ impl HLInterpreter {
         // Allow all opcodes the full JIT supports. The v1 whitelist was too
         // conservative — it blocked GetThis/GetGlobal/Call/Field etc., preventing
         // any real Heaps functions from being promoted.
-        !matches!(op, Opcode::Prefetch { .. } | Opcode::Asm { .. })
+        !matches!(op, Opcode::Prefetch { .. })
     }
 
     /// Deopt after a compiled invoke failed: invalidate the bead (permanent
@@ -7592,7 +7608,10 @@ impl HLInterpreter {
                 // No-op on interpreter
             }
             Opcode::Asm { .. } => {
-                // No-op on interpreter (x86 specific)
+                return Err(anyhow!(
+                    "$asm machine code cannot run in the interpreter (function {})",
+                    bytecode.functions[func_idx].name()
+                ));
             }
             // IndirectCall: same as CallN in the interpreter (dispatch is always by findex)
             Opcode::IndirectCall { dst, fun, args } => {

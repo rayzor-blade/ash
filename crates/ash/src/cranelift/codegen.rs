@@ -2328,13 +2328,9 @@ impl AirCodegen<'_, '_> {
                 self.b.set_srcloc(SourceLoc::new(loc));
             }
 
-            // Haxe uses the non-zero OAsm modes as backend register hints;
-            // neither interpreter observes them. Cranelift owns its register
-            // allocation, so those hints are intentionally inert here. Mode
-            // zero embeds target-specific instruction bytes in HashLink's x86
-            // JIT and has no portable AIR meaning; treating it as inert is the
-            // only architecture-independent behavior and matches interp.
-            Instr::Asm { .. } => {}
+            // HashLink `$asm` embeds x86-64 machine code. Cranelift cannot
+            // embed bytes, so the LLVM tier compiles these functions.
+            Instr::Asm { .. } => bail!("$asm needs the LLVM tier"),
 
             other => bail!("unhandled AIR instruction {:?}", instr_reject(other)),
         }

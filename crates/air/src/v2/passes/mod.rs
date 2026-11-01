@@ -591,13 +591,6 @@ impl RegClaims {
         for c in &f.cells {
             bump(c.reg, &mut counts);
         }
-        for blk in &f.blocks {
-            for ins in &blk.instrs {
-                if let Instr::Asm { reg, .. } = ins {
-                    bump(*reg, &mut counts);
-                }
-            }
-        }
         RegClaims { counts }
     }
 

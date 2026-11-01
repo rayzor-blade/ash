@@ -9,7 +9,7 @@ import sys.FileSystem;
 import sys.io.File;
 import sys.io.Process;
 
-/** Copy the bundled host HDLL beside HashLink bytecode; Ash ignores the copy. */
+/** Copy the bundled host HDLL beside HashLink bytecode; Ash ignores the copy. -D ash_simd_require_hdll makes a missing one an error. */
 class NativeInstall {
 	public static function stage():Void {
 		if (!Context.defined("hl") || Context.defined("hlc") || Context.defined("ash_simd_no_hdll")) return;
@@ -24,14 +24,28 @@ class NativeInstall {
 				return;
 			}
 			var source = Path.join([root, entry.packagePath]);
-			if (!FileSystem.exists(source)) {
-				Context.fatalError('ash-simd is missing $source; install the release Haxelib ZIP', Context.currentPos());
+			if (!FileSystem.exists(source)) source = findBuilt(root);
+			if (source == null) {
+				var message = 'ash-simd has no simd.hdll for $platform; install the release Haxelib ZIP or build ash_hdll_simd. The standard HashLink VM cannot run this program without it';
+				if (Context.defined("ash_simd_require_hdll")) Context.fatalError(message, Context.currentPos());
+				else Context.warning(message, Context.currentPos());
 				return;
 			}
 			var output = Compiler.getOutput();
 			var destination = Path.join([Path.directory(output), "simd.hdll"]);
 			if (Path.normalize(source) != Path.normalize(destination)) File.copy(source, destination);
 		});
+	}
+
+	/** A source checkout keeps the package under haxelib/ and the Rust build under target/. */
+	static function findBuilt(root:String):Null<String> {
+		var target = Path.join([root, "../../target"]);
+		for (profile in ["release", "debug"])
+			for (name in ["libash_hdll_simd.dylib", "libash_hdll_simd.so", "ash_hdll_simd.dll"]) {
+				var path = Path.join([target, profile, name]);
+				if (FileSystem.exists(path)) return path;
+			}
+		return null;
 	}
 
 	static function hostPlatform():String {

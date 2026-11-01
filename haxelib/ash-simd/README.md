@@ -29,7 +29,11 @@ directory.
 
 Build with `-lib ash-simd`, or `-cp` pointing at this directory. A source
 checkout used with `-cp` does not run `extraParams.hxml`; copy `simd.hdll`
-manually for stock HashLink. The API and lane semantics are documented in
+manually for stock HashLink. A checkout reached through `-lib` (a `haxelib
+dev` link) stages the `ash_hdll_simd` library from the repository's `target/`
+directory when it has been built, and otherwise warns that stock HashLink will
+not find `simd.hdll`; Ash does not need the file. `-D ash_simd_require_hdll`
+turns that warning into an error. The API and lane semantics are documented in
 `docs/simd.md` of the ash repository.
 
 For a scalar, value-vector, and reusable-slot comparison, compile

@@ -542,6 +542,8 @@ struct MutatorRecord {
     idle_since: Option<Instant>,
     /// How long it ran between waits since `idle_since`.
     ran: Duration,
+    /// How many waits it has entered since `idle_since`.
+    waits: u32,
     /// When it last left a blocking wait, while it is running.
     woke_at: Option<Instant>,
 }
@@ -609,6 +611,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
             site: TLAB.with(|t| &t.site as *const AtomicU64 as usize),
             idle_since: None,
             ran: Duration::ZERO,
+            waits: 0,
             woke_at: None,
         });
     }
@@ -814,7 +817,9 @@ pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
             if record.ran.as_secs_f64() > (now - since).as_secs_f64() * IDLE_DUTY {
                 record.idle_since = Some(now);
                 record.ran = Duration::ZERO;
+                record.waits = 0;
             }
+            record.waits = record.waits.saturating_add(1);
         }
         record.blocking_depth = record.blocking_depth.saturating_add(1);
         record.stopped_sp = sp;
@@ -7746,6 +7751,9 @@ const IDLE_DELAY: Duration = Duration::from_millis(300);
 /// still be idle: an idle UI waking every 100ms for a millisecond is 1%, a
 /// 120Hz animation with millisecond frames 12%.
 const IDLE_DUTY: f64 = 0.05;
+/// A mutator that enters more waits per second than this is a frame loop, not
+/// an idle program, however little it runs between them.
+const IDLE_MAX_WAITS_PER_SEC: f64 = 30.0;
 /// How often the idle collector looks.
 const IDLE_TICK: Duration = Duration::from_millis(250);
 /// An idle collection that frees less than this share of the live heap earns
@@ -7816,13 +7824,17 @@ fn idle_holdouts() -> Option<Vec<String>> {
                 }
                 let span = now - since;
                 let busy = ran.as_secs_f64() / span.as_secs_f64().max(1e-9);
-                (span < IDLE_DELAY || busy > IDLE_DUTY).then(|| {
-                    format!(
-                        "{who}: idle {:.0}ms, busy {:.0}%",
-                        span.as_secs_f64() * 1e3,
-                        busy * 100.0
-                    )
-                })
+                let rate = m.waits as f64 / span.as_secs_f64().max(1e-9);
+                (span < IDLE_DELAY || busy > IDLE_DUTY || rate > IDLE_MAX_WAITS_PER_SEC).then(
+                    || {
+                        format!(
+                            "{who}: idle {:.0}ms, busy {:.0}%, {:.0} waits/s",
+                            span.as_secs_f64() * 1e3,
+                            busy * 100.0,
+                            rate
+                        )
+                    },
+                )
             })
             .collect(),
     )

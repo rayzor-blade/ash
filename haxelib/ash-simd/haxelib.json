@@ -4,8 +4,8 @@
 	"license": "MIT",
 	"tags": ["hashlink", "simd", "ash"],
 	"description": "128-bit vector primitives for HashLink: simd.hdll on stock hl, vector instructions on ash",
-	"version": "0.1.0",
-	"releasenote": "First release: f32x4, f64x2, i32x4, i16x8, i8x16, u8x16 slot primitives and the Float32x4/Int32x4 value types.",
+	"version": "0.1.1",
+	"releasenote": "A checkout without a built simd.hdll warns instead of stopping the build, and stages a library built under the repository's target directory. -D ash_simd_require_hdll makes a missing one an error. The README says the Vec indices are byte offsets.",
 	"contributors": ["rayzor", "darmie"],
 	"classPath": ""
 }

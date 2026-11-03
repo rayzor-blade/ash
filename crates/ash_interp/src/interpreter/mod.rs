@@ -3135,6 +3135,21 @@ impl HLInterpreter {
                 let f: SetRunner = std::mem::transmute(set);
                 f(fiber_closure_runner);
             }
+            let set_boundary = native_resolver
+                .resolve_function("std", "hlp_set_trap_boundary")
+                .unwrap_or(std::ptr::null_mut());
+            if !set_boundary.is_null() {
+                type SetBoundary = unsafe extern "C" fn(
+                    unsafe extern "C" fn(
+                        Option<FnTrapSetup>,
+                        Option<FnTrapRemove>,
+                        Option<FnTrapCallback>,
+                        *mut c_void,
+                    ) -> i32,
+                );
+                let f: SetBoundary = std::mem::transmute(set_boundary);
+                f(ash_interp_run_with_hl_trap);
+            }
             let set_switch = native_resolver
                 .resolve_function("std", "hlp_set_fiber_switch_hook")
                 .unwrap_or(std::ptr::null_mut());

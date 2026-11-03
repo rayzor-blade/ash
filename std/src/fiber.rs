@@ -62,9 +62,18 @@ use std::time::Instant;
 pub type ClosureRunner =
     unsafe extern "C" fn(*mut vclosure, *mut *mut vdynamic, i32) -> *mut vdynamic;
 pub type FiberSwitchHook = unsafe extern "C" fn(u32, u32);
+/// The host's setjmp frame: runs `callback(context)` under a trap armed by
+/// `setup`; 1 when an exception landed, 0 otherwise.
+pub type TrapBoundary = unsafe extern "C" fn(
+    Option<unsafe extern "C" fn() -> *mut c_void>,
+    Option<unsafe extern "C" fn()>,
+    Option<unsafe extern "C" fn(*mut c_void)>,
+    *mut c_void,
+) -> i32;
 pub type StubResolver = unsafe extern "C" fn(i32) -> *mut c_void;
 
 static CLOSURE_RUNNER: AtomicUsize = AtomicUsize::new(0);
+static TRAP_BOUNDARY: AtomicUsize = AtomicUsize::new(0);
 static FIBER_SWITCH_HOOK: AtomicUsize = AtomicUsize::new(0);
 static STUB_RESOLVER: AtomicUsize = AtomicUsize::new(0);
 static THREAD_ROOT_RESOLVER: AtomicUsize = AtomicUsize::new(0);
@@ -224,6 +233,13 @@ fn worker_trace(label: &str, id: u64, detail: u64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_set_closure_runner(f: ClosureRunner) {
     CLOSURE_RUNNER.store(f as usize, Ordering::Release);
+}
+
+/// Registered by the host so a thread body that throws is reported and ends
+/// that thread, instead of aborting the process for lack of a trap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_set_trap_boundary(f: TrapBoundary) {
+    TRAP_BOUNDARY.store(f as usize, Ordering::Release);
 }
 
 /// Registered by the host so logical VM state follows krio's stack switch.
@@ -1333,7 +1349,7 @@ unsafe fn run_closure(c: *mut vclosure) {
         let compiled = fun != 0 && !is_stub_sentinel(fun);
         if crate::rt::is_worker_lane() {
             if compiled {
-                hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
+                run_guarded(hlp_jit_closure_runner, c);
             } else {
                 eprintln!(
                     "[ash] worker fiber received uncompiled closure sentinel {fun:#x}; refusing interpreter re-entry"
@@ -1342,12 +1358,12 @@ unsafe fn run_closure(c: *mut vclosure) {
             return;
         }
         if let Some(runner) = closure_runner() {
-            runner(c, std::ptr::null_mut(), 0);
+            run_guarded(runner, c);
         } else if compiled {
             // Invoke a compiled thread body through the same typed ABI bridge used
             // by dynamic native calls. We are already on the thread fiber's stack;
             // creating another fiber here would change Thread.current() identity.
-            hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
+            run_guarded(hlp_jit_closure_runner, c);
         } else {
             eprintln!(
                 "[ash] fiber: cannot run closure (fun={:#x}, hasValue={}) — no closure runner set",
@@ -1374,6 +1390,43 @@ unsafe extern "C-unwind" fn run_closure_body(ctx: *mut c_void) {
         // rooted, so a poll in the body may collect.
         let _outermost = crate::gc::Callout::outermost();
         run_closure(c);
+    }
+}
+
+struct GuardedRun {
+    runner: ClosureRunner,
+    closure: *mut vclosure,
+}
+
+unsafe extern "C" fn run_guarded_body(ctx: *mut c_void) {
+    unsafe {
+        let run = &*(ctx as *const GuardedRun);
+        (run.runner)(run.closure, ptr::null_mut(), 0);
+    }
+}
+
+/// Run a thread body under a trap, so an exception out of it is reported and
+/// ends the thread. Without a registered boundary there is nothing to land on
+/// and the body runs bare.
+unsafe fn run_guarded(runner: ClosureRunner, c: *mut vclosure) {
+    unsafe {
+        let boundary = TRAP_BOUNDARY.load(Ordering::Acquire);
+        if boundary == 0 {
+            runner(c, ptr::null_mut(), 0);
+            return;
+        }
+        let boundary = std::mem::transmute::<usize, TrapBoundary>(boundary);
+        let mut run = GuardedRun { runner, closure: c };
+        let jumped = boundary(
+            Some(crate::error::hlp_setup_trap_jit),
+            Some(crate::error::hlp_remove_trap_jit),
+            Some(run_guarded_body),
+            &mut run as *mut GuardedRun as *mut c_void,
+        );
+        if jumped == 1 {
+            crate::error::hlp_print_uncaught_exception(crate::error::hlp_get_exc_value());
+            crate::error::hlp_clear_exc_value();
+        }
     }
 }
 

@@ -1013,123 +1013,156 @@ pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *mut vbyte {
     }
 }
 
+/// The eleven stat fields upstream fills, widest form: gid, uid, atime, mtime,
+/// ctime (microseconds since the epoch), size, dev, ino, nlink, rdev, mode.
+/// None when the path cannot be stat'ed.
+unsafe fn stat_fields(path: *const vbyte) -> Option<[i64; 11]> {
+    let p = unsafe { pchar_to_path(path) }?;
+    let md = std::fs::metadata(&p).ok()?;
+
+    #[cfg(unix)]
+    let fields: [i64; 11] = {
+        use std::os::unix::fs::MetadataExt;
+        let us = |s: i64, ns: i64| s * 1_000_000 + ns / 1000;
+        [
+            md.gid() as i64,
+            md.uid() as i64,
+            us(md.atime(), md.atime_nsec()),
+            us(md.mtime(), md.mtime_nsec()),
+            us(md.ctime(), md.ctime_nsec()),
+            md.size() as i64,
+            md.dev() as i64,
+            md.ino() as i64,
+            md.nlink() as i64,
+            md.rdev() as i64,
+            md.mode() as i64,
+        ]
+    };
+
+    #[cfg(windows)]
+    let fields: [i64; 11] = {
+        use std::os::windows::fs::MetadataExt;
+        // _wstat32's view of a Windows file: no owner, no inode, one link,
+        // dev/rdev the 0-based drive index. Times are FILETIME converted to
+        // microseconds since the unix epoch.
+        let unix_us = |ft: u64| -> i64 {
+            if ft == 0 {
+                0
+            } else {
+                (ft / 10) as i64 - 11_644_473_600_000_000
+            }
+        };
+        let drive = p
+            .to_string_lossy()
+            .as_bytes()
+            .first()
+            .filter(|_| p.to_string_lossy().as_bytes().get(1) == Some(&b':'))
+            .map(|c| (c.to_ascii_uppercase() - b'A') as i64)
+            .unwrap_or(0);
+        // The CRT's _S_* bits, then the owner triplet mirrored into group
+        // and other exactly as _wstat32 does.
+        let mut mode: i64 = if md.is_dir() { 0x4000 } else { 0x8000 };
+        mode |= 0o400;
+        // FILE_ATTRIBUTE_READONLY
+        if md.file_attributes() & 0x1 == 0 {
+            mode |= 0o200;
+        }
+        let executable = md.is_dir()
+            || matches!(
+                p.extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .as_deref(),
+                Some("exe") | Some("com") | Some("bat") | Some("cmd")
+            );
+        if executable {
+            mode |= 0o100;
+        }
+        mode |= (mode & 0o700) >> 3 | (mode & 0o700) >> 6;
+        [
+            0,
+            0,
+            unix_us(md.last_access_time()),
+            unix_us(md.last_write_time()),
+            unix_us(md.creation_time()),
+            md.file_size() as i64,
+            drive,
+            0,
+            1,
+            drive,
+            mode,
+        ]
+    };
+
+    // WASI reports a file's size and times and nothing else: no owner, no
+    // device, no inode, and no mode bits worth reporting. The shape stays the
+    // same so a caller indexes it identically; the absent fields are zero,
+    // which is what the Windows arm does for the ones Windows lacks too.
+    #[cfg(not(any(unix, windows)))]
+    let fields: [i64; 11] = {
+        let us = |t: std::io::Result<std::time::SystemTime>| -> i64 {
+            t.ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_micros() as i64)
+                .unwrap_or(0)
+        };
+        [
+            0,
+            0,
+            us(md.accessed()),
+            us(md.modified()),
+            us(md.created()),
+            md.len() as i64,
+            0,
+            0,
+            1,
+            0,
+            if md.is_dir() { 0o040_755 } else { 0o100_644 },
+        ]
+    };
+
+    Some(fields)
+}
+
 /// Twelve i32 slots, of which upstream fills eleven and leaves the last
-/// zeroed: gid, uid, atime, mtime, ctime, size, dev, ino, nlink, rdev, mode.
-/// Null when the path cannot be stat'ed — sys.FileSystem.stat turns that into
-/// a SysError.
+/// zeroed: gid, uid, atime, mtime, ctime (seconds), size, dev, ino, nlink,
+/// rdev, mode. Null when the path cannot be stat'ed — sys.FileSystem.stat
+/// turns that into a SysError.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_sys_stat(path: *const vbyte) -> *mut varray {
     unsafe {
-        let Some(p) = pchar_to_path(path) else {
+        let Some(fields) = stat_fields(path) else {
             return std::ptr::null_mut();
         };
-        let Ok(md) = std::fs::metadata(&p) else {
-            return std::ptr::null_mut();
-        };
-
-        #[cfg(unix)]
-        let fields: [i32; 11] = {
-            use std::os::unix::fs::MetadataExt;
-            [
-                md.gid() as i32,
-                md.uid() as i32,
-                md.atime() as i32,
-                md.mtime() as i32,
-                md.ctime() as i32,
-                md.size() as i32,
-                md.dev() as i32,
-                md.ino() as i32,
-                md.nlink() as i32,
-                md.rdev() as i32,
-                md.mode() as i32,
-            ]
-        };
-
-        #[cfg(windows)]
-        let fields: [i32; 11] = {
-            use std::os::windows::fs::MetadataExt;
-            // _wstat32's view of a Windows file: no owner, no inode, one link,
-            // times as 32-bit unix seconds, dev/rdev the 0-based drive index.
-            let unix_time = |ft: u64| -> i32 {
-                if ft == 0 {
-                    0
-                } else {
-                    ((ft / 10_000_000) as i64 - 11_644_473_600) as i32
-                }
-            };
-            let drive = p
-                .to_string_lossy()
-                .as_bytes()
-                .first()
-                .filter(|_| p.to_string_lossy().as_bytes().get(1) == Some(&b':'))
-                .map(|c| (c.to_ascii_uppercase() - b'A') as i32)
-                .unwrap_or(0);
-            // The CRT's _S_* bits, then the owner triplet mirrored into group
-            // and other exactly as _wstat32 does.
-            let mut mode: i32 = if md.is_dir() { 0x4000 } else { 0x8000 };
-            mode |= 0o400;
-            // FILE_ATTRIBUTE_READONLY
-            if md.file_attributes() & 0x1 == 0 {
-                mode |= 0o200;
-            }
-            let executable = md.is_dir()
-                || matches!(
-                    p.extension()
-                        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-                        .as_deref(),
-                    Some("exe") | Some("com") | Some("bat") | Some("cmd")
-                );
-            if executable {
-                mode |= 0o100;
-            }
-            mode |= (mode & 0o700) >> 3 | (mode & 0o700) >> 6;
-            [
-                0,
-                0,
-                unix_time(md.last_access_time()),
-                unix_time(md.last_write_time()),
-                unix_time(md.creation_time()),
-                md.file_size() as i32,
-                drive,
-                0,
-                1,
-                drive,
-                mode,
-            ]
-        };
-
         let a = hlp_alloc_array(hlt_i32(), 12);
         if a.is_null() {
             return std::ptr::null_mut();
         }
         let slots = hl_aptr::<i32>(a);
-        // WASI reports a file's size and times and nothing else: no owner, no
-        // device, no inode, and no mode bits worth reporting. The shape stays the
-        // same so a caller indexes it identically; the absent fields are zero,
-        // which is what the Windows arm does for the ones Windows lacks too.
-        #[cfg(not(any(unix, windows)))]
-        let fields: [i32; 11] = {
-            let secs = |t: std::io::Result<std::time::SystemTime>| -> i32 {
-                t.ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i32)
-                    .unwrap_or(0)
+        for (i, v) in fields.iter().enumerate() {
+            let v = if (2..=4).contains(&i) {
+                v.div_euclid(1_000_000)
+            } else {
+                *v
             };
-            [
-                0,
-                0,
-                secs(md.accessed()),
-                secs(md.modified()),
-                secs(md.created()),
-                md.len() as i32,
-                0,
-                0,
-                1,
-                0,
-                if md.is_dir() { 0o040_755 } else { 0o100_644 },
-            ]
-        };
+            *slots.add(i) = v as i32;
+        }
+        a
+    }
+}
 
+/// Eleven i64 slots in the same order as `hlp_sys_stat`, with the three times
+/// in microseconds and size/dev/ino at full width.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_sys_stat2(path: *const vbyte) -> *mut varray {
+    unsafe {
+        let Some(fields) = stat_fields(path) else {
+            return std::ptr::null_mut();
+        };
+        let a = hlp_alloc_array(crate::types::hlt_i64(), 11);
+        if a.is_null() {
+            return std::ptr::null_mut();
+        }
+        let slots = hl_aptr::<i64>(a);
         for (i, v) in fields.iter().enumerate() {
             *slots.add(i) = *v;
         }
@@ -1559,6 +1592,31 @@ mod tests {
         let mut v = s.as_bytes().to_vec();
         v.push(0);
         v
+    }
+
+    #[test]
+    fn sys_stat2_agrees_with_sys_stat_in_seconds() {
+        let dir = std::env::temp_dir().join(format!("ash_stat2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.bin");
+        std::fs::write(&file, [7u8; 123]).unwrap();
+        let path = pc(file.to_str().unwrap());
+        unsafe {
+            let a32 = hlp_sys_stat(path.as_ptr());
+            let a64 = hlp_sys_stat2(path.as_ptr());
+            assert!(!a32.is_null() && !a64.is_null());
+            assert_eq!((*a64).size, 11);
+            let w = std::slice::from_raw_parts(hl_aptr::<i32>(a32), 11);
+            let n = std::slice::from_raw_parts(hl_aptr::<i64>(a64), 11);
+            assert_eq!(n[5], 123);
+            for i in 2..=4 {
+                assert_eq!(n[i].div_euclid(1_000_000), w[i] as i64, "time slot {i}");
+            }
+            assert_eq!(n[10] as i32, w[10]);
+            let missing = pc(dir.join("absent").to_str().unwrap());
+            assert!(hlp_sys_stat2(missing.as_ptr()).is_null());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Read back a pchar the prim handed us.

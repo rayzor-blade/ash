@@ -187,6 +187,14 @@ jobs:
           $env:PATH = "$PWD\llvmenv\Library\bin;$env:PATH"
           cargo test -p ash_core --test win_setjmp -- --nocapture
 
+      # ash_static_call must keep its stack pointer in a register the callee
+      # preserves; the test calls through it with a callee that clobbers the
+      # volatile ones.
+      - name: Win64 static call preserves its frame
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test -p ash_std win64_call_tests -- --nocapture
+
       - name: AOT binaries match the JIT
         shell: bash
         run: cargo test -p ash --test aot_smoke --test aot_distribution --test aot_dynamic_throw -- --nocapture

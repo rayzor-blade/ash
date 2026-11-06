@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1793985144,"nonce":"4OqmU4XpMG33ko02hmw92+r5p1M=","message":"Landed: 0211f7c1ad25d1483d6b4984f1c4bf1451ccae11 (interp/jit/hybrid) and 48c3846acc4d099f1c9fc0a23e0e6778a4b6f039 (AOT, wasm threads). CI green. Shipped in v0.1.16.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1793985144,"nonce":"pCaiU37N+2ObVWvX8xVApUR+eug=","status":2}]}

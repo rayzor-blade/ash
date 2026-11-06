@@ -4307,6 +4307,91 @@ impl<'ctx> JITModule<'ctx> {
         Ok(wrapper)
     }
 
+    /// The setjmp frame a thread body runs under: `(setup, remove, callback,
+    /// context) -> i32`, 1 when an exception landed and 0 otherwise. The
+    /// runtime has no setjmp of its own, so a compiled program registers this
+    /// one with `hlp_set_trap_boundary`.
+    pub(crate) fn build_trap_boundary(&self) -> Result<FunctionValue<'ctx>> {
+        let saved_block = self.builder.get_insert_block();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let void_type = self.context.void_type();
+        let boundary = self.module.add_function(
+            "__ash_trap_boundary",
+            i32_type.fn_type(
+                &[
+                    ptr_type.into(),
+                    ptr_type.into(),
+                    ptr_type.into(),
+                    ptr_type.into(),
+                ],
+                false,
+            ),
+            None,
+        );
+        self.stamp_host_cpu(boundary);
+        // Private, so its address is a plain table index; an exported symbol
+        // is addressed through the GOT, which the wasm tree shaker does not
+        // follow.
+        boundary.set_linkage(inkwell::module::Linkage::Internal);
+        // setjmp locals must remain in memory across the second return.
+        for name in ["noinline", "optnone"] {
+            boundary.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id(name),
+                    0,
+                ),
+            );
+        }
+        let start = self.context.append_basic_block(boundary, "start");
+        let normal = self.context.append_basic_block(boundary, "normal");
+        let exception = self.context.append_basic_block(boundary, "exception");
+        self.builder.position_at_end(start);
+
+        let arg = |i: u32| boundary.get_nth_param(i).unwrap().into_pointer_value();
+        let setup_ty = ptr_type.fn_type(&[], false);
+        let buf = self
+            .builder
+            .build_indirect_call(setup_ty, arg(0), &[], "trap_buf")?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let jumped = self.build_setjmp_call(buf, "boundary_setjmp")?;
+        let is_exception = self.builder.build_int_compare(
+            IntPredicate::NE,
+            jumped,
+            i32_type.const_zero(),
+            "boundary_is_exception",
+        )?;
+        self.builder
+            .build_conditional_branch(is_exception, exception, normal)?;
+
+        self.builder.position_at_end(normal);
+        self.builder.build_indirect_call(
+            void_type.fn_type(&[ptr_type.into()], false),
+            arg(2),
+            &[arg(3).into()],
+            "",
+        )?;
+        self.builder
+            .build_indirect_call(void_type.fn_type(&[], false), arg(1), &[], "")?;
+        self.builder.build_return(Some(&i32_type.const_zero()))?;
+
+        self.builder.position_at_end(exception);
+        self.builder
+            .build_return(Some(&i32_type.const_int(1, false)))?;
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        if !boundary.verify(true) {
+            return Err(anyhow!("invalid LLVM trap-boundary function"));
+        }
+        Ok(boundary)
+    }
+
     pub(crate) fn install_function_address(&mut self, findex: usize, addr: *mut c_void) {
         // Every LLVM-compiled entry point passes through here -- promotions
         // and reload recompiles alike -- so this is the one place the

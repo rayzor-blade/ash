@@ -1973,7 +1973,19 @@ impl<'ctx> JITModule<'ctx> {
         // on the stack, which aborts the process instead -- the two socket
         // parity programs diverged from the interpreter on exactly that.
         let safe_entry = self.build_safe_entry_wrapper(entry_fn)?;
+        let boundary = self.build_trap_boundary()?;
         self.builder.position_at_end(run);
+        // Thread bodies run under this frame, so a throw out of one ends that
+        // thread rather than the process.
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let set_boundary_ty = void_type.fn_type(&[ptr_type.into()], false);
+        let set_boundary = self.aot_symbol("hlp_set_trap_boundary", set_boundary_ty);
+        self.builder.build_indirect_call(
+            set_boundary_ty,
+            set_boundary,
+            &[boundary.as_global_value().as_pointer_value().into()],
+            "",
+        )?;
         let status = self
             .builder
             .build_call(safe_entry, &[], "entrypoint")?

@@ -46,4 +46,27 @@ fn thread_body_throw_does_not_abort_the_process() {
             );
         }
     }
+
+    // A compiled program carries no interpreter to supply the frame, so it
+    // brings its own.
+    let binary = dir.path().join("thread_throw_aot");
+    let mut build = Command::new(ash_cli_bin());
+    build.arg("--quiet").arg("--build").arg(&binary).arg(&hl);
+    let built = run_with_timeout(build, Duration::from_secs(300));
+    assert!(
+        !built.timed_out && built.output.status.success(),
+        "aot build: {}",
+        render_output(&built.output)
+    );
+    let ran = run_with_timeout(Command::new(&binary), Duration::from_secs(20));
+    assert!(
+        !ran.timed_out && ran.output.status.success(),
+        "aot: {}",
+        render_output(&ran.output)
+    );
+    assert!(
+        String::from_utf8_lossy(&ran.output.stdout).contains("survived"),
+        "aot: {}",
+        render_output(&ran.output)
+    );
 }

@@ -516,6 +516,11 @@ unsafe extern "C" fn call_sysv(
 /// Arguments past the fourth would go on the stack. They are dropped here, as
 /// the System V arm drops its seventh integer, rather than being silently
 /// mispassed.
+/// Eight-byte stack slots a Win64 dynamic call can pass past its four
+/// register arguments; the asm below copies exactly this many.
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+const STACK_ARG_SLOTS: usize = 8;
+
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ash_static_call(
@@ -527,23 +532,35 @@ pub unsafe extern "C" fn ash_static_call(
     let ft = (*t).__bindgen_anon_1.fun.as_ref().unwrap();
     let nargs = ft.nargs as usize;
 
-    // One slot per argument position, not one per bank.
+    // One slot per argument position, not one per bank. Positions past the
+    // fourth go to the stack in call order, one eight-byte slot each, floats
+    // as their bit patterns.
     let mut ivals = [0usize; 4];
     let mut fvals = [0.0f64; 4];
+    let mut stack = [0usize; STACK_ARG_SLOTS];
 
-    for i in 0..nargs.min(4) {
+    for i in 0..nargs.min(4 + STACK_ARG_SLOTS) {
         let arg_t = *ft.args.add(i);
         let kind = (*arg_t).kind;
         let p = *args.add(i);
-        match kind {
-            hl_type_kind_HF32 => fvals[i] = f32_in_float_reg(*(p as *const f32)),
-            hl_type_kind_HF64 => fvals[i] = *(p as *const f64),
+        let (word, is_float) = match kind {
+            hl_type_kind_HF32 => ((*(p as *const f32)).to_bits() as usize, true),
+            hl_type_kind_HF64 => ((*(p as *const f64)).to_bits() as usize, true),
             hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
                 let val = (*(p as *const f64)) as i32;
-                ivals[i] = val as i64 as usize; // sign-extend
+                (val as i64 as usize, false) // sign-extend
             }
-            hl_type_kind_HI64 => ivals[i] = *(p as *const i64) as usize,
-            _ => ivals[i] = p as usize,
+            hl_type_kind_HI64 => (*(p as *const i64) as usize, false),
+            _ => (p as usize, false),
+        };
+        if i < 4 {
+            if is_float {
+                fvals[i] = f64::from_bits(word as u64);
+            } else {
+                ivals[i] = word;
+            }
+        } else {
+            stack[i - 4] = word;
         }
     }
 
@@ -551,16 +568,34 @@ pub unsafe extern "C" fn ash_static_call(
     let fresult: f64;
 
     core::arch::asm!(
-        // 32 bytes of shadow space, on a stack aligned so that the call
-        // leaves the callee's own rsp at 8 mod 16. The old stack pointer
-        // waits in `rsi`, which the callee must preserve; a volatile register
-        // would not survive the call.
+        // Shadow space plus the stack argument slots, on a stack aligned so
+        // that the call leaves the callee's own rsp at 8 mod 16. The slots
+        // are copied unconditionally; a callee reads only the ones its type
+        // declares. The old stack pointer waits in `rsi`, which the callee
+        // must preserve; a volatile register would not survive the call.
         "mov rsi, rsp",
         "and rsp, -16",
-        "sub rsp, 32",
+        "sub rsp, 96",
+        "mov rax, [r11]",
+        "mov [rsp + 32], rax",
+        "mov rax, [r11 + 8]",
+        "mov [rsp + 40], rax",
+        "mov rax, [r11 + 16]",
+        "mov [rsp + 48], rax",
+        "mov rax, [r11 + 24]",
+        "mov [rsp + 56], rax",
+        "mov rax, [r11 + 32]",
+        "mov [rsp + 64], rax",
+        "mov rax, [r11 + 40]",
+        "mov [rsp + 72], rax",
+        "mov rax, [r11 + 48]",
+        "mov [rsp + 80], rax",
+        "mov rax, [r11 + 56]",
+        "mov [rsp + 88], rax",
         "call r10",
         "mov rsp, rsi",
         in("r10") fun,
+        in("r11") stack.as_ptr(),
         out("rax") result,
         in("rcx") ivals[0],
         in("rdx") ivals[1],
@@ -1620,6 +1655,89 @@ mod win64_call_tests {
                 &mut out,
             );
             assert_eq!(out.v.i, 42);
+        }
+    }
+
+    /// Reads arguments 5 and 6 from the stack, where Win64 puts them above
+    /// the return address and 32 bytes of shadow space.
+    #[unsafe(naked)]
+    unsafe extern "C" fn stack_ints() -> i32 {
+        core::arch::naked_asm!(
+            "mov rax, [rsp + 48]",
+            "imul rax, rax, 10000",
+            "mov rdx, [rsp + 40]",
+            "imul rdx, rdx, 100",
+            "add rax, rdx",
+            "add rax, rcx",
+            "ret",
+        );
+    }
+
+    #[unsafe(naked)]
+    unsafe extern "C" fn stack_float() -> f64 {
+        core::arch::naked_asm!("movsd xmm0, [rsp + 40]", "ret");
+    }
+
+    unsafe fn fun_type(args: &[*mut hl_type], ret: *mut hl_type) -> *mut hl_type {
+        unsafe {
+            let args = Box::leak(args.to_vec().into_boxed_slice());
+            let fun = Box::leak(Box::new(hl::hl_type_fun {
+                args: args.as_mut_ptr(),
+                ret,
+                nargs: args.len() as i32,
+                parent: ptr::null_mut(),
+                closure_type: hl::hl_type_fun__bindgen_ty_1 {
+                    kind: hl_type_kind_HVOID,
+                    p: ptr::null_mut(),
+                },
+                closure: hl::hl_type_fun__bindgen_ty_2 {
+                    args: ptr::null_mut(),
+                    ret: ptr::null_mut(),
+                    nargs: 0,
+                    parent: ptr::null_mut(),
+                },
+            }));
+            Box::leak(Box::new(hl_type {
+                kind: hl_type_kind_HFUN,
+                __bindgen_anon_1: hl_type__bindgen_ty_1 { fun },
+                vobj_proto: ptr::null_mut(),
+                mark_bits: ptr::null_mut(),
+            }))
+        }
+    }
+
+    #[test]
+    fn arguments_past_the_fourth_reach_the_callee_on_the_stack() {
+        unsafe {
+            let i = crate::types::hlt_i32();
+            let t = fun_type(&[i; 6], i);
+            let mut vals = [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+            let mut ptrs: Vec<*mut c_void> = vals
+                .iter_mut()
+                .map(|v| v as *mut f64 as *mut c_void)
+                .collect();
+            let mut out: vdynamic = mem::zeroed();
+            ash_static_call(stack_ints as *mut c_void, t, ptrs.as_mut_ptr(), &mut out);
+            assert_eq!(out.v.i, 1 + 5 * 100 + 6 * 10000);
+        }
+    }
+
+    #[test]
+    fn a_float_past_the_fourth_argument_is_passed_by_value() {
+        unsafe {
+            let i = crate::types::hlt_i32();
+            let d = crate::types::hlt_f64();
+            let t = fun_type(&[i, i, i, i, d], d);
+            let mut ints = [1.0f64, 2.0, 3.0, 4.0];
+            let mut f = 2.5f64;
+            let mut ptrs: Vec<*mut c_void> = ints
+                .iter_mut()
+                .map(|v| v as *mut f64 as *mut c_void)
+                .collect();
+            ptrs.push(&mut f as *mut f64 as *mut c_void);
+            let mut out: vdynamic = mem::zeroed();
+            ash_static_call(stack_float as *mut c_void, t, ptrs.as_mut_ptr(), &mut out);
+            assert_eq!(out.v.d, 2.5);
         }
     }
 }

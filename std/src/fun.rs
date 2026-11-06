@@ -552,13 +552,14 @@ pub unsafe extern "C" fn ash_static_call(
 
     core::arch::asm!(
         // 32 bytes of shadow space, on a stack aligned so that the call
-        // leaves the callee's own rsp at 8 mod 16. `r11` is volatile under
-        // this ABI, so it can hold the old stack pointer across the call.
-        "mov r11, rsp",
+        // leaves the callee's own rsp at 8 mod 16. The old stack pointer
+        // waits in `rsi`, which the callee must preserve; a volatile register
+        // would not survive the call.
+        "mov rsi, rsp",
         "and rsp, -16",
         "sub rsp, 32",
         "call r10",
-        "mov rsp, r11",
+        "mov rsp, rsi",
         in("r10") fun,
         out("rax") result,
         in("rcx") ivals[0],
@@ -569,7 +570,7 @@ pub unsafe extern "C" fn ash_static_call(
         in("xmm1") fvals[1],
         in("xmm2") fvals[2],
         in("xmm3") fvals[3],
-        lateout("r11") _,
+        out("rsi") _,
         clobber_abi("C"),
     );
 
@@ -1567,6 +1568,59 @@ pub unsafe extern "C" fn hlp_install_static_call() {
 pub unsafe extern "C" fn hlp_install_closure_runner() {
     unsafe {
         crate::fiber::hlp_set_closure_runner(crate::fiber::hlp_jit_closure_runner);
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64", target_os = "windows"))]
+mod win64_call_tests {
+    use super::*;
+
+    /// Clobbers every volatile register, as a callee is entitled to.
+    #[unsafe(naked)]
+    unsafe extern "C" fn clobber_volatile() -> i32 {
+        core::arch::naked_asm!(
+            "mov r10, 0x1111",
+            "mov r11, 0x2222",
+            "mov eax, 42",
+            "ret",
+        );
+    }
+
+    #[test]
+    fn a_callee_that_clobbers_volatile_registers_returns_to_the_caller() {
+        unsafe {
+            let args = Box::leak(Box::new([ptr::null_mut::<hl_type>(); 1]));
+            let fun = Box::leak(Box::new(hl::hl_type_fun {
+                args: args.as_mut_ptr(),
+                ret: crate::types::hlt_i32(),
+                nargs: 0,
+                parent: ptr::null_mut(),
+                closure_type: hl::hl_type_fun__bindgen_ty_1 {
+                    kind: hl_type_kind_HVOID,
+                    p: ptr::null_mut(),
+                },
+                closure: hl::hl_type_fun__bindgen_ty_2 {
+                    args: ptr::null_mut(),
+                    ret: ptr::null_mut(),
+                    nargs: 0,
+                    parent: ptr::null_mut(),
+                },
+            }));
+            let t = Box::leak(Box::new(hl_type {
+                kind: hl_type_kind_HFUN,
+                __bindgen_anon_1: hl_type__bindgen_ty_1 { fun },
+                vobj_proto: ptr::null_mut(),
+                mark_bits: ptr::null_mut(),
+            }));
+            let mut out: vdynamic = mem::zeroed();
+            ash_static_call(
+                clobber_volatile as *mut c_void,
+                t,
+                ptr::null_mut(),
+                &mut out,
+            );
+            assert_eq!(out.v.i, 42);
+        }
     }
 }
 

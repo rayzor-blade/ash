@@ -279,7 +279,8 @@ fn llvm_config(args: &[&str]) -> Option<String> {
 /// Compile the C++ the LLVM C API cannot express: a target machine's
 /// exception model (`cpp/wasm_exception_model.cpp`), a call turned into an
 /// invoke (`cpp/call_to_invoke.cpp`) and where MCJIT loaded an object's
-/// sections (`cpp/jit_sections.cpp`). Without it, a wasm build
+/// sections (`cpp/jit_sections.cpp`), and reading one function body of a lazily
+/// read module (`cpp/lazy_bodies.cpp`). Without it, a wasm build
 /// is refused rather than emitted wrong and a compiled frame reports its
 /// function's entry line, which is what the cfg carries.
 fn build_wasm_exception_shim() {
@@ -288,6 +289,8 @@ fn build_wasm_exception_shim() {
     let src = cpp.join("wasm_exception_model.cpp");
     let sections = cpp.join("jit_sections.cpp");
     let invoke = cpp.join("call_to_invoke.cpp");
+    let lazy = cpp.join("lazy_bodies.cpp");
+    println!("cargo:rerun-if-changed={}", lazy.display());
     println!("cargo:rerun-if-changed={}", src.display());
     println!("cargo:rerun-if-changed={}", invoke.display());
     println!("cargo:rerun-if-changed={}", sections.display());
@@ -311,7 +314,8 @@ fn build_wasm_exception_shim() {
         .warnings(false)
         .file(&src)
         .file(&sections)
-        .file(&invoke);
+        .file(&invoke)
+        .file(&lazy);
     // Include paths, language level and the defines that decide LLVM's own
     // ABI, all of which must match the library being linked. Warning and
     // debug flags are dropped: they say nothing about compatibility and are

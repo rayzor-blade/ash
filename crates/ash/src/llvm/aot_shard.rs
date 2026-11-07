@@ -181,6 +181,18 @@ fn instruction_count(f: FunctionValue<'_>) -> usize {
         .sum()
 }
 
+/// No body to emit, and none waiting to be read.
+fn is_declaration(f: FunctionValue<'_>) -> bool {
+    unsafe { llvm_sys::core::LLVMIsDeclaration(f.as_value_ref()) != 0 }
+}
+
+/// A body small enough, and not shielded, for the inliner to want in every
+/// shard. A shielded body is `optnone`: it is never inlined, so carrying it
+/// buys nothing.
+fn is_inline_candidate(f: FunctionValue<'_>, instructions: usize) -> bool {
+    instructions <= INLINE_CANDIDATE_INSTRUCTIONS && !has_attribute(f, "optnone")
+}
+
 fn compilation_weight(instructions: usize, body_weight: usize) -> usize {
     instructions.saturating_add(body_weight)
 }
@@ -395,8 +407,9 @@ impl<'ctx> JITModule<'ctx> {
     /// Give every body and every named data global a symbol another object
     /// can reference, and return the bodies in findex order with their
     /// compilation weights.
-    fn promote_for_sharding(&self, body_weight: usize) -> Vec<(String, usize)> {
+    fn promote_for_sharding(&self, body_weight: usize) -> (Vec<(String, usize)>, HashSet<String>) {
         let mut ordered: Vec<(String, usize)> = Vec::new();
+        let mut carry: HashSet<String> = HashSet::new();
         let mut recorded: HashSet<String> = HashSet::new();
 
         let mut by_findex: Vec<(usize, FunctionValue<'ctx>)> = self.func_cache
@@ -417,7 +430,11 @@ impl<'ctx> JITModule<'ctx> {
             }
             let name = f.get_name().to_string_lossy().into_owned();
             if recorded.insert(name.clone()) {
-                ordered.push((name, compilation_weight(instruction_count(f), body_weight)));
+                let instructions = instruction_count(f);
+                if is_inline_candidate(f, instructions) {
+                    carry.insert(name.clone());
+                }
+                ordered.push((name, compilation_weight(instructions, body_weight)));
             }
         }
         let mut helper = 0usize;
@@ -438,7 +455,11 @@ impl<'ctx> JITModule<'ctx> {
             }
             let name = f.get_name().to_string_lossy().into_owned();
             if recorded.insert(name.clone()) {
-                ordered.push((name, compilation_weight(instruction_count(f), body_weight)));
+                let instructions = instruction_count(f);
+                if is_inline_candidate(f, instructions) {
+                    carry.insert(name.clone());
+                }
+                ordered.push((name, compilation_weight(instructions, body_weight)));
             }
         }
 
@@ -458,7 +479,7 @@ impl<'ctx> JITModule<'ctx> {
             }
             global = g.get_next_global();
         }
-        ordered
+        (ordered, carry)
     }
 
     /// Write the object that defines the program's data, from the emitter's
@@ -606,7 +627,7 @@ impl<'ctx> JITModule<'ctx> {
         } else {
             0
         };
-        let weights = self.promote_for_sharding(body_weight);
+        let (weights, carry) = self.promote_for_sharding(body_weight);
         let owned = partition(&weights, shards);
         if let Some(dest) = &dump_ir {
             self.module
@@ -658,6 +679,7 @@ impl<'ctx> JITModule<'ctx> {
                 .map(|k| {
                     let bitcode = &bitcode;
                     let owned = &owned[k];
+                    let carry = &carry;
                     let part = parts[k].clone();
                     let dump_ir = dump_ir.clone();
                     let optimization = crate::aot_options::current();
@@ -674,6 +696,7 @@ impl<'ctx> JITModule<'ctx> {
                                     triple,
                                     bitcode,
                                     owned,
+                                    carry,
                                     &part,
                                     no_opt,
                                     dump_ir.as_deref(),
@@ -708,12 +731,83 @@ impl<'ctx> JITModule<'ctx> {
     }
 }
 
+#[cfg(not(no_wasm_exception_shim))]
+unsafe extern "C" {
+    fn ash_materialize_function(f: llvm_sys::prelude::LLVMValueRef) -> *mut std::ffi::c_char;
+    fn ash_delete_function_body(f: llvm_sys::prelude::LLVMValueRef);
+}
+
+/// Whether shards read the stream lazily: bodies stay unread bitcode until a
+/// shard asks for one, and a body it drops is never read at all.
+/// `ASH_AOT_EAGER_PARSE=1` reads every body first and strips afterward, the
+/// way this always was; the two produce the same objects.
+fn lazy_parse() -> bool {
+    cfg!(not(no_wasm_exception_shim)) && std::env::var_os("ASH_AOT_EAGER_PARSE").is_none()
+}
+
+/// The stream as a module whose bodies are read on demand. The module owns
+/// the buffer object and borrows `bitcode`, which must outlive it.
+#[cfg(not(no_wasm_exception_shim))]
+fn parse_lazily<'c>(context: &'c Context, bitcode: &[u8]) -> Result<Module<'c>> {
+    use inkwell::context::AsContextRef;
+    use llvm_sys::bit_reader::LLVMGetBitcodeModuleInContext2;
+    use llvm_sys::core::LLVMCreateMemoryBufferWithMemoryRange;
+    unsafe {
+        let buffer = LLVMCreateMemoryBufferWithMemoryRange(
+            bitcode.as_ptr().cast(),
+            bitcode.len(),
+            c"ash-aot".as_ptr(),
+            0
+        );
+        let mut module = std::ptr::null_mut();
+        // The reader takes the buffer whether or not it succeeds.
+        if LLVMGetBitcodeModuleInContext2(context.as_ctx_ref(), buffer, &mut module) != 0 {
+            return Err(anyhow!("parse bitcode lazily"));
+        }
+        Ok(Module::new(module))
+    }
+}
+
+#[cfg(no_wasm_exception_shim)]
+fn parse_lazily<'c>(_context: &'c Context, _bitcode: &[u8]) -> Result<Module<'c>> {
+    Err(anyhow!("lazy bitcode reading needs the LLVM bridge"))
+}
+
+#[cfg(not(no_wasm_exception_shim))]
+fn materialize(f: FunctionValue<'_>) -> Result<()> {
+    unsafe {
+        let message = ash_materialize_function(f.as_value_ref());
+        if message.is_null() {
+            return Ok(());
+        }
+        let text = std::ffi::CStr::from_ptr(message).to_string_lossy().into_owned();
+        libc::free(message.cast());
+        Err(anyhow!("read body of {}: {text}", f.get_name().to_string_lossy()))
+    }
+}
+
+#[cfg(no_wasm_exception_shim)]
+fn materialize(_f: FunctionValue<'_>) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(no_wasm_exception_shim))]
+fn drop_unread_body(f: FunctionValue<'_>) {
+    unsafe { ash_delete_function_body(f.as_value_ref()) }
+}
+
+#[cfg(no_wasm_exception_shim)]
+fn drop_unread_body(f: FunctionValue<'_>) {
+    strip_body(f);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_shard(
     k: usize,
     triple: &str,
     bitcode: &[u8],
     owned: &HashSet<String>,
+    carry: &HashSet<String>,
     part: &Path,
     no_opt: bool,
     dump_ir: Option<&Path>,
@@ -723,38 +817,49 @@ fn emit_shard(
     crate::llvm_init::ensure();
     let context = Context::create();
     // Borrowed, not copied: nine shards copying a 61 MB stream is half a
-    // gigabyte of nothing. The parse reads the buffer to completion and the
-    // module keeps no reference to it, and `thread::scope` already guarantees
-    // the bytes outlive every shard.
-    let buffer = MemoryBuffer::create_from_memory_range(bitcode, "ash-aot");
-    let module: Module<'_> = Module::parse_bitcode_from_buffer(&buffer, &context).map_err(|e|
-        anyhow!("parse bitcode: {}", e.to_string())
-    )?;
+    // gigabyte of nothing, and `thread::scope` already guarantees the bytes
+    // outlive every shard. Read lazily, the module keeps the buffer and
+    // reads from it again for each body asked for; read eagerly, the parse
+    // reads it to completion and keeps no reference.
+    let lazy = lazy_parse();
+    let eager_buffer;
+    let module: Module<'_> = if lazy {
+        parse_lazily(&context, bitcode)?
+    } else {
+        eager_buffer = MemoryBuffer::create_from_memory_range(bitcode, "ash-aot");
+        Module::parse_bitcode_from_buffer(&eager_buffer, &context).map_err(|e|
+            anyhow!("parse bitcode: {}", e.to_string())
+        )?
+    };
 
     let mut kept = 0usize;
     let mut carried = 0usize;
     let mut stripped = 0usize;
     for f in module.get_functions() {
-        if f.count_basic_blocks() == 0 {
+        // A body not yet read has no blocks, so `count_basic_blocks` cannot
+        // tell it from a declaration.
+        if is_declaration(f) {
             continue;
         }
         let name = f.get_name().to_string_lossy();
         if owned.contains(name.as_ref()) {
+            materialize(f)?;
             kept += 1;
             continue;
         }
-        // A shielded body is `optnone`: it will never be inlined, so carrying
-        // it buys nothing. Everything else small enough rides along for the
-        // inliner, and the sweep below drops the ones this shard never calls.
-        if
-            !no_opt &&
-            instruction_count(f) <= INLINE_CANDIDATE_INSTRUCTIONS &&
-            !has_attribute(f, "optnone")
-        {
+        // The emitter decided which bodies the inliner may want, from the
+        // module it lowered; everything else small enough rides along, and
+        // the sweep below drops the ones this shard never calls.
+        if !no_opt && carry.contains(name.as_ref()) {
+            materialize(f)?;
             f.set_linkage(Linkage::AvailableExternally);
             carried += 1;
         } else {
-            strip_body(f);
+            if lazy {
+                drop_unread_body(f);
+            } else {
+                strip_body(f);
+            }
             stripped += 1;
         }
     }
@@ -880,6 +985,41 @@ mod tests {
             assert!(owners[0] >= previous);
             previous = owners[0];
         }
+    }
+
+    #[cfg(not(no_wasm_exception_shim))]
+    #[test]
+    fn a_lazily_read_module_reads_only_the_bodies_asked_for() {
+        crate::llvm_init::ensure();
+        let context = Context::create();
+        let module = context.create_module("lazy");
+        let i32_type = context.i32_type();
+        let builder = context.create_builder();
+        for name in ["kept", "dropped"] {
+            let f = module.add_function(name, i32_type.fn_type(&[], false), None);
+            builder.position_at_end(context.append_basic_block(f, "entry"));
+            builder.build_return(Some(&i32_type.const_int(7, false))).unwrap();
+        }
+        let bytes = module.write_bitcode_to_memory().as_slice().to_vec();
+
+        let lazy_context = Context::create();
+        let lazy = parse_lazily(&lazy_context, &bytes).unwrap();
+        let kept = lazy.get_function("kept").unwrap();
+        let dropped = lazy.get_function("dropped").unwrap();
+        // Unread: no blocks yet, and still not a declaration.
+        assert_eq!(kept.count_basic_blocks(), 0);
+        assert!(!is_declaration(kept));
+        assert!(!is_declaration(dropped));
+
+        materialize(kept).unwrap();
+        assert_eq!(kept.count_basic_blocks(), 1);
+        drop_unread_body(dropped);
+        assert!(is_declaration(dropped));
+
+        lazy.verify().unwrap();
+        // The dropped body is gone for good: printing must not read it back.
+        let text = lazy.print_to_string().to_string();
+        assert_eq!(text.matches("ret i32 7").count(), 1, "{text}");
     }
 
     #[test]

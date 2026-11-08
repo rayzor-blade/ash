@@ -1,0 +1,30 @@
+name: Set up Haxe
+description: krdlab/setup-haxe with up to three attempts, since its download server intermittently returns 5xx.
+inputs:
+  haxe-version:
+    description: Haxe version to install.
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: first
+      uses: krdlab/setup-haxe@v1
+      continue-on-error: true
+      with:
+        haxe-version: ${{ inputs.haxe-version }}
+    - if: steps.first.outcome == 'failure'
+      shell: bash
+      run: sleep 30
+    - id: second
+      if: steps.first.outcome == 'failure'
+      uses: krdlab/setup-haxe@v1
+      continue-on-error: true
+      with:
+        haxe-version: ${{ inputs.haxe-version }}
+    - if: steps.second.outcome == 'failure'
+      shell: bash
+      run: sleep 90
+    - if: steps.second.outcome == 'failure'
+      uses: krdlab/setup-haxe@v1
+      with:
+        haxe-version: ${{ inputs.haxe-version }}

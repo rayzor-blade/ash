@@ -126,7 +126,7 @@ jobs:
           ./scripts/build_wasm_hdll.py --only sqlite --sysroot ~/wasi-sysroot \
             || echo "::warning::sqlite.wasm did not build; the sys suite's sqlite tests will error on the wasm arms"
 
-      - uses: krdlab/setup-haxe@v1
+      - uses: ./.github/actions/setup-haxe
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 

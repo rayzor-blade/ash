@@ -156,7 +156,7 @@ jobs:
       - uses: ./.github/actions/llvm21
 
       # The dynamic-throw regression compiles its fixture on Linux x86-64.
-      - uses: krdlab/setup-haxe@v1
+      - uses: ./.github/actions/setup-haxe
         if: matrix.os == 'ubuntu-24.04'
         with:
           haxe-version: "4.3.6"
@@ -227,7 +227,7 @@ jobs:
 
       # krdlab/setup-haxe has no arm64 build and fails outright on Apple Silicon
       # with "arm64 not supported", so Apple Silicon takes it from Homebrew.
-      - uses: krdlab/setup-haxe@v1
+      - uses: ./.github/actions/setup-haxe
         if: runner.os != 'macOS'
         with:
           haxe-version: ${{ env.HAXE_VERSION }}

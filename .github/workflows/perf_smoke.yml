@@ -33,7 +33,7 @@ jobs:
         with:
           components: rustfmt
 
-      - uses: krdlab/setup-haxe@v1
+      - uses: ./.github/actions/setup-haxe
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 

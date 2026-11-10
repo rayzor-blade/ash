@@ -70,6 +70,10 @@ cranelift-module   = { git = "https://github.com/bytecodealliance/wasmtime", rev
 # this crate spent a while producing "release" builds that were nothing of the
 # sort.
 
+[dev-dependencies]
+wasm-encoder = "0.258"
+wasmparser = "0.258"
+
 [package.metadata.bundle]
 
 [build-dependencies]

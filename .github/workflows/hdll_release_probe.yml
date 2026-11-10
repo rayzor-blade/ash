@@ -1,0 +1,63 @@
+name: hdll_release_probe
+
+# Loads HashLink's official Windows release HDLLs through ash and prints what
+# happens. It reports and never fails on the result: a first run is a
+# measurement, and it starts gating once its expectations are recorded.
+#
+# Runs on a push to the branch below and by hand; it is not part of the
+# gating workflows.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/hdll-release-probe
+
+concurrency:
+  group: hdll_release_probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: hashlink ${{ matrix.hashlink }} hdlls (windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.15 predates win_get_display_scale; 1.16 has it. The project is
+        # always built from the released hlsdl 1.16 haxelib, so the 1.15 row
+        # is the mismatched pairing a user can end up with.
+        hashlink: ["1.15", "1.16"]
+    env:
+      HAXE_VERSION: "4.3.4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt # bindgen pretty-prints through it
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: corpus-windows-2022
+
+      - uses: ./.github/actions/setup-haxe
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - uses: ./.github/actions/llvm21
+
+      - name: Build ash
+        shell: bash
+        run: |
+          cargo build -p ash_std
+          cargo build -p ash
+
+      # Windows cannot start the binary without these beside it.
+      - uses: ./.github/actions/llvm21-runtime-dlls
+        with:
+          into: target\debug\
+
+      - name: Run the cells against the release HDLLs
+        shell: bash
+        run: python scripts/hdll_release_probe.py --hashlink ${{ matrix.hashlink }}

@@ -101,6 +101,29 @@ fn closures_through_the_direct_backend_match_the_interpreter() {
     );
 }
 
+/// Boxing and unboxing, nullable numbers, and objects viewed as a structure.
+#[test]
+fn casts_through_the_direct_backend_match_the_interpreter() {
+    check(
+        "TestWasmCast",
+        "test_wasm_cast.hl",
+        &[
+            "boxInt",
+            "boxFloat",
+            "boxBool",
+            "boxObject",
+            "boxBytes",
+            "unboxInt",
+            "unboxFloat",
+            "unboxBool",
+            "orMinusOne",
+            "maybe",
+            "wide",
+            "view",
+        ],
+    );
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {

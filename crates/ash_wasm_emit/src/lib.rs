@@ -25,6 +25,7 @@
 //! (`(file << 32) | line` stored into a frame per function).
 #![forbid(unsafe_code)]
 
+mod locals;
 pub mod object;
 
 /// The encoder the instructions of [`object::Body`] come from.
@@ -99,6 +100,11 @@ pub trait Program {
     /// The symbol of the table of function addresses, one pointer wide each,
     /// indexed by findex.
     fn functions_symbol(&self) -> Option<String>;
+    /// What kind of reference values of type `t` are, where it matters to a
+    /// cast.
+    fn shape(&self, t: TypeRef) -> Shape;
+    /// `T` of the type `Null<T>`.
+    fn null_param(&self, t: TypeRef) -> Option<TypeRef>;
     /// The index of the type of function `findex`, native or not.
     fn function_type(&self, findex: usize) -> Option<usize>;
     /// The symbol of the descriptor for type `type_index`.
@@ -116,6 +122,23 @@ pub trait Program {
     /// Whether a store of a reference into the heap must mark its card for
     /// the generational collector.
     fn write_barriers(&self) -> bool;
+}
+
+/// The kinds of reference a cast tells apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// `Dynamic`.
+    Dyn,
+    /// `Null<T>`.
+    Null,
+    /// A structural type, wrapped around the object it views.
+    Virtual,
+    Obj,
+    Struct,
+    /// A pointer with no type header of its own (bytes, a type, a reference,
+    /// an abstract), which a Dynamic holds in a box.
+    Boxed,
+    Other,
 }
 
 /// How a value of a type is allocated.
@@ -390,6 +413,12 @@ const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
     ("hlp_alloc_dynobj", &[], &[ValType::I32]),
     ("hlp_alloc_virtual", &[ValType::I32], &[ValType::I32]),
     ("hlp_gc_write_barrier", &[ValType::I32], &[]),
+    ("hl_to_virtual", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("hlp_alloc_dynamic", &[ValType::I32], &[ValType::I32]),
+    ("hlp_dyn_toint", &[ValType::I32], &[ValType::I32]),
+    ("hlp_dyn_tofloat", &[ValType::I32], &[ValType::F32]),
+    ("hlp_dyn_todouble", &[ValType::I32], &[ValType::F64]),
+    ("hlp_dyn_toi64", &[ValType::I32], &[ValType::I64]),
     ("hlp_alloc_closure_void", &[ValType::I32, ValType::I32], &[ValType::I32]),
     (
         "hlp_alloc_closure_ptr",
@@ -423,6 +452,8 @@ const VVIRTUAL_VALUE: u64 = 4;
 const VVIRTUAL_FIELDS: u64 = 12;
 /// Where a `varray` keeps its element count and its first element on wasm32:
 /// `{ t, at, size, pad }` and then the elements.
+/// Where a `vdynamic` keeps the value it boxes: `{ t, <8-aligned union> }`.
+const VDYNAMIC_VALUE: u64 = 8;
 const VARRAY_SIZE: u64 = 8;
 const VARRAY_DATA: u64 = 16;
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
@@ -742,6 +773,8 @@ struct Fx<'a, P: Program> {
     out: object::Body,
     ctx: Vec<Frame>,
     nparams: u32,
+    /// The wasm local of each value.
+    slot: Vec<u32>,
     tys: Vec<Ty>,
     rpo_num: Vec<usize>,
     loop_header: Vec<bool>,
@@ -767,6 +800,7 @@ fn emit_function<P: Program>(
         return unsupported(format!("a value of type {t:?}"));
     }
     let cfg = CfgInfo::build(f);
+    let assignment = locals::assign(f, &cfg, &tys);
     let n = f.blocks.len();
     let rpo = cfg.rpo();
     let mut rpo_num = vec![usize::MAX; n];
@@ -819,11 +853,15 @@ fn emit_function<P: Program>(
         }
         kids[i].sort_by_key(|k| rpo_num[*k]);
     }
-    let mut locals: Vec<(u32, ValType)> = tys
-        .iter()
-        .map(|t| (1, t.wasm().unwrap_or(ValType::I32)))
-        .collect();
-    let frame_local = inp.sig.params.len() as u32 + locals.len() as u32;
+    let nparams = inp.sig.params.len() as u32;
+    let mut locals: Vec<(u32, ValType)> = Vec::new();
+    for &t in &assignment.types {
+        match locals.last_mut() {
+            Some((count, last)) if *last == t => *count += 1,
+            _ => locals.push((1, t)),
+        }
+    }
+    let frame_local = nparams + assignment.types.len() as u32;
     locals.push((1, ValType::I32));
     // The poll epoch this body last saw, and the one just read.
     let handled_local = frame_local + 1;
@@ -851,7 +889,8 @@ fn emit_function<P: Program>(
         used: Used::default(),
         out: object::Body::new(locals),
         ctx: Vec::new(),
-        nparams: inp.sig.params.len() as u32,
+        nparams,
+        slot: assignment.slot.iter().map(|s| nparams + s).collect(),
         tys,
         rpo_num,
         loop_header,
@@ -923,11 +962,11 @@ impl<P: Program> Fx<'_, P> {
     }
 
     fn get(&mut self, v: ValueId) {
-        self.emit(&I::LocalGet(self.nparams + v.0));
+        self.emit(&I::LocalGet(self.slot[v.0 as usize]));
     }
 
     fn set(&mut self, v: ValueId) {
-        self.emit(&I::LocalSet(self.nparams + v.0));
+        self.emit(&I::LocalSet(self.slot[v.0 as usize]));
     }
 
     fn ty(&self, v: ValueId) -> Ty {
@@ -1727,8 +1766,180 @@ impl<P: Program> Fx<'_, P> {
                     (a, b) => return unsupported(format!("ToInt from {a:?} into {b:?}")),
                 }
             }
-            other => return unsupported(format!("the {other:?} cast")),
+            CastKind::UnsafeCast => {
+                if ts != td {
+                    return unsupported("an unchecked cast between different kinds");
+                }
+                self.get(src);
+            }
+            CastKind::ToVirtual => {
+                let dst_type = self.f.values[dst.0 as usize].ty;
+                if ts != td || ts != Ty::Ptr {
+                    return unsupported("a wrap into a structural type from other than a reference");
+                }
+                if self.program.shape(dst_type) == Shape::Virtual {
+                    self.type_of_value(dst)?;
+                    self.get(src);
+                    let wrap = self.runtime("hl_to_virtual")?;
+                    self.call(wrap);
+                } else {
+                    self.get(src);
+                }
+            }
+            CastKind::ToDyn => return self.box_dynamic(dst, src),
+            CastKind::SafeCast => return self.safe_cast(dst, src),
         }
+        self.set(dst);
+        Ok(())
+    }
+
+    /// A box for the value `src`, of the type `ty`, in `dst`: the runtime
+    /// allocates it and the value goes into the payload word.
+    fn box_value(&mut self, dst: ValueId, src: ValueId, boxed: Ty, type_name: &str) -> Res<()> {
+        let tmp = self.tmp_local;
+        self.data_address(type_name, 0)?;
+        let alloc = self.runtime("hlp_alloc_dynamic")?;
+        self.call(alloc);
+        self.emit(&I::LocalSet(tmp));
+        self.emit(&I::LocalGet(tmp));
+        self.get(src);
+        self.store_kind(boxed, VDYNAMIC_VALUE)?;
+        self.emit(&I::LocalGet(tmp));
+        self.set(dst);
+        Ok(())
+    }
+
+    fn box_dynamic(&mut self, dst: ValueId, src: ValueId) -> Res<()> {
+        let src_type = self.f.values[src.0 as usize].ty;
+        if self.ty(dst) != Ty::Ptr {
+            return unsupported("a Dynamic held in other than a reference");
+        }
+        let kind = self.ty(src);
+        match kind {
+            Ty::Ptr if self.program.shape(src_type) != Shape::Boxed => {
+                // A pointer with a type header is its own Dynamic.
+                self.get(src);
+                self.set(dst);
+                Ok(())
+            }
+            Ty::Ptr => {
+                let Some(name) = self.program.type_symbol(src_type.0 as usize) else {
+                    return unsupported("a type with no descriptor symbol");
+                };
+                let tmp = self.tmp_local;
+                self.get(src);
+                self.emit(&I::I32Eqz);
+                self.emit(&I::If(BlockType::Result(ValType::I32)));
+                self.emit(&I::I32Const(0));
+                self.emit(&I::Else);
+                self.data_address(&name, 0)?;
+                let alloc = self.runtime("hlp_alloc_dynamic")?;
+                self.call(alloc);
+                self.emit(&I::LocalSet(tmp));
+                self.emit(&I::LocalGet(tmp));
+                self.get(src);
+                self.store_kind(Ty::Ptr, VDYNAMIC_VALUE)?;
+                self.emit(&I::LocalGet(tmp));
+                self.emit(&I::End);
+                self.set(dst);
+                Ok(())
+            }
+            Ty::Bool | Ty::I32 | Ty::I64 | Ty::F32 | Ty::F64 => {
+                let Some(name) = self.program.type_symbol(src_type.0 as usize) else {
+                    return unsupported("a type with no descriptor symbol");
+                };
+                self.box_value(dst, src, kind, &name)
+            }
+            Ty::Void | Ty::Other => unsupported("a Dynamic from a value of no storable kind"),
+        }
+    }
+
+    /// The checked cast: unbox a Dynamic to a number, box a number, or copy.
+    /// The forms that hand the runtime a pointer to the value are not done.
+    fn safe_cast(&mut self, dst: ValueId, src: ValueId) -> Res<()> {
+        let (ts, td) = (self.ty(src), self.ty(dst));
+        let src_type = self.f.values[src.0 as usize].ty;
+        let dst_type = self.f.values[dst.0 as usize].ty;
+        let (src_shape, dst_shape) = (self.program.shape(src_type), self.program.shape(dst_type));
+        let numeric = |t: Ty| matches!(t, Ty::Bool | Ty::I32 | Ty::I64 | Ty::F32 | Ty::F64);
+
+        if ts == Ty::Ptr && matches!(src_shape, Shape::Null | Shape::Dyn) && numeric(td) {
+            // Unbox through the runtime, which switches on the box's own type;
+            // no box is the zero value.
+            let (helper, zero) = match td {
+                Ty::F64 => ("hlp_dyn_todouble", I::F64Const(0.0f64.into())),
+                Ty::F32 => ("hlp_dyn_tofloat", I::F32Const(0.0f32.into())),
+                Ty::I64 => ("hlp_dyn_toi64", I::I64Const(0)),
+                _ => ("hlp_dyn_toint", I::I32Const(0)),
+            };
+            let wasm = td.wasm().expect("a numeric kind has a wasm type");
+            self.get(src);
+            self.emit(&I::I32Eqz);
+            self.emit(&I::If(BlockType::Result(wasm)));
+            self.emit(&zero);
+            self.emit(&I::Else);
+            self.get(src);
+            let unbox = self.runtime(helper)?;
+            self.call(unbox);
+            if td == Ty::Bool {
+                // Any nonzero byte is true.
+                self.emit(&I::I32Const(0));
+                self.emit(&I::I32Ne);
+            }
+            self.emit(&I::End);
+            self.set(dst);
+            return Ok(());
+        }
+        if matches!(dst_shape, Shape::Null | Shape::Dyn) && numeric(ts) {
+            // A number into a box, of the type the box holds.
+            let box_type = match dst_shape {
+                Shape::Null => self.program.null_param(dst_type).unwrap_or(src_type),
+                _ => src_type,
+            };
+            let boxed = self.program.ty(box_type);
+            let Some(name) = self.program.type_symbol(box_type.0 as usize) else {
+                return unsupported("a type with no descriptor symbol");
+            };
+            if boxed == ts {
+                return self.box_value(dst, src, boxed, &name);
+            }
+            if boxed == Ty::I64 && matches!(ts, Ty::I32 | Ty::Bool) {
+                // Null<Int64> from an Int widens first.
+                let tmp = self.tmp_local;
+                self.data_address(&name, 0)?;
+                let alloc = self.runtime("hlp_alloc_dynamic")?;
+                self.call(alloc);
+                self.emit(&I::LocalSet(tmp));
+                self.emit(&I::LocalGet(tmp));
+                self.get(src);
+                self.emit(&I::I64ExtendI32S);
+                self.store_kind(Ty::I64, VDYNAMIC_VALUE)?;
+                self.emit(&I::LocalGet(tmp));
+                self.set(dst);
+                return Ok(());
+            }
+            return unsupported("a number boxed as a different kind of number");
+        }
+        if ts == Ty::Ptr && numeric(td) {
+            return unsupported("a reference cast to a number, which needs the value in memory");
+        }
+        if ts == Ty::Ptr && matches!(src_shape, Shape::Dyn | Shape::Null) {
+            return unsupported("a Dynamic cast to a reference, which needs the value in memory");
+        }
+        let class_cast = src_type != dst_type
+            && matches!(
+                (src_shape, dst_shape),
+                (Shape::Obj, Shape::Obj)
+                    | (Shape::Struct, Shape::Struct)
+                    | (Shape::Virtual, Shape::Obj | Shape::Struct | Shape::Virtual)
+            );
+        if class_cast {
+            return unsupported("a class cast, which needs the value in memory");
+        }
+        if ts != td {
+            return unsupported("a cast between different kinds");
+        }
+        self.get(src);
         self.set(dst);
         Ok(())
     }

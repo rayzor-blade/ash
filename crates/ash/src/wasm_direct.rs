@@ -6,7 +6,7 @@
 //! either side of the link name it by that.
 use crate::bytecode::DecodedBytecode;
 use crate::hl_bindings as hl;
-use ash_wasm_emit::{Alloc, Input, ObjectEmitted, Options, Program, Sig, Ty};
+use ash_wasm_emit::{Alloc, Input, ObjectEmitted, Options, Program, Shape, Sig, Ty};
 use std::collections::HashMap;
 
 pub struct BytecodeProgram<'a> {
@@ -106,6 +106,37 @@ impl Program for BytecodeProgram<'_> {
     fn array_elem_size(&self, t: air::v2::ir::TypeRef) -> Option<u32> {
         let kind = self.bc.types.get(t.0 as usize)?.kind;
         u32::try_from(crate::layout::array_elem_size_for(kind, 4)).ok()
+    }
+
+    fn shape(&self, t: air::v2::ir::TypeRef) -> Shape {
+        let Some(info) = self.bc.types.get(t.0 as usize) else {
+            return Shape::Other;
+        };
+        let k = info.kind;
+        if k == hl::hl_type_kind_HDYN {
+            Shape::Dyn
+        } else if k == hl::hl_type_kind_HNULL {
+            Shape::Null
+        } else if k == hl::hl_type_kind_HVIRTUAL {
+            Shape::Virtual
+        } else if k == hl::hl_type_kind_HOBJ {
+            Shape::Obj
+        } else if k == hl::hl_type_kind_HSTRUCT {
+            Shape::Struct
+        } else if k == hl::hl_type_kind_HBYTES
+            || k == hl::hl_type_kind_HTYPE
+            || k == hl::hl_type_kind_HREF
+            || k == hl::hl_type_kind_HABSTRACT
+        {
+            Shape::Boxed
+        } else {
+            Shape::Other
+        }
+    }
+
+    fn null_param(&self, t: air::v2::ir::TypeRef) -> Option<air::v2::ir::TypeRef> {
+        let p = self.bc.types.get(t.0 as usize)?.tparam.as_ref()?;
+        Some(air::v2::ir::TypeRef(p.0 as u32))
     }
 
     fn functions_symbol(&self) -> Option<String> {

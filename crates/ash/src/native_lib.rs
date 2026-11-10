@@ -1183,7 +1183,16 @@ impl NativeFunctionResolver {
         };
 
         unsafe {
-            let symbol: Symbol<*mut c_void> = library.get(function_name.as_bytes())?;
+            let symbol: Symbol<*mut c_void> =
+                library.get(function_name.as_bytes()).map_err(|cause| {
+                    anyhow!(
+                        "{clean_lib}@{function_name} is not exported by the loaded \
+                         {clean_lib}.hdll.\n\
+                         The program was built against a {clean_lib} that has it; use the \
+                         {clean_lib}.hdll from that build.\n\
+                         Loader said: {cause}"
+                    )
+                })?;
 
             // HDLLs use DEFINE_PRIM resolver protocol:
             // hlp_xxx is a resolver: fn(*mut *const c_char) -> *mut c_void

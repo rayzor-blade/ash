@@ -662,12 +662,21 @@ def wasm_module_for(ash: str, program: pathlib.Path, timeout: int,
     # is the piece that changes without the compiler changing: a std fix is
     # invisible to a comparison against `ash` alone.
     runtime = pathlib.Path(ash).parent / WASM_TRIPLE / "ash_runtime.o"
+    # What the build ran under. A switch such as ASH_WASM_DIRECT changes the
+    # module without touching any file the comparison below looks at, so it is
+    # recorded beside the module and a different set is a stale module.
+    build_env = "\n".join(
+        f"{k}={v}"
+        for k, v in sorted({**os.environ, **extra}.items())
+        if k.startswith("ASH_")
+    )
+    stamp = out.with_name(out.name + ".env")
     try:
         built = out.stat().st_mtime
         inputs = [program.stat().st_mtime, os.stat(ash).st_mtime]
         if runtime.is_file():
             inputs.append(runtime.stat().st_mtime)
-        if all(built > t for t in inputs):
+        if all(built > t for t in inputs) and stamp.read_text() == build_env:
             _WASM_MODULES[key] = str(out)
             return _WASM_MODULES[key]
     except FileNotFoundError:
@@ -693,6 +702,7 @@ def wasm_module_for(ash: str, program: pathlib.Path, timeout: int,
             f"building {program.name} for {WASM_TRIPLE} failed: "
             + (why[-1] if why else "no output"))
         raise RuntimeError(_WASM_FAILURES[key])
+    stamp.write_text(build_env)
     _WASM_MODULES[key] = str(out)
     return str(out)
 

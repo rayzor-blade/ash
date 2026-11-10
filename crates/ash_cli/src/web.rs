@@ -389,6 +389,7 @@ fn send_with(
 }
 
 /// Write the page that runs `module` in a browser beside it, and say so.
+#[cfg(feature = "llvm")]
 pub fn write_page(module: &Path, quiet: bool) -> Result<()> {
     let written = ash_page::write_page(module)
         .with_context(|| format!("writing the page beside {}", module.display()))?;

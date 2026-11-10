@@ -32,7 +32,8 @@ pub use wasm_encoder;
 
 use air::v2::CfgInfo;
 use air::v2::ir::{
-    BinOp, CastKind, CondKind, Function, Instr, IntrinsicKind, Terminator, TypeRef, UnOp, ValueId,
+    BinOp, CastKind, CondKind, Function, Instr, IntrinsicKind, MemAccess, Terminator, TypeRef, UnOp,
+    ValueId,
 };
 use std::collections::HashMap;
 use wasm_encoder as we;
@@ -105,6 +106,8 @@ pub trait Program {
     fn invalid_comparison(&self) -> i32;
     /// How `New` allocates a value of this type.
     fn alloc(&self, type_index: usize) -> Option<Alloc>;
+    /// The bytes one element of an array whose elements have type `t` takes.
+    fn array_elem_size(&self, t: TypeRef) -> Option<u32>;
     /// Whether a store of a reference into the heap must mark its card for
     /// the generational collector.
     fn write_barriers(&self) -> bool;
@@ -407,6 +410,10 @@ const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
 /// followed by one pointer per field.
 const VVIRTUAL_VALUE: u64 = 4;
 const VVIRTUAL_FIELDS: u64 = 12;
+/// Where a `varray` keeps its element count and its first element on wasm32:
+/// `{ t, at, size, pad }` and then the elements.
+const VARRAY_SIZE: u64 = 8;
+const VARRAY_DATA: u64 = 16;
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
 
@@ -1168,6 +1175,19 @@ impl<P: Program> Fx<'_, P> {
             Instr::Cast { kind, dst, src } => self.cast(*kind, *dst, *src)?,
             Instr::Call { dst, fun, args } => self.call_instr(*dst, *fun, args)?,
             Instr::Intrinsic { kind, dst, args, .. } => self.intrinsic(*kind, *dst, args)?,
+            Instr::ArraySize { dst, array } => self.array_size(*dst, *array)?,
+            Instr::MemGet {
+                kind,
+                dst,
+                base,
+                index,
+            } => self.mem_get(*kind, *dst, *base, *index)?,
+            Instr::MemSet {
+                kind,
+                base,
+                index,
+                src,
+            } => self.mem_set(*kind, *base, *index, *src)?,
             Instr::Fma { dst, a, b, c } => {
                 let t = self.ty(*dst);
                 if !t.is_float() || self.ty(*a) != t || self.ty(*b) != t || self.ty(*c) != t {
@@ -1698,6 +1718,138 @@ impl<P: Program> Fx<'_, P> {
         }
         self.set(dst);
         Ok(())
+    }
+
+    /// `dst = array.size`, which is 0 for no array.
+    fn array_size(&mut self, dst: ValueId, array: ValueId) -> Res<()> {
+        if self.ty(array) != Ty::Ptr || self.ty(dst) != Ty::I32 {
+            return unsupported("an array size on other than a reference");
+        }
+        self.get(array);
+        self.emit(&I::I32Eqz);
+        self.emit(&I::If(BlockType::Result(ValType::I32)));
+        self.emit(&I::I32Const(0));
+        self.emit(&I::Else);
+        self.get(array);
+        self.emit(&I::I32Load(we::MemArg {
+            offset: VARRAY_SIZE,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::End);
+        self.set(dst);
+        Ok(())
+    }
+
+    /// The address of element `index` of the array `base`, less the header.
+    fn element_address(&mut self, base: ValueId, index: ValueId, size: u32) {
+        self.get(base);
+        self.get(index);
+        if size != 1 {
+            self.emit(&I::I32Const(size as i32));
+            self.emit(&I::I32Mul);
+        }
+        self.emit(&I::I32Add);
+    }
+
+    /// Where the access `kind` of `base[index]` lands, as an address on the
+    /// stack and the offset to add to it. `elem` is the element's type for an
+    /// array access.
+    fn access_address(
+        &mut self,
+        kind: MemAccess,
+        base: ValueId,
+        index: ValueId,
+        elem: ValueId,
+    ) -> Res<u64> {
+        if self.ty(base) != Ty::Ptr || self.ty(index) != Ty::I32 {
+            return unsupported("a memory access with the wrong operand types");
+        }
+        if kind == MemAccess::Array {
+            let t = self.f.values[elem.0 as usize].ty;
+            let Some(size) = self.program.array_elem_size(t) else {
+                return unsupported("an array of elements with no known size");
+            };
+            self.element_address(base, index, size);
+            Ok(VARRAY_DATA)
+        } else {
+            // A byte offset from the base.
+            self.element_address(base, index, 1);
+            Ok(0)
+        }
+    }
+
+    fn mem_get(&mut self, kind: MemAccess, dst: ValueId, base: ValueId, index: ValueId) -> Res<()> {
+        let want = self.ty(dst);
+        let at = self.access_address(kind, base, index, dst)?;
+        let mem = |align: u32| we::MemArg {
+            offset: at,
+            align,
+            memory_index: 0,
+        };
+        match kind {
+            MemAccess::I8 | MemAccess::I16 => {
+                if want != Ty::I32 {
+                    return unsupported("a narrow read into other than an integer");
+                }
+                if kind == MemAccess::I8 {
+                    self.emit(&I::I32Load8U(mem(0)));
+                } else {
+                    self.emit(&I::I32Load16U(mem(1)));
+                }
+            }
+            MemAccess::Mem | MemAccess::Array => self.load_kind(want, at)?,
+        }
+        self.set(dst);
+        Ok(())
+    }
+
+    fn mem_set(&mut self, kind: MemAccess, base: ValueId, index: ValueId, src: ValueId) -> Res<()> {
+        let value = self.ty(src);
+        let at = self.access_address(kind, base, index, src)?;
+        match kind {
+            MemAccess::I8 | MemAccess::I16 => {
+                if !matches!(value, Ty::I32 | Ty::Bool) {
+                    return unsupported("a narrow write of other than an integer");
+                }
+                self.get(src);
+                if kind == MemAccess::I8 {
+                    self.emit(&I::I32Store8(we::MemArg {
+                        offset: at,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                } else {
+                    self.emit(&I::I32Store16(we::MemArg {
+                        offset: at,
+                        align: 1,
+                        memory_index: 0,
+                    }));
+                }
+                Ok(())
+            }
+            MemAccess::Mem | MemAccess::Array => {
+                self.get(src);
+                self.store_kind(value, at)?;
+                self.write_barrier(
+                    |fx| {
+                        // The address was consumed by the store; build it again.
+                        let size = if kind == MemAccess::Array {
+                            let t = fx.f.values[src.0 as usize].ty;
+                            fx.program.array_elem_size(t).unwrap_or(1)
+                        } else {
+                            1
+                        };
+                        fx.element_address(base, index, size);
+                        if at != 0 {
+                            fx.emit(&I::I32Const(at as i32));
+                            fx.emit(&I::I32Add);
+                        }
+                    },
+                    src,
+                )
+            }
+        }
     }
 
     /// A recognized stdlib operation as the wasm instructions that compute it.

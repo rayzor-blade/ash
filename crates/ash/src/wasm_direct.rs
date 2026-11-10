@@ -101,6 +101,11 @@ impl Program for BytecodeProgram<'_> {
         }
     }
 
+    fn array_elem_size(&self, t: air::v2::ir::TypeRef) -> Option<u32> {
+        let kind = self.bc.types.get(t.0 as usize)?.kind;
+        u32::try_from(crate::layout::array_elem_size_for(kind, 4)).ok()
+    }
+
     fn virtual_field(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<i32> {
         let t = self.bc.types.get(obj_ty.0 as usize)?;
         if t.kind != hl::hl_type_kind_HVIRTUAL {

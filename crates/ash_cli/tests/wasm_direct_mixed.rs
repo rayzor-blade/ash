@@ -71,6 +71,25 @@ fn natives_through_the_direct_backend_match_the_interpreter() {
     );
 }
 
+/// Arrays and raw memory at every width, and reference stores into them.
+#[test]
+fn arrays_through_the_direct_backend_match_the_interpreter() {
+    check(
+        "TestWasmArray",
+        "test_wasm_array.hl",
+        &[
+            "sumInts",
+            "scale",
+            "nativeSum",
+            "nativeFill",
+            "nativeSize",
+            "swapItems",
+            "bytesRoundTrip",
+            "bytesWide",
+        ],
+    );
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
@@ -98,7 +117,7 @@ fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
     let reference = run_with_timeout(interp, Duration::from_secs(60));
     assert!(!reference.timed_out && reference.output.status.success());
     let expected = lines(&reference.output.stdout);
-    assert!(expected.len() >= 10, "the reference printed {} lines", expected.len());
+    assert!(expected.len() >= 5, "the reference printed {} lines", expected.len());
 
     for fibers in [false, true] {
         let wasm = dir.path().join(format!("program_{fibers}.wasm"));

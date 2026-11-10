@@ -4,7 +4,7 @@
 //! without the fiber transform.
 mod common;
 
-use common::{ash_cli_bin, haxe_available, render_output, run_with_timeout, tests_dir};
+use common::{ash_cli_bin, haxe_available, render_output, run_with_timeout, static_findex, tests_dir};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -19,6 +19,16 @@ fn runtime_object() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The function indices the build log says went direct.
+fn direct_list(log: &str) -> Vec<usize> {
+    let line = log.lines().find(|l| l.starts_with("[aot] direct: [")).unwrap_or("");
+    line.trim_start_matches("[aot] direct: [")
+        .trim_end_matches(']')
+        .split(',')
+        .filter_map(|n| n.trim().parse().ok())
+        .collect()
+}
+
 fn lines(stdout: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stdout)
         .lines()
@@ -29,17 +39,30 @@ fn lines(stdout: &[u8]) -> Vec<String> {
 
 #[test]
 fn mixed_direct_and_llvm_wasm_matches_the_interpreter() {
-    check("TestWasmNumeric", "test_wasm_numeric.hl");
+    check("TestWasmNumeric", "test_wasm_numeric.hl", &[]);
 }
 
 /// References: equality by value, catchable null checks, fields of every kind,
 /// global slots and type constants.
 #[test]
 fn references_through_the_direct_backend_match_the_interpreter() {
-    check("TestWasmDynamic", "test_wasm_dynamic.hl");
+    check("TestWasmDynamic", "test_wasm_dynamic.hl", &[]);
 }
 
-fn check(main_class: &str, fallback: &str) {
+/// Fields of structural types: found by pointer, and by name when the object
+/// behind the structure lacks them.
+#[test]
+fn virtual_fields_through_the_direct_backend_match_the_interpreter() {
+    check(
+        "TestWasmVirtual",
+        "test_wasm_virtual.hl",
+        &["total", "assign", "link"],
+    );
+}
+
+/// Build `main_class` and run it. `must_be_direct` names static methods of the class
+/// that must have gone through the direct backend.
+fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
     if runtime_object().is_none() {
         eprintln!("skipped: no wasm runtime object for {TARGET}");
         return;
@@ -64,7 +87,7 @@ fn check(main_class: &str, fallback: &str) {
     let reference = run_with_timeout(interp, Duration::from_secs(60));
     assert!(!reference.timed_out && reference.output.status.success());
     let expected = lines(&reference.output.stdout);
-    assert!(expected.len() > 15, "the reference printed {} lines", expected.len());
+    assert!(expected.len() >= 10, "the reference printed {} lines", expected.len());
 
     for fibers in [false, true] {
         let wasm = dir.path().join(format!("program_{fibers}.wasm"));
@@ -93,6 +116,17 @@ fn check(main_class: &str, fallback: &str) {
             direct.matches(',').count() >= 5,
             "fibers={fibers}: too few functions went direct: {direct}"
         );
+
+        ash_core::native_lib::init_std_library().unwrap();
+        let bc = ash_core::bytecode::BytecodeDecoder::decode(&hl).unwrap();
+        for name in must_be_direct {
+            let findex = static_findex(&bc, main_class, name)
+                .unwrap_or_else(|| panic!("no static {name} in {main_class}"));
+            assert!(
+                direct_list(&log).contains(&findex),
+                "fibers={fibers}: {name} (f{findex}) was not emitted directly: {direct}"
+            );
+        }
 
         let mut run = Command::new(ash_cli_bin());
         run.arg("run").arg(&wasm);

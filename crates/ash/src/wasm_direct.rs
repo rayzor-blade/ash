@@ -85,6 +85,14 @@ impl Program for BytecodeProgram<'_> {
             .unwrap_or_else(|| format!("Fun_{findex}"))
     }
 
+    fn virtual_field(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<i32> {
+        let t = self.bc.types.get(obj_ty.0 as usize)?;
+        if t.kind != hl::hl_type_kind_HVIRTUAL {
+            return None;
+        }
+        Some(t.virt.as_ref()?.fields.get(field)?.hashed_name as i32)
+    }
+
     fn field(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<(u32, Ty)> {
         let index = obj_ty.0 as usize;
         let k = self.bc.types.get(index)?.kind;

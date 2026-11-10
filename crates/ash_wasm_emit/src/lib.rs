@@ -90,6 +90,9 @@ pub trait Program {
     /// from the object, and the kind it was declared with. `None` for a type
     /// whose fields are not at fixed offsets (a virtual, say).
     fn field(&self, obj_ty: TypeRef, field: usize) -> Option<(u32, Ty)>;
+    /// The hashed name of field `field` of the virtual type `obj_ty`; `None`
+    /// when the type is not a virtual or has no such field.
+    fn virtual_field(&self, obj_ty: TypeRef, field: usize) -> Option<i32>;
     /// The symbol of the table of global slots, one pointer wide each.
     fn globals_symbol(&self) -> Option<String>;
     /// The symbol of the descriptor for type `type_index`.
@@ -379,7 +382,31 @@ const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
     ("hlp_alloc_dynobj", &[], &[ValType::I32]),
     ("hlp_alloc_virtual", &[ValType::I32], &[ValType::I32]),
     ("hlp_gc_write_barrier", &[ValType::I32], &[]),
+    ("hlp_dyn_getd", &[ValType::I32, ValType::I32], &[ValType::F64]),
+    ("hlp_dyn_getf", &[ValType::I32, ValType::I32], &[ValType::F32]),
+    ("hlp_dyn_geti64", &[ValType::I32, ValType::I32], &[ValType::I64]),
+    ("hlp_dyn_geti", &[ValType::I32, ValType::I32, ValType::I32], &[ValType::I32]),
+    ("hlp_dyn_getp", &[ValType::I32, ValType::I32, ValType::I32], &[ValType::I32]),
+    ("hlp_dyn_setd", &[ValType::I32, ValType::I32, ValType::F64], &[]),
+    ("hlp_dyn_setf", &[ValType::I32, ValType::I32, ValType::F32], &[]),
+    ("hlp_dyn_seti64", &[ValType::I32, ValType::I32, ValType::I64], &[]),
+    (
+        "hlp_dyn_seti",
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[],
+    ),
+    (
+        "hlp_dyn_setp",
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[],
+    ),
 ];
+
+/// Where a virtual keeps the object it stands for, and its table of field
+/// pointers, as byte offsets on wasm32: `vvirtual` is `{ t, value, next }`
+/// followed by one pointer per field.
+const VVIRTUAL_VALUE: u64 = 4;
+const VVIRTUAL_FIELDS: u64 = 12;
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
 
@@ -1271,18 +1298,13 @@ impl<P: Program> Fx<'_, P> {
         Ok((offset, declared))
     }
 
-    fn field_get(&mut self, dst: ValueId, obj: ValueId, obj_ty: TypeRef, field: usize) -> Res<()> {
-        if self.ty(obj) != Ty::Ptr {
-            return unsupported("a field read from a non-reference");
-        }
-        let (offset, kind) = self.field_slot(obj_ty, field, dst)?;
-        let at = u64::from(offset);
+    /// Load a value of `kind` from the address on the stack plus `offset`.
+    fn load_kind(&mut self, kind: Ty, offset: u64) -> Res<()> {
         let mem = |align: u32| we::MemArg {
-            offset: at,
+            offset,
             align,
             memory_index: 0,
         };
-        self.get(obj);
         match kind {
             // Any nonzero byte is true, as the runtime reads it.
             Ty::Bool => {
@@ -1296,12 +1318,101 @@ impl<P: Program> Fx<'_, P> {
             Ty::F64 => self.emit(&I::F64Load(mem(3))),
             Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
         }
+        Ok(())
+    }
+
+    /// Store a value of `kind`, on the stack above its address, at `offset`.
+    fn store_kind(&mut self, kind: Ty, offset: u64) -> Res<()> {
+        let mem = |align: u32| we::MemArg {
+            offset,
+            align,
+            memory_index: 0,
+        };
+        match kind {
+            Ty::Bool => self.emit(&I::I32Store8(mem(0))),
+            Ty::I32 | Ty::Ptr => self.emit(&I::I32Store(mem(2))),
+            Ty::I64 => self.emit(&I::I64Store(mem(3))),
+            Ty::F32 => self.emit(&I::F32Store(mem(2))),
+            Ty::F64 => self.emit(&I::F64Store(mem(3))),
+            Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
+        }
+        Ok(())
+    }
+
+    fn field_get(&mut self, dst: ValueId, obj: ValueId, obj_ty: TypeRef, field: usize) -> Res<()> {
+        if self.ty(obj) != Ty::Ptr {
+            return unsupported("a field read from a non-reference");
+        }
+        if let Some(hash) = self.program.virtual_field(obj_ty, field) {
+            return self.virtual_get(dst, obj, field, hash);
+        }
+        let (offset, kind) = self.field_slot(obj_ty, field, dst)?;
+        self.get(obj);
+        self.load_kind(kind, u64::from(offset))?;
         self.set(dst);
         Ok(())
     }
 
-    /// After a store of `src` to the address on top of the stack... the caller
-    /// has the address in `addr`: mark its card when the collector needs it.
+    /// The descriptor of the type of `v`, pushed as an address.
+    fn type_of_value(&mut self, v: ValueId) -> Res<()> {
+        let type_index = self.f.values[v.0 as usize].ty.0 as usize;
+        let Some(name) = self.program.type_symbol(type_index) else {
+            return unsupported("a type with no descriptor symbol");
+        };
+        self.data_address(&name, 0)
+    }
+
+    /// A field of a virtual: through its pointer in the field table when the
+    /// virtual has one, and by name on the object it stands for when not.
+    fn virtual_get(&mut self, dst: ValueId, obj: ValueId, field: usize, hash: i32) -> Res<()> {
+        let kind = self.ty(dst);
+        if matches!(kind, Ty::Void | Ty::Other) {
+            return unsupported("a virtual field of no storable kind");
+        }
+        let slot = VVIRTUAL_FIELDS + 4 * field as u64;
+        let tmp = self.tmp_local;
+        self.get(obj);
+        self.emit(&I::I32Load(we::MemArg {
+            offset: slot,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::LocalTee(tmp));
+        self.emit(&I::If(BlockType::Empty));
+        self.emit(&I::LocalGet(tmp));
+        self.load_kind(kind, 0)?;
+        self.set(dst);
+        self.emit(&I::Else);
+        self.get(obj);
+        self.emit(&I::I32Load(we::MemArg {
+            offset: VVIRTUAL_VALUE,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::I32Const(hash));
+        let getter = match kind {
+            Ty::F64 => "hlp_dyn_getd",
+            Ty::F32 => "hlp_dyn_getf",
+            Ty::I64 => "hlp_dyn_geti64",
+            Ty::Bool | Ty::I32 => "hlp_dyn_geti",
+            _ => "hlp_dyn_getp",
+        };
+        if !matches!(kind, Ty::F64 | Ty::F32 | Ty::I64) {
+            self.type_of_value(dst)?;
+        }
+        let getter = self.runtime(getter)?;
+        self.call(getter);
+        if kind == Ty::Bool {
+            self.emit(&I::I32Const(0));
+            self.emit(&I::I32Ne);
+        }
+        self.set(dst);
+        self.emit(&I::End);
+        Ok(())
+    }
+
+    /// After a store of `src`, mark the card of the address `addr_of` pushes
+    /// when the collector needs it.
     fn write_barrier(&mut self, addr_of: impl FnOnce(&mut Self), src: ValueId) -> Res<()> {
         if self.ty(src) != Ty::Ptr
             || !self.program.write_barriers()
@@ -1319,23 +1430,13 @@ impl<P: Program> Fx<'_, P> {
         if self.ty(obj) != Ty::Ptr {
             return unsupported("a field write to a non-reference");
         }
+        if let Some(hash) = self.program.virtual_field(obj_ty, field) {
+            return self.virtual_set(obj, field, src, hash);
+        }
         let (offset, kind) = self.field_slot(obj_ty, field, src)?;
-        let at = u64::from(offset);
-        let mem = |align: u32| we::MemArg {
-            offset: at,
-            align,
-            memory_index: 0,
-        };
         self.get(obj);
         self.get(src);
-        match kind {
-            Ty::Bool => self.emit(&I::I32Store8(mem(0))),
-            Ty::I32 | Ty::Ptr => self.emit(&I::I32Store(mem(2))),
-            Ty::I64 => self.emit(&I::I64Store(mem(3))),
-            Ty::F32 => self.emit(&I::F32Store(mem(2))),
-            Ty::F64 => self.emit(&I::F64Store(mem(3))),
-            Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
-        }
+        self.store_kind(kind, u64::from(offset))?;
         self.write_barrier(
             |fx| {
                 fx.get(obj);
@@ -1344,6 +1445,50 @@ impl<P: Program> Fx<'_, P> {
             },
             src,
         )
+    }
+
+    fn virtual_set(&mut self, obj: ValueId, field: usize, src: ValueId, hash: i32) -> Res<()> {
+        let kind = self.ty(src);
+        if matches!(kind, Ty::Void | Ty::Other) {
+            return unsupported("a virtual field of no storable kind");
+        }
+        let slot = VVIRTUAL_FIELDS + 4 * field as u64;
+        let tmp = self.tmp_local;
+        self.get(obj);
+        self.emit(&I::I32Load(we::MemArg {
+            offset: slot,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::LocalTee(tmp));
+        self.emit(&I::If(BlockType::Empty));
+        self.emit(&I::LocalGet(tmp));
+        self.get(src);
+        self.store_kind(kind, 0)?;
+        self.write_barrier(|fx| fx.emit(&I::LocalGet(tmp)), src)?;
+        self.emit(&I::Else);
+        self.get(obj);
+        self.emit(&I::I32Load(we::MemArg {
+            offset: VVIRTUAL_VALUE,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::I32Const(hash));
+        let setter = match kind {
+            Ty::F64 => "hlp_dyn_setd",
+            Ty::F32 => "hlp_dyn_setf",
+            Ty::I64 => "hlp_dyn_seti64",
+            Ty::Bool | Ty::I32 => "hlp_dyn_seti",
+            _ => "hlp_dyn_setp",
+        };
+        if !matches!(kind, Ty::F64 | Ty::F32 | Ty::I64) {
+            self.type_of_value(src)?;
+        }
+        self.get(src);
+        let setter = self.runtime(setter)?;
+        self.call(setter);
+        self.emit(&I::End);
+        Ok(())
     }
 
     fn bin_op(&mut self, op: BinOp, dst: ValueId, a: ValueId, b: ValueId) -> Res<()> {

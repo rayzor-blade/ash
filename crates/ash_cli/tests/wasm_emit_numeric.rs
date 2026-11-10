@@ -6,32 +6,9 @@ mod common;
 use ash_core::bytecode::{BytecodeDecoder, DecodedBytecode};
 use ash_core::wasm_direct::BytecodeProgram;
 use ash_wasm_emit::{Input, Options, Program, Sig, emit_module_with};
-use common::{ash_cli_bin, haxe_available, render_output, run_with_timeout, tests_dir};
+use common::{ash_cli_bin, haxe_available, render_output, run_with_timeout, static_findex, tests_dir};
 use std::process::Command;
 use std::time::Duration;
-
-/// The function a class's static method is bound to. A binding names its
-/// field by absolute index, which counts the fields of every supertype first.
-fn static_findex(bc: &DecodedBytecode, class: &str, name: &str) -> Option<usize> {
-    let want = format!("${class}");
-    let t = bc
-        .types
-        .iter()
-        .find(|t| t.obj.as_ref().is_some_and(|o| o.name == want))?;
-    let o = t.obj.as_ref()?;
-    let mut inherited = 0;
-    let mut up = o.super_.clone();
-    while let Some(s) = up {
-        let parent = bc.types[s.0].obj.as_ref()?;
-        inherited += parent.fields.len();
-        up = parent.super_.clone();
-    }
-    let field = inherited + o.fields.iter().position(|f| f.name == name)?;
-    o.bindings
-        .chunks(2)
-        .find(|p| p[0] as usize == field)
-        .map(|p| p[1] as usize)
-}
 
 /// The module the emitter makes from every numeric function in `hl`.
 fn emit(hl: &std::path::Path, opts: Options) -> (DecodedBytecode, ash_wasm_emit::Emitted) {

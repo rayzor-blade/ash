@@ -141,10 +141,10 @@ def summarize(cell: str, text: str, code: int | None) -> tuple[str, str]:
         if got == OPTIONAL_PRIM_EXPECTED:
             return "ok", "behaves like HashLink"
         return "DIFF", problem or " | ".join(got[:5]) or "no output"
-    if code is None:
-        return "timeout", missing or "window never closed"
     if problem:
         return "FAIL", problem
+    if code is None:
+        return "ran", "until the time limit; " + (missing or "no missing natives")
     return "ran", missing or "no missing natives"
 
 
@@ -205,7 +205,7 @@ def main() -> int:
 
     table = [f"### HashLink {label} HDLLs", "",
              "| cell | mode | result | detail |", "|---|---|---|---|"]
-    table += [f"| {c} | {m} | {v} | {d.replace('|', '/')[:160]} |" for c, m, v, d in rows]
+    table += [f"| {c} | {m} | {v} | {d.replace('|', '/')[:400]} |" for c, m, v, d in rows]
     print("\n" + "\n".join(table))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

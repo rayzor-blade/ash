@@ -192,8 +192,26 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         .and_then(|v| v.parse().ok())
         .unwrap_or(500);
     let mut slowest: Vec<(u128, usize)> = Vec::new();
+    // The direct wasm backend takes the functions it can and leaves the rest to
+    // LLVM. Opt-in while it grows; see `wasm_direct`.
+    let direct = if crate::llvm::aot_link::is_wasm_triple(&triple)
+        && std::env::var_os("ASH_WASM_DIRECT").is_some()
+    {
+        Some(emit_direct_object(&mut jit, &triple, &findexes, out, quiet)?)
+    } else {
+        None
+    };
+    let direct_set: std::collections::HashSet<usize> = direct
+        .as_ref()
+        .map(|d| d.functions.iter().copied().collect())
+        .unwrap_or_default();
     let began = std::time::Instant::now();
     for fx in &findexes {
+        if direct_set.contains(fx) {
+            lowered += 1;
+            crate::progress::advance(1);
+            continue;
+        }
         let began = std::time::Instant::now();
         let outcome = jit.promote_function_strict(*fx);
         let took = began.elapsed().as_millis();
@@ -402,6 +420,9 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         } else {
             crate::llvm::aot_link::Runtime::Static
         };
+        if let Some(d) = &direct {
+            objects.push(d.path.clone());
+        }
         let scratch_objects = objects.clone();
         objects.extend(language_objects);
         let began = std::time::Instant::now();
@@ -431,4 +452,64 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         crate::air_disk_cache::stage("link", began.elapsed());
     }
     Ok(())
+}
+
+/// What the direct backend emitted for this build.
+struct DirectObject {
+    path: PathBuf,
+    functions: Vec<usize>,
+}
+
+/// Emit the functions the direct wasm backend covers as an object beside `out`,
+/// and arrange the LLVM module so the two link: every direct function is
+/// declared (which puts it in the dynamic-call table), and the functions the
+/// object calls stay visible to the linker.
+fn emit_direct_object(
+    jit: &mut crate::llvm::module::JITModule<'_>,
+    triple: &str,
+    findexes: &[usize],
+    out: &std::path::Path,
+    quiet: bool,
+) -> anyhow::Result<DirectObject> {
+    let began = std::time::Instant::now();
+    let mut symbols = std::collections::HashMap::new();
+    for fx in findexes {
+        symbols.insert(*fx, jit.function_symbol(*fx)?);
+    }
+    // `ASH_WASM_DIRECT` takes any value to turn the backend on; `noshadow`,
+    // `nopolls` and `log` in it are measurement switches, and a build with
+    // either of the first two is not sound to run.
+    let mode = std::env::var("ASH_WASM_DIRECT").unwrap_or_default();
+    let polls = !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"))
+        && !mode.contains("nopolls");
+    let shadow = crate::target_abi::TargetAbi::for_triple(triple)?.shadow_call_stack
+        && !mode.contains("noshadow");
+    let emitted = crate::wasm_direct::emit_object(
+        &jit.bytecode,
+        &symbols,
+        ash_wasm_emit::Options { polls, shadow },
+    );
+    jit.keep_external(emitted.imports.iter().filter_map(|f| symbols.get(f).cloned()));
+    jit.define_elsewhere(emitted.functions.iter().copied());
+    let path = out.with_extension("direct.o");
+    std::fs::write(&path, &emitted.bytes)?;
+    if mode.contains("log") {
+        eprintln!("[aot] direct: {:?}", emitted.functions);
+        for (f, why) in emitted.skipped.iter().take(40) {
+            eprintln!("[aot] not direct: f{f}: {why}");
+        }
+    }
+    if !quiet {
+        eprintln!(
+            "[aot] direct wasm backend: {} of {} functions, {} bytes",
+            emitted.functions.len(),
+            findexes.len(),
+            emitted.bytes.len()
+        );
+    }
+    crate::air_disk_cache::stage("direct_emit", began.elapsed());
+    Ok(DirectObject {
+        path,
+        functions: emitted.functions,
+    })
 }

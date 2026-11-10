@@ -4,42 +4,11 @@
 mod common;
 
 use ash_core::bytecode::{BytecodeDecoder, DecodedBytecode};
-use ash_core::hl_bindings as hl;
-use ash_wasm_emit::{Input, Options, Program, Sig, Ty, emit_module_with};
+use ash_core::wasm_direct::BytecodeProgram;
+use ash_wasm_emit::{Input, Options, Program, Sig, emit_module_with};
 use common::{ash_cli_bin, haxe_available, render_output, run_with_timeout, tests_dir};
 use std::process::Command;
 use std::time::Duration;
-
-struct Prog<'a>(&'a DecodedBytecode);
-
-impl Program for Prog<'_> {
-    fn ty(&self, t: air::v2::ir::TypeRef) -> Ty {
-        let k = self.0.types[t.0 as usize].kind;
-        if k == hl::hl_type_kind_HVOID {
-            Ty::Void
-        } else if k == hl::hl_type_kind_HBOOL {
-            Ty::Bool
-        } else if k == hl::hl_type_kind_HI32 {
-            Ty::I32
-        } else if k == hl::hl_type_kind_HI64 {
-            Ty::I64
-        } else if k == hl::hl_type_kind_HF32 {
-            Ty::F32
-        } else if k == hl::hl_type_kind_HF64 {
-            Ty::F64
-        } else {
-            Ty::Other
-        }
-    }
-
-    fn int(&self, idx: usize) -> Option<i32> {
-        self.0.ints.get(idx).copied()
-    }
-
-    fn float(&self, idx: usize) -> Option<f64> {
-        self.0.floats.get(idx).copied()
-    }
-}
 
 /// The function a class's static method is bound to. A binding names its
 /// field by absolute index, which counts the fields of every supertype first.
@@ -70,7 +39,11 @@ fn emit(hl: &std::path::Path, opts: Options) -> (DecodedBytecode, ash_wasm_emit:
     let bc = BytecodeDecoder::decode(hl).unwrap();
     let emitted = {
         let module = ash_core::air_pipeline::AshModule::new(&bc);
-        let prog = Prog(&bc);
+        let symbols = std::collections::HashMap::new();
+        let prog = BytecodeProgram {
+            bc: &bc,
+            symbols: &symbols,
+        };
         let mut optimized = Vec::new();
         for f in &bc.functions {
             if let Ok(o) = ash_core::air_pipeline::optimized(&module, f) {

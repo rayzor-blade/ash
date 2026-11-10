@@ -43,6 +43,7 @@ memchr = "2.7.4"
 byteorder = {workspace=true}
 ash_macro = {workspace=true}
 air = { path = "../air", features = ["serde"] }
+ash_wasm_emit = { path = "../ash_wasm_emit" }
 libc = "0.2.158"
 # Reading the line table MCJIT loads beside a promoted body (llvm/lines.rs).
 # The same version wasmtime already pins, so no second copy.
@@ -91,6 +92,10 @@ required-features = ["llvm"]
 
 [[example]]
 name = "middle_end_target"
+required-features = ["llvm"]
+
+[[example]]
+name = "wasm_obj_dump"
 required-features = ["llvm"]
 
 

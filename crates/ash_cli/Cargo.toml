@@ -54,3 +54,4 @@ tempfile = "3.2"
 ash_wasm_emit = { path = "../ash_wasm_emit" }
 air = { path = "../air" }
 wasmtime = "43"
+ash_wasm_link = { path = "../ash_wasm_link" }

@@ -25,6 +25,11 @@
 //! (`(file << 32) | line` stored into a frame per function).
 #![forbid(unsafe_code)]
 
+pub mod object;
+
+/// The encoder the instructions of [`object::Body`] come from.
+pub use wasm_encoder;
+
 use air::v2::CfgInfo;
 use air::v2::ir::{
     BinOp, CastKind, CondKind, Function, Instr, Terminator, TypeRef, UnOp, ValueId,
@@ -72,6 +77,11 @@ pub trait Program {
     fn int(&self, idx: usize) -> Option<i32>;
     /// An entry of the float constant pool.
     fn float(&self, idx: usize) -> Option<f64>;
+    /// The symbol a function is known by to the linker, which is what an
+    /// object defines for it and what a caller in another object names.
+    fn symbol(&self, findex: usize) -> String;
+    /// The signature of any function of the program, emitted here or not.
+    fn signature(&self, findex: usize) -> Option<Sig>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +150,14 @@ pub fn emit_module<P: Program>(program: &P, inputs: &[Input]) -> Emitted {
 
 /// [`emit_module`] with polls and shadow frames as asked.
 pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options) -> Emitted {
+    let module_rt = Runtime {
+        fma64: Ref::index(FMA64),
+        fma32: Ref::index(FMA32),
+        push: Ref::index(SHADOW_PUSH),
+        pop: Ref::index(SHADOW_POP),
+        poll: Ref::index(POLL_CHECK),
+        epoch: None,
+    };
     // First pass: every input is assumed callable, to learn which fail on
     // their own and whom they call.
     let provisional: HashMap<usize, Callee> = inputs
@@ -149,17 +167,18 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
             (
                 inp.findex,
                 Callee {
-                    index: FIRST + i as u32,
+                    to: Ref::index(FIRST + i as u32),
                     sig: inp.sig.clone(),
                 },
             )
         })
         .collect();
+    let first = |findex: usize| provisional.get(&findex).cloned();
     let mut failure: Vec<Option<String>> = vec![None; inputs.len()];
     let mut callers: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, inp) in inputs.iter().enumerate() {
-        match emit_function(program, inp, &provisional, opts) {
-            Ok((_, called)) => {
+        match emit_function(program, inp, &first, &module_rt, opts) {
+            Ok((_, called, _)) => {
                 for callee in called {
                     callers.entry(callee).or_default().push(i);
                 }
@@ -167,12 +186,8 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
             Err(e) => failure[i] = Some(e.0),
         }
     }
-    // A function that calls one that failed fails with it.
-    let position: HashMap<usize, usize> = inputs
-        .iter()
-        .enumerate()
-        .map(|(i, inp)| (inp.findex, i))
-        .collect();
+    // A function that calls one that failed fails with it: nothing else
+    // defines the callee in a module.
     let mut work: Vec<usize> = (0..inputs.len()).filter(|i| failure[*i].is_some()).collect();
     while let Some(bad) = work.pop() {
         let findex = inputs[bad].findex;
@@ -183,7 +198,6 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
             }
         }
     }
-    let _ = position;
 
     // Second pass: the live functions, with their final indices.
     let live: Vec<usize> = (0..inputs.len())
@@ -196,12 +210,13 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
             (
                 inputs[i].findex,
                 Callee {
-                    index: FIRST + n as u32,
+                    to: Ref::index(FIRST + n as u32),
                     sig: inputs[i].sig.clone(),
                 },
             )
         })
         .collect();
+    let second = |findex: usize| finals.get(&findex).cloned();
 
     let mut types = TypeTable::default();
     let fma64 = types.get(vec![ValType::F64; 3], vec![ValType::F64]);
@@ -216,12 +231,12 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
     let mut skipped: Vec<(usize, String)> = Vec::new();
     for (n, &i) in live.iter().enumerate() {
         let inp = &inputs[i];
-        match emit_function(program, inp, &finals, opts) {
-            Ok((body, _)) => {
+        match emit_function(program, inp, &second, &module_rt, opts) {
+            Ok((body, _, _)) => {
                 let params: Vec<ValType> = inp.sig.params.iter().filter_map(|t| t.wasm()).collect();
                 let results: Vec<ValType> = inp.sig.ret.wasm().into_iter().collect();
                 funcs.function(types.get(params, results));
-                code.function(&body);
+                code.function(&body.into_function());
                 exports.export(
                     &format!("f{}", inp.findex),
                     we::ExportKind::Func,
@@ -278,6 +293,161 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
         bytes: module.finish(),
         functions,
         skipped,
+    }
+}
+
+/// A relocatable object holding the inputs that can be emitted. What it leaves
+/// out is not an error: the functions in `skipped` are defined by whoever else
+/// the linker is given, and the object calls them by symbol like any other
+/// function it does not define.
+pub struct ObjectEmitted {
+    pub bytes: Vec<u8>,
+    pub functions: Vec<usize>,
+    pub skipped: Vec<(usize, String)>,
+    /// Functions the object calls and does not define, which whoever links it
+    /// must therefore export.
+    pub imports: Vec<usize>,
+}
+
+/// The runtime symbols an object calls. `hlp_fiber_poll` is the safepoint the
+/// fiber transform and the collector key on; `fma` and `fmaf` are libm's.
+pub const RT_SHADOW_PUSH: &str = "hlp_shadow_push";
+pub const RT_SHADOW_POP: &str = "hlp_shadow_pop";
+pub const RT_POLL: &str = "hlp_fiber_poll";
+/// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
+pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
+
+pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> ObjectEmitted {
+    // Pass one: which inputs emit at all, and whom the survivors call. Calls
+    // to anything are allowed here, since the linker resolves them.
+    let throwaway = Runtime {
+        fma64: Ref::index(0),
+        fma32: Ref::index(0),
+        push: Ref::index(0),
+        pop: Ref::index(0),
+        poll: Ref::index(0),
+        epoch: None,
+    };
+    let known = |findex: usize| {
+        program.signature(findex).map(|sig| Callee {
+            to: Ref::index(0),
+            sig,
+        })
+    };
+    let mut live: Vec<usize> = Vec::new();
+    let mut skipped: Vec<(usize, String)> = Vec::new();
+    let mut called: Vec<usize> = Vec::new();
+    let mut uses_fma = false;
+    for (i, inp) in inputs.iter().enumerate() {
+        match emit_function(program, inp, &known, &throwaway, opts) {
+            Ok((_, c, fma)) => {
+                live.push(i);
+                called.extend(c);
+                uses_fma |= fma;
+            }
+            Err(e) => skipped.push((inp.findex, e.0)),
+        }
+    }
+
+    // Pass two: symbols first, so a body can call a function defined after it.
+    let mut obj = object::ObjectBuilder::new();
+    if opts.shadow || opts.polls {
+        obj.import_memory(1);
+    }
+    let wasm_sig = |sig: &Sig| {
+        (
+            sig.params.iter().filter_map(|t| t.wasm()).collect::<Vec<_>>(),
+            sig.ret.wasm().into_iter().collect::<Vec<_>>(),
+        )
+    };
+    let mut syms: HashMap<usize, object::Sym> = HashMap::new();
+    for &i in &live {
+        let inp = &inputs[i];
+        let (p, r) = wasm_sig(&inp.sig);
+        syms.insert(
+            inp.findex,
+            obj.declare_function(&program.symbol(inp.findex), p, r, false),
+        );
+    }
+    called.sort_unstable();
+    called.dedup();
+    let mut imports = Vec::new();
+    for findex in called {
+        if syms.contains_key(&findex) {
+            continue;
+        }
+        let Some(sig) = program.signature(findex) else {
+            continue;
+        };
+        let (p, r) = wasm_sig(&sig);
+        syms.insert(findex, obj.import_function(&program.symbol(findex), p, r));
+        imports.push(findex);
+    }
+    let rt_sym = |obj: &mut object::ObjectBuilder, name: &str, p: Vec<ValType>, r: Vec<ValType>| {
+        Ref {
+            index: 0,
+            sym: Some(obj.import_function(name, p, r)),
+        }
+    };
+    let none = Ref::index(0);
+    let runtime = Runtime {
+        fma64: if uses_fma {
+            rt_sym(&mut obj, "fma", vec![ValType::F64; 3], vec![ValType::F64])
+        } else {
+            none
+        },
+        fma32: if uses_fma {
+            rt_sym(&mut obj, "fmaf", vec![ValType::F32; 3], vec![ValType::F32])
+        } else {
+            none
+        },
+        push: if opts.shadow {
+            rt_sym(&mut obj, RT_SHADOW_PUSH, vec![ValType::I32], vec![ValType::I32])
+        } else {
+            none
+        },
+        pop: if opts.shadow {
+            rt_sym(&mut obj, RT_SHADOW_POP, vec![], vec![])
+        } else {
+            none
+        },
+        poll: if opts.polls {
+            rt_sym(&mut obj, RT_POLL, vec![], vec![])
+        } else {
+            none
+        },
+        epoch: opts.polls.then(|| obj.import_data(RT_EPOCH)),
+    };
+    let resolve = |findex: usize| {
+        let sym = *syms.get(&findex)?;
+        let sig = program.signature(findex)?;
+        Some(Callee {
+            to: Ref {
+                index: 0,
+                sym: Some(sym),
+            },
+            sig,
+        })
+    };
+    let mut functions = Vec::new();
+    for &i in &live {
+        let inp = &inputs[i];
+        match emit_function(program, inp, &resolve, &runtime, opts) {
+            Ok((body, _, _)) => {
+                obj.set_body(syms[&inp.findex], body);
+                functions.push(inp.findex);
+            }
+            Err(e) => panic!(
+                "f{} emitted in the first pass and not the second: {}",
+                inp.findex, e.0
+            ),
+        }
+    }
+    ObjectEmitted {
+        bytes: obj.finish(),
+        functions,
+        skipped,
+        imports,
     }
 }
 
@@ -364,9 +534,37 @@ impl TypeTable {
     }
 }
 
-struct Callee {
+/// How a body names a function: by its index in a module, or by the symbol an
+/// object leaves for the linker to resolve.
+#[derive(Clone, Copy)]
+struct Ref {
     index: u32,
+    sym: Option<object::Sym>,
+}
+
+impl Ref {
+    fn index(index: u32) -> Self {
+        Ref { index, sym: None }
+    }
+}
+
+#[derive(Clone)]
+struct Callee {
+    to: Ref,
     sig: Sig,
+}
+
+/// The helpers every body may call.
+struct Runtime {
+    fma64: Ref,
+    fma32: Ref,
+    push: Ref,
+    pop: Ref,
+    poll: Ref,
+    /// The runtime's poll epoch, when the body tests it inline: a loop header
+    /// loads it and calls `poll` only if it has moved since this body last
+    /// looked. Without it every header calls `poll`.
+    epoch: Option<object::Sym>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -380,11 +578,15 @@ struct Fx<'a, P: Program> {
     program: &'a P,
     f: &'a Function,
     sig: &'a Sig,
-    callees: &'a HashMap<usize, Callee>,
+    callees: &'a dyn Fn(usize) -> Option<Callee>,
+    rt: &'a Runtime,
     opts: Options,
     frame_local: u32,
+    handled_local: u32,
+    cur_local: u32,
     called: Vec<usize>,
-    out: we::Function,
+    used_fma: bool,
+    out: object::Body,
     ctx: Vec<Frame>,
     nparams: u32,
     tys: Vec<Ty>,
@@ -397,9 +599,10 @@ struct Fx<'a, P: Program> {
 fn emit_function<P: Program>(
     program: &P,
     inp: &Input,
-    callees: &HashMap<usize, Callee>,
+    callees: &dyn Fn(usize) -> Option<Callee>,
+    rt: &Runtime,
     opts: Options,
-) -> Res<(we::Function, Vec<usize>)> {
+) -> Res<(object::Body, Vec<usize>, bool)> {
     let f = inp.body;
     if inp.sig.params.iter().any(|t| t.wasm().is_none())
         || !(inp.sig.ret == Ty::Void || inp.sig.ret.wasm().is_some())
@@ -469,15 +672,25 @@ fn emit_function<P: Program>(
         .collect();
     let frame_local = inp.sig.params.len() as u32 + locals.len() as u32;
     locals.push((1, ValType::I32));
+    // The poll epoch this body last saw, and the one just read.
+    let handled_local = frame_local + 1;
+    let cur_local = frame_local + 2;
+    locals.push((1, ValType::I64));
+    locals.push((1, ValType::I64));
+    let has_loops = loop_header.iter().any(|h| *h);
     let mut fx = Fx {
         program,
         f,
         sig: &inp.sig,
         callees,
+        rt,
         opts,
         frame_local,
+        handled_local,
+        cur_local,
         called: Vec::new(),
-        out: we::Function::new(locals),
+        used_fma: false,
+        out: object::Body::new(locals),
         ctx: Vec::new(),
         nparams: inp.sig.params.len() as u32,
         tys,
@@ -489,9 +702,21 @@ fn emit_function<P: Program>(
     if opts.shadow {
         let findex = inp.findex as i32;
         fx.emit(&I::I32Const(findex));
-        fx.emit(&I::Call(SHADOW_PUSH));
+        fx.call(rt.push);
         let frame = fx.frame_local;
         fx.emit(&I::LocalSet(frame));
+    }
+    if opts.polls
+        && has_loops
+        && let Some(epoch) = rt.epoch
+    {
+        fx.out.address_of(epoch, 0);
+        fx.emit(&I::I64Load(we::MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+        fx.emit(&I::LocalSet(handled_local));
     }
     if !rpo.is_empty() {
         fx.do_tree(rpo[0].idx())?;
@@ -499,12 +724,43 @@ fn emit_function<P: Program>(
     // Control never falls off the end; this satisfies the function's result.
     fx.emit(&I::Unreachable);
     fx.emit(&I::End);
-    Ok((fx.out, fx.called))
+    Ok((fx.out, fx.called, fx.used_fma))
 }
 
 impl<P: Program> Fx<'_, P> {
     fn emit(&mut self, i: &I) {
         self.out.instruction(i);
+    }
+
+    /// A safepoint at a loop header.
+    fn poll(&mut self) {
+        let poll = self.rt.poll;
+        let Some(epoch) = self.rt.epoch else {
+            self.call(poll);
+            return;
+        };
+        let (handled, cur) = (self.handled_local, self.cur_local);
+        self.out.address_of(epoch, 0);
+        self.emit(&I::I64Load(we::MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+        self.emit(&I::LocalTee(cur));
+        self.emit(&I::LocalGet(handled));
+        self.emit(&I::I64Ne);
+        self.emit(&I::If(BlockType::Empty));
+        self.emit(&I::LocalGet(cur));
+        self.emit(&I::LocalSet(handled));
+        self.call(poll);
+        self.emit(&I::End);
+    }
+
+    fn call(&mut self, r: Ref) {
+        match r.sym {
+            Some(sym) => self.out.call(sym),
+            None => self.out.instruction(&I::Call(r.index)),
+        }
     }
 
     fn get(&mut self, v: ValueId) {
@@ -533,7 +789,7 @@ impl<P: Program> Fx<'_, P> {
             self.emit(&I::Loop(BlockType::Empty));
             self.ctx.push(Frame::Loop(x));
             if self.opts.polls {
-                self.emit(&I::Call(POLL_CHECK));
+                self.poll();
             }
             self.node_within(x, &ys)?;
             self.ctx.pop();
@@ -712,7 +968,7 @@ impl<P: Program> Fx<'_, P> {
             Instr::BinOp { op, dst, a, b } => self.bin_op(*op, *dst, *a, *b)?,
             Instr::UnOp { op, dst, src } => self.un_op(*op, *dst, *src)?,
             Instr::Cast { kind, dst, src } => self.cast(*kind, *dst, *src)?,
-            Instr::Call { dst, fun, args } => self.call(*dst, *fun, args)?,
+            Instr::Call { dst, fun, args } => self.call_instr(*dst, *fun, args)?,
             Instr::Fma { dst, a, b, c } => {
                 let t = self.ty(*dst);
                 if !t.is_float() || self.ty(*a) != t || self.ty(*b) != t || self.ty(*c) != t {
@@ -721,7 +977,9 @@ impl<P: Program> Fx<'_, P> {
                 self.get(*a);
                 self.get(*b);
                 self.get(*c);
-                self.emit(&I::Call(if t == Ty::F64 { FMA64 } else { FMA32 }));
+                let fma = if t == Ty::F64 { self.rt.fma64 } else { self.rt.fma32 };
+                self.call(fma);
+                self.used_fma = true;
                 self.set(*dst);
             }
             other => {
@@ -943,9 +1201,9 @@ impl<P: Program> Fx<'_, P> {
         Ok(())
     }
 
-    fn call(&mut self, dst: ValueId, fun: usize, args: &[ValueId]) -> Res<()> {
-        let Some(callee) = self.callees.get(&fun) else {
-            return unsupported(format!("a call to f{fun}, outside the module"));
+    fn call_instr(&mut self, dst: ValueId, fun: usize, args: &[ValueId]) -> Res<()> {
+        let Some(callee) = (self.callees)(fun) else {
+            return unsupported(format!("a call to f{fun}, which has no known signature"));
         };
         if callee.sig.params.len() != args.len() {
             return unsupported(format!("a call to f{fun} with the wrong argument count"));
@@ -955,7 +1213,6 @@ impl<P: Program> Fx<'_, P> {
                 return unsupported(format!("a call to f{fun} with a mismatched argument"));
             }
         }
-        let index = callee.index;
         let ret = callee.sig.ret;
         if ret != Ty::Void && self.ty(dst) != ret {
             return unsupported(format!("a call to f{fun} whose result type differs"));
@@ -963,7 +1220,7 @@ impl<P: Program> Fx<'_, P> {
         for a in args {
             self.get(*a);
         }
-        self.emit(&I::Call(index));
+        self.call(callee.to);
         self.called.push(fun);
         if ret != Ty::Void {
             self.set(dst);
@@ -1005,7 +1262,8 @@ impl<P: Program> Fx<'_, P> {
         match &f.blocks[x].term {
             Terminator::Ret { value } => {
                 if self.opts.shadow {
-                    self.emit(&I::Call(SHADOW_POP));
+                    let pop = self.rt.pop;
+                    self.call(pop);
                 }
                 if self.sig.ret != Ty::Void {
                     if self.ty(*value) != self.sig.ret {

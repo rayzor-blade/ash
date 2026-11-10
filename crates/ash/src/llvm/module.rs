@@ -146,6 +146,12 @@ pub struct JITModule<'ctx> {
     pub(crate) aot_shared_runtime: bool,
     pub(crate) type_info_globals: HashMap<usize, GlobalValue<'ctx>>,
     pub(crate) findexes: HashMap<usize, FuncPtr>,
+    /// Symbols an object built elsewhere calls, which must stay visible to the
+    /// linker when the function behind them has a body here.
+    pub(crate) aot_extern_names: std::collections::HashSet<String>,
+    /// Functions an object built elsewhere defines. They are declared here and
+    /// never lowered, whoever asks for them.
+    pub(crate) aot_defined_elsewhere: std::collections::HashSet<usize>,
     /// Symbol names for bytecode functions the type table binds to a field
     /// or proto, by findex; see `symbol_name`.
     pub(crate) function_names: HashMap<usize, String>,
@@ -545,6 +551,8 @@ impl<'ctx> JITModule<'ctx> {
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
             findexes: HashMap::new(),
+            aot_extern_names: std::collections::HashSet::new(),
+            aot_defined_elsewhere: std::collections::HashSet::new(),
             function_names: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),
@@ -838,6 +846,27 @@ impl<'ctx> JITModule<'ctx> {
         &self.bytecode.functions
     }
 
+    /// The symbol function `findex` has in this module, declaring it if nothing
+    /// has yet. A function another object defines is called by this name, and
+    /// declaring it is also what puts it in `ash_functions`, the table a
+    /// dynamic call goes through.
+    pub fn function_symbol(&mut self, findex: usize) -> Result<String> {
+        let (f, _) = self.get_or_create_function_value(findex)?;
+        Ok(f.get_name().to_string_lossy().into_owned())
+    }
+
+    /// Declare these functions and never lower them: another object defines
+    /// them.
+    pub fn define_elsewhere(&mut self, findexes: impl IntoIterator<Item = usize>) {
+        self.aot_defined_elsewhere.extend(findexes);
+    }
+
+    /// Keep these symbols external when their functions are lowered here, for
+    /// an object built elsewhere to call.
+    pub fn keep_external(&mut self, names: impl IntoIterator<Item = String>) {
+        self.aot_extern_names.extend(names);
+    }
+
     /// The findex the module starts at.
     pub fn entrypoint_findex(&self) -> u32 {
         self.bytecode.entrypoint
@@ -1006,6 +1035,8 @@ impl<'ctx> JITModule<'ctx> {
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,
             findexes: HashMap::new(),
+            aot_extern_names: std::collections::HashSet::new(),
+            aot_defined_elsewhere: std::collections::HashSet::new(),
             function_names: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),

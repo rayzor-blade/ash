@@ -96,6 +96,11 @@ pub trait Program {
     fn virtual_field(&self, obj_ty: TypeRef, field: usize) -> Option<i32>;
     /// The symbol of the table of global slots, one pointer wide each.
     fn globals_symbol(&self) -> Option<String>;
+    /// The symbol of the table of function addresses, one pointer wide each,
+    /// indexed by findex.
+    fn functions_symbol(&self) -> Option<String>;
+    /// The index of the type of function `findex`, native or not.
+    fn function_type(&self, findex: usize) -> Option<usize>;
     /// The symbol of the descriptor for type `type_index`.
     fn type_symbol(&self, type_index: usize) -> Option<String>;
     /// Whether two references of this type are compared by value, through the
@@ -385,6 +390,12 @@ const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
     ("hlp_alloc_dynobj", &[], &[ValType::I32]),
     ("hlp_alloc_virtual", &[ValType::I32], &[ValType::I32]),
     ("hlp_gc_write_barrier", &[ValType::I32], &[]),
+    ("hlp_alloc_closure_void", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    (
+        "hlp_alloc_closure_ptr",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
     ("hlp_dyn_getd", &[ValType::I32, ValType::I32], &[ValType::F64]),
     ("hlp_dyn_getf", &[ValType::I32, ValType::I32], &[ValType::F32]),
     ("hlp_dyn_geti64", &[ValType::I32, ValType::I32], &[ValType::I64]),
@@ -1176,6 +1187,8 @@ impl<P: Program> Fx<'_, P> {
             Instr::Call { dst, fun, args } => self.call_instr(*dst, *fun, args)?,
             Instr::Intrinsic { kind, dst, args, .. } => self.intrinsic(*kind, *dst, args)?,
             Instr::ArraySize { dst, array } => self.array_size(*dst, *array)?,
+            Instr::StaticClosure { dst, fun } => self.closure(*dst, *fun, None)?,
+            Instr::InstanceClosure { dst, fun, obj } => self.closure(*dst, *fun, Some(*obj))?,
             Instr::MemGet {
                 kind,
                 dst,
@@ -1716,6 +1729,41 @@ impl<P: Program> Fx<'_, P> {
             }
             other => return unsupported(format!("the {other:?} cast")),
         }
+        self.set(dst);
+        Ok(())
+    }
+
+    /// A closure over function `fun`, binding `obj` as its first argument when
+    /// there is one. The function's address is read from the program's table,
+    /// where the module that defines it put it.
+    fn closure(&mut self, dst: ValueId, fun: usize, obj: Option<ValueId>) -> Res<()> {
+        if self.ty(dst) != Ty::Ptr || obj.is_some_and(|o| self.ty(o) != Ty::Ptr) {
+            return unsupported("a closure over other than references");
+        }
+        let Some(fun_type) = self.program.function_type(fun) else {
+            return unsupported(format!("a closure over f{fun}, which has no type"));
+        };
+        let (Some(type_name), Some(table)) =
+            (self.program.type_symbol(fun_type), self.program.functions_symbol())
+        else {
+            return unsupported("a closure in a program with no function table");
+        };
+        let slot = i32::try_from(fun * 4).map_err(|_| Unsupported("a function past 512 MiB".into()))?;
+        self.data_address(&type_name, 0)?;
+        self.data_address(&table, slot)?;
+        self.emit(&I::I32Load(we::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        let alloc = match obj {
+            Some(o) => {
+                self.get(o);
+                self.runtime("hlp_alloc_closure_ptr")?
+            }
+            None => self.runtime("hlp_alloc_closure_void")?,
+        };
+        self.call(alloc);
         self.set(dst);
         Ok(())
     }

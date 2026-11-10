@@ -881,8 +881,12 @@ impl<'ctx> JITModule<'ctx> {
                 types.insert(type_index, g.get_name().to_string_lossy().into_owned());
             }
         }
+        let functions = self
+            .aot_functions
+            .map(|g| g.get_name().to_string_lossy().into_owned());
         crate::wasm_direct::ProgramData {
             globals,
+            functions,
             types,
             sized_alloc: super::function::sized_alloc_enabled(),
             object_tails: self.object_tails.clone(),

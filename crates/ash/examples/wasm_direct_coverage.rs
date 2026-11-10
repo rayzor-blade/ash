@@ -50,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         // is no LLVM module here to name the real data.
         let data = ash_core::wasm_direct::ProgramData {
             globals: Some("ash_globals".to_string()),
+            functions: Some("ash_functions".to_string()),
             types: (0..bc.types.len())
                 .map(|i| (i, format!("ash_type_{i}")))
                 .collect(),

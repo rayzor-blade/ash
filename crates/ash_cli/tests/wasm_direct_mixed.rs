@@ -90,6 +90,17 @@ fn arrays_through_the_direct_backend_match_the_interpreter() {
     );
 }
 
+/// Closures made by direct code: over a static function, a bound method and
+/// a lambda, then called by code the direct backend did not emit.
+#[test]
+fn closures_through_the_direct_backend_match_the_interpreter() {
+    check(
+        "TestWasmClosure",
+        "test_wasm_closure.hl",
+        &["twice", "pick", "makeBumper"],
+    );
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {

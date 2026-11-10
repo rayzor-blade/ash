@@ -23,6 +23,8 @@ pub struct BytecodeProgram<'a> {
 #[derive(Default)]
 pub struct ProgramData {
     pub globals: Option<String>,
+    /// The table of function addresses, indexed by findex.
+    pub functions: Option<String>,
     pub types: HashMap<usize, String>,
     /// Whether an ordinary class is allocated with its size known up front.
     pub sized_alloc: bool,
@@ -104,6 +106,21 @@ impl Program for BytecodeProgram<'_> {
     fn array_elem_size(&self, t: air::v2::ir::TypeRef) -> Option<u32> {
         let kind = self.bc.types.get(t.0 as usize)?.kind;
         u32::try_from(crate::layout::array_elem_size_for(kind, 4)).ok()
+    }
+
+    fn functions_symbol(&self) -> Option<String> {
+        self.data.functions.clone()
+    }
+
+    fn function_type(&self, findex: usize) -> Option<usize> {
+        if let Some(f) = self.bc.functions.iter().find(|f| f.findex as usize == findex) {
+            return Some(f.type_.0);
+        }
+        self.bc
+            .natives
+            .iter()
+            .find(|n| n.findex as usize == findex)
+            .map(|n| n.type_.0)
     }
 
     fn virtual_field(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<i32> {

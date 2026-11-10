@@ -32,6 +32,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -78,9 +79,10 @@ def fetch_release(tag: str, work: Path) -> Path:
         print(f"fetching {url}")
         urllib.request.urlretrieve(url, archive)
     out = work / f"hashlink-{tag}"
-    if not out.exists():
-        with zipfile.ZipFile(archive) as z:
-            z.extractall(out)
+    if out.exists():
+        shutil.rmtree(out)
+    with zipfile.ZipFile(archive) as z:
+        z.extractall(out)
     hits = sorted(out.rglob("sdl.hdll"))
     if not hits:
         sys.exit(f"no sdl.hdll in {archive}")
@@ -163,7 +165,7 @@ def main() -> int:
     ap.add_argument("--cells", default=",".join(CELLS))
     ap.add_argument("--modes", default=",".join(MODES))
     ap.add_argument("--timeout", type=int, default=45)
-    ap.add_argument("--work", type=Path, default=ROOT / "target" / "hdll_release_probe")
+    ap.add_argument("--work", type=Path, default=Path(tempfile.gettempdir()) / "hdll_release_probe")
     ap.add_argument("--no-run", action="store_true", help="build the cells and stop")
     ap.add_argument("--strict", action="store_true")
     args = ap.parse_args()

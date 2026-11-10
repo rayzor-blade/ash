@@ -47,6 +47,10 @@ fn main() -> anyhow::Result<()> {
             types: (0..bc.types.len())
                 .map(|i| (i, format!("ash_type_{i}")))
                 .collect(),
+            sized_alloc: true,
+            object_tails: HashMap::new(),
+            object_drops: std::collections::HashSet::new(),
+            barriers: true,
         };
         let emitted = ash_core::wasm_direct::emit_object(
             &bc,

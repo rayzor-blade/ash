@@ -42,6 +42,17 @@ enum Slot {
     UndefinedData,
 }
 
+/// Who can see a defined function's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Linkage {
+    /// Only this object.
+    Local,
+    /// Other objects, but not the final module's exports.
+    Hidden,
+    /// Other objects and the final module's exports.
+    Default,
+}
+
 /// What a patch site holds the index or address of.
 #[derive(Clone, Copy)]
 enum Target {
@@ -175,13 +186,13 @@ impl ObjectBuilder {
         sym
     }
 
-    /// A function this object defines. `local` hides it from other objects.
+    /// A function this object defines.
     pub fn declare_function(
         &mut self,
         name: &str,
         params: Vec<ValType>,
         results: Vec<ValType>,
-        local: bool,
+        linkage: Linkage,
     ) -> Sym {
         let ty = self.ty(params, results);
         self.defined.push(Defined { ty, body: None });
@@ -189,7 +200,11 @@ impl ObjectBuilder {
         self.symbols.push(SymbolInfo {
             name: name.to_string(),
             slot: Slot::Defined(self.defined.len() - 1),
-            flags: if local { FLAG_LOCAL } else { FLAG_HIDDEN },
+            flags: match linkage {
+                Linkage::Local => FLAG_LOCAL,
+                Linkage::Hidden => FLAG_HIDDEN,
+                Linkage::Default => 0,
+            },
         });
         self.by_name.insert(name.to_string(), sym);
         sym

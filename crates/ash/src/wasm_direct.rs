@@ -6,7 +6,7 @@
 //! either side of the link name it by that.
 use crate::bytecode::DecodedBytecode;
 use crate::hl_bindings as hl;
-use ash_wasm_emit::{Input, ObjectEmitted, Options, Program, Sig, Ty};
+use ash_wasm_emit::{Alloc, Input, ObjectEmitted, Options, Program, Sig, Ty};
 use std::collections::HashMap;
 
 pub struct BytecodeProgram<'a> {
@@ -24,6 +24,14 @@ pub struct BytecodeProgram<'a> {
 pub struct ProgramData {
     pub globals: Option<String>,
     pub types: HashMap<usize, String>,
+    /// Whether an ordinary class is allocated with its size known up front.
+    pub sized_alloc: bool,
+    /// Extra bytes a host module appends to objects of a type.
+    pub object_tails: HashMap<usize, u64>,
+    /// Types whose objects a host module must be told about when they die.
+    pub object_drops: std::collections::HashSet<usize>,
+    /// Whether reference stores mark cards for the generational collector.
+    pub barriers: bool,
 }
 
 impl BytecodeProgram<'_> {
@@ -120,6 +128,47 @@ impl Program for BytecodeProgram<'_> {
 
     fn invalid_comparison(&self) -> i32 {
         hl::hl_invalid_comparison as i32
+    }
+
+    fn alloc(&self, type_index: usize) -> Option<Alloc> {
+        let ty = self.bc.types.get(type_index)?;
+        let k = ty.kind;
+        if k == hl::hl_type_kind_HDYNOBJ {
+            return Some(Alloc::DynObj);
+        }
+        if k == hl::hl_type_kind_HVIRTUAL {
+            return Some(Alloc::Virtual);
+        }
+        if k != hl::hl_type_kind_HOBJ && k != hl::hl_type_kind_HSTRUCT {
+            return None;
+        }
+        // The same decision the LLVM lowering makes: a class with no closure
+        // bindings and a known size is allocated sized; a struct keeps the
+        // general path, having no type header to stamp.
+        let sized = (k == hl::hl_type_kind_HOBJ && self.data.sized_alloc)
+            .then(|| {
+                let no_bindings = ty.obj.as_ref().is_some_and(|o| o.bindings.is_empty());
+                let size = crate::layout::object_layout_for(&self.bc.types, type_index, 4)
+                    .map(|l| l.size);
+                let tail = self.data.object_tails.get(&type_index).copied().unwrap_or(0);
+                match (no_bindings, size) {
+                    (true, Some(size)) if size > 0 => {
+                        let flags = if self.data.object_drops.contains(&type_index) {
+                            ash_std::rt::RT_OBJECT_HOST_DROP
+                        } else {
+                            0
+                        };
+                        u32::try_from(size as u64 + tail).ok().map(|n| (n, flags))
+                    }
+                    _ => None,
+                }
+            })
+            .flatten();
+        Some(Alloc::Object { sized })
+    }
+
+    fn write_barriers(&self) -> bool {
+        self.data.barriers
     }
 
     fn globals_symbol(&self) -> Option<String> {

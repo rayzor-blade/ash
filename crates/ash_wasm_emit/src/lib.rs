@@ -100,6 +100,23 @@ pub trait Program {
     fn dynamic_compare(&self, t: TypeRef) -> bool;
     /// What the runtime's comparison answers for a pair with no order.
     fn invalid_comparison(&self) -> i32;
+    /// How `New` allocates a value of this type.
+    fn alloc(&self, type_index: usize) -> Option<Alloc>;
+    /// Whether a store of a reference into the heap must mark its card for
+    /// the generational collector.
+    fn write_barriers(&self) -> bool;
+}
+
+/// How a value of a type is allocated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alloc {
+    /// An object or struct, from its type descriptor. With a size and flags
+    /// when the runtime can be told both up front.
+    Object { sized: Option<(u32, u32)> },
+    /// An anonymous object.
+    DynObj,
+    /// A virtual, from its type descriptor.
+    Virtual,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,8 +169,8 @@ pub struct Options {
 #[derive(Clone, Default)]
 struct Used {
     fma: bool,
-    null_access: bool,
-    dyn_compare: bool,
+    /// Runtime functions called by name, from [`RT_FUNCS`].
+    funcs: Vec<&'static str>,
     /// Data symbols the body takes the address of.
     data: Vec<String>,
 }
@@ -185,8 +202,8 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
         pop: Ref::index(SHADOW_POP),
         poll: Ref::index(POLL_CHECK),
         epoch: None,
-        null_access: None,
-        dyn_compare: None,
+        funcs: HashMap::new(),
+        any_func: false,
         data: HashMap::new(),
     };
     // First pass: every input is assumed callable, to learn which fail on
@@ -348,8 +365,21 @@ pub struct ObjectEmitted {
 pub const RT_SHADOW_PUSH: &str = "hlp_shadow_push";
 pub const RT_SHADOW_POP: &str = "hlp_shadow_pop";
 pub const RT_POLL: &str = "hlp_fiber_poll";
-pub const RT_NULL_ACCESS: &str = "hlp_null_access";
-pub const RT_DYN_COMPARE: &str = "hlp_dyn_compare";
+/// The runtime functions a body may call by name, with their wasm signatures.
+/// Pointers and sizes are one `i32` on wasm32.
+const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
+    ("hlp_null_access", &[], &[]),
+    ("hlp_dyn_compare", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("hlp_alloc_obj", &[ValType::I32], &[ValType::I32]),
+    (
+        "hlp_alloc_obj_sized_flags",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    ("hlp_alloc_dynobj", &[], &[ValType::I32]),
+    ("hlp_alloc_virtual", &[ValType::I32], &[ValType::I32]),
+    ("hlp_gc_write_barrier", &[ValType::I32], &[]),
+];
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
 
@@ -363,8 +393,8 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
         pop: Ref::index(0),
         poll: Ref::index(0),
         epoch: None,
-        null_access: Some(Ref::index(0)),
-        dyn_compare: Some(Ref::index(0)),
+        funcs: HashMap::new(),
+        any_func: true,
         data: HashMap::new(),
     };
     let known = |findex: usize| {
@@ -377,8 +407,7 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
     let mut skipped: Vec<(usize, String)> = Vec::new();
     let mut called: Vec<usize> = Vec::new();
     let mut uses_fma = false;
-    let mut uses_null_access = false;
-    let mut uses_dyn_compare = false;
+    let mut rt_names: Vec<&'static str> = Vec::new();
     let mut data_names: Vec<String> = Vec::new();
     for (i, inp) in inputs.iter().enumerate() {
         match emit_function(program, inp, &known, &throwaway, opts) {
@@ -386,8 +415,7 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
                 live.push(i);
                 called.extend(c);
                 uses_fma |= used.fma;
-                uses_null_access |= used.null_access;
-                uses_dyn_compare |= used.dyn_compare;
+                rt_names.extend(used.funcs);
                 data_names.extend(used.data);
             }
             Err(e) => skipped.push((inp.findex, e.0)),
@@ -410,7 +438,7 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
         let (p, r) = wasm_sig(&inp.sig);
         syms.insert(
             inp.findex,
-            obj.declare_function(&program.symbol(inp.findex), p, r, false),
+            obj.declare_function(&program.symbol(inp.findex), p, r, object::Linkage::Hidden),
         );
     }
     called.sort_unstable();
@@ -461,16 +489,22 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
             none
         },
         epoch: opts.polls.then(|| obj.import_data(RT_EPOCH)),
-        null_access: uses_null_access
-            .then(|| rt_sym(&mut obj, RT_NULL_ACCESS, vec![], vec![])),
-        dyn_compare: uses_dyn_compare.then(|| {
-            rt_sym(
-                &mut obj,
-                RT_DYN_COMPARE,
-                vec![ValType::I32, ValType::I32],
-                vec![ValType::I32],
-            )
-        }),
+        funcs: {
+            rt_names.sort_unstable();
+            rt_names.dedup();
+            rt_names
+                .iter()
+                .map(|&name| {
+                    let (_, p, r) = RT_FUNCS
+                        .iter()
+                        .find(|(n, _, _)| *n == name)
+                        .map(|(n, p, r)| (n, p.to_vec(), r.to_vec()))
+                        .expect("a runtime function the table does not list");
+                    (name, rt_sym(&mut obj, name, p, r))
+                })
+                .collect()
+        },
+        any_func: false,
         data: data_names
             .iter()
             .map(|n| (n.clone(), obj.import_data(n)))
@@ -626,11 +660,11 @@ struct Runtime {
     /// loads it and calls `poll` only if it has moved since this body last
     /// looked. Without it every header calls `poll`.
     epoch: Option<object::Sym>,
-    /// Raises "Null access". Absent from a standalone module, which has no
+    /// Runtime functions by name. Empty in a standalone module, which has no
     /// runtime to ask.
-    null_access: Option<Ref>,
-    /// Compares two references by value; `(a, b) -> order`.
-    dyn_compare: Option<Ref>,
+    funcs: HashMap<&'static str, Ref>,
+    /// Answers every name, for the pass that only finds out what a body uses.
+    any_func: bool,
     /// Data symbols an object may take the address of, by name. Empty in a
     /// standalone module, which has none.
     data: HashMap<String, object::Sym>,
@@ -654,6 +688,10 @@ struct Fx<'a, P: Program> {
     handled_local: u32,
     cur_local: u32,
     tmp_local: u32,
+    /// Stores that need no barrier, by (block, instruction).
+    barrier_free: std::collections::HashSet<(usize, usize)>,
+    /// Where `instr` is, for the analysis above.
+    at: (usize, usize),
     called: Vec<usize>,
     used: Used,
     out: object::Body,
@@ -762,6 +800,8 @@ fn emit_function<P: Program>(
         handled_local,
         cur_local,
         tmp_local,
+        barrier_free: air::v2::analysis::barrier_free_stores(f),
+        at: (0, 0),
         called: Vec::new(),
         used: Used::default(),
         out: object::Body::new(locals),
@@ -966,6 +1006,7 @@ impl<P: Program> Fx<'_, P> {
         let f = self.f;
         let instrs = &f.blocks[x].instrs;
         for (i, ins) in instrs.iter().enumerate() {
+            self.at = (x, i);
             // Of consecutive positions only the last can be read back.
             if let Instr::Pos { .. } = ins
                 && matches!(instrs.get(i + 1), Some(Instr::Pos { .. }))
@@ -1020,6 +1061,7 @@ impl<P: Program> Fx<'_, P> {
                 self.set(*dst);
             }
             Instr::NullCheck { value } => self.null_check(*value)?,
+            Instr::New { dst } => self.new_value(*dst)?,
             Instr::TypeConst { dst, ty } => {
                 if self.ty(*dst) != Ty::Ptr {
                     return unsupported("a type constant into a non-reference");
@@ -1122,6 +1164,20 @@ impl<P: Program> Fx<'_, P> {
         Ok(())
     }
 
+    /// A runtime function by name, noting that this body calls it.
+    fn runtime(&mut self, name: &'static str) -> Res<Ref> {
+        if !self.used.funcs.contains(&name) {
+            self.used.funcs.push(name);
+        }
+        if self.rt.any_func {
+            return Ok(Ref::index(0));
+        }
+        match self.rt.funcs.get(name) {
+            Some(&r) => Ok(r),
+            None => unsupported(format!("{name}, which needs the runtime")),
+        }
+    }
+
     /// Push the address of a named data symbol plus `addend`.
     fn data_address(&mut self, name: &str, addend: i32) -> Res<()> {
         if !self.used.data.iter().any(|d| d == name) {
@@ -1131,7 +1187,7 @@ impl<P: Program> Fx<'_, P> {
         // records the name.
         match self.rt.data.get(name) {
             Some(&sym) => self.out.address_of(sym, addend),
-            None if self.rt.null_access.is_some() => self.emit(&I::I32Const(0)),
+            None if self.rt.any_func => self.emit(&I::I32Const(0)),
             None => return unsupported("data from another object, in a standalone module"),
         }
         Ok(())
@@ -1145,19 +1201,59 @@ impl<P: Program> Fx<'_, P> {
         self.data_address(&table, offset)
     }
 
+    fn new_value(&mut self, dst: ValueId) -> Res<()> {
+        if self.ty(dst) != Ty::Ptr {
+            return unsupported("an allocation into a non-reference");
+        }
+        let type_index = self.f.values[dst.0 as usize].ty.0 as usize;
+        let Some(plan) = self.program.alloc(type_index) else {
+            return unsupported("an allocation of a type with no plan");
+        };
+        match plan {
+            Alloc::DynObj => {
+                let alloc = self.runtime("hlp_alloc_dynobj")?;
+                self.call(alloc);
+            }
+            Alloc::Virtual | Alloc::Object { .. } => {
+                let Some(name) = self.program.type_symbol(type_index) else {
+                    return unsupported("a type with no descriptor symbol");
+                };
+                self.data_address(&name, 0)?;
+                match plan {
+                    Alloc::Object {
+                        sized: Some((size, flags)),
+                    } => {
+                        self.emit(&I::I32Const(size as i32));
+                        self.emit(&I::I32Const(flags as i32));
+                        let alloc = self.runtime("hlp_alloc_obj_sized_flags")?;
+                        self.call(alloc);
+                    }
+                    Alloc::Object { sized: None } => {
+                        let alloc = self.runtime("hlp_alloc_obj")?;
+                        self.call(alloc);
+                    }
+                    Alloc::Virtual => {
+                        let alloc = self.runtime("hlp_alloc_virtual")?;
+                        self.call(alloc);
+                    }
+                    Alloc::DynObj => unreachable!("handled above"),
+                }
+            }
+        }
+        self.set(dst);
+        Ok(())
+    }
+
     fn null_check(&mut self, value: ValueId) -> Res<()> {
         if self.ty(value) != Ty::Ptr {
             // Nothing else can be null.
             return Ok(());
         }
-        let Some(raise) = self.rt.null_access else {
-            return unsupported("a null check, which needs the runtime");
-        };
+        let raise = self.runtime("hlp_null_access")?;
         self.get(value);
         self.emit(&I::I32Eqz);
         self.emit(&I::If(BlockType::Empty));
         self.call(raise);
-        self.used.null_access = true;
         self.emit(&I::Unreachable);
         self.emit(&I::End);
         Ok(())
@@ -1204,6 +1300,21 @@ impl<P: Program> Fx<'_, P> {
         Ok(())
     }
 
+    /// After a store of `src` to the address on top of the stack... the caller
+    /// has the address in `addr`: mark its card when the collector needs it.
+    fn write_barrier(&mut self, addr_of: impl FnOnce(&mut Self), src: ValueId) -> Res<()> {
+        if self.ty(src) != Ty::Ptr
+            || !self.program.write_barriers()
+            || self.barrier_free.contains(&self.at)
+        {
+            return Ok(());
+        }
+        let barrier = self.runtime("hlp_gc_write_barrier")?;
+        addr_of(self);
+        self.call(barrier);
+        Ok(())
+    }
+
     fn field_set(&mut self, obj: ValueId, obj_ty: TypeRef, field: usize, src: ValueId) -> Res<()> {
         if self.ty(obj) != Ty::Ptr {
             return unsupported("a field write to a non-reference");
@@ -1225,7 +1336,14 @@ impl<P: Program> Fx<'_, P> {
             Ty::F64 => self.emit(&I::F64Store(mem(3))),
             Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
         }
-        Ok(())
+        self.write_barrier(
+            |fx| {
+                fx.get(obj);
+                fx.emit(&I::I32Const(offset as i32));
+                fx.emit(&I::I32Add);
+            },
+            src,
+        )
     }
 
     fn bin_op(&mut self, op: BinOp, dst: ValueId, a: ValueId, b: ValueId) -> Res<()> {
@@ -1500,11 +1618,8 @@ impl<P: Program> Fx<'_, P> {
     /// Both references are on the stack. The runtime orders them, and the
     /// condition is a test of that order against zero.
     fn dynamic_condition(&mut self, c: CondKind) -> Res<()> {
-        let Some(compare) = self.rt.dyn_compare else {
-            return unsupported("a comparison by value, which needs the runtime");
-        };
+        let compare = self.runtime("hlp_dyn_compare")?;
         self.call(compare);
-        self.used.dyn_compare = true;
         let (op, ordered) = match c {
             CondKind::Eq => (I::I32Eq, false),
             CondKind::NotEq => (I::I32Ne, false),

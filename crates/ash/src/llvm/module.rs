@@ -881,7 +881,14 @@ impl<'ctx> JITModule<'ctx> {
                 types.insert(type_index, g.get_name().to_string_lossy().into_owned());
             }
         }
-        crate::wasm_direct::ProgramData { globals, types }
+        crate::wasm_direct::ProgramData {
+            globals,
+            types,
+            sized_alloc: super::function::sized_alloc_enabled(),
+            object_tails: self.object_tails.clone(),
+            object_drops: self.object_drops.clone(),
+            barriers: self.aot_wants_barriers(),
+        }
     }
 
     /// Make these data symbols visible to the linker, for an object built

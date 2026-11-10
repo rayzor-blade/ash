@@ -318,7 +318,7 @@ fn first_operator_of(key: usize) -> usize {
 }
 
 /// One entry of the frame chain during a walk.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Enclosing {
     /// Operator index this frame's ladder is keyed by.
     key: usize,
@@ -329,6 +329,10 @@ struct Enclosing {
     entry: Boundary,
     /// Where that boundary is.
     entry_at: usize,
+    /// The locals landing at `entry` spills into, by type. They join the
+    /// function's reserved pool once a resume point inside makes that entry a
+    /// real boundary.
+    entry_need: BTreeMap<ValType, usize>,
     /// Ladder blocks of this frame still to close.
     open: usize,
     /// Splits of this frame already passed.
@@ -341,6 +345,7 @@ impl Enclosing {
             key: FUNCTION_FRAME,
             entry: Boundary::default(),
             entry_at: FUNCTION_FRAME,
+            entry_need: BTreeMap::new(),
             open: 0,
             passed: 0,
         }
@@ -504,6 +509,10 @@ fn plan(
                         break;
                     }
                     plan.boundaries.insert(f.entry_at, f.entry);
+                    for (ty, n) in &f.entry_need {
+                        let have = plan.pool.entry(*ty).or_default();
+                        *have = (*have).max(*n);
+                    }
                     target = f.entry_at;
                 }
             }
@@ -518,6 +527,7 @@ fn plan(
                     key: at,
                     entry: Boundary::default(),
                     entry_at: at,
+                    entry_need: BTreeMap::new(),
                     open: 0,
                     passed: 0,
                 });
@@ -527,6 +537,7 @@ fn plan(
                 // that value on the stack again -- the same problem as a
                 // call's arguments, and the same answer.
                 let (entry_at, spill) = boundary(at, c.stack_height(), trivial);
+                let entry_need = spill_types(c, spill)?;
                 chain.push(Enclosing {
                     key: at,
                     entry: Boundary {
@@ -534,6 +545,7 @@ fn plan(
                         is_call: false,
                     },
                     entry_at,
+                    entry_need,
                     open: 0,
                     passed: 0,
                 });
@@ -807,7 +819,12 @@ pub fn add_rewind_dispatch(
             let key = chain.last().map(|f| f.key).unwrap_or(FUNCTION_FRAME);
             let has_block = at != first_operator_of(key);
             let slots = if has_block && b.spill > 0 {
-                spill_stack(c, &pool, b.spill)?
+                spill_stack(c, &pool, b.spill).map_err(|e| {
+                    e.context(format!(
+                        "function {index} (module index), operator {at}, spilling {} operand(s)",
+                        b.spill
+                    ))
+                })?
             } else {
                 Vec::new()
             };
@@ -871,6 +888,7 @@ pub fn add_rewind_dispatch(
                     key: at,
                     entry: Boundary::default(),
                     entry_at: at,
+                    entry_need: BTreeMap::new(),
                     open: 0,
                     passed: 0,
                 });
@@ -881,6 +899,7 @@ pub fn add_rewind_dispatch(
                     key: at,
                     entry: Boundary::default(),
                     entry_at: at,
+                    entry_need: BTreeMap::new(),
                     open: 0,
                     passed: 0,
                 });
@@ -1837,6 +1856,37 @@ mod tests {
             "resuming at the second call of the then arm"
         );
         assert_eq!(got[3], vec![20], "resuming into the else arm");
+    }
+
+    #[test]
+    fn an_if_whose_condition_is_computed_is_planned_and_runs() {
+        // A condition made by an operator is not something a rewind can
+        // recompute for free, so entering the `if` spills it. The function
+        // must have reserved a local for that spill, not only for its calls'
+        // arguments; without one the rewrite stopped with "the plan reserved
+        // 0 locals". The driver here jumps without saving or restoring, so a
+        // rewind through the spilled condition is for the machine tests; what
+        // this holds is that the shape is accepted and runs as before.
+        let module = dispatch_module(
+            &[],
+            &[
+                Instruction::LocalGet(0),
+                Instruction::I32Const(0),
+                Instruction::I32Ne,
+                Instruction::If(wasm_encoder::BlockType::Empty),
+                Instruction::I32Const(10),
+                Instruction::Call(0),
+                Instruction::I32Const(11),
+                Instruction::Call(0),
+                Instruction::Else,
+                Instruction::I32Const(20),
+                Instruction::Call(0),
+                Instruction::End,
+            ],
+        );
+        let got = run_dispatch(module, &[(0, 1), (0, 0)]);
+        assert_eq!(got[0], vec![10, 11], "the then arm, run normally");
+        assert_eq!(got[1], vec![20], "the else arm, run normally");
     }
 
     #[test]

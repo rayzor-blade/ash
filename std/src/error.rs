@@ -1765,6 +1765,17 @@ thread_local! {
         const { std::cell::UnsafeCell::new(unsafe { mem::zeroed() }) };
 }
 
+/// Raise "Null access", the catchable error HashLink's null checks raise.
+/// Called by compiled code that tests a reference itself and has no message
+/// string of its own to pass to `hlp_error`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_null_access() {
+    static MESSAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let message = *MESSAGE.get_or_init(|| crate::strings::str_to_uchar_ptr("Null access") as usize)
+        as *const uchar;
+    unsafe { hlp_error(message) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
     unsafe {

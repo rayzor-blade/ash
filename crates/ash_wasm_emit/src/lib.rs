@@ -47,13 +47,17 @@ pub enum Ty {
     I64,
     F32,
     F64,
+    /// A reference to anything on the heap: an object, string, array, closure,
+    /// dynamic. All of them are one `i32` in wasm32, and nothing here knows
+    /// what is behind it.
+    Ptr,
     Other,
 }
 
 impl Ty {
     fn wasm(self) -> Option<ValType> {
         match self {
-            Ty::Bool | Ty::I32 => Some(ValType::I32),
+            Ty::Bool | Ty::I32 | Ty::Ptr => Some(ValType::I32),
             Ty::I64 => Some(ValType::I64),
             Ty::F32 => Some(ValType::F32),
             Ty::F64 => Some(ValType::F64),
@@ -82,6 +86,20 @@ pub trait Program {
     fn symbol(&self, findex: usize) -> String;
     /// The signature of any function of the program, emitted here or not.
     fn signature(&self, findex: usize) -> Option<Sig>;
+    /// Where field `field` of the object type `obj_ty` lives, as a byte offset
+    /// from the object, and the kind it was declared with. `None` for a type
+    /// whose fields are not at fixed offsets (a virtual, say).
+    fn field(&self, obj_ty: TypeRef, field: usize) -> Option<(u32, Ty)>;
+    /// The symbol of the table of global slots, one pointer wide each.
+    fn globals_symbol(&self) -> Option<String>;
+    /// The symbol of the descriptor for type `type_index`.
+    fn type_symbol(&self, type_index: usize) -> Option<String>;
+    /// Whether two references of this type are compared by value, through the
+    /// runtime, and not by address: dynamics, boxed numbers, objects (which
+    /// may define a comparison) and virtuals.
+    fn dynamic_compare(&self, t: TypeRef) -> bool;
+    /// What the runtime's comparison answers for a pair with no order.
+    fn invalid_comparison(&self) -> i32;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +148,16 @@ pub struct Options {
     pub shadow: bool,
 }
 
+/// Which optional runtime functions a body ended up calling.
+#[derive(Clone, Default)]
+struct Used {
+    fma: bool,
+    null_access: bool,
+    dyn_compare: bool,
+    /// Data symbols the body takes the address of.
+    data: Vec<String>,
+}
+
 pub struct Input<'a> {
     pub findex: usize,
     pub sig: Sig,
@@ -157,6 +185,9 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
         pop: Ref::index(SHADOW_POP),
         poll: Ref::index(POLL_CHECK),
         epoch: None,
+        null_access: None,
+        dyn_compare: None,
+        data: HashMap::new(),
     };
     // First pass: every input is assumed callable, to learn which fail on
     // their own and whom they call.
@@ -307,6 +338,9 @@ pub struct ObjectEmitted {
     /// Functions the object calls and does not define, which whoever links it
     /// must therefore export.
     pub imports: Vec<usize>,
+    /// Data symbols the object takes the address of, which whoever defines
+    /// them must export.
+    pub data: Vec<String>,
 }
 
 /// The runtime symbols an object calls. `hlp_fiber_poll` is the safepoint the
@@ -314,6 +348,8 @@ pub struct ObjectEmitted {
 pub const RT_SHADOW_PUSH: &str = "hlp_shadow_push";
 pub const RT_SHADOW_POP: &str = "hlp_shadow_pop";
 pub const RT_POLL: &str = "hlp_fiber_poll";
+pub const RT_NULL_ACCESS: &str = "hlp_null_access";
+pub const RT_DYN_COMPARE: &str = "hlp_dyn_compare";
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
 
@@ -327,6 +363,9 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
         pop: Ref::index(0),
         poll: Ref::index(0),
         epoch: None,
+        null_access: Some(Ref::index(0)),
+        dyn_compare: Some(Ref::index(0)),
+        data: HashMap::new(),
     };
     let known = |findex: usize| {
         program.signature(findex).map(|sig| Callee {
@@ -338,12 +377,18 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
     let mut skipped: Vec<(usize, String)> = Vec::new();
     let mut called: Vec<usize> = Vec::new();
     let mut uses_fma = false;
+    let mut uses_null_access = false;
+    let mut uses_dyn_compare = false;
+    let mut data_names: Vec<String> = Vec::new();
     for (i, inp) in inputs.iter().enumerate() {
         match emit_function(program, inp, &known, &throwaway, opts) {
-            Ok((_, c, fma)) => {
+            Ok((_, c, used)) => {
                 live.push(i);
                 called.extend(c);
-                uses_fma |= fma;
+                uses_fma |= used.fma;
+                uses_null_access |= used.null_access;
+                uses_dyn_compare |= used.dyn_compare;
+                data_names.extend(used.data);
             }
             Err(e) => skipped.push((inp.findex, e.0)),
         }
@@ -351,9 +396,8 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
 
     // Pass two: symbols first, so a body can call a function defined after it.
     let mut obj = object::ObjectBuilder::new();
-    if opts.shadow || opts.polls {
-        obj.import_memory(1);
-    }
+    // Field accesses and the frame and poll words all go through memory.
+    obj.import_memory(1);
     let wasm_sig = |sig: &Sig| {
         (
             sig.params.iter().filter_map(|t| t.wasm()).collect::<Vec<_>>(),
@@ -417,6 +461,20 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
             none
         },
         epoch: opts.polls.then(|| obj.import_data(RT_EPOCH)),
+        null_access: uses_null_access
+            .then(|| rt_sym(&mut obj, RT_NULL_ACCESS, vec![], vec![])),
+        dyn_compare: uses_dyn_compare.then(|| {
+            rt_sym(
+                &mut obj,
+                RT_DYN_COMPARE,
+                vec![ValType::I32, ValType::I32],
+                vec![ValType::I32],
+            )
+        }),
+        data: data_names
+            .iter()
+            .map(|n| (n.clone(), obj.import_data(n)))
+            .collect(),
     };
     let resolve = |findex: usize| {
         let sym = *syms.get(&findex)?;
@@ -443,11 +501,14 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
             ),
         }
     }
+    data_names.sort_unstable();
+    data_names.dedup();
     ObjectEmitted {
         bytes: obj.finish(),
         functions,
         skipped,
         imports,
+        data: data_names,
     }
 }
 
@@ -565,6 +626,14 @@ struct Runtime {
     /// loads it and calls `poll` only if it has moved since this body last
     /// looked. Without it every header calls `poll`.
     epoch: Option<object::Sym>,
+    /// Raises "Null access". Absent from a standalone module, which has no
+    /// runtime to ask.
+    null_access: Option<Ref>,
+    /// Compares two references by value; `(a, b) -> order`.
+    dyn_compare: Option<Ref>,
+    /// Data symbols an object may take the address of, by name. Empty in a
+    /// standalone module, which has none.
+    data: HashMap<String, object::Sym>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -584,8 +653,9 @@ struct Fx<'a, P: Program> {
     frame_local: u32,
     handled_local: u32,
     cur_local: u32,
+    tmp_local: u32,
     called: Vec<usize>,
-    used_fma: bool,
+    used: Used,
     out: object::Body,
     ctx: Vec<Frame>,
     nparams: u32,
@@ -602,7 +672,7 @@ fn emit_function<P: Program>(
     callees: &dyn Fn(usize) -> Option<Callee>,
     rt: &Runtime,
     opts: Options,
-) -> Res<(object::Body, Vec<usize>, bool)> {
+) -> Res<(object::Body, Vec<usize>, Used)> {
     let f = inp.body;
     if inp.sig.params.iter().any(|t| t.wasm().is_none())
         || !(inp.sig.ret == Ty::Void || inp.sig.ret.wasm().is_some())
@@ -677,6 +747,9 @@ fn emit_function<P: Program>(
     let cur_local = frame_local + 2;
     locals.push((1, ValType::I64));
     locals.push((1, ValType::I64));
+    // An i32 scratch, for a value read twice.
+    let tmp_local = frame_local + 3;
+    locals.push((1, ValType::I32));
     let has_loops = loop_header.iter().any(|h| *h);
     let mut fx = Fx {
         program,
@@ -688,8 +761,9 @@ fn emit_function<P: Program>(
         frame_local,
         handled_local,
         cur_local,
+        tmp_local,
         called: Vec::new(),
-        used_fma: false,
+        used: Used::default(),
         out: object::Body::new(locals),
         ctx: Vec::new(),
         nparams: inp.sig.params.len() as u32,
@@ -724,7 +798,7 @@ fn emit_function<P: Program>(
     // Control never falls off the end; this satisfies the function's result.
     fx.emit(&I::Unreachable);
     fx.emit(&I::End);
-    Ok((fx.out, fx.called, fx.used_fma))
+    Ok((fx.out, fx.called, fx.used))
 }
 
 impl<P: Program> Fx<'_, P> {
@@ -937,6 +1011,61 @@ impl<P: Program> Fx<'_, P> {
                 self.get(*src);
                 self.set(*dst);
             }
+            Instr::Null { dst } => {
+                let t = self.ty(*dst);
+                if t != Ty::Ptr {
+                    return unsupported("a null constant into a non-reference");
+                }
+                self.zero(t);
+                self.set(*dst);
+            }
+            Instr::NullCheck { value } => self.null_check(*value)?,
+            Instr::TypeConst { dst, ty } => {
+                if self.ty(*dst) != Ty::Ptr {
+                    return unsupported("a type constant into a non-reference");
+                }
+                let Some(name) = self.program.type_symbol(ty.0 as usize) else {
+                    return unsupported("a type with no descriptor symbol");
+                };
+                self.data_address(&name, 0)?;
+                self.set(*dst);
+            }
+            Instr::GetGlobal { dst, global } => {
+                if self.ty(*dst) != Ty::Ptr {
+                    return unsupported("a global read into a non-reference");
+                }
+                self.global_address(*global)?;
+                self.emit(&I::I32Load(we::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                self.set(*dst);
+            }
+            Instr::SetGlobal { global, src } => {
+                if !matches!(self.ty(*src), Ty::Ptr | Ty::I32) {
+                    return unsupported("a global slot written with a value wider than a word");
+                }
+                self.global_address(*global)?;
+                self.get(*src);
+                self.emit(&I::I32Store(we::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+            Instr::FieldGet {
+                dst,
+                obj,
+                obj_ty,
+                field,
+            } => self.field_get(*dst, *obj, *obj_ty, *field)?,
+            Instr::FieldSet {
+                obj,
+                obj_ty,
+                field,
+                src,
+            } => self.field_set(*obj, *obj_ty, *field, *src)?,
             Instr::Int { dst, idx } => {
                 let v = self.int_const(*idx)?;
                 match self.ty(*dst) {
@@ -979,7 +1108,7 @@ impl<P: Program> Fx<'_, P> {
                 self.get(*c);
                 let fma = if t == Ty::F64 { self.rt.fma64 } else { self.rt.fma32 };
                 self.call(fma);
-                self.used_fma = true;
+                self.used.fma = true;
                 self.set(*dst);
             }
             other => {
@@ -989,6 +1118,112 @@ impl<P: Program> Fx<'_, P> {
                     .collect();
                 return unsupported(format!("the {name} instruction"));
             }
+        }
+        Ok(())
+    }
+
+    /// Push the address of a named data symbol plus `addend`.
+    fn data_address(&mut self, name: &str, addend: i32) -> Res<()> {
+        if !self.used.data.iter().any(|d| d == name) {
+            self.used.data.push(name.to_string());
+        }
+        // A standalone module has no data symbols; pass one of an object only
+        // records the name.
+        match self.rt.data.get(name) {
+            Some(&sym) => self.out.address_of(sym, addend),
+            None if self.rt.null_access.is_some() => self.emit(&I::I32Const(0)),
+            None => return unsupported("data from another object, in a standalone module"),
+        }
+        Ok(())
+    }
+
+    fn global_address(&mut self, global: usize) -> Res<()> {
+        let Some(table) = self.program.globals_symbol() else {
+            return unsupported("a program with no global table");
+        };
+        let offset = i32::try_from(global * 4).map_err(|_| Unsupported("a global past 2 GiB".into()))?;
+        self.data_address(&table, offset)
+    }
+
+    fn null_check(&mut self, value: ValueId) -> Res<()> {
+        if self.ty(value) != Ty::Ptr {
+            // Nothing else can be null.
+            return Ok(());
+        }
+        let Some(raise) = self.rt.null_access else {
+            return unsupported("a null check, which needs the runtime");
+        };
+        self.get(value);
+        self.emit(&I::I32Eqz);
+        self.emit(&I::If(BlockType::Empty));
+        self.call(raise);
+        self.used.null_access = true;
+        self.emit(&I::Unreachable);
+        self.emit(&I::End);
+        Ok(())
+    }
+
+    /// The offset of a field and the kind of memory access it takes, checked
+    /// against the type of the register that reads or writes it.
+    fn field_slot(&self, obj_ty: TypeRef, field: usize, value: ValueId) -> Res<(u32, Ty)> {
+        let Some((offset, declared)) = self.program.field(obj_ty, field) else {
+            return unsupported("a field of a type without fixed offsets");
+        };
+        if declared != self.ty(value) {
+            return unsupported("a field whose declared kind differs from its register");
+        }
+        Ok((offset, declared))
+    }
+
+    fn field_get(&mut self, dst: ValueId, obj: ValueId, obj_ty: TypeRef, field: usize) -> Res<()> {
+        if self.ty(obj) != Ty::Ptr {
+            return unsupported("a field read from a non-reference");
+        }
+        let (offset, kind) = self.field_slot(obj_ty, field, dst)?;
+        let at = u64::from(offset);
+        let mem = |align: u32| we::MemArg {
+            offset: at,
+            align,
+            memory_index: 0,
+        };
+        self.get(obj);
+        match kind {
+            // Any nonzero byte is true, as the runtime reads it.
+            Ty::Bool => {
+                self.emit(&I::I32Load8U(mem(0)));
+                self.emit(&I::I32Const(0));
+                self.emit(&I::I32Ne);
+            }
+            Ty::I32 | Ty::Ptr => self.emit(&I::I32Load(mem(2))),
+            Ty::I64 => self.emit(&I::I64Load(mem(3))),
+            Ty::F32 => self.emit(&I::F32Load(mem(2))),
+            Ty::F64 => self.emit(&I::F64Load(mem(3))),
+            Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
+        }
+        self.set(dst);
+        Ok(())
+    }
+
+    fn field_set(&mut self, obj: ValueId, obj_ty: TypeRef, field: usize, src: ValueId) -> Res<()> {
+        if self.ty(obj) != Ty::Ptr {
+            return unsupported("a field write to a non-reference");
+        }
+        let (offset, kind) = self.field_slot(obj_ty, field, src)?;
+        let at = u64::from(offset);
+        let mem = |align: u32| we::MemArg {
+            offset: at,
+            align,
+            memory_index: 0,
+        };
+        self.get(obj);
+        self.get(src);
+        match kind {
+            Ty::Bool => self.emit(&I::I32Store8(mem(0))),
+            Ty::I32 | Ty::Ptr => self.emit(&I::I32Store(mem(2))),
+            Ty::I64 => self.emit(&I::I64Store(mem(3))),
+            Ty::F32 => self.emit(&I::F32Store(mem(2))),
+            Ty::F64 => self.emit(&I::F64Store(mem(3))),
+            Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
         }
         Ok(())
     }
@@ -1237,6 +1472,9 @@ impl<P: Program> Fx<'_, P> {
                     return unsupported("a comparison of different types");
                 }
                 self.get(b);
+                if t == Ty::Ptr && self.program.dynamic_compare(self.f.values[a.0 as usize].ty) {
+                    return self.dynamic_condition(c);
+                }
                 let (op, negate) = compare(t, c)?;
                 self.emit(&op);
                 if negate {
@@ -1244,8 +1482,10 @@ impl<P: Program> Fx<'_, P> {
                 }
             }
             None => match (t, c) {
-                (Ty::I32 | Ty::Bool, CondKind::True | CondKind::NotNull) => {}
-                (Ty::I32 | Ty::Bool, CondKind::False | CondKind::Null) => self.emit(&I::I32Eqz),
+                (Ty::I32 | Ty::Bool | Ty::Ptr, CondKind::True | CondKind::NotNull) => {}
+                (Ty::I32 | Ty::Bool | Ty::Ptr, CondKind::False | CondKind::Null) => {
+                    self.emit(&I::I32Eqz)
+                }
                 (Ty::I64, CondKind::True | CondKind::NotNull) => {
                     self.emit(&I::I64Eqz);
                     self.emit(&I::I32Eqz);
@@ -1253,6 +1493,46 @@ impl<P: Program> Fx<'_, P> {
                 (Ty::I64, CondKind::False | CondKind::Null) => self.emit(&I::I64Eqz),
                 (t, c) => return unsupported(format!("the condition {c:?} on {t:?}")),
             },
+        }
+        Ok(())
+    }
+
+    /// Both references are on the stack. The runtime orders them, and the
+    /// condition is a test of that order against zero.
+    fn dynamic_condition(&mut self, c: CondKind) -> Res<()> {
+        let Some(compare) = self.rt.dyn_compare else {
+            return unsupported("a comparison by value, which needs the runtime");
+        };
+        self.call(compare);
+        self.used.dyn_compare = true;
+        let (op, ordered) = match c {
+            CondKind::Eq => (I::I32Eq, false),
+            CondKind::NotEq => (I::I32Ne, false),
+            CondKind::SLt => (I::I32LtS, true),
+            CondKind::SGte => (I::I32GeS, true),
+            CondKind::SGt => (I::I32GtS, true),
+            CondKind::SLte => (I::I32LeS, true),
+            CondKind::ULt => (I::I32LtU, true),
+            CondKind::UGte => (I::I32GeU, true),
+            // The inverted tests of Haxe's float comparisons.
+            CondKind::NotLt => (I::I32GeS, true),
+            CondKind::NotGte => (I::I32LtS, true),
+            other => return unsupported(format!("the condition {other:?} on references")),
+        };
+        if ordered {
+            // A pair with no order answers a sentinel that must not pass an
+            // ordering test.
+            let tmp = self.tmp_local;
+            self.emit(&I::LocalTee(tmp));
+            self.emit(&I::I32Const(0));
+            self.emit(&op);
+            self.emit(&I::LocalGet(tmp));
+            self.emit(&I::I32Const(self.program.invalid_comparison()));
+            self.emit(&I::I32Ne);
+            self.emit(&I::I32And);
+        } else {
+            self.emit(&I::I32Const(0));
+            self.emit(&op);
         }
         Ok(())
     }
@@ -1350,6 +1630,11 @@ impl<P: Program> Fx<'_, P> {
 fn compare(t: Ty, c: CondKind) -> Res<(I<'static>, bool)> {
     use CondKind as C;
     let r = match t {
+        Ty::Ptr => match c {
+            C::Eq => (I::I32Eq, false),
+            C::NotEq => (I::I32Ne, false),
+            _ => return unsupported(format!("the condition {c:?} on references")),
+        },
         Ty::I32 | Ty::Bool => match c {
             C::Eq => (I::I32Eq, false),
             C::NotEq => (I::I32Ne, false),

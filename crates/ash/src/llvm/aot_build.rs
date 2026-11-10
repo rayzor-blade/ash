@@ -484,12 +484,15 @@ fn emit_direct_object(
         && !mode.contains("nopolls");
     let shadow = crate::target_abi::TargetAbi::for_triple(triple)?.shadow_call_stack
         && !mode.contains("noshadow");
+    let data = jit.aot_data_symbols();
     let emitted = crate::wasm_direct::emit_object(
         &jit.bytecode,
         &symbols,
+        &data,
         ash_wasm_emit::Options { polls, shadow },
     );
     jit.keep_external(emitted.imports.iter().filter_map(|f| symbols.get(f).cloned()));
+    jit.keep_data_external(emitted.data.iter().cloned());
     jit.define_elsewhere(emitted.functions.iter().copied());
     let path = out.with_extension("direct.o");
     std::fs::write(&path, &emitted.bytes)?;

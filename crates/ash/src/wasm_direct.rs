@@ -14,6 +14,16 @@ pub struct BytecodeProgram<'a> {
     /// Each bytecode function's symbol, as the module that lowers the rest of
     /// the program names it.
     pub symbols: &'a HashMap<usize, String>,
+    /// The data the module that lowers the rest of the program defines.
+    pub data: &'a ProgramData,
+}
+
+/// Names of the data a program's other object defines, for an object that
+/// takes their addresses.
+#[derive(Default)]
+pub struct ProgramData {
+    pub globals: Option<String>,
+    pub types: HashMap<usize, String>,
 }
 
 impl BytecodeProgram<'_> {
@@ -31,8 +41,11 @@ impl BytecodeProgram<'_> {
             Ty::F32
         } else if k == hl::hl_type_kind_HF64 {
             Ty::F64
-        } else {
+        } else if k == hl::hl_type_kind_HUI8 || k == hl::hl_type_kind_HUI16 {
+            // Narrow unsigned integers wrap on every store; not handled yet.
             Ty::Other
+        } else {
+            Ty::Ptr
         }
     }
 
@@ -64,6 +77,59 @@ impl Program for BytecodeProgram<'_> {
             .unwrap_or_else(|| format!("Fun_{findex}"))
     }
 
+    fn field(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<(u32, Ty)> {
+        let index = obj_ty.0 as usize;
+        let k = self.bc.types.get(index)?.kind;
+        if k != hl::hl_type_kind_HOBJ && k != hl::hl_type_kind_HSTRUCT {
+            return None;
+        }
+        // wasm32 words are four bytes.
+        let (offset, declared) =
+            crate::layout::field_offset_and_kind_for(&self.bc.types, index, field, 4)?;
+        let ty = if declared == hl::hl_type_kind_HBOOL {
+            Ty::Bool
+        } else if declared == hl::hl_type_kind_HI32 {
+            Ty::I32
+        } else if declared == hl::hl_type_kind_HI64 {
+            Ty::I64
+        } else if declared == hl::hl_type_kind_HF32 {
+            Ty::F32
+        } else if declared == hl::hl_type_kind_HF64 {
+            Ty::F64
+        } else if declared == hl::hl_type_kind_HVOID
+            || declared == hl::hl_type_kind_HUI8
+            || declared == hl::hl_type_kind_HUI16
+        {
+            return None;
+        } else {
+            Ty::Ptr
+        };
+        u32::try_from(offset).ok().map(|o| (o, ty))
+    }
+
+    fn dynamic_compare(&self, t: air::v2::ir::TypeRef) -> bool {
+        let Some(ty) = self.bc.types.get(t.0 as usize) else {
+            return false;
+        };
+        let k = ty.kind;
+        k == hl::hl_type_kind_HDYN
+            || k == hl::hl_type_kind_HNULL
+            || k == hl::hl_type_kind_HOBJ
+            || k == hl::hl_type_kind_HVIRTUAL
+    }
+
+    fn invalid_comparison(&self) -> i32 {
+        hl::hl_invalid_comparison as i32
+    }
+
+    fn globals_symbol(&self) -> Option<String> {
+        self.data.globals.clone()
+    }
+
+    fn type_symbol(&self, type_index: usize) -> Option<String> {
+        self.data.types.get(&type_index).cloned()
+    }
+
     fn signature(&self, findex: usize) -> Option<Sig> {
         // A native is called through a lowering of its own, not by symbol.
         let f = self
@@ -81,9 +147,10 @@ impl Program for BytecodeProgram<'_> {
 pub fn emit_object(
     bc: &DecodedBytecode,
     symbols: &HashMap<usize, String>,
+    data: &ProgramData,
     opts: Options,
 ) -> ObjectEmitted {
-    let program = BytecodeProgram { bc, symbols };
+    let program = BytecodeProgram { bc, symbols, data };
     let module = crate::air_pipeline::AshModule::new(bc);
     let mut optimized = Vec::new();
     for f in &bc.functions {

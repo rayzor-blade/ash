@@ -40,9 +40,11 @@ fn emit(hl: &std::path::Path, opts: Options) -> (DecodedBytecode, ash_wasm_emit:
     let emitted = {
         let module = ash_core::air_pipeline::AshModule::new(&bc);
         let symbols = std::collections::HashMap::new();
+        let data = ash_core::wasm_direct::ProgramData::default();
         let prog = BytecodeProgram {
             bc: &bc,
             symbols: &symbols,
+            data: &data,
         };
         let mut optimized = Vec::new();
         for f in &bc.functions {

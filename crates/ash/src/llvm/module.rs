@@ -852,7 +852,47 @@ impl<'ctx> JITModule<'ctx> {
     /// dynamic call goes through.
     pub fn function_symbol(&mut self, findex: usize) -> Result<String> {
         let (f, _) = self.get_or_create_function_value(findex)?;
+        // A bytecode function is named for its Haxe method, and the runtime
+        // links libc: a method called `close` would be a second definition of
+        // libc's, or worse, silently resolve to it. Every function an object
+        // built elsewhere defines or calls gets a name no library has.
+        let unique = format!("ash_direct_{findex}");
+        if f.get_name().to_str() != Ok(unique.as_str()) {
+            f.as_global_value().set_name(&unique);
+        }
+        // Hidden: the definition is in this link unit, so taking the function's
+        // address is a table index and not a GOT entry, which the linker has
+        // for data only.
+        f.as_global_value()
+            .set_visibility(inkwell::GlobalVisibility::Hidden);
         Ok(f.get_name().to_string_lossy().into_owned())
+    }
+
+    /// The names of the data other objects may take the address of: the global
+    /// slot table, and each type's descriptor by type index. Available once
+    /// the AOT data is emitted.
+    pub fn aot_data_symbols(&self) -> crate::wasm_direct::ProgramData {
+        let globals = self
+            .aot_globals
+            .map(|g| g.get_name().to_string_lossy().into_owned());
+        let mut types = std::collections::HashMap::new();
+        for (&type_index, &descriptor) in &self.type_index_to_c_ptr {
+            if let Some(g) = self.aot_types.get(&(descriptor as usize)) {
+                types.insert(type_index, g.get_name().to_string_lossy().into_owned());
+            }
+        }
+        crate::wasm_direct::ProgramData { globals, types }
+    }
+
+    /// Make these data symbols visible to the linker, for an object built
+    /// elsewhere to address.
+    pub fn keep_data_external(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            if let Some(g) = self.module.get_global(&name) {
+                g.set_linkage(inkwell::module::Linkage::External);
+                g.set_visibility(inkwell::GlobalVisibility::Hidden);
+            }
+        }
     }
 
     /// Declare these functions and never lower them: another object defines

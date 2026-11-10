@@ -22,6 +22,7 @@ const FUNCTION_INDEX_LEB: u8 = 0;
 const MEMORY_ADDR_SLEB: u8 = 4;
 
 const FLAG_LOCAL: u32 = 0x02;
+const FLAG_HIDDEN: u32 = 0x04;
 const FLAG_UNDEFINED: u32 = 0x10;
 
 #[derive(Clone)]
@@ -188,7 +189,7 @@ impl ObjectBuilder {
         self.symbols.push(SymbolInfo {
             name: name.to_string(),
             slot: Slot::Defined(self.defined.len() - 1),
-            flags: if local { FLAG_LOCAL } else { 0 },
+            flags: if local { FLAG_LOCAL } else { FLAG_HIDDEN },
         });
         self.by_name.insert(name.to_string(), sym);
         sym

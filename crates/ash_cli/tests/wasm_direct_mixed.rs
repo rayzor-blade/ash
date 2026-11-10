@@ -29,23 +29,34 @@ fn lines(stdout: &[u8]) -> Vec<String> {
 
 #[test]
 fn mixed_direct_and_llvm_wasm_matches_the_interpreter() {
+    check("TestWasmNumeric", "test_wasm_numeric.hl");
+}
+
+/// References: equality by value, catchable null checks, fields of every kind,
+/// global slots and type constants.
+#[test]
+fn references_through_the_direct_backend_match_the_interpreter() {
+    check("TestWasmDynamic", "test_wasm_dynamic.hl");
+}
+
+fn check(main_class: &str, fallback: &str) {
     if runtime_object().is_none() {
         eprintln!("skipped: no wasm runtime object for {TARGET}");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let hl = dir.path().join("numeric.hl");
+    let hl = dir.path().join("program.hl");
     if haxe_available() {
         let out = Command::new("haxe")
             .arg("-cp")
             .arg(tests_dir())
-            .args(["-main", "TestWasmNumeric", "-hl"])
+            .args(["-main", main_class, "-hl"])
             .arg(&hl)
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     } else {
-        std::fs::copy(tests_dir().join("test_wasm_numeric.hl"), &hl).unwrap();
+        std::fs::copy(tests_dir().join(fallback), &hl).unwrap();
     }
 
     let mut interp = Command::new(ash_cli_bin());
@@ -53,10 +64,10 @@ fn mixed_direct_and_llvm_wasm_matches_the_interpreter() {
     let reference = run_with_timeout(interp, Duration::from_secs(60));
     assert!(!reference.timed_out && reference.output.status.success());
     let expected = lines(&reference.output.stdout);
-    assert!(expected.len() > 30, "the reference printed {} lines", expected.len());
+    assert!(expected.len() > 15, "the reference printed {} lines", expected.len());
 
     for fibers in [false, true] {
-        let wasm = dir.path().join(format!("numeric_{fibers}.wasm"));
+        let wasm = dir.path().join(format!("program_{fibers}.wasm"));
         let mut build = Command::new(ash_cli_bin());
         build
             .env("ASH_WASM_DIRECT", "log")

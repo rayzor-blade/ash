@@ -60,6 +60,17 @@ fn virtual_fields_through_the_direct_backend_match_the_interpreter() {
     );
 }
 
+/// Calls into the runtime: math and string natives, and the stdlib operations
+/// emitted as single instructions.
+#[test]
+fn natives_through_the_direct_backend_match_the_interpreter() {
+    check(
+        "TestWasmNative",
+        "test_wasm_native.hl",
+        &["rounding", "classify", "powers", "curve", "where"],
+    );
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {

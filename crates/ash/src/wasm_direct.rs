@@ -57,6 +57,19 @@ impl BytecodeProgram<'_> {
         }
     }
 
+    /// A native the runtime itself exports as `hlp_<name>`, called with the
+    /// signature the bytecode declares. A host's native, an HDLL primitive
+    /// and a native that takes a context word are reached some other way.
+    fn runtime_native(&self, findex: usize) -> Option<&crate::types::HLNative> {
+        use crate::native_lib as lib;
+        let n = self.bc.natives.iter().find(|n| n.findex as usize == findex)?;
+        let plain = lib::is_runtime_lib(&n.lib)
+            && lib::host_link(&n.lib, &n.name).is_none()
+            && lib::host_native_context(&n.lib, &n.name) == 0
+            && !lib::host_native_record(&n.lib, &n.name);
+        plain.then_some(n)
+    }
+
     fn sig_of(&self, fun: &crate::types::HLTypeFun) -> Sig {
         Sig {
             params: fun.args.iter().map(|a| self.ty_of(a.0)).collect(),
@@ -79,10 +92,13 @@ impl Program for BytecodeProgram<'_> {
     }
 
     fn symbol(&self, findex: usize) -> String {
-        self.symbols
-            .get(&findex)
-            .cloned()
-            .unwrap_or_else(|| format!("Fun_{findex}"))
+        if let Some(name) = self.symbols.get(&findex) {
+            return name.clone();
+        }
+        match self.runtime_native(findex) {
+            Some(n) => format!("hlp_{}", n.name),
+            None => format!("Fun_{findex}"),
+        }
     }
 
     fn virtual_field(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<i32> {
@@ -188,12 +204,12 @@ impl Program for BytecodeProgram<'_> {
     }
 
     fn signature(&self, findex: usize) -> Option<Sig> {
-        // A native is called through a lowering of its own, not by symbol.
-        let f = self
-            .bc
-            .functions
-            .iter()
-            .find(|f| f.findex as usize == findex)?;
+        let Some(f) = self.bc.functions.iter().find(|f| f.findex as usize == findex) else {
+            let n = self.runtime_native(findex)?;
+            let sig = self.sig_of(self.bc.types[n.type_.0].fun.as_ref()?);
+            let narrow = |t: &Ty| *t == Ty::Other;
+            return (!sig.params.iter().any(narrow) && !narrow(&sig.ret)).then_some(sig);
+        };
         let fun = self.bc.types[f.type_.0].fun.as_ref()?;
         Some(self.sig_of(fun))
     }

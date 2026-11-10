@@ -32,7 +32,7 @@ pub use wasm_encoder;
 
 use air::v2::CfgInfo;
 use air::v2::ir::{
-    BinOp, CastKind, CondKind, Function, Instr, Terminator, TypeRef, UnOp, ValueId,
+    BinOp, CastKind, CondKind, Function, Instr, IntrinsicKind, Terminator, TypeRef, UnOp, ValueId,
 };
 use std::collections::HashMap;
 use wasm_encoder as we;
@@ -1167,6 +1167,7 @@ impl<P: Program> Fx<'_, P> {
             Instr::UnOp { op, dst, src } => self.un_op(*op, *dst, *src)?,
             Instr::Cast { kind, dst, src } => self.cast(*kind, *dst, *src)?,
             Instr::Call { dst, fun, args } => self.call_instr(*dst, *fun, args)?,
+            Instr::Intrinsic { kind, dst, args, .. } => self.intrinsic(*kind, *dst, args)?,
             Instr::Fma { dst, a, b, c } => {
                 let t = self.ty(*dst);
                 if !t.is_float() || self.ty(*a) != t || self.ty(*b) != t || self.ty(*c) != t {
@@ -1694,6 +1695,73 @@ impl<P: Program> Fx<'_, P> {
                 }
             }
             other => return unsupported(format!("the {other:?} cast")),
+        }
+        self.set(dst);
+        Ok(())
+    }
+
+    /// A recognized stdlib operation as the wasm instructions that compute it.
+    fn intrinsic(&mut self, kind: IntrinsicKind, dst: ValueId, args: &[ValueId]) -> Res<()> {
+        use IntrinsicKind as K;
+        if args.len() != kind.arity() {
+            return unsupported("an intrinsic with the wrong operand count");
+        }
+        if kind == K::PtrCompare {
+            if args.iter().any(|a| self.ty(*a) != Ty::Ptr) || self.ty(dst) != Ty::I32 {
+                return unsupported("a pointer comparison on other than references");
+            }
+            // (a > b) - (a < b), unsigned: the identity order of the addresses.
+            self.get(args[0]);
+            self.get(args[1]);
+            self.emit(&I::I32GtU);
+            self.get(args[0]);
+            self.get(args[1]);
+            self.emit(&I::I32LtU);
+            self.emit(&I::I32Sub);
+            self.set(dst);
+            return Ok(());
+        }
+        let x = args[0];
+        let result = match kind {
+            K::IsNaN | K::IsFinite => Ty::Bool,
+            K::FloorToI32 | K::CeilToI32 | K::RoundHalfUpToI32 => Ty::I32,
+            _ => Ty::F64,
+        };
+        if self.ty(x) != Ty::F64 || self.ty(dst) != result {
+            return unsupported("an intrinsic on other than doubles");
+        }
+        self.get(x);
+        match kind {
+            K::IsNaN => {
+                self.get(x);
+                self.emit(&I::F64Ne);
+            }
+            K::IsFinite => {
+                self.emit(&I::F64Abs);
+                self.emit(&I::F64Const(f64::INFINITY.into()));
+                self.emit(&I::F64Lt);
+            }
+            K::Sqrt => self.emit(&I::F64Sqrt),
+            K::Abs => self.emit(&I::F64Abs),
+            K::Floor => self.emit(&I::F64Floor),
+            K::Ceil => self.emit(&I::F64Ceil),
+            K::FloorToI32 => {
+                self.emit(&I::F64Floor);
+                self.emit(&I::I32TruncSatF64S);
+            }
+            K::CeilToI32 => {
+                self.emit(&I::F64Ceil);
+                self.emit(&I::I32TruncSatF64S);
+            }
+            K::RoundHalfUp | K::RoundHalfUpToI32 => {
+                self.emit(&I::F64Const(0.5f64.into()));
+                self.emit(&I::F64Add);
+                self.emit(&I::F64Floor);
+                if kind == K::RoundHalfUpToI32 {
+                    self.emit(&I::I32TruncSatF64S);
+                }
+            }
+            K::PtrCompare => unreachable!("handled above"),
         }
         self.set(dst);
         Ok(())

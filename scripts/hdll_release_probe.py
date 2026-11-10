@@ -38,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "crates" / "ash" / "test" / "hdll_release"
+TESTS = ROOT / "crates" / "ash" / "test" / "tests"
 IS_WINDOWS = platform.system() == "Windows"
 EXE = ".exe" if IS_WINDOWS else ""
 MODES = ("interp", "hybrid", "jit")
@@ -100,8 +101,8 @@ def stage(hdll_dir: Path, runtime: Path | None, dest: Path) -> None:
 
 
 def build_optional_prim(dest: Path) -> Path:
-    out = dest / "OptionalPrim.hl"
-    p = run([tool("haxe"), "-hl", out, "-cp", FIXTURES, "-main", "OptionalPrim"])
+    out = dest / "TestOptionalPrim.hl"
+    p = run([tool("haxe"), "-hl", out, "-cp", TESTS, "-main", "TestOptionalPrim"])
     if p.returncode:
         sys.exit(f"haxe failed:\n{p.stdout}")
     return out
@@ -137,7 +138,9 @@ def summarize(cell: str, text: str, code: int | None) -> tuple[str, str]:
     problem = next((l for l in lines if l.startswith(("Error:", "Uncaught exception"))
                     or "panicked" in l or "LLVM ERROR" in l), "")
     if cell == "optional-prim":
-        got = [l for l in lines if not l.startswith("[ash]")]
+        got = [l for l in lines
+               if not l.startswith("[ash]") and " returned: " not in l
+               and "replacing existing signature" not in l]
         if got == OPTIONAL_PRIM_EXPECTED:
             return "ok", "behaves like HashLink"
         return "DIFF", problem or " | ".join(got[:5]) or "no output"

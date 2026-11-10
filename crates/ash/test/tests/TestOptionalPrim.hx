@@ -1,7 +1,7 @@
 // Two primitives from an optional library (`?sdl`) that no sdl.hdll exports.
 // HashLink binds each to a stub that raises when called, so the program
 // starts, skips the first, and catches the second.
-class OptionalPrim {
+class TestOptionalPrim {
 	@:hlNative("?sdl", "no_such_prim_skipped") static function skipped():Int { return 0; }
 	@:hlNative("?sdl", "no_such_prim_called") static function called():Int { return 0; }
 

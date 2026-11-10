@@ -1553,8 +1553,14 @@ pub unsafe extern "C" fn hlp_dyn_call(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn hlp_prim_not_loaded() {
+    // hlp_error reads a NUL-terminated UTF-16 string; converted once, since a
+    // program may catch this and call the primitive again.
+    static MESSAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let message = *MESSAGE.get_or_init(|| {
+        crate::strings::str_to_uchar_ptr("Primitive or library is missing") as usize
+    }) as *const u16;
     unsafe {
-        hlp_error(c"Primitive or library is missing".as_ptr() as *const u16);
+        hlp_error(message);
     }
 }
 

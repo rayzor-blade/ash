@@ -491,6 +491,17 @@ fn symbol_table() -> &'static Mutex<HashMap<String, usize>> {
     SYMBOL_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// What HashLink binds a primitive to when its library is optional (`?lib`)
+/// and the primitive, or the library, is missing: a stub that raises
+/// "Primitive or library is missing" when called. `None` for a required
+/// library, where a missing primitive stays an error.
+fn optional_stub(library_name: &str) -> Option<*mut c_void> {
+    if !library_name.starts_with('?') {
+        return None;
+    }
+    std_symbol_addr("hlp_prim_not_loaded").map(|a| a as *mut c_void)
+}
+
 fn symbol_key(library_name: &str, function_name: &str) -> String {
     let clean = library_name.strip_prefix('?').unwrap_or(library_name);
     format!("{}@{}", clean, function_name)
@@ -1099,8 +1110,10 @@ impl NativeFunctionResolver {
 
     /// Populate the canonical symbol table from the bytecode natives list.
     /// Called once after HDLL loading; idempotent and shared process-wide.
-    /// Returns (resolved_count, missing_keys) — misses are left out of the
-    /// table so consumers keep their lazy-resolution fallback semantics.
+    /// Returns (resolved_count, missing_keys). A miss in a required library
+    /// is left out of the table so consumers keep their lazy-resolution
+    /// fallback semantics; a miss in an optional (`?`) library is bound to
+    /// the not-loaded stub, which raises when called, as HashLink does.
     pub fn build_symbol_table(&self, natives: &[HLNative]) -> (usize, Vec<String>) {
         let mut resolved = 0usize;
         let mut missing = Vec::new();
@@ -1115,7 +1128,7 @@ impl NativeFunctionResolver {
                 resolved += 1;
                 continue;
             }
-            match self.resolve_function_uncached(&native.lib, &name) {
+            match self.resolve_function_exact(&native.lib, &name) {
                 Ok(addr) if !addr.is_null() => {
                     symbol_table()
                         .lock()
@@ -1123,7 +1136,17 @@ impl NativeFunctionResolver {
                         .insert(key, addr as usize);
                     resolved += 1;
                 }
-                _ => missing.push(key),
+                _ => {
+                    if let Some(stub) = optional_stub(&native.lib) {
+                        symbol_table()
+                            .lock()
+                            .expect("symbol table poisoned")
+                            .insert(key.clone(), stub as usize);
+                        missing.push(format!("{key} (optional)"));
+                    } else {
+                        missing.push(key);
+                    }
+                }
             }
         }
         (resolved, missing)
@@ -1145,7 +1168,20 @@ impl NativeFunctionResolver {
         Ok(addr)
     }
 
+    /// `resolve_function_exact`, except that a primitive missing from an
+    /// optional (`?`) library resolves to the not-loaded stub.
     fn resolve_function_uncached(
+        &self,
+        library_name: &str,
+        function_name: &str,
+    ) -> Result<*mut c_void> {
+        match self.resolve_function_exact(library_name, function_name) {
+            Err(err) => optional_stub(library_name).ok_or(err),
+            found => found,
+        }
+    }
+
+    fn resolve_function_exact(
         &self,
         library_name: &str,
         function_name: &str,

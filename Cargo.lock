@@ -164,12 +164,14 @@ dependencies = [
 name = "ash"
 version = "0.1.17"
 dependencies = [
+ "air",
  "anyhow",
  "ash_core",
  "ash_interp",
  "ash_page",
  "ash_std",
  "ash_trace",
+ "ash_wasm_emit",
  "ash_wasm_runtime",
  "brotli",
  "clap",
@@ -179,6 +181,7 @@ dependencies = [
  "tempfile",
  "tikv-jemallocator",
  "tokio",
+ "wasmtime",
  "windows-sys 0.59.0",
 ]
 
@@ -328,6 +331,14 @@ name = "ash_trace"
 version = "0.1.0"
 dependencies = [
  "ariadne",
+]
+
+[[package]]
+name = "ash_wasm_emit"
+version = "0.1.0"
+dependencies = [
+ "air",
+ "wasm-encoder 0.258.0",
 ]
 
 [[package]]

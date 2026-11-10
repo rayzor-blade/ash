@@ -51,3 +51,6 @@ tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 tempfile = "3.2"
+ash_wasm_emit = { path = "../ash_wasm_emit" }
+air = { path = "../air" }
+wasmtime = "43"

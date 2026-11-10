@@ -1,0 +1,11 @@
+[package]
+name = "ash_wasm_emit"
+version = "0.1.0"
+edition = "2024"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "Direct emission of WebAssembly from optimized AIR, without LLVM"
+
+[dependencies]
+air = { path = "../air" }
+wasm-encoder = "0.258"

@@ -174,9 +174,28 @@ fn flow_through_the_direct_backend_matches_the_interpreter() {
     );
 }
 
+/// Whole programs through the backend alone, with no LLVM module: the data,
+/// the start-up routine and `main` are written beside the bodies.
+#[test]
+fn whole_programs_without_llvm_match_the_interpreter() {
+    check_only("TestWasmNumeric", "test_wasm_numeric.hl");
+    check_only("TestWasmDispatch", "test_wasm_dispatch.hl");
+    check_only("TestWasmFlow", "test_wasm_flow.hl");
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
+    check_in(main_class, fallback, must_be_direct, false);
+}
+
+/// The same, with the direct backend taking the whole program: no LLVM module
+/// is built at all.
+fn check_only(main_class: &str, fallback: &str) {
+    check_in(main_class, fallback, &[], true);
+}
+
+fn check_in(main_class: &str, fallback: &str, must_be_direct: &[&str], only: bool) {
     if runtime_object().is_none() {
         eprintln!("skipped: no wasm runtime object for {TARGET}");
         return;
@@ -207,10 +226,13 @@ fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
         let wasm = dir.path().join(format!("program_{fibers}.wasm"));
         let mut build = Command::new(ash_cli_bin());
         build
-            .env("ASH_WASM_DIRECT", "log")
-            .args(["--quiet", "--target", TARGET, "--build"])
+            .env("ASH_WASM_DIRECT", if only { "log,only" } else { "log" })
+            .args(["--target", TARGET, "--build"])
             .arg(&wasm)
             .arg(&hl);
+        if !only {
+            build.arg("--quiet");
+        }
         if fibers {
             build.env("ASH_WASM_FIBERS", "1");
         }
@@ -220,8 +242,15 @@ fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
             "fibers={fibers}: {}",
             render_output(&built.output)
         );
-        // It must have taken functions, or this tests nothing.
         let log = String::from_utf8_lossy(&built.output.stderr).into_owned();
+        if only {
+            assert!(
+                log.contains("functions, no LLVM"),
+                "fibers={fibers}: the program did not go through the backend alone: {log}"
+            );
+        }
+        // It must have taken functions, or this tests nothing.
+        if !only {
         let direct = log
             .lines()
             .find(|l| l.starts_with("[aot] direct: ["))
@@ -230,6 +259,7 @@ fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
             direct.matches(',').count() >= 5,
             "fibers={fibers}: too few functions went direct: {direct}"
         );
+        }
 
         ash_core::native_lib::init_std_library().unwrap();
         let bc = ash_core::bytecode::BytecodeDecoder::decode(&hl).unwrap();
@@ -238,7 +268,7 @@ fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
                 .unwrap_or_else(|| panic!("no static {name} in {main_class}"));
             assert!(
                 direct_list(&log).contains(&findex),
-                "fibers={fibers}: {name} (f{findex}) was not emitted directly: {direct}"
+                "fibers={fibers}: {name} (f{findex}) was not emitted directly: {log}"
             );
         }
 

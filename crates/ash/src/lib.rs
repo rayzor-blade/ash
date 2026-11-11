@@ -18,6 +18,7 @@ pub mod devirt;
 pub mod generated;
 pub mod tree_fusion;
 pub mod wasm_direct;
+pub mod wasm_program;
 pub mod host_export;
 pub mod host_module;
 pub mod intrinsics;

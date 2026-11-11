@@ -603,12 +603,12 @@ impl ObjectBuilder {
                     data_payload[p..p + 4].copy_from_slice(&addend.to_le_bytes());
                 }
             }
+            // Its index among the sections is the number written before it.
+            data_section_index = sections;
             module.section(&we::RawSection {
                 id: 11,
                 data: &data_payload,
             });
-            sections += 1;
-            data_section_index = sections;
         }
 
         // linking: version 2, then the symbol table and the segment.

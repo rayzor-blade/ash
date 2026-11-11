@@ -142,6 +142,69 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     crate::air_pipeline::set_shadow_frames(
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
+    // The direct wasm backend on its own, with no LLVM module at all, when it
+    // can take the whole program. `ASH_WASM_DIRECT` containing `only` asks for
+    // it; a program it cannot take goes the ordinary way.
+    if crate::llvm::aot_link::is_wasm_triple(&triple)
+        && let Some(exe) = exe
+        && let Ok(mode) = std::env::var("ASH_WASM_DIRECT")
+        && mode.contains("only")
+        && pgo.is_none()
+        && links.is_empty()
+        && exports.is_empty()
+        && closures.is_empty()
+        && object_tails.is_empty()
+        && object_drops.is_empty()
+    {
+        let polls = !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"))
+            && !mode.contains("nopolls");
+        let shadow = crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack
+            && !mode.contains("noshadow");
+        let began = std::time::Instant::now();
+        match crate::wasm_program::build(file, &triple, polls, shadow, quiet)? {
+            crate::wasm_program::Outcome::Built(bytes) => {
+                crate::air_disk_cache::stage("direct_program", began.elapsed());
+                let object = out.with_extension("direct.o");
+                std::fs::write(&object, &bytes)?;
+                let host_libraries = crate::bytecode::BytecodeDecoder::decode_for_abi(
+                    file,
+                    &crate::target_abi::TargetAbi::for_triple(&triple)?,
+                )?
+                .natives
+                .iter()
+                .any(|n| !crate::native_lib::is_runtime_lib(&n.lib));
+                let kind = if host_libraries {
+                    crate::llvm::aot_link::Runtime::Shared
+                } else {
+                    crate::llvm::aot_link::Runtime::Static
+                };
+                let mut objects = vec![object.clone()];
+                objects.extend(language_objects.iter().cloned());
+                let began = std::time::Instant::now();
+                let linked = crate::llvm::aot_link::link_executable(
+                    &objects,
+                    exe,
+                    &triple,
+                    kind,
+                    runtime,
+                    abi_version,
+                    wasm_fibers,
+                    quiet,
+                );
+                if linked.is_ok() {
+                    let _ = std::fs::remove_file(&object);
+                }
+                crate::air_disk_cache::stage("link", began.elapsed());
+                return linked;
+            }
+            crate::wasm_program::Outcome::Declined(why) => {
+                if !quiet {
+                    eprintln!("[aot] the direct wasm backend declined the whole program: {why}");
+                }
+            }
+        }
+    }
+
     // A one-command build of a native executable nothing else registers into
     // is a fresh standalone program, which is what tree fusion's contract
     // needs; an object a host links, or a wasm module, is not.

@@ -78,6 +78,7 @@ use std::sync::{Arc, OnceLock};
 use air::v2::{Function, Instr};
 use ash_core::air_pipeline::AshModule;
 use ash_core::bytecode::DecodedBytecode;
+use ash_core::hl_bindings as hl;
 use ash_core::types::{HLFunction, TypeRef};
 
 /// Whether the interpreter executes AIR v2 SSA directly.
@@ -130,7 +131,13 @@ pub struct Prepared {
     /// For each block, the headers of the loops it is a latch of; built on
     /// first use.
     back_edges: OnceLock<Box<[Box<[u32]>]>>,
+    /// See [`Prepared::kills`]; built on first use.
+    kills: OnceLock<Kills>,
 }
+
+/// Per block, the call-family instructions (by index in the block) that leave
+/// values dead, with the slots to clear once the call has returned.
+type Kills = Box<[Box<[(u32, Box<[u32]>)]>]>;
 
 struct OsrState {
     liveness: air::v2::liveness::Liveness,
@@ -168,6 +175,137 @@ impl Prepared {
         table
             .get(latch as usize)
             .is_some_and(|headers| headers.contains(&header))
+    }
+
+    /// The slots to clear after each call in each block.
+    ///
+    /// A value lives in its own frame slot until the frame returns, and the
+    /// collector scans the slot whether or not anything reads it again. A
+    /// call whose result is unused, or a temporary whose last use has passed,
+    /// would then keep its object alive for as long as the frame runs: inlining
+    /// and unrolling give each such value a slot of its own, so a long-lived
+    /// frame retains one dead object per call site. The slots listed here are
+    /// cleared once the call-family instruction they are attached to returns.
+    ///
+    /// A value is listed at the first call after it dies on a path, whether
+    /// at its last use or on an edge that leaves its live range, and only if it
+    /// can hold a heap pointer. "Dies" is liveness as the IR defines it, so phi
+    /// sources, terminator operands and the exceptional edges into trap
+    /// handlers all count as reads. A value that dies with no call after it on
+    /// its path keeps its slot. `ASH_AIR_KILLS=0` turns clearing off; it is
+    /// safe either way.
+    pub fn kills(&self, bc: &DecodedBytecode) -> &[Box<[(u32, Box<[u32]>)]>] {
+        self.kills.get_or_init(|| self.build_kills(bc))
+    }
+
+    fn build_kills(&self, bc: &DecodedBytecode) -> Kills {
+        use std::collections::BTreeSet;
+
+        let ir = self.ir();
+        let nb = ir.blocks.len();
+        if !kills_enabled() {
+            return vec![Box::default(); nb].into_boxed_slice();
+        }
+        let cfg = air::v2::CfgInfo::build(ir);
+        let liveness = air::v2::liveness::Liveness::analyze(ir, &cfg);
+        let clearable = |v: air::v2::ValueId| -> bool {
+            ir.values.get(v.0 as usize).is_some_and(|d| d.lanes <= 1)
+                && self
+                    .shim
+                    .regs
+                    .get(v.0 as usize)
+                    .is_some_and(|t| holds_heap_pointer(bc.types[t.0].kind))
+        };
+
+        // What each instruction leaves dead. Walking a block backwards from
+        // what it leaves live, the first time an operand is seen is its last
+        // use here, and a result that is not live afterwards is never read.
+        let dying: Vec<Vec<Vec<u32>>> = ir
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(b, blk)| {
+                let mut live = liveness.live_out(air::v2::BlockId(b as u32)).clone();
+                live.extend(blk.term.uses());
+                let mut out: Vec<Vec<u32>> = vec![Vec::new(); blk.instrs.len()];
+                for (i, ins) in blk.instrs.iter().enumerate().rev() {
+                    if let Some(d) = ins.dst()
+                        && !live.remove(&d)
+                        && clearable(d)
+                    {
+                        out[i].push(d.0);
+                    }
+                    for u in ins.uses() {
+                        if live.insert(u) && clearable(u) {
+                            out[i].push(u.0);
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+
+        // Forward, over what is dead but still in its slot. A definition puts
+        // a fresh value in the slot, so it leaves the set; a call clears it.
+        let walk = |b: usize, entry: &BTreeSet<u32>| -> (BTreeSet<u32>, Vec<(u32, Box<[u32]>)>) {
+            let blk = &ir.blocks[b];
+            let mut stale = entry.clone();
+            for phi in &blk.phis {
+                stale.remove(&phi.dst.0);
+            }
+            let mut kills = Vec::new();
+            for (i, ins) in blk.instrs.iter().enumerate() {
+                if let Some(d) = ins.dst() {
+                    stale.remove(&d.0);
+                }
+                stale.extend(dying[b][i].iter().copied());
+                if matches!(
+                    ins,
+                    Instr::Call { .. } | Instr::CallMethod { .. } | Instr::CallClosure { .. }
+                ) {
+                    if !stale.is_empty() {
+                        kills.push((i as u32, stale.iter().copied().collect()));
+                    }
+                    stale.clear();
+                }
+            }
+            (stale, kills)
+        };
+        // A value that is live out of a block but not into one of its
+        // successors dies on that edge: a collection read in a loop and
+        // unused after it has no last-use instruction to mark it.
+        let on_edge: Vec<Vec<Vec<u32>>> = (0..nb)
+            .map(|b| {
+                let out = liveness.live_out(air::v2::BlockId(b as u32));
+                cfg.succs[b]
+                    .iter()
+                    .map(|s| {
+                        let into = liveness.live_in(*s);
+                        out.iter()
+                            .filter(|v| !into.contains(v) && clearable(**v))
+                            .map(|v| v.0)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut stale_in: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nb];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for b in 0..nb {
+                let (out, _) = walk(b, &stale_in[b]);
+                for (k, s) in cfg.succs[b].iter().enumerate() {
+                    let into = &mut stale_in[s.idx()];
+                    for &v in out.iter().chain(&on_edge[b][k]) {
+                        changed |= into.insert(v);
+                    }
+                }
+            }
+        }
+        (0..nb)
+            .map(|b| walk(b, &stale_in[b]).1.into_boxed_slice())
+            .collect()
     }
 
     pub fn instr_pcs(&self) -> &[Vec<usize>] {
@@ -222,6 +360,30 @@ impl Prepared {
         );
         true
     }
+}
+
+/// Whether a value of `kind` can be a pointer into the GC heap. Numbers,
+/// booleans and type descriptors cannot, so clearing them would only cost a
+/// store.
+fn holds_heap_pointer(kind: hl::hl_type_kind) -> bool {
+    !matches!(
+        kind,
+        hl::hl_type_kind_HVOID
+            | hl::hl_type_kind_HUI8
+            | hl::hl_type_kind_HUI16
+            | hl::hl_type_kind_HI32
+            | hl::hl_type_kind_HI64
+            | hl::hl_type_kind_HF32
+            | hl::hl_type_kind_HF64
+            | hl::hl_type_kind_HBOOL
+            | hl::hl_type_kind_HTYPE
+    )
+}
+
+/// `ASH_AIR_KILLS=0` leaves dead values in their slots (see `Prepared::kills`).
+fn kills_enabled() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| std::env::var("ASH_AIR_KILLS").map_or(true, |v| v != "0"))
 }
 
 /// What a function executes, decided once on its first call.
@@ -407,6 +569,7 @@ impl Cache {
                             positions: positions.into_boxed_slice(),
                             osr: OnceLock::new(),
                             back_edges: OnceLock::new(),
+                            kills: OnceLock::new(),
                         }))
                     }
                 },
@@ -570,6 +733,7 @@ mod tests {
             positions: Box::new([]),
             osr: OnceLock::new(),
             back_edges: OnceLock::new(),
+            kills: OnceLock::new(),
         })));
         let active = cache.body(0).unwrap();
         assert!(active.osr.get().is_none(), "OSR data must not be eager");

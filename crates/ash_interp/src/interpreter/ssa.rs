@@ -180,6 +180,10 @@ impl HLInterpreter {
             }
 
             let pcs = prep.instr_pcs().get(block);
+            // Slots to clear after a call, in instruction order; see
+            // `Prepared::kills`.
+            let kills = prep.kills(bc).get(block).map_or(&[][..], |k| &k[..]);
+            let mut next_kill = 0;
             for &index in &prep.instructions[block] {
                 let i = index as usize;
                 let ins = &blk.instrs[i];
@@ -220,6 +224,15 @@ impl HLInterpreter {
                     prev_block = Some(block as u32);
                     block = handler;
                     continue 'blocks;
+                }
+                if let Some((at, dead)) = kills.get(next_kill)
+                    && *at == index
+                {
+                    next_kill += 1;
+                    let frame = self.stack.last_mut().unwrap();
+                    for &v in dead.iter() {
+                        frame.registers.set(v, NanBoxedValue::void());
+                    }
                 }
             }
 

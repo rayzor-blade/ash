@@ -124,6 +124,56 @@ fn casts_through_the_direct_backend_match_the_interpreter() {
     );
 }
 
+/// Calls through a pointer: methods of classes, interfaces and structural
+/// types, and closures with the signature they were made with and with
+/// another.
+#[test]
+fn dispatch_through_the_direct_backend_matches_the_interpreter() {
+    check(
+        "TestWasmDispatch",
+        "test_wasm_dispatch.hl",
+        &[
+            "sumAreas",
+            "labels",
+            "baseTwice",
+            "baseScale",
+            "viaStructure",
+            "applyInt",
+            "applyFloat",
+            "applyTwo",
+            "applyBool",
+            "applyVoid",
+            "callDyn",
+        ],
+    );
+}
+
+/// Exceptions, enums, references to locals, narrow integers and fields of a
+/// Dynamic.
+#[test]
+fn flow_through_the_direct_backend_matches_the_interpreter() {
+    check(
+        "TestWasmFlow",
+        "test_wasm_flow.hl",
+        &[
+            "sum",
+            "build",
+            "describe",
+            "thrower",
+            "guarded",
+            "nested",
+            "rethrown",
+            "afterwards",
+            "inLoop",
+            "bump",
+            "counter",
+            "narrow",
+            "dynGet",
+            "dynSet",
+        ],
+    );
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {

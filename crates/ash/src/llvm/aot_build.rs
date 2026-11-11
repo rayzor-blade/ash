@@ -491,6 +491,23 @@ fn emit_direct_object(
         &data,
         ash_wasm_emit::Options { polls, shadow },
     );
+    // Natives of host libraries are reached through slots the LLVM module
+    // owns and fills at start-up.
+    let wanted: Vec<(String, String)> = jit
+        .bytecode
+        .natives
+        .iter()
+        .filter_map(|n| {
+            let lib = n.lib.strip_prefix('?').unwrap_or(&n.lib);
+            emitted
+                .data
+                .contains(&format!("ash_native_{lib}_{}", n.name))
+                .then(|| (lib.to_string(), n.name.clone()))
+        })
+        .collect();
+    for (lib, prim) in wanted {
+        jit.ensure_native_slot(&lib, &prim);
+    }
     jit.keep_external(emitted.imports.iter().filter_map(|f| symbols.get(f).cloned()));
     jit.keep_data_external(emitted.data.iter().cloned());
     jit.define_elsewhere(emitted.functions.iter().copied());

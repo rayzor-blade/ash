@@ -51,9 +51,10 @@ impl BytecodeProgram<'_> {
             Ty::F32
         } else if k == hl::hl_type_kind_HF64 {
             Ty::F64
-        } else if k == hl::hl_type_kind_HUI8 || k == hl::hl_type_kind_HUI16 {
-            // Narrow unsigned integers wrap on every store; not handled yet.
-            Ty::Other
+        } else if k == hl::hl_type_kind_HUI8 {
+            Ty::U8
+        } else if k == hl::hl_type_kind_HUI16 {
+            Ty::U16
         } else {
             Ty::Ptr
         }
@@ -66,6 +67,19 @@ impl BytecodeProgram<'_> {
         use crate::native_lib as lib;
         let n = self.bc.natives.iter().find(|n| n.findex as usize == findex)?;
         let plain = lib::is_runtime_lib(&n.lib)
+            && lib::host_link(&n.lib, &n.name).is_none()
+            && lib::host_native_context(&n.lib, &n.name) == 0
+            && !lib::host_native_record(&n.lib, &n.name);
+        plain.then_some(n)
+    }
+
+    /// A native of a library the host opens at start-up: an HDLL primitive,
+    /// reached through a slot the program fills once the library is open.
+    fn slot_native(&self, findex: usize) -> Option<&crate::types::HLNative> {
+        use crate::native_lib as lib;
+        let n = self.bc.natives.iter().find(|n| n.findex as usize == findex)?;
+        let clean = n.lib.strip_prefix('?').unwrap_or(&n.lib);
+        let plain = !lib::is_runtime_lib(clean)
             && lib::host_link(&n.lib, &n.name).is_none()
             && lib::host_native_context(&n.lib, &n.name) == 0
             && !lib::host_native_record(&n.lib, &n.name);
@@ -181,10 +195,11 @@ impl Program for BytecodeProgram<'_> {
             Ty::F32
         } else if declared == hl::hl_type_kind_HF64 {
             Ty::F64
-        } else if declared == hl::hl_type_kind_HVOID
-            || declared == hl::hl_type_kind_HUI8
-            || declared == hl::hl_type_kind_HUI16
-        {
+        } else if declared == hl::hl_type_kind_HUI8 {
+            Ty::U8
+        } else if declared == hl::hl_type_kind_HUI16 {
+            Ty::U16
+        } else if declared == hl::hl_type_kind_HVOID {
             return None;
         } else {
             Ty::Ptr
@@ -248,6 +263,102 @@ impl Program for BytecodeProgram<'_> {
         self.data.barriers
     }
 
+    fn method(&self, obj_ty: air::v2::ir::TypeRef, slot: usize) -> Option<Sig> {
+        self.signature(self.method_function(obj_ty, slot)?)
+    }
+
+    fn method_function(&self, obj_ty: air::v2::ir::TypeRef, slot: usize) -> Option<usize> {
+        crate::devirt::proto_findex_for_slot(&self.bc.types, obj_ty.0 as usize, slot)
+    }
+
+    fn native_slot(&self, findex: usize) -> Option<ash_wasm_emit::NativeSlot> {
+        let n = self.slot_native(findex)?;
+        let lib = n.lib.strip_prefix('?').unwrap_or(&n.lib).to_string();
+        Some(ash_wasm_emit::NativeSlot {
+            slot: format!("ash_native_{lib}_{}", n.name),
+            lib,
+            prim: n.name.clone(),
+        })
+    }
+
+    fn self_describing(&self, t: air::v2::ir::TypeRef) -> bool {
+        let Some(info) = self.bc.types.get(t.0 as usize) else {
+            return false;
+        };
+        let k = info.kind;
+        k == hl::hl_type_kind_HDYN
+            || k == hl::hl_type_kind_HFUN
+            || k == hl::hl_type_kind_HOBJ
+            || k == hl::hl_type_kind_HARRAY
+            || k == hl::hl_type_kind_HVIRTUAL
+            || k == hl::hl_type_kind_HDYNOBJ
+            || k == hl::hl_type_kind_HENUM
+            || k == hl::hl_type_kind_HNULL
+    }
+
+    fn dyn_type(&self) -> Option<air::v2::ir::TypeRef> {
+        let at = self
+            .bc
+            .types
+            .iter()
+            .position(|t| t.kind == hl::hl_type_kind_HDYN)?;
+        Some(air::v2::ir::TypeRef(at as u32))
+    }
+
+    fn virtual_method(&self, obj_ty: air::v2::ir::TypeRef, field: usize) -> Option<Sig> {
+        let t = self.bc.types.get(obj_ty.0 as usize)?;
+        let declared = self.bc.types.get(t.virt.as_ref()?.fields.get(field)?.type_.0)?;
+        let fun = declared.fun.as_ref()?;
+        let mut sig = self.sig_of(fun);
+        sig.params.insert(0, Ty::Ptr);
+        Some(sig)
+    }
+
+    fn string_hash(&self, idx: usize) -> Option<i32> {
+        Some(crate::layout::field_name_hash(self.bc.strings.get(idx)?))
+    }
+
+    fn string_symbol(&self, idx: usize) -> Option<String> {
+        (idx < self.bc.strings.len()).then(|| format!("String_{idx}"))
+    }
+
+    fn bytes_symbol(&self, idx: usize) -> Option<String> {
+        (idx < self.bc.bytes_pos.len()).then(|| format!("Bytes_{idx}"))
+    }
+
+    fn void_type(&self) -> Option<air::v2::ir::TypeRef> {
+        let at = self
+            .bc
+            .types
+            .iter()
+            .position(|t| t.kind == hl::hl_type_kind_HVOID)?;
+        Some(air::v2::ir::TypeRef(at as u32))
+    }
+
+    fn type_kind(&self, t: air::v2::ir::TypeRef) -> Option<i32> {
+        Some(self.bc.types.get(t.0 as usize)?.kind as i32)
+    }
+
+    fn is_type(&self, t: air::v2::ir::TypeRef) -> bool {
+        self.bc
+            .types
+            .get(t.0 as usize)
+            .is_some_and(|ty| ty.kind == hl::hl_type_kind_HTYPE)
+    }
+
+    fn virtual_kind(&self) -> i32 {
+        hl::hl_type_kind_HVIRTUAL as i32
+    }
+
+    fn enum_field(&self, enum_ty: air::v2::ir::TypeRef, construct: usize, field: usize) -> Option<(u32, Ty)> {
+        let e = self.bc.types.get(enum_ty.0 as usize)?.tenum.as_ref()?;
+        let c = e.constructs.get(construct)?;
+        let kinds = c.params.iter().map(|p| self.bc.types[p.0].kind);
+        let (offsets, _) = crate::bytecode::enum_construct_layout(kinds, 4);
+        let offset = u32::try_from(*offsets.get(field)?).ok()?;
+        Some((offset, self.ty_of(c.params.get(field)?.0)))
+    }
+
     fn globals_symbol(&self) -> Option<String> {
         self.data.globals.clone()
     }
@@ -258,7 +369,7 @@ impl Program for BytecodeProgram<'_> {
 
     fn signature(&self, findex: usize) -> Option<Sig> {
         let Some(f) = self.bc.functions.iter().find(|f| f.findex as usize == findex) else {
-            let n = self.runtime_native(findex)?;
+            let n = self.runtime_native(findex).or_else(|| self.slot_native(findex))?;
             let sig = self.sig_of(self.bc.types[n.type_.0].fun.as_ref()?);
             let narrow = |t: &Ty| *t == Ty::Other;
             return (!sig.params.iter().any(narrow) && !narrow(&sig.ret)).then_some(sig);
@@ -271,6 +382,21 @@ impl Program for BytecodeProgram<'_> {
 /// Emit every function of `bc` that the direct backend can, as one relocatable
 /// object.
 pub fn emit_object(
+    bc: &DecodedBytecode,
+    symbols: &HashMap<usize, String>,
+    data: &ProgramData,
+    opts: Options,
+) -> ObjectEmitted {
+    let mut obj = ash_wasm_emit::object::ObjectBuilder::new();
+    let mut emitted = emit_into(&mut obj, bc, symbols, data, opts);
+    emitted.bytes = obj.finish();
+    emitted
+}
+
+/// [`emit_object`] into a builder the caller goes on to add to; the result's
+/// `bytes` is empty.
+pub fn emit_into(
+    obj: &mut ash_wasm_emit::object::ObjectBuilder,
     bc: &DecodedBytecode,
     symbols: &HashMap<usize, String>,
     data: &ProgramData,
@@ -296,5 +422,5 @@ pub fn emit_object(
             body: &o.ir,
         })
         .collect();
-    ash_wasm_emit::emit_object(&program, &inputs, opts)
+    ash_wasm_emit::emit_into(obj, &program, &inputs, opts)
 }

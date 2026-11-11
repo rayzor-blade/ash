@@ -1,6 +1,8 @@
 //! How much of a program the direct wasm backend takes, and what stops the rest.
 //!
-//! Usage: wasm_direct_coverage <file.hl> [<file.hl> ...] [--top N] [--class NAME]
+//! Usage: wasm_direct_coverage <file.hl> [<file.hl> ...] [--top N] [--class NAME] [--exact]
+//!
+//! `--exact` keeps the numbers in each reason instead of folding them.
 //!
 //! With `--class`, also says for each static method of class NAME whether it
 //! went direct and, if not, why.
@@ -31,10 +33,13 @@ fn main() -> anyhow::Result<()> {
     let mut paths = Vec::new();
     let mut top = 25usize;
     let mut class_filter: Option<String> = None;
+    let mut exact = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--top" {
             top = args.next().expect("--top N").parse()?;
+        } else if a == "--exact" {
+            exact = true;
         } else if a == "--class" {
             class_filter = Some(args.next().expect("--class NAME"));
         } else {
@@ -111,7 +116,31 @@ fn main() -> anyhow::Result<()> {
         }
         let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
         for (_, why) in &emitted.skipped {
-            *by_reason.entry(shape(why)).or_default() += 1;
+            *by_reason
+                .entry(if exact { why.clone() } else { shape(why) })
+                .or_default() += 1;
+        }
+        if exact {
+            // Name the natives behind "no known signature".
+            let mut by_lib: BTreeMap<String, usize> = BTreeMap::new();
+            for (why, n) in &by_reason {
+                let Some(rest) = why.strip_prefix("a call to f") else { continue };
+                let Some(findex) = rest.split(',').next().and_then(|d| d.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                if !why.contains("no known signature") {
+                    continue;
+                }
+                let label = match bc.natives.iter().find(|n| n.findex as usize == findex) {
+                    Some(nat) => format!("native {}", nat.lib),
+                    None => "a bytecode function".to_string(),
+                };
+                *by_lib.entry(label).or_default() += n;
+            }
+            for (label, n) in by_lib {
+                println!("  callers of {label}: {n}");
+            }
         }
         let mut rows: Vec<_> = by_reason.into_iter().collect();
         rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));

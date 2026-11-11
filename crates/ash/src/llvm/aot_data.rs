@@ -207,8 +207,10 @@ impl<'ctx> JITModule<'ctx> {
             let name = g.get_name().to_string_lossy();
             if (name.starts_with("String_")
                 || name.starts_with("Int_")
-                || name.starts_with("Float_"))
+                || name.starts_with("Float_")
+                || name.starts_with("Bytes_"))
                 && g.get_initializer().is_some()
+                && !self.aot_extern_names.contains(&*name)
             {
                 g.set_linkage(Linkage::Internal);
             }

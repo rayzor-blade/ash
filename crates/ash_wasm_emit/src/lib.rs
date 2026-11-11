@@ -25,7 +25,11 @@
 //! (`(file << 32) | line` stored into a frame per function).
 #![forbid(unsafe_code)]
 
+mod calls;
+mod dynamic;
 mod locals;
+mod memory;
+mod traps;
 pub mod object;
 
 /// The encoder the instructions of [`object::Body`] come from.
@@ -46,6 +50,10 @@ pub enum Ty {
     Void,
     Bool,
     I32,
+    /// Unsigned 8 and 16 bit integers, held in an `i32` that is always
+    /// zero-extended: whatever produces one wraps it.
+    U8,
+    U16,
     I64,
     F32,
     F64,
@@ -59,7 +67,7 @@ pub enum Ty {
 impl Ty {
     fn wasm(self) -> Option<ValType> {
         match self {
-            Ty::Bool | Ty::I32 | Ty::Ptr => Some(ValType::I32),
+            Ty::Bool | Ty::I32 | Ty::Ptr | Ty::U8 | Ty::U16 => Some(ValType::I32),
             Ty::I64 => Some(ValType::I64),
             Ty::F32 => Some(ValType::F32),
             Ty::F64 => Some(ValType::F64),
@@ -68,7 +76,16 @@ impl Ty {
     }
 
     fn is_int(self) -> bool {
-        matches!(self, Ty::Bool | Ty::I32 | Ty::I64)
+        matches!(self, Ty::Bool | Ty::I32 | Ty::I64 | Ty::U8 | Ty::U16)
+    }
+
+    /// The mask that wraps an `i32` to this type, for the narrow ones.
+    fn mask(self) -> Option<i32> {
+        match self {
+            Ty::U8 => Some(0xff),
+            Ty::U16 => Some(0xffff),
+            _ => None,
+        }
     }
 
     fn is_float(self) -> bool {
@@ -122,7 +139,54 @@ pub trait Program {
     /// Whether a store of a reference into the heap must mark its card for
     /// the generational collector.
     fn write_barriers(&self) -> bool;
+    /// The signature, receiver first, of the function that method slot `slot`
+    /// of the class `obj_ty` holds.
+    fn method(&self, obj_ty: TypeRef, slot: usize) -> Option<Sig>;
+    /// The function the class `obj_ty` itself names at method slot `slot`.
+    fn method_function(&self, obj_ty: TypeRef, slot: usize) -> Option<usize>;
+    /// Whether a value of this type is its own Dynamic: it starts with the
+    /// type descriptor that says what it is.
+    fn self_describing(&self, t: TypeRef) -> bool;
+    /// The type `Dynamic`.
+    fn dyn_type(&self) -> Option<TypeRef>;
+    /// The signature, receiver first, of method `field` of the structural type
+    /// `obj_ty`, as declared.
+    fn virtual_method(&self, obj_ty: TypeRef, field: usize) -> Option<Sig>;
+    /// The number a type descriptor holds as its kind, for a structural type.
+    fn virtual_kind(&self) -> i32;
+    /// Where field `field` of constructor `construct` of the enum `enum_ty`
+    /// lives, as a byte offset from the value, and its kind.
+    fn enum_field(&self, enum_ty: TypeRef, construct: usize, field: usize) -> Option<(u32, Ty)>;
+    /// The hash of string `idx` of the string pool, as a field name.
+    fn string_hash(&self, idx: usize) -> Option<i32>;
+    /// The symbol of string `idx` of the pool, and of bytes constant `idx`.
+    fn string_symbol(&self, idx: usize) -> Option<String>;
+    fn bytes_symbol(&self, idx: usize) -> Option<String>;
+    /// The type `Void`.
+    fn void_type(&self) -> Option<TypeRef>;
+    /// The kind number of type `t`, as a type descriptor holds it.
+    fn type_kind(&self, t: TypeRef) -> Option<i32>;
+    /// Whether `t` is the type of type descriptors.
+    fn is_type(&self, t: TypeRef) -> bool;
+    /// A native that lives in a library the host opens: the data symbol that
+    /// holds its address once the library is open, and the names it is asked
+    /// for by. The slot is zero when the library could not be opened.
+    fn native_slot(&self, findex: usize) -> Option<NativeSlot>;
 }
+
+/// Where a program finds a native of a library the host opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSlot {
+    pub slot: String,
+    pub lib: String,
+    pub prim: String,
+}
+
+/// The prefix of the name of a data symbol that holds a C string the body
+/// names; the rest of the name is the text.
+const CSTR: &str = "ash_cstr:";
+/// The same for text in UTF-16, which is what the runtime reads names in.
+const UTF16: &str = "ash_utf16:";
 
 /// The kinds of reference a cast tells apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,6 +303,7 @@ pub fn emit_module_with<P: Program>(program: &P, inputs: &[Input], opts: Options
         funcs: HashMap::new(),
         any_func: false,
         data: HashMap::new(),
+        frames: false,
     };
     // First pass: every input is assumed callable, to learn which fail on
     // their own and whom they call.
@@ -425,6 +490,44 @@ const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
         &[ValType::I32, ValType::I32, ValType::I32],
         &[ValType::I32],
     ),
+    ("hlp_aot_native_missing", &[ValType::I32, ValType::I32], &[]),
+    ("hlp_error", &[ValType::I32, ValType::I32], &[]),
+    ("fmod", &[ValType::F64, ValType::F64], &[ValType::F64]),
+    ("fmodf", &[ValType::F32, ValType::F32], &[ValType::F32]),
+    ("hlp_setup_trap_jit", &[], &[ValType::I32]),
+    ("hlp_remove_trap_jit", &[], &[]),
+    ("hlp_get_exc_value", &[], &[ValType::I32]),
+    ("hlp_clear_exc_value", &[], &[]),
+    ("hlp_throw", &[ValType::I32], &[]),
+    ("hlp_rethrow", &[ValType::I32], &[]),
+    ("__wasm_longjmp", &[ValType::I32, ValType::I32], &[]),
+    ("hlp_alloc_enum", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("hlp_dyn_castd", &[ValType::I32, ValType::I32], &[ValType::F64]),
+    ("hlp_dyn_castf", &[ValType::I32, ValType::I32], &[ValType::F32]),
+    ("hlp_dyn_casti64", &[ValType::I32, ValType::I32], &[ValType::I64]),
+    (
+        "hlp_dyn_casti",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    ("hlp_same_type", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("hlp_make_dyn", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    (
+        "hlp_dyn_call",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    (
+        "hlp_dyn_castp",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    ("hlp_alloc_dyn_array", &[ValType::I32], &[ValType::I32]),
+    (
+        "hlp_vcall_dyn",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
     ("hlp_dyn_getd", &[ValType::I32, ValType::I32], &[ValType::F64]),
     ("hlp_dyn_getf", &[ValType::I32, ValType::I32], &[ValType::F32]),
     ("hlp_dyn_geti64", &[ValType::I32, ValType::I32], &[ValType::I64]),
@@ -456,10 +559,35 @@ const VVIRTUAL_FIELDS: u64 = 12;
 const VDYNAMIC_VALUE: u64 = 8;
 const VARRAY_SIZE: u64 = 8;
 const VARRAY_DATA: u64 = 16;
+/// Where a type descriptor keeps the table of its class's methods.
+const TYPE_VOBJ_PROTO: u64 = 8;
+/// A closure is `{ t, fun, hasValue, value }`; one made to adapt a signature
+/// is followed by the closure it wraps, and has `hasValue` 2.
+const VCLOSURE_FUN: u64 = 4;
+const VCLOSURE_HAS_VALUE: u64 = 8;
+const VCLOSURE_VALUE: u64 = 12;
+const VCLOSURE_WRAPPED: u64 = 16;
+const WRAPPER: i32 = 2;
+/// The marker error that asks `emit_function` to try again with a frame.
+const NEEDS_FRAME: &str = "\u{0}needs a frame in memory";
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
 
 pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> ObjectEmitted {
+    let mut obj = object::ObjectBuilder::new();
+    let mut emitted = emit_into(&mut obj, program, inputs, opts);
+    emitted.bytes = obj.finish();
+    emitted
+}
+
+/// [`emit_object`] into a builder that already holds other definitions, or
+/// will: the result's `bytes` is empty, and the caller finishes the object.
+pub fn emit_into<P: Program>(
+    obj: &mut object::ObjectBuilder,
+    program: &P,
+    inputs: &[Input],
+    opts: Options,
+) -> ObjectEmitted {
     // Pass one: which inputs emit at all, and whom the survivors call. Calls
     // to anything are allowed here, since the linker resolves them.
     let throwaway = Runtime {
@@ -472,6 +600,7 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
         funcs: HashMap::new(),
         any_func: true,
         data: HashMap::new(),
+        frames: true,
     };
     let known = |findex: usize| {
         program.signature(findex).map(|sig| Callee {
@@ -499,7 +628,6 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
     }
 
     // Pass two: symbols first, so a body can call a function defined after it.
-    let mut obj = object::ObjectBuilder::new();
     // Field accesses and the frame and poll words all go through memory.
     obj.import_memory(1);
     let wasm_sig = |sig: &Sig| {
@@ -540,27 +668,27 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
     let none = Ref::index(0);
     let runtime = Runtime {
         fma64: if uses_fma {
-            rt_sym(&mut obj, "fma", vec![ValType::F64; 3], vec![ValType::F64])
+            rt_sym(obj, "fma", vec![ValType::F64; 3], vec![ValType::F64])
         } else {
             none
         },
         fma32: if uses_fma {
-            rt_sym(&mut obj, "fmaf", vec![ValType::F32; 3], vec![ValType::F32])
+            rt_sym(obj, "fmaf", vec![ValType::F32; 3], vec![ValType::F32])
         } else {
             none
         },
         push: if opts.shadow {
-            rt_sym(&mut obj, RT_SHADOW_PUSH, vec![ValType::I32], vec![ValType::I32])
+            rt_sym(obj, RT_SHADOW_PUSH, vec![ValType::I32], vec![ValType::I32])
         } else {
             none
         },
         pop: if opts.shadow {
-            rt_sym(&mut obj, RT_SHADOW_POP, vec![], vec![])
+            rt_sym(obj, RT_SHADOW_POP, vec![], vec![])
         } else {
             none
         },
         poll: if opts.polls {
-            rt_sym(&mut obj, RT_POLL, vec![], vec![])
+            rt_sym(obj, RT_POLL, vec![], vec![])
         } else {
             none
         },
@@ -576,15 +704,35 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
                         .find(|(n, _, _)| *n == name)
                         .map(|(n, p, r)| (n, p.to_vec(), r.to_vec()))
                         .expect("a runtime function the table does not list");
-                    (name, rt_sym(&mut obj, name, p, r))
+                    (name, rt_sym(obj, name, p, r))
                 })
                 .collect()
         },
         any_func: false,
         data: data_names
             .iter()
-            .map(|n| (n.clone(), obj.import_data(n)))
+            .map(|n| {
+                let sym = if let Some(text) = n.strip_prefix(CSTR) {
+                    // The text of a C string is defined here.
+                    let sym = obj.declare_data(n, text.len() as u32 + 1, 0, object::Linkage::Local);
+                    obj.set_data(sym, text.as_bytes(), &[]);
+                    sym
+                } else if let Some(text) = n.strip_prefix(UTF16) {
+                    let units: Vec<u8> = text
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .flat_map(u16::to_le_bytes)
+                        .collect();
+                    let sym = obj.declare_data(n, units.len() as u32, 1, object::Linkage::Local);
+                    obj.set_data(sym, &units, &[]);
+                    sym
+                } else {
+                    obj.import_data(n)
+                };
+                (n.clone(), sym)
+            })
             .collect(),
+        frames: true,
     };
     let resolve = |findex: usize| {
         let sym = *syms.get(&findex)?;
@@ -613,8 +761,10 @@ pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> 
     }
     data_names.sort_unstable();
     data_names.dedup();
+    // What the body defines itself is not for another object to provide.
+    data_names.retain(|n| !n.starts_with(CSTR) && !n.starts_with(UTF16));
     ObjectEmitted {
-        bytes: obj.finish(),
+        bytes: Vec::new(),
         functions,
         skipped,
         imports,
@@ -744,6 +894,9 @@ struct Runtime {
     /// Data symbols an object may take the address of, by name. Empty in a
     /// standalone module, which has none.
     data: HashMap<String, object::Sym>,
+    /// Whether a body may keep values in a frame in memory, which needs the
+    /// linker's stack pointer.
+    frames: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -764,6 +917,17 @@ struct Fx<'a, P: Program> {
     handled_local: u32,
     cur_local: u32,
     tmp_local: u32,
+    /// Whether this body opens a frame in memory, and the locals that hold
+    /// the stack pointer on entry, the frame's base, and four scratch words.
+    has_frame: bool,
+    frame_size: u32,
+    sp_local: u32,
+    fp_local: u32,
+    scratch: u32,
+    /// Where in the frame each cell of the function is.
+    cell_offsets: Vec<u32>,
+    /// The trap regions of the body, by handler block.
+    traps: HashMap<usize, traps::TrapInfo>,
     /// Stores that need no barrier, by (block, instruction).
     barrier_free: std::collections::HashSet<(usize, usize)>,
     /// Where `instr` is, for the analysis above.
@@ -789,6 +953,25 @@ fn emit_function<P: Program>(
     rt: &Runtime,
     opts: Options,
 ) -> Res<(object::Body, Vec<usize>, Used)> {
+    // A body finds out that it needs memory for values only as it goes; the
+    // second attempt opens a frame for it.
+    match emit_function_in(program, inp, callees, rt, opts, false) {
+        Err(e) if e.0 == NEEDS_FRAME && rt.frames => {
+            emit_function_in(program, inp, callees, rt, opts, true)
+        }
+        Err(e) if e.0 == NEEDS_FRAME => unsupported("a frame in memory, in a module with no stack"),
+        other => other,
+    }
+}
+
+fn emit_function_in<P: Program>(
+    program: &P,
+    inp: &Input,
+    callees: &dyn Fn(usize) -> Option<Callee>,
+    rt: &Runtime,
+    opts: Options,
+    with_frame: bool,
+) -> Res<(object::Body, Vec<usize>, Used)> {
     let f = inp.body;
     if inp.sig.params.iter().any(|t| t.wasm().is_none())
         || !(inp.sig.ret == Ty::Void || inp.sig.ret.wasm().is_some())
@@ -813,8 +996,8 @@ fn emit_function<P: Program>(
     for b in &rpo {
         let from = b.idx();
         let blk = &f.blocks[from];
-        if blk.handler.is_some() {
-            return unsupported("a trap region");
+        if let Terminator::Trap { handler, .. } = &blk.term {
+            forced[handler.idx()] = true;
         }
         let mut seen: Vec<usize> = Vec::new();
         for s in blk.term.successors() {
@@ -854,6 +1037,22 @@ fn emit_function<P: Program>(
         kids[i].sort_by_key(|k| rpo_num[*k]);
     }
     let nparams = inp.sig.params.len() as u32;
+    let mut trap_order: Vec<(usize, air::v2::ir::CellId, Option<usize>)> = Vec::new();
+    for b in &rpo {
+        let blk = &f.blocks[b.idx()];
+        if let Terminator::Trap {
+            exc_cell, handler, ..
+        } = &blk.term
+        {
+            if !f.blocks[handler.idx()].phis.is_empty() {
+                return unsupported("a handler that takes values");
+            }
+            trap_order.push((handler.idx(), *exc_cell, blk.handler.map(|h| h.idx())));
+        }
+    }
+    if !trap_order.is_empty() && !with_frame {
+        return unsupported(NEEDS_FRAME);
+    }
     let mut locals: Vec<(u32, ValType)> = Vec::new();
     for &t in &assignment.types {
         match locals.last_mut() {
@@ -871,6 +1070,30 @@ fn emit_function<P: Program>(
     // An i32 scratch, for a value read twice.
     let tmp_local = frame_local + 3;
     locals.push((1, ValType::I32));
+    // The stack pointer on entry, the frame's base, and four scratch words.
+    let (sp_local, fp_local, scratch) = (frame_local + 4, frame_local + 5, frame_local + 6);
+    if with_frame {
+        locals.push((6, ValType::I32));
+    }
+    // One local per trap region, for the buffer it is armed with.
+    let trap_base = frame_local + 10;
+    let trap_infos: HashMap<usize, traps::TrapInfo> = trap_order
+        .iter()
+        .enumerate()
+        .map(|(i, &(handler, exc_cell, parent))| {
+            (
+                handler,
+                traps::TrapInfo {
+                    exc_cell,
+                    slot: trap_base + i as u32,
+                    parent,
+                },
+            )
+        })
+        .collect();
+    if !trap_order.is_empty() {
+        locals.push((trap_order.len() as u32, ValType::I32));
+    }
     let has_loops = loop_header.iter().any(|h| *h);
     let mut fx = Fx {
         program,
@@ -883,6 +1106,13 @@ fn emit_function<P: Program>(
         handled_local,
         cur_local,
         tmp_local,
+        has_frame: with_frame,
+        frame_size: 0,
+        sp_local,
+        fp_local,
+        scratch,
+        cell_offsets: Vec::new(),
+        traps: trap_infos,
         barrier_free: air::v2::analysis::barrier_free_stores(f),
         at: (0, 0),
         called: Vec::new(),
@@ -897,6 +1127,24 @@ fn emit_function<P: Program>(
         merge,
         kids,
     };
+    for (i, t) in inp.sig.params.iter().enumerate() {
+        if let Some(m) = t.mask() {
+            fx.emit(&I::LocalGet(i as u32));
+            fx.emit(&I::I32Const(m));
+            fx.emit(&I::I32And);
+            fx.emit(&I::LocalSet(i as u32));
+        }
+    }
+    if with_frame {
+        // sp0 = sp; fp = sp - frame size; sp = fp
+        fx.out.stack_pointer_get();
+        fx.emit(&I::LocalTee(sp_local));
+        fx.out.frame_size_const();
+        fx.emit(&I::I32Sub);
+        fx.emit(&I::LocalTee(fp_local));
+        fx.out.stack_pointer_set();
+        fx.open_cells()?;
+    }
     if opts.shadow {
         let findex = inp.findex as i32;
         fx.emit(&I::I32Const(findex));
@@ -922,12 +1170,42 @@ fn emit_function<P: Program>(
     // Control never falls off the end; this satisfies the function's result.
     fx.emit(&I::Unreachable);
     fx.emit(&I::End);
+    let frame = fx.frame_size.div_ceil(16) * 16;
+    fx.out.set_frame_size(frame);
     Ok((fx.out, fx.called, fx.used))
 }
 
 impl<P: Program> Fx<'_, P> {
     fn emit(&mut self, i: &I) {
         self.out.instruction(i);
+    }
+
+    /// Reserve `size` bytes in the frame, aligned to `align`, and return their
+    /// offset from the frame's base.
+    fn frame_alloc(&mut self, size: u32, align: u32) -> Res<u32> {
+        if !self.has_frame {
+            return unsupported(NEEDS_FRAME);
+        }
+        let at = self.frame_size.div_ceil(align) * align;
+        self.frame_size = at + size;
+        Ok(at)
+    }
+
+    /// The address of the frame byte at `offset`.
+    fn frame_address(&mut self, offset: u32) {
+        self.emit(&I::LocalGet(self.fp_local));
+        if offset != 0 {
+            self.emit(&I::I32Const(offset as i32));
+            self.emit(&I::I32Add);
+        }
+    }
+
+    /// Give the frame back, on the way out.
+    fn close_frame(&mut self) {
+        if self.has_frame {
+            self.emit(&I::LocalGet(self.sp_local));
+            self.out.stack_pointer_set();
+        }
     }
 
     /// A safepoint at a loop header.
@@ -1089,6 +1367,10 @@ impl<P: Program> Fx<'_, P> {
     fn code(&mut self, x: usize) -> Res<()> {
         let f = self.f;
         let instrs = &f.blocks[x].instrs;
+        let region = f.blocks[x].handler.map(|h| h.idx());
+        if self.traps.contains_key(&x) {
+            self.landing(x)?;
+        }
         for (i, ins) in instrs.iter().enumerate() {
             self.at = (x, i);
             // Of consecutive positions only the last can be read back.
@@ -1097,7 +1379,11 @@ impl<P: Program> Fx<'_, P> {
             {
                 continue;
             }
-            self.instr(ins)?;
+            if region.is_some() && traps::may_throw(ins) {
+                self.guarded(region, &mut |fx| fx.instr(ins))?;
+            } else {
+                self.instr(ins)?;
+            }
         }
         Ok(())
     }
@@ -1138,13 +1424,34 @@ impl<P: Program> Fx<'_, P> {
             }
             Instr::Null { dst } => {
                 let t = self.ty(*dst);
-                if t != Ty::Ptr {
-                    return unsupported("a null constant into a non-reference");
+                if t == Ty::Other {
+                    return unsupported("a null constant into a value of no storable kind");
                 }
-                self.zero(t);
-                self.set(*dst);
+                // A void holds nothing, so there is nothing to store.
+                if t != Ty::Void {
+                    self.zero(t);
+                    self.set(*dst);
+                }
+            }
+            Instr::EndTrap { .. } => self.end_trap(self.at.0)?,
+            // A cache hint, which wasm has no way to give.
+            Instr::Prefetch { .. } => {}
+            Instr::Assert => {
+                // The runtime's error, which raises; its second word is the
+                // empty list of further arguments.
+                self.data_address(&format!("{UTF16}assert"), 0)?;
+                self.emit(&I::I32Const(0));
+                let error = self.runtime("hlp_error")?;
+                self.call(error);
+                self.emit(&I::Unreachable);
             }
             Instr::NullCheck { value } => self.null_check(*value)?,
+            Instr::String { dst, idx } => self.string_const(*dst, *idx)?,
+            Instr::Bytes { dst, idx } => self.bytes_const(*dst, *idx)?,
+            Instr::GetType { dst, src } => self.get_type(*dst, *src)?,
+            Instr::GetTID { dst, src } => self.get_tid(*dst, *src)?,
+            Instr::DynGet { dst, obj, field } => self.dyn_get(*dst, *obj, *field)?,
+            Instr::DynSet { obj, field, src } => self.dyn_set(*obj, *field, *src)?,
             Instr::New { dst } => self.new_value(*dst)?,
             Instr::TypeConst { dst, ty } => {
                 if self.ty(*dst) != Ty::Ptr {
@@ -1196,6 +1503,10 @@ impl<P: Program> Fx<'_, P> {
                 let v = self.int_const(*idx)?;
                 match self.ty(*dst) {
                     Ty::I32 | Ty::Bool => self.emit(&I::I32Const(v)),
+                    Ty::U8 | Ty::U16 => {
+                        let m = self.ty(*dst).mask().unwrap_or(-1);
+                        self.emit(&I::I32Const(v & m))
+                    }
                     Ty::I64 => self.emit(&I::I64Const(i64::from(v))),
                     t => return unsupported(format!("an integer constant into {t:?}")),
                 }
@@ -1224,10 +1535,41 @@ impl<P: Program> Fx<'_, P> {
             Instr::UnOp { op, dst, src } => self.un_op(*op, *dst, *src)?,
             Instr::Cast { kind, dst, src } => self.cast(*kind, *dst, *src)?,
             Instr::Call { dst, fun, args } => self.call_instr(*dst, *fun, args)?,
+            Instr::CellGet { dst, cell } => self.cell_get(*dst, *cell)?,
+            Instr::CellSet { cell, src } => self.cell_set(*cell, *src)?,
+            Instr::CellIncr { cell } => self.cell_step(*cell, true)?,
+            Instr::CellDecr { cell } => self.cell_step(*cell, false)?,
+            Instr::CellRef { dst, cell } => self.cell_ref(*dst, *cell)?,
+            Instr::Unref { dst, src } => self.unref(*dst, *src)?,
+            Instr::SetRef { r, value } => self.set_ref(*r, *value)?,
+            Instr::RefData { dst, src } => self.ref_data(*dst, *src)?,
+            Instr::RefOffset { dst, base, offset } => self.ref_offset(*dst, *base, *offset)?,
+            Instr::EnumAlloc { dst, construct } => self.enum_alloc(*dst, *construct)?,
+            Instr::MakeEnum {
+                dst,
+                construct,
+                args,
+            } => self.make_enum(*dst, *construct, args)?,
+            Instr::EnumIndex { dst, value } => self.enum_index(*dst, *value)?,
+            Instr::EnumField {
+                dst,
+                value,
+                construct,
+                field,
+            } => self.enum_field(*dst, *value, *construct, *field)?,
+            Instr::SetEnumField {
+                value,
+                construct,
+                field,
+                src,
+            } => self.set_enum_field(*value, *construct, *field, *src)?,
+            Instr::CallMethod { dst, field, args } => self.call_method(*dst, *field, args)?,
+            Instr::CallClosure { dst, fun, args } => self.call_closure(*dst, *fun, args)?,
             Instr::Intrinsic { kind, dst, args, .. } => self.intrinsic(*kind, *dst, args)?,
             Instr::ArraySize { dst, array } => self.array_size(*dst, *array)?,
             Instr::StaticClosure { dst, fun } => self.closure(*dst, *fun, None)?,
             Instr::InstanceClosure { dst, fun, obj } => self.closure(*dst, *fun, Some(*obj))?,
+            Instr::VirtualClosure { dst, obj, field } => self.virtual_closure(*dst, *obj, *field)?,
             Instr::MemGet {
                 kind,
                 dst,
@@ -1385,6 +1727,8 @@ impl<P: Program> Fx<'_, P> {
                 self.emit(&I::I32Const(0));
                 self.emit(&I::I32Ne);
             }
+            Ty::U8 => self.emit(&I::I32Load8U(mem(0))),
+            Ty::U16 => self.emit(&I::I32Load16U(mem(1))),
             Ty::I32 | Ty::Ptr => self.emit(&I::I32Load(mem(2))),
             Ty::I64 => self.emit(&I::I64Load(mem(3))),
             Ty::F32 => self.emit(&I::F32Load(mem(2))),
@@ -1402,7 +1746,8 @@ impl<P: Program> Fx<'_, P> {
             memory_index: 0,
         };
         match kind {
-            Ty::Bool => self.emit(&I::I32Store8(mem(0))),
+            Ty::Bool | Ty::U8 => self.emit(&I::I32Store8(mem(0))),
+            Ty::U16 => self.emit(&I::I32Store16(mem(1))),
             Ty::I32 | Ty::Ptr => self.emit(&I::I32Store(mem(2))),
             Ty::I64 => self.emit(&I::I64Store(mem(3))),
             Ty::F32 => self.emit(&I::F32Store(mem(2))),
@@ -1467,7 +1812,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::F64 => "hlp_dyn_getd",
             Ty::F32 => "hlp_dyn_getf",
             Ty::I64 => "hlp_dyn_geti64",
-            Ty::Bool | Ty::I32 => "hlp_dyn_geti",
+            Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 => "hlp_dyn_geti",
             _ => "hlp_dyn_getp",
         };
         if !matches!(kind, Ty::F64 | Ty::F32 | Ty::I64) {
@@ -1479,6 +1824,7 @@ impl<P: Program> Fx<'_, P> {
             self.emit(&I::I32Const(0));
             self.emit(&I::I32Ne);
         }
+        self.narrow(kind);
         self.set(dst);
         self.emit(&I::End);
         Ok(())
@@ -1551,7 +1897,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::F64 => "hlp_dyn_setd",
             Ty::F32 => "hlp_dyn_setf",
             Ty::I64 => "hlp_dyn_seti64",
-            Ty::Bool | Ty::I32 => "hlp_dyn_seti",
+            Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 => "hlp_dyn_seti",
             _ => "hlp_dyn_setp",
         };
         if !matches!(kind, Ty::F64 | Ty::F32 | Ty::I64) {
@@ -1596,6 +1942,7 @@ impl<P: Program> Fx<'_, P> {
                     self.emit(&I::I32DivS);
                 }
                 self.emit(&I::End);
+                self.narrow(td);
                 self.set(dst);
                 return Ok(());
             }
@@ -1638,6 +1985,15 @@ impl<P: Program> Fx<'_, P> {
                 }
             };
             self.emit(&ins);
+            self.narrow(td);
+            self.set(dst);
+            return Ok(());
+        }
+        if ta.is_float() && ta == tb && ta == td && matches!(op, BinOp::SMod) {
+            self.get(a);
+            self.get(b);
+            let fmod = self.runtime(if ta == Ty::F64 { "fmod" } else { "fmodf" })?;
+            self.call(fmod);
             self.set(dst);
             return Ok(());
         }
@@ -1669,7 +2025,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a unary operation that changes type");
         }
         match (op, ts) {
-            (UnOp::Neg, Ty::I32) => {
+            (UnOp::Neg, Ty::I32 | Ty::U8 | Ty::U16) => {
                 self.emit(&I::I32Const(0));
                 self.get(src);
                 self.emit(&I::I32Sub);
@@ -1691,7 +2047,7 @@ impl<P: Program> Fx<'_, P> {
                 self.get(src);
                 self.emit(&I::I32Eqz);
             }
-            (UnOp::Not, Ty::I32) => {
+            (UnOp::Not, Ty::I32 | Ty::U8 | Ty::U16) => {
                 self.get(src);
                 self.emit(&I::I32Const(-1));
                 self.emit(&I::I32Xor);
@@ -1701,7 +2057,7 @@ impl<P: Program> Fx<'_, P> {
                 self.emit(&I::I64Const(-1));
                 self.emit(&I::I64Xor);
             }
-            (UnOp::Incr | UnOp::Decr, Ty::I32) => {
+            (UnOp::Incr | UnOp::Decr, Ty::I32 | Ty::U8 | Ty::U16) => {
                 self.get(src);
                 self.emit(&I::I32Const(1));
                 self.emit(&if matches!(op, UnOp::Incr) {
@@ -1721,8 +2077,17 @@ impl<P: Program> Fx<'_, P> {
             }
             (op, t) => return unsupported(format!("{op:?} on {t:?}")),
         }
+        self.narrow(td);
         self.set(dst);
         Ok(())
+    }
+
+    /// Wrap the `i32` on the stack to `t`, when `t` is a narrow integer.
+    fn narrow(&mut self, t: Ty) {
+        if let Some(m) = t.mask() {
+            self.emit(&I::I32Const(m));
+            self.emit(&I::I32And);
+        }
     }
 
     fn cast(&mut self, kind: CastKind, dst: ValueId, src: ValueId) -> Res<()> {
@@ -1732,7 +2097,7 @@ impl<P: Program> Fx<'_, P> {
                 let signed = matches!(kind, CastKind::ToSFloat);
                 self.get(src);
                 match ts {
-                    Ty::I32 | Ty::Bool => self.emit(&if signed {
+                    Ty::I32 | Ty::Bool | Ty::U8 | Ty::U16 => self.emit(&if signed {
                         I::F64ConvertI32S
                     } else {
                         I::F64ConvertI32U
@@ -1761,8 +2126,22 @@ impl<P: Program> Fx<'_, P> {
                     (Ty::F32, Ty::I32) => self.emit(&I::I32TruncSatF32S),
                     (Ty::F32, Ty::I64) => self.emit(&I::I64TruncSatF32S),
                     (Ty::I32 | Ty::Bool, Ty::I64) => self.emit(&I::I64ExtendI32S),
+                    (Ty::U8 | Ty::U16, Ty::I64) => self.emit(&I::I64ExtendI32U),
                     (Ty::I64, Ty::I32) => self.emit(&I::I32WrapI64),
-                    (Ty::I32 | Ty::Bool, Ty::I32) | (Ty::I64, Ty::I64) => {}
+                    (Ty::I32 | Ty::Bool | Ty::U8 | Ty::U16, Ty::I32) | (Ty::I64, Ty::I64) => {}
+                    (Ty::I32 | Ty::Bool | Ty::U8 | Ty::U16, Ty::U8 | Ty::U16) => self.narrow(td),
+                    (Ty::I64, Ty::U8 | Ty::U16) => {
+                        self.emit(&I::I32WrapI64);
+                        self.narrow(td);
+                    }
+                    (Ty::F64, Ty::U8 | Ty::U16) => {
+                        self.emit(&I::I32TruncSatF64S);
+                        self.narrow(td);
+                    }
+                    (Ty::F32, Ty::U8 | Ty::U16) => {
+                        self.emit(&I::I32TruncSatF32S);
+                        self.narrow(td);
+                    }
                     (a, b) => return unsupported(format!("ToInt from {a:?} into {b:?}")),
                 }
             }
@@ -1844,7 +2223,7 @@ impl<P: Program> Fx<'_, P> {
                 self.set(dst);
                 Ok(())
             }
-            Ty::Bool | Ty::I32 | Ty::I64 | Ty::F32 | Ty::F64 => {
+            Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 | Ty::I64 | Ty::F32 | Ty::F64 => {
                 let Some(name) = self.program.type_symbol(src_type.0 as usize) else {
                     return unsupported("a type with no descriptor symbol");
                 };
@@ -1861,7 +2240,8 @@ impl<P: Program> Fx<'_, P> {
         let src_type = self.f.values[src.0 as usize].ty;
         let dst_type = self.f.values[dst.0 as usize].ty;
         let (src_shape, dst_shape) = (self.program.shape(src_type), self.program.shape(dst_type));
-        let numeric = |t: Ty| matches!(t, Ty::Bool | Ty::I32 | Ty::I64 | Ty::F32 | Ty::F64);
+        let numeric =
+            |t: Ty| matches!(t, Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 | Ty::I64 | Ty::F32 | Ty::F64);
 
         if ts == Ty::Ptr && matches!(src_shape, Shape::Null | Shape::Dyn) && numeric(td) {
             // Unbox through the runtime, which switches on the box's own type;
@@ -1886,6 +2266,7 @@ impl<P: Program> Fx<'_, P> {
                 self.emit(&I::I32Const(0));
                 self.emit(&I::I32Ne);
             }
+            self.narrow(td);
             self.emit(&I::End);
             self.set(dst);
             return Ok(());
@@ -1921,10 +2302,10 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a number boxed as a different kind of number");
         }
         if ts == Ty::Ptr && numeric(td) {
-            return unsupported("a reference cast to a number, which needs the value in memory");
+            return self.cast_through_memory(dst, src);
         }
         if ts == Ty::Ptr && matches!(src_shape, Shape::Dyn | Shape::Null) {
-            return unsupported("a Dynamic cast to a reference, which needs the value in memory");
+            return self.cast_through_memory(dst, src);
         }
         let class_cast = src_type != dst_type
             && matches!(
@@ -1934,7 +2315,7 @@ impl<P: Program> Fx<'_, P> {
                     | (Shape::Virtual, Shape::Obj | Shape::Struct | Shape::Virtual)
             );
         if class_cast {
-            return unsupported("a class cast, which needs the value in memory");
+            return self.cast_through_memory(dst, src);
         }
         if ts != td {
             return unsupported("a cast between different kinds");
@@ -1974,6 +2355,63 @@ impl<P: Program> Fx<'_, P> {
             }
             None => self.runtime("hlp_alloc_closure_void")?,
         };
+        self.call(alloc);
+        self.set(dst);
+        Ok(())
+    }
+
+    /// A closure over a method of the object, as the object itself has it:
+    /// the class's table names the override, and the function the type names
+    /// is the fallback.
+    fn virtual_closure(&mut self, dst: ValueId, obj: ValueId, field: usize) -> Res<()> {
+        if self.ty(dst) != Ty::Ptr || self.ty(obj) != Ty::Ptr {
+            return unsupported("a closure over other than references");
+        }
+        let obj_ty = self.f.values[obj.0 as usize].ty;
+        let Some(fun) = self.program.method_function(obj_ty, field) else {
+            return unsupported("a method slot whose function is not known");
+        };
+        let Some(fun_type) = self.program.function_type(fun) else {
+            return unsupported(format!("a closure over f{fun}, which has no type"));
+        };
+        let (Some(type_name), Some(table)) =
+            (self.program.type_symbol(fun_type), self.program.functions_symbol())
+        else {
+            return unsupported("a closure in a program with no function table");
+        };
+        let slot = i32::try_from(fun * 4).map_err(|_| Unsupported("a function past 512 MiB".into()))?;
+        let tmp = self.tmp_local;
+        self.data_address(&type_name, 0)?;
+        self.get(obj);
+        self.emit(&I::I32Load(we::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::I32Load(we::MemArg {
+            offset: TYPE_VOBJ_PROTO,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::I32Load(we::MemArg {
+            offset: 4 * field as u64,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::LocalTee(tmp));
+        self.emit(&I::I32Eqz);
+        self.emit(&I::If(BlockType::Result(ValType::I32)));
+        self.data_address(&table, slot)?;
+        self.emit(&I::I32Load(we::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        self.emit(&I::Else);
+        self.emit(&I::LocalGet(tmp));
+        self.emit(&I::End);
+        self.get(obj);
+        let alloc = self.runtime("hlp_alloc_closure_ptr")?;
         self.call(alloc);
         self.set(dst);
         Ok(())
@@ -2048,7 +2486,7 @@ impl<P: Program> Fx<'_, P> {
         };
         match kind {
             MemAccess::I8 | MemAccess::I16 => {
-                if want != Ty::I32 {
+                if !matches!(want, Ty::I32 | Ty::U8 | Ty::U16) {
                     return unsupported("a narrow read into other than an integer");
                 }
                 if kind == MemAccess::I8 {
@@ -2068,7 +2506,7 @@ impl<P: Program> Fx<'_, P> {
         let at = self.access_address(kind, base, index, src)?;
         match kind {
             MemAccess::I8 | MemAccess::I16 => {
-                if !matches!(value, Ty::I32 | Ty::Bool) {
+                if !matches!(value, Ty::I32 | Ty::Bool | Ty::U8 | Ty::U16) {
                     return unsupported("a narrow write of other than an integer");
                 }
                 self.get(src);
@@ -2179,6 +2617,9 @@ impl<P: Program> Fx<'_, P> {
     }
 
     fn call_instr(&mut self, dst: ValueId, fun: usize, args: &[ValueId]) -> Res<()> {
+        if let Some(native) = self.program.native_slot(fun) {
+            return self.call_native_slot(dst, fun, args, &native);
+        }
         let Some(callee) = (self.callees)(fun) else {
             return unsupported(format!("a call to f{fun}, which has no known signature"));
         };
@@ -2200,6 +2641,8 @@ impl<P: Program> Fx<'_, P> {
         self.call(callee.to);
         self.called.push(fun);
         if ret != Ty::Void {
+            // A callee compiled elsewhere need not extend what it returns.
+            self.narrow(ret);
             self.set(dst);
         }
         Ok(())
@@ -2224,8 +2667,8 @@ impl<P: Program> Fx<'_, P> {
                 }
             }
             None => match (t, c) {
-                (Ty::I32 | Ty::Bool | Ty::Ptr, CondKind::True | CondKind::NotNull) => {}
-                (Ty::I32 | Ty::Bool | Ty::Ptr, CondKind::False | CondKind::Null) => {
+                (Ty::I32 | Ty::Bool | Ty::Ptr | Ty::U8 | Ty::U16, CondKind::True | CondKind::NotNull) => {}
+                (Ty::I32 | Ty::Bool | Ty::Ptr | Ty::U8 | Ty::U16, CondKind::False | CondKind::Null) => {
                     self.emit(&I::I32Eqz)
                 }
                 (Ty::I64, CondKind::True | CondKind::NotNull) => {
@@ -2284,6 +2727,7 @@ impl<P: Program> Fx<'_, P> {
                     let pop = self.rt.pop;
                     self.call(pop);
                 }
+                self.close_frame();
                 if self.sig.ret != Ty::Void {
                     if self.ty(*value) != self.sig.ret {
                         return unsupported("a return whose type differs from the signature");
@@ -2314,9 +2758,11 @@ impl<P: Program> Fx<'_, P> {
                 targets,
                 default,
             } => self.switch(x, *value, targets, *default)?,
-            Terminator::Throw { .. } | Terminator::Rethrow { .. } | Terminator::Trap { .. } => {
-                return unsupported("an exception");
-            }
+            Terminator::Throw { exc } => self.throw(x, *exc, false)?,
+            Terminator::Rethrow { exc } => self.throw(x, *exc, true)?,
+            Terminator::Trap {
+                handler, normal, ..
+            } => self.arm_trap(x, handler.idx(), normal.idx())?,
         }
         Ok(())
     }
@@ -2374,7 +2820,7 @@ fn compare(t: Ty, c: CondKind) -> Res<(I<'static>, bool)> {
             C::NotEq => (I::I32Ne, false),
             _ => return unsupported(format!("the condition {c:?} on references")),
         },
-        Ty::I32 | Ty::Bool => match c {
+        Ty::I32 | Ty::Bool | Ty::U8 | Ty::U16 => match c {
             C::Eq => (I::I32Eq, false),
             C::NotEq => (I::I32Ne, false),
             C::SLt => (I::I32LtS, false),

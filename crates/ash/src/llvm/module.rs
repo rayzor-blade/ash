@@ -899,11 +899,35 @@ impl<'ctx> JITModule<'ctx> {
     /// elsewhere to address.
     pub fn keep_data_external(&mut self, names: impl IntoIterator<Item = String>) {
         for name in names {
+            // A constant the direct backend reads is created here if no
+            // lowered function has asked for it.
+            let pooled = |prefix: &str| name.strip_prefix(prefix).and_then(|n| n.parse::<usize>().ok());
+            if let Some(i) = pooled("String_") {
+                self.ensure_string_global(i);
+            } else if let Some(i) = pooled("Bytes_") {
+                self.ensure_bytes_global(i);
+            }
+            self.aot_extern_names.insert(name.clone());
             if let Some(g) = self.module.get_global(&name) {
                 g.set_linkage(inkwell::module::Linkage::External);
                 g.set_visibility(inkwell::GlobalVisibility::Hidden);
             }
         }
+    }
+
+    /// The slot a native of a host library is reached through, made if no
+    /// lowered function asked for it; start-up fills it, and it stays null
+    /// when the library does not open.
+    pub fn ensure_native_slot(&mut self, lib: &str, prim: &str) {
+        let name = format!("ash_native_{lib}_{prim}");
+        if self.module.get_global(&name).is_some() {
+            return;
+        }
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let g = self.module.add_global(ptr_type, None, &name);
+        g.set_initializer(&ptr_type.const_null());
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        self.aot_hdll_natives.push((lib.to_string(), prim.to_string()));
     }
 
     /// Declare these functions and never lower them: another object defines

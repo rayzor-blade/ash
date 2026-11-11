@@ -110,6 +110,19 @@ impl F {
 
 const I32: ValType = ValType::I32;
 
+/// The wasm type a kind of value has, if it has one.
+fn wasm_of(t: ash_wasm_emit::Ty) -> Option<ValType> {
+    use ash_wasm_emit::Ty;
+    match t {
+        Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 | Ty::Ptr => Some(ValType::I32),
+        Ty::I64 => Some(ValType::I64),
+        Ty::F32 => Some(ValType::F32),
+        Ty::F64 => Some(ValType::F64),
+        Ty::V128 => Some(ValType::V128),
+        Ty::Void | Ty::Other => None,
+    }
+}
+
 struct Image<'a> {
     obj: &'a mut ObjectBuilder,
     bc: &'a DecodedBytecode,
@@ -126,6 +139,24 @@ struct Image<'a> {
     functions: Sym,
     function_types: Sym,
     module_ctx: Sym,
+    /// Natives the program takes as values -- binds to a method, closes over --
+    /// and so needs an address for in the function table.
+    value_natives: Vec<ValueNative>,
+}
+
+/// A native with an entry in the function table.
+struct ValueNative {
+    findex: usize,
+    params: Vec<ValType>,
+    results: Vec<ValType>,
+    how: NativeKind,
+}
+
+enum NativeKind {
+    /// Exported by the runtime under this name.
+    Runtime(String),
+    /// In a library the host opens, reached through this slot.
+    Slot { slot: String, lib: String, prim: String },
 }
 
 impl<'a> Image<'a> {
@@ -428,6 +459,69 @@ pub fn build(
         }
     }
 
+    // The natives the program takes as values: methods bound to them, and
+    // functions closed over, in code and in constants.
+    let mut as_values: BTreeSet<usize> = BTreeSet::new();
+    for t in &bc.types {
+        if let Some(o) = &t.obj {
+            as_values.extend(o.proto.iter().map(|p| p.findex as usize));
+        }
+    }
+    for func in &bc.functions {
+        for op in func.ops() {
+            match op {
+                crate::opcodes::Opcode::StaticClosure { fun, .. }
+                | crate::opcodes::Opcode::InstanceClosure { fun, .. } => {
+                    as_values.insert(fun.0);
+                }
+                _ => {}
+            }
+        }
+    }
+    for c in &bc.constants {
+        let Some(global_type) = bc.globals.get(c.global as usize) else { continue };
+        let Some(o) = bc.types[global_type.0].obj.as_ref() else { continue };
+        for (j, &value) in c.fields.iter().enumerate() {
+            let Some(field) = o.fields.get(j) else { break };
+            let kind = bc.types[field.type_.0].kind;
+            if kind == hl::hl_type_kind_HFUN || kind == hl::hl_type_kind_HMETHOD {
+                as_values.insert(value as usize);
+            }
+        }
+    }
+    let mut value_natives: Vec<ValueNative> = Vec::new();
+    {
+        use ash_wasm_emit::Program;
+        let program = crate::wasm_direct::BytecodeProgram {
+            bc: &bc,
+            symbols: &symbols,
+            data: &data,
+        };
+        for &findex in &as_values {
+            let Some(n) = bc.natives.iter().find(|n| n.findex as usize == findex) else { continue };
+            let Some(sig) = program.signature(findex) else { continue };
+            let params: Vec<ValType> = sig.params.iter().filter_map(|t| wasm_of(*t)).collect();
+            let results: Vec<ValType> = wasm_of(sig.ret).into_iter().collect();
+            let how = match program.native_slot(findex) {
+                Some(s) => {
+                    slots.insert(s.slot.clone(), (s.lib.clone(), s.prim.clone()));
+                    NativeKind::Slot {
+                        slot: s.slot,
+                        lib: s.lib,
+                        prim: s.prim,
+                    }
+                }
+                None => NativeKind::Runtime(format!("hlp_{}", n.name)),
+            };
+            value_natives.push(ValueNative {
+                findex,
+                params,
+                results,
+                how,
+            });
+        }
+    }
+
     let mut image = {
         let globals = obj.declare_data("ash_globals", 4 * bc.globals.len().max(1) as u32, 2, Linkage::Hidden);
         let functions = obj.declare_data("ash_functions", 4 * nfun as u32, 2, Linkage::Hidden);
@@ -449,6 +543,7 @@ pub fn build(
             functions,
             function_types,
             module_ctx,
+            value_natives,
         }
     };
     image.finish(&slots, barriers)?;
@@ -488,10 +583,33 @@ impl Image<'_> {
         for n in &bc.natives {
             type_of[n.findex as usize] = Some(n.type_.0);
         }
+        let is_function: std::collections::HashSet<usize> =
+            bc.functions.iter().map(|f| f.findex as usize).collect();
+        let mut native_entry: HashMap<usize, Sym> = HashMap::new();
+        for i in 0..self.value_natives.len() {
+            let (findex, params, results) = {
+                let n = &self.value_natives[i];
+                (n.findex, n.params.clone(), n.results.clone())
+            };
+            let sym = match &self.value_natives[i].how {
+                NativeKind::Runtime(name) => self.obj.import_function(name, params, results),
+                NativeKind::Slot { slot, lib, prim } => {
+                    let (slot, lib, prim) = (slot.clone(), lib.clone(), prim.clone());
+                    self.slot_caller(&slot, &lib, &prim, params, results)?
+                }
+            };
+            native_entry.insert(findex, sym);
+        }
         for findex in 0..self.nfun {
-            match self.obj.lookup(&format!("Fun_{findex}")) {
-                Some(sym) if bc.functions.iter().any(|f| f.findex as usize == findex) => fns.function(sym),
-                _ => fns.u32(0),
+            if is_function.contains(&findex) {
+                match self.obj.lookup(&format!("Fun_{findex}")) {
+                    Some(sym) => fns.function(sym),
+                    None => fns.u32(0),
+                }
+            } else if let Some(&sym) = native_entry.get(&findex) {
+                fns.function(sym);
+            } else {
+                fns.u32(0);
             }
             fts.ptr(self.type_ptr(type_of[findex]), 0);
         }
@@ -552,6 +670,45 @@ impl Image<'_> {
         let keys = self.data("ash_tramp_keys", keys, 3, Linkage::Local);
         let fns = self.data("ash_tramp_fns", fns, 2, Linkage::Local);
         Ok(Some((keys, fns, wanted.len())))
+    }
+
+    /// A function that calls a native of a host library through its slot, or
+    /// reports that it is missing, which is what a table entry for it is.
+    fn slot_caller(
+        &mut self,
+        slot: &str,
+        lib: &str,
+        prim: &str,
+        params: Vec<ValType>,
+        results: Vec<ValType>,
+    ) -> Result<Sym> {
+        let name = format!("{slot}_caller");
+        if let Some(s) = self.obj.lookup(&name) {
+            return Ok(s);
+        }
+        let slot_sym = self
+            .obj
+            .lookup(slot)
+            .ok_or_else(|| anyhow!("no slot {slot}"))?;
+        let lib_s = self.cstr(lib);
+        let prim_s = self.cstr(prim);
+        let missing = self.imp("hlp_aot_native_missing", &[I32, I32], &[]);
+        let n = params.len() as u32;
+        let sym = self
+            .obj
+            .declare_function(&name, params.clone(), results.clone(), Linkage::Local);
+        let mut f = F::new(&[(1, I32)]);
+        for i in 0..n {
+            f.get(i);
+        }
+        f.addr(slot_sym, 0).i(I::I32Load(mem(0, 2))).set(n);
+        f.get(n).i(I::I32Eqz).i(I::If(BlockType::Empty));
+        f.addr(lib_s, 0).addr(prim_s, 0).call(missing);
+        f.i(I::Unreachable).i(I::End);
+        f.get(n);
+        f.body.call_indirect(params, results);
+        self.obj.set_body(sym, f.finish());
+        Ok(sym)
     }
 
     fn imp(&mut self, name: &str, p: &[ValType], r: &[ValType]) -> Sym {

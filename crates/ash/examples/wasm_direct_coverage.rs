@@ -3,6 +3,7 @@
 //! Usage: wasm_direct_coverage <file.hl> [<file.hl> ...] [--top N] [--class NAME] [--exact]
 //!
 //! `--exact` keeps the numbers in each reason instead of folding them.
+//! `--find N` names function N and lists the calls and closures in it.
 //!
 //! With `--class`, also says for each static method of class NAME whether it
 //! went direct and, if not, why.
@@ -34,10 +35,13 @@ fn main() -> anyhow::Result<()> {
     let mut top = 25usize;
     let mut class_filter: Option<String> = None;
     let mut exact = false;
+    let mut find: Vec<usize> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--top" {
             top = args.next().expect("--top N").parse()?;
+        } else if a == "--find" {
+            find.push(args.next().expect("--find N").parse()?);
         } else if a == "--exact" {
             exact = true;
         } else if a == "--class" {
@@ -82,6 +86,25 @@ fn main() -> anyhow::Result<()> {
             emitted.bytes.len(),
             began.elapsed().as_secs_f64() * 1e3
         );
+        if !find.is_empty() {
+            let keys = ash_core::types::function_keys(&bc.types, &bc.functions);
+            for &fx in &find {
+                let native = bc.natives.iter().find(|n| n.findex as usize == fx);
+                println!(
+                    "f{fx}: {} {}",
+                    keys.get(&(fx as u32)).cloned().unwrap_or_default(),
+                    native.map_or(String::new(), |n| format!("(native {}@{})", n.name, n.lib))
+                );
+                if let Some(f) = bc.functions.iter().find(|f| f.findex as usize == fx) {
+                    for op in f.ops() {
+                        let text = format!("{op:?}");
+                        if text.contains("Call") || text.contains("Closure") {
+                            println!("    {text}");
+                        }
+                    }
+                }
+            }
+        }
         if let Some(class) = &class_filter {
             let want = format!("${class}");
             let statics = bc

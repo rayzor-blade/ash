@@ -88,7 +88,15 @@ impl BytecodeProgram<'_> {
 
     fn sig_of(&self, fun: &crate::types::HLTypeFun) -> Sig {
         Sig {
-            params: fun.args.iter().map(|a| self.ty_of(a.0)).collect(),
+            // A void argument is a null pointer.
+            params: fun
+                .args
+                .iter()
+                .map(|a| match self.ty_of(a.0) {
+                    Ty::Void => Ty::Ptr,
+                    t => t,
+                })
+                .collect(),
             ret: self.ty_of(fun.ret.0),
         }
     }

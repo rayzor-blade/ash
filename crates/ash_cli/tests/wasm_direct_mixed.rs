@@ -183,6 +183,15 @@ fn whole_programs_without_llvm_match_the_interpreter() {
     check_only("TestWasmFlow", "test_wasm_flow.hl");
 }
 
+/// The `simd` primitives and the vector values they promote to, against a
+/// scalar reference: wasm `v128` operations. Built from the committed
+/// bytecode, since the fixture needs the library's class path.
+#[test]
+fn simd_through_the_direct_backend_matches_the_interpreter() {
+    check_with("TestSimd", "test_simd.hl", &[], false, false);
+    check_with("TestSimd", "test_simd.hl", &[], true, false);
+}
+
 /// Build `main_class` and run it. `must_be_direct` names static methods of the class
 /// that must have gone through the direct backend.
 fn check(main_class: &str, fallback: &str, must_be_direct: &[&str]) {
@@ -196,13 +205,17 @@ fn check_only(main_class: &str, fallback: &str) {
 }
 
 fn check_in(main_class: &str, fallback: &str, must_be_direct: &[&str], only: bool) {
+    check_with(main_class, fallback, must_be_direct, only, true);
+}
+
+fn check_with(main_class: &str, fallback: &str, must_be_direct: &[&str], only: bool, compile: bool) {
     if runtime_object().is_none() {
         eprintln!("skipped: no wasm runtime object for {TARGET}");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
     let hl = dir.path().join("program.hl");
-    if haxe_available() {
+    if compile && haxe_available() {
         let out = Command::new("haxe")
             .arg("-cp")
             .arg(tests_dir())

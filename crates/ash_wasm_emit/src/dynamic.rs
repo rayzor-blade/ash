@@ -24,7 +24,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::I64 => "hlp_dyn_geti64",
             Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 => "hlp_dyn_geti",
             Ty::Ptr => "hlp_dyn_getp",
-            Ty::Void | Ty::Other => return unsupported("a dynamic field of no storable kind"),
+            Ty::Void | Ty::Other | Ty::V128 => return unsupported("a dynamic field of no storable kind"),
         };
         self.get(obj);
         self.emit(&I::I32Const(hash));
@@ -54,7 +54,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::I64 => "hlp_dyn_seti64",
             Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 => "hlp_dyn_seti",
             Ty::Ptr => "hlp_dyn_setp",
-            Ty::Void | Ty::Other => return unsupported("a dynamic field of no storable kind"),
+            Ty::Void | Ty::Other | Ty::V128 => return unsupported("a dynamic field of no storable kind"),
         };
         self.get(obj);
         self.emit(&I::I32Const(hash));
@@ -147,7 +147,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::I64 => "hlp_dyn_casti64",
             Ty::Bool | Ty::I32 | Ty::U8 | Ty::U16 => "hlp_dyn_casti",
             Ty::Ptr => "hlp_dyn_castp",
-            Ty::Void | Ty::Other => return unsupported("a cast into a value of no storable kind"),
+            Ty::Void | Ty::Other | Ty::V128 => return unsupported("a cast into a value of no storable kind"),
         };
         let slot = self.frame_alloc(4, 4)?;
         self.frame_address(slot);

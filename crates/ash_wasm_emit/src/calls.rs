@@ -53,7 +53,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a call with the wrong argument count");
         }
         for (a, want) in args.iter().zip(&sig.params) {
-            if self.ty(*a) != *want {
+            if self.arg_ty(*a) != *want {
                 return unsupported("a call with a mismatched argument");
             }
         }
@@ -76,7 +76,7 @@ impl<P: Program> Fx<'_, P> {
         };
         self.check_arguments(&sig, args)?;
         for a in args {
-            self.get(*a);
+            self.push_arg(*a);
         }
         // object -> type -> method table -> slot
         self.get(this);
@@ -140,7 +140,7 @@ impl<P: Program> Fx<'_, P> {
         self.emit(&I::If(BlockType::Empty));
         self.emit(&I::LocalGet(value));
         for a in &args[1..] {
-            self.get(*a);
+            self.push_arg(*a);
         }
         self.emit(&I::LocalGet(target));
         let (p, r) = wasm_signature(&declared);
@@ -190,6 +190,11 @@ impl<P: Program> Fx<'_, P> {
     /// Leave on the stack a Dynamic for argument `a`: the value itself if it
     /// carries its own type, a box if it does not.
     fn boxed_argument(&mut self, a: ValueId) -> Res<()> {
+        // Nothing boxes to null.
+        if self.ty(a) == Ty::Void {
+            self.emit(&I::I32Const(0));
+            return Ok(());
+        }
         let ty = self.f.values[a.0 as usize].ty;
         if self.program.self_describing(ty) {
             self.get(a);
@@ -271,7 +276,7 @@ impl<P: Program> Fx<'_, P> {
                 }
                 self.narrow(kind);
             }
-            Ty::Other => return unsupported("a dynamic result of no storable kind"),
+            Ty::Other | Ty::V128 => return unsupported("a dynamic result of no storable kind"),
         }
         self.set(dst);
         Ok(())
@@ -289,7 +294,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a closure type with no descriptor symbol");
         };
         let ret = self.ty(dst);
-        let params: Vec<Ty> = args.iter().map(|a| self.ty(*a)).collect();
+        let params: Vec<Ty> = args.iter().map(|a| self.arg_ty(*a)).collect();
         if params.iter().any(|t| t.wasm().is_none()) || ret == Ty::Other {
             return unsupported("a closure call with a value of no wasm kind");
         }
@@ -343,7 +348,7 @@ impl<P: Program> Fx<'_, P> {
         self.emit(&I::LocalGet(callee_closure));
         self.emit(&I::I32Load(mem(VCLOSURE_VALUE, 2)));
         for a in args {
-            self.get(*a);
+            self.push_arg(*a);
         }
         self.emit(&I::LocalGet(callee_closure));
         self.emit(&I::I32Load(mem(VCLOSURE_FUN, 2)));
@@ -352,7 +357,7 @@ impl<P: Program> Fx<'_, P> {
         self.call_result(dst, ret)?;
         self.emit(&I::Else);
         for a in args {
-            self.get(*a);
+            self.push_arg(*a);
         }
         self.emit(&I::LocalGet(callee_closure));
         self.emit(&I::I32Load(mem(VCLOSURE_FUN, 2)));
@@ -395,7 +400,7 @@ impl<P: Program> Fx<'_, P> {
         };
         self.check_arguments(&sig, args)?;
         for a in args {
-            self.get(*a);
+            self.push_arg(*a);
         }
         let target = self.scratch_word(0);
         self.data_address(&native.slot, 0)?;

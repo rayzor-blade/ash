@@ -16,7 +16,7 @@ fn size_of(t: Ty) -> Option<u32> {
         Ty::U16 => Some(2),
         Ty::I32 | Ty::F32 | Ty::Ptr => Some(4),
         Ty::I64 | Ty::F64 => Some(8),
-        Ty::Void | Ty::Other => None,
+        Ty::Void | Ty::Other | Ty::V128 => None,
     }
 }
 

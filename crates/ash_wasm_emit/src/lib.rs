@@ -29,6 +29,7 @@ mod calls;
 mod dynamic;
 mod locals;
 mod memory;
+mod simd;
 mod traps;
 pub mod object;
 
@@ -57,6 +58,8 @@ pub enum Ty {
     I64,
     F32,
     F64,
+    /// A vector of 128 bits, whatever its lanes.
+    V128,
     /// A reference to anything on the heap: an object, string, array, closure,
     /// dynamic. All of them are one `i32` in wasm32, and nothing here knows
     /// what is behind it.
@@ -71,6 +74,7 @@ impl Ty {
             Ty::I64 => Some(ValType::I64),
             Ty::F32 => Some(ValType::F32),
             Ty::F64 => Some(ValType::F64),
+            Ty::V128 => Some(ValType::V128),
             Ty::Void | Ty::Other => None,
         }
     }
@@ -493,6 +497,8 @@ const RT_FUNCS: &[(&str, &[ValType], &[ValType])] = &[
     ("hlp_aot_native_missing", &[ValType::I32, ValType::I32], &[]),
     ("hlp_error", &[ValType::I32, ValType::I32], &[]),
     ("fmod", &[ValType::F64, ValType::F64], &[ValType::F64]),
+    ("fma", &[ValType::F64, ValType::F64, ValType::F64], &[ValType::F64]),
+    ("fmaf", &[ValType::F32, ValType::F32, ValType::F32], &[ValType::F32]),
     ("fmodf", &[ValType::F32, ValType::F32], &[ValType::F32]),
     ("hlp_setup_trap_jit", &[], &[ValType::I32]),
     ("hlp_remove_trap_jit", &[], &[]),
@@ -570,6 +576,7 @@ const VCLOSURE_WRAPPED: u64 = 16;
 const WRAPPER: i32 = 2;
 /// The marker error that asks `emit_function` to try again with a frame.
 const NEEDS_FRAME: &str = "\u{0}needs a frame in memory";
+const NEEDS_VECTORS: &str = "a vector operation in a body that was not scanned for them";
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
 
@@ -924,6 +931,10 @@ struct Fx<'a, P: Program> {
     sp_local: u32,
     fp_local: u32,
     scratch: u32,
+    /// Whether the body has vectors, and the first of the four v128 locals
+    /// it keeps for them.
+    has_vectors: bool,
+    vector_scratch: u32,
     /// Where in the frame each cell of the function is.
     cell_offsets: Vec<u32>,
     /// The trap regions of the body, by handler block.
@@ -978,7 +989,37 @@ fn emit_function_in<P: Program>(
     {
         return unsupported("signature has a type outside the numeric subset");
     }
-    let tys: Vec<Ty> = f.values.iter().map(|v| program.ty(v.ty)).collect();
+    let mut tys: Vec<Ty> = f
+        .values
+        .iter()
+        .map(|v| if v.lanes > 1 { Ty::V128 } else { program.ty(v.ty) })
+        .collect();
+    // What a vector instruction defines is a vector, whatever lane count the
+    // value was recorded with.
+    let mut has_vectors = false;
+    for blk in &f.blocks {
+        for ins in &blk.instrs {
+            match ins {
+                Instr::VecLoad { dst, .. }
+                | Instr::VecSplat { dst, .. }
+                | Instr::VecBinOp { dst, .. }
+                | Instr::VecInsert { dst, .. }
+                | Instr::VecOp {
+                    dst,
+                    out: air::v2::ir::VecOut::Value,
+                    ..
+                } => {
+                    tys[dst.0 as usize] = Ty::V128;
+                    has_vectors = true;
+                }
+                Instr::VecStore { .. }
+                | Instr::VecReduce { .. }
+                | Instr::VecExtract { .. }
+                | Instr::VecOp { .. } => has_vectors = true,
+                _ => {}
+            }
+        }
+    }
     if let Some(t) = tys.iter().find(|t| matches!(t, Ty::Other)) {
         return unsupported(format!("a value of type {t:?}"));
     }
@@ -1094,6 +1135,10 @@ fn emit_function_in<P: Program>(
     if !trap_order.is_empty() {
         locals.push((trap_order.len() as u32, ValType::I32));
     }
+    let vector_scratch = (if with_frame { trap_base } else { frame_local + 4 }) + trap_order.len() as u32;
+    if has_vectors {
+        locals.push((4, ValType::V128));
+    }
     let has_loops = loop_header.iter().any(|h| *h);
     let mut fx = Fx {
         program,
@@ -1111,6 +1156,8 @@ fn emit_function_in<P: Program>(
         sp_local,
         fp_local,
         scratch,
+        has_vectors,
+        vector_scratch,
         cell_offsets: Vec::new(),
         traps: trap_infos,
         barrier_free: air::v2::analysis::barrier_free_stores(f),
@@ -1345,6 +1392,7 @@ impl<P: Program> Fx<'_, P> {
             Some(ValType::I64) => self.emit(&I::I64Const(0)),
             Some(ValType::F32) => self.emit(&I::F32Const(0.0f32.into())),
             Some(ValType::F64) => self.emit(&I::F64Const(0.0f64.into())),
+            Some(ValType::V128) => self.emit(&I::V128Const(0)),
             _ => self.emit(&I::I32Const(0)),
         }
     }
@@ -1405,7 +1453,12 @@ impl<P: Program> Fx<'_, P> {
             Instr::Param { dst, reg } => {
                 // Registers past the arguments are locals that start zeroed.
                 if *reg < self.nparams {
-                    if self.sig.params[*reg as usize] != self.ty(*dst) {
+                    // A void register is a null pointer, as it is in a call.
+                    let held = match self.ty(*dst) {
+                        Ty::Void => Ty::Ptr,
+                        t => t,
+                    };
+                    if self.sig.params[*reg as usize] != held {
                         return unsupported("a parameter whose register type differs");
                     }
                     self.emit(&I::LocalGet(*reg));
@@ -1436,6 +1489,39 @@ impl<P: Program> Fx<'_, P> {
             Instr::EndTrap { .. } => self.end_trap(self.at.0)?,
             // A cache hint, which wasm has no way to give.
             Instr::Prefetch { .. } => {}
+            Instr::VecLoad {
+                kind,
+                dst,
+                base,
+                index,
+                stride,
+            } => self.vec_load(*kind, *dst, *base, *index, *stride)?,
+            Instr::VecStore {
+                kind,
+                base,
+                index,
+                src,
+                stride,
+            } => self.vec_store(*kind, *base, *index, *src, *stride)?,
+            Instr::VecSplat { dst, src } => self.vec_splat(*dst, *src)?,
+            Instr::VecBinOp { op, dst, a, b } => self.vec_binop(*op, *dst, *a, *b)?,
+            Instr::VecReduce { op, dst, src } => self.vec_reduce(*op, *dst, *src)?,
+            Instr::VecOp {
+                v, dst, out, args, ..
+            } => self.vec_op(*v, *dst, *out, args)?,
+            Instr::VecExtract {
+                elem,
+                lane,
+                dst,
+                src,
+            } => self.vec_extract(*elem, *lane, *dst, *src)?,
+            Instr::VecInsert {
+                elem,
+                lane,
+                dst,
+                src,
+                value,
+            } => self.vec_insert(*elem, *lane, *dst, *src, *value)?,
             Instr::Assert => {
                 // The runtime's error, which raises; its second word is the
                 // empty list of further arguments.
@@ -1733,7 +1819,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::I64 => self.emit(&I::I64Load(mem(3))),
             Ty::F32 => self.emit(&I::F32Load(mem(2))),
             Ty::F64 => self.emit(&I::F64Load(mem(3))),
-            Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
+            Ty::Void | Ty::Other | Ty::V128 => return unsupported("a field of no storable kind"),
         }
         Ok(())
     }
@@ -1752,7 +1838,7 @@ impl<P: Program> Fx<'_, P> {
             Ty::I64 => self.emit(&I::I64Store(mem(3))),
             Ty::F32 => self.emit(&I::F32Store(mem(2))),
             Ty::F64 => self.emit(&I::F64Store(mem(3))),
-            Ty::Void | Ty::Other => return unsupported("a field of no storable kind"),
+            Ty::Void | Ty::Other | Ty::V128 => return unsupported("a field of no storable kind"),
         }
         Ok(())
     }
@@ -1784,7 +1870,7 @@ impl<P: Program> Fx<'_, P> {
     /// virtual has one, and by name on the object it stands for when not.
     fn virtual_get(&mut self, dst: ValueId, obj: ValueId, field: usize, hash: i32) -> Res<()> {
         let kind = self.ty(dst);
-        if matches!(kind, Ty::Void | Ty::Other) {
+        if matches!(kind, Ty::Void | Ty::Other | Ty::V128) {
             return unsupported("a virtual field of no storable kind");
         }
         let slot = VVIRTUAL_FIELDS + 4 * field as u64;
@@ -1868,7 +1954,7 @@ impl<P: Program> Fx<'_, P> {
 
     fn virtual_set(&mut self, obj: ValueId, field: usize, src: ValueId, hash: i32) -> Res<()> {
         let kind = self.ty(src);
-        if matches!(kind, Ty::Void | Ty::Other) {
+        if matches!(kind, Ty::Void | Ty::Other | Ty::V128) {
             return unsupported("a virtual field of no storable kind");
         }
         let slot = VVIRTUAL_FIELDS + 4 * field as u64;
@@ -2229,7 +2315,7 @@ impl<P: Program> Fx<'_, P> {
                 };
                 self.box_value(dst, src, kind, &name)
             }
-            Ty::Void | Ty::Other => unsupported("a Dynamic from a value of no storable kind"),
+            Ty::Void | Ty::Other | Ty::V128 => unsupported("a Dynamic from a value of no storable kind"),
         }
     }
 
@@ -2616,6 +2702,23 @@ impl<P: Program> Fx<'_, P> {
         Ok(())
     }
 
+    /// The kind a value is passed as: a void value is a null pointer.
+    pub(crate) fn arg_ty(&self, v: ValueId) -> Ty {
+        match self.ty(v) {
+            Ty::Void => Ty::Ptr,
+            t => t,
+        }
+    }
+
+    /// Push a value as an argument.
+    pub(crate) fn push_arg(&mut self, v: ValueId) {
+        if self.ty(v) == Ty::Void {
+            self.emit(&I::I32Const(0));
+        } else {
+            self.get(v);
+        }
+    }
+
     fn call_instr(&mut self, dst: ValueId, fun: usize, args: &[ValueId]) -> Res<()> {
         if let Some(native) = self.program.native_slot(fun) {
             return self.call_native_slot(dst, fun, args, &native);
@@ -2627,7 +2730,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported(format!("a call to f{fun} with the wrong argument count"));
         }
         for (a, want) in args.iter().zip(&callee.sig.params) {
-            if self.ty(*a) != *want {
+            if self.arg_ty(*a) != *want {
                 return unsupported(format!("a call to f{fun} with a mismatched argument"));
             }
         }
@@ -2636,7 +2739,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported(format!("a call to f{fun} whose result type differs"));
         }
         for a in args {
-            self.get(*a);
+            self.push_arg(*a);
         }
         self.call(callee.to);
         self.called.push(fun);
@@ -2868,7 +2971,7 @@ fn compare(t: Ty, c: CondKind) -> Res<(I<'static>, bool)> {
             C::NotGte => (I::F32Ge, true),
             _ => return unsupported(format!("the condition {c:?} with two operands")),
         },
-        Ty::Void | Ty::Other => return unsupported("a comparison of non-numbers"),
+        Ty::Void | Ty::Other | Ty::V128 => return unsupported("a comparison of non-numbers"),
     };
     Ok(r)
 }

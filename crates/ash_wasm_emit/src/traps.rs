@@ -131,7 +131,7 @@ impl<P: Program> Fx<'_, P> {
         self.emit(&I::LocalSet(trap.slot));
         let get = self.runtime("hlp_get_exc_value")?;
         self.call(get);
-        let tmp = self.tmp_local;
+        let tmp = self.tmp()?;
         self.emit(&I::LocalSet(tmp));
         let (at, kind) = self.cell_place(trap.exc_cell)?;
         if kind != Ty::Ptr {

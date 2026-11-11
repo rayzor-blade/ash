@@ -576,6 +576,8 @@ const VCLOSURE_WRAPPED: u64 = 16;
 const WRAPPER: i32 = 2;
 /// The marker error that asks `emit_function` to try again with a frame.
 const NEEDS_FRAME: &str = "\u{0}needs a frame in memory";
+const NEEDS_TMP: &str = "\u{0}needs a scratch local";
+const NEEDS_SCRATCH: &str = "\u{0}needs scratch words";
 const NEEDS_VECTORS: &str = "a vector operation in a body that was not scanned for them";
 /// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
 pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
@@ -922,13 +924,13 @@ struct Fx<'a, P: Program> {
     opts: Options,
     frame_local: u32,
     handled_local: u32,
-    cur_local: u32,
     tmp_local: u32,
+    has_tmp: bool,
+    has_scratch: bool,
     /// Whether this body opens a frame in memory, and the locals that hold
     /// the stack pointer on entry, the frame's base, and four scratch words.
     has_frame: bool,
     frame_size: u32,
-    sp_local: u32,
     fp_local: u32,
     scratch: u32,
     /// Whether the body has vectors, and the first of the four v128 locals
@@ -964,15 +966,31 @@ fn emit_function<P: Program>(
     rt: &Runtime,
     opts: Options,
 ) -> Res<(object::Body, Vec<usize>, Used)> {
-    // A body finds out that it needs memory for values only as it goes; the
-    // second attempt opens a frame for it.
-    match emit_function_in(program, inp, callees, rt, opts, false) {
-        Err(e) if e.0 == NEEDS_FRAME && rt.frames => {
-            emit_function_in(program, inp, callees, rt, opts, true)
+    // A body finds out what it needs as it goes -- a frame in memory, a local
+    // to hold a value twice, scratch words -- and each is a local the fiber
+    // transform saves at every call, so a body gets only those it asked for.
+    // The second attempt has them.
+    let mut has = Has::default();
+    for _ in 0..4 {
+        match emit_function_in(program, inp, callees, rt, opts, has) {
+            Err(e) if e.0 == NEEDS_FRAME && rt.frames && !has.frame => has.frame = true,
+            Err(e) if e.0 == NEEDS_FRAME => {
+                return unsupported("a frame in memory, in a module with no stack");
+            }
+            Err(e) if e.0 == NEEDS_TMP && !has.tmp => has.tmp = true,
+            Err(e) if e.0 == NEEDS_SCRATCH && !has.scratch => has.scratch = true,
+            other => return other,
         }
-        Err(e) if e.0 == NEEDS_FRAME => unsupported("a frame in memory, in a module with no stack"),
-        other => other,
     }
+    unsupported("a body whose needs kept growing")
+}
+
+/// The optional locals a body has.
+#[derive(Clone, Copy, Default)]
+struct Has {
+    frame: bool,
+    tmp: bool,
+    scratch: bool,
 }
 
 fn emit_function_in<P: Program>(
@@ -981,8 +999,9 @@ fn emit_function_in<P: Program>(
     callees: &dyn Fn(usize) -> Option<Callee>,
     rt: &Runtime,
     opts: Options,
-    with_frame: bool,
+    has: Has,
 ) -> Res<(object::Body, Vec<usize>, Used)> {
+    let (with_frame, with_tmp, with_scratch) = (has.frame, has.tmp, has.scratch);
     let f = inp.body;
     if inp.sig.params.iter().any(|t| t.wasm().is_none())
         || !(inp.sig.ret == Ty::Void || inp.sig.ret.wasm().is_some())
@@ -1094,6 +1113,9 @@ fn emit_function_in<P: Program>(
     if !trap_order.is_empty() && !with_frame {
         return unsupported(NEEDS_FRAME);
     }
+    if !trap_order.is_empty() && !with_scratch {
+        return unsupported(NEEDS_SCRATCH);
+    }
     let mut locals: Vec<(u32, ValType)> = Vec::new();
     for &t in &assignment.types {
         match locals.last_mut() {
@@ -1101,23 +1123,27 @@ fn emit_function_in<P: Program>(
             _ => locals.push((1, t)),
         }
     }
-    let frame_local = nparams + assignment.types.len() as u32;
-    locals.push((1, ValType::I32));
-    // The poll epoch this body last saw, and the one just read.
-    let handled_local = frame_local + 1;
-    let cur_local = frame_local + 2;
-    locals.push((1, ValType::I64));
-    locals.push((1, ValType::I64));
+    // Locals past the values', each only when the body uses it.
+    let next = std::cell::Cell::new(nparams + assignment.types.len() as u32);
+    let take = |n: u32, ty: ValType, locals: &mut Vec<(u32, ValType)>| -> u32 {
+        let at = next.get();
+        next.set(at + n);
+        locals.push((n, ty));
+        at
+    };
+    let has_loops = loop_header.iter().any(|h| *h);
+    // The shadow frame's slot.
+    let frame_local = if opts.shadow { take(1, ValType::I32, &mut locals) } else { 0 };
+    // The poll epoch this body last saw.
+    let polling = opts.polls && has_loops && rt.epoch.is_some();
+    let handled_local = if polling { take(1, ValType::I64, &mut locals) } else { 0 };
     // An i32 scratch, for a value read twice.
-    let tmp_local = frame_local + 3;
-    locals.push((1, ValType::I32));
-    // The stack pointer on entry, the frame's base, and four scratch words.
-    let (sp_local, fp_local, scratch) = (frame_local + 4, frame_local + 5, frame_local + 6);
-    if with_frame {
-        locals.push((6, ValType::I32));
-    }
+    let tmp_local = if with_tmp { take(1, ValType::I32, &mut locals) } else { 0 };
+    // The frame's base, and four scratch words.
+    let fp_local = if with_frame { take(1, ValType::I32, &mut locals) } else { 0 };
+    let scratch = if with_scratch { take(4, ValType::I32, &mut locals) } else { 0 };
     // One local per trap region, for the buffer it is armed with.
-    let trap_base = frame_local + 10;
+    let trap_base = next.get();
     let trap_infos: HashMap<usize, traps::TrapInfo> = trap_order
         .iter()
         .enumerate()
@@ -1133,13 +1159,12 @@ fn emit_function_in<P: Program>(
         })
         .collect();
     if !trap_order.is_empty() {
-        locals.push((trap_order.len() as u32, ValType::I32));
+        take(trap_order.len() as u32, ValType::I32, &mut locals);
     }
-    let vector_scratch = (if with_frame { trap_base } else { frame_local + 4 }) + trap_order.len() as u32;
+    let vector_scratch = next.get();
     if has_vectors {
-        locals.push((4, ValType::V128));
+        take(4, ValType::V128, &mut locals);
     }
-    let has_loops = loop_header.iter().any(|h| *h);
     let mut fx = Fx {
         program,
         f,
@@ -1149,11 +1174,11 @@ fn emit_function_in<P: Program>(
         opts,
         frame_local,
         handled_local,
-        cur_local,
         tmp_local,
         has_frame: with_frame,
+        has_tmp: with_tmp,
+        has_scratch: with_scratch,
         frame_size: 0,
-        sp_local,
         fp_local,
         scratch,
         has_vectors,
@@ -1183,9 +1208,8 @@ fn emit_function_in<P: Program>(
         }
     }
     if with_frame {
-        // sp0 = sp; fp = sp - frame size; sp = fp
+        // fp = sp - frame size; sp = fp
         fx.out.stack_pointer_get();
-        fx.emit(&I::LocalTee(sp_local));
         fx.out.frame_size_const();
         fx.emit(&I::I32Sub);
         fx.emit(&I::LocalTee(fp_local));
@@ -1227,6 +1251,15 @@ impl<P: Program> Fx<'_, P> {
         self.out.instruction(i);
     }
 
+    /// The scratch local, which a body has only when it asked for it.
+    pub(crate) fn tmp(&self) -> Res<u32> {
+        if self.has_tmp {
+            Ok(self.tmp_local)
+        } else {
+            unsupported(NEEDS_TMP)
+        }
+    }
+
     /// Reserve `size` bytes in the frame, aligned to `align`, and return their
     /// offset from the frame's base.
     fn frame_alloc(&mut self, size: u32, align: u32) -> Res<u32> {
@@ -1250,7 +1283,9 @@ impl<P: Program> Fx<'_, P> {
     /// Give the frame back, on the way out.
     fn close_frame(&mut self) {
         if self.has_frame {
-            self.emit(&I::LocalGet(self.sp_local));
+            self.emit(&I::LocalGet(self.fp_local));
+            self.out.frame_size_const();
+            self.emit(&I::I32Add);
             self.out.stack_pointer_set();
         }
     }
@@ -1262,18 +1297,20 @@ impl<P: Program> Fx<'_, P> {
             self.call(poll);
             return;
         };
-        let (handled, cur) = (self.handled_local, self.cur_local);
-        self.out.address_of(epoch, 0);
-        self.emit(&I::I64Load(we::MemArg {
-            offset: 0,
-            align: 3,
-            memory_index: 0,
-        }));
-        self.emit(&I::LocalTee(cur));
+        let handled = self.handled_local;
+        let load = |fx: &mut Self| {
+            fx.out.address_of(epoch, 0);
+            fx.emit(&I::I64Load(we::MemArg {
+                offset: 0,
+                align: 3,
+                memory_index: 0,
+            }));
+        };
+        load(self);
         self.emit(&I::LocalGet(handled));
         self.emit(&I::I64Ne);
         self.emit(&I::If(BlockType::Empty));
-        self.emit(&I::LocalGet(cur));
+        load(self);
         self.emit(&I::LocalSet(handled));
         self.call(poll);
         self.emit(&I::End);
@@ -1874,7 +1911,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a virtual field of no storable kind");
         }
         let slot = VVIRTUAL_FIELDS + 4 * field as u64;
-        let tmp = self.tmp_local;
+        let tmp = self.tmp()?;
         self.get(obj);
         self.emit(&I::I32Load(we::MemArg {
             offset: slot,
@@ -1958,7 +1995,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a virtual field of no storable kind");
         }
         let slot = VVIRTUAL_FIELDS + 4 * field as u64;
-        let tmp = self.tmp_local;
+        let tmp = self.tmp()?;
         self.get(obj);
         self.emit(&I::I32Load(we::MemArg {
             offset: slot,
@@ -2261,7 +2298,7 @@ impl<P: Program> Fx<'_, P> {
     /// A box for the value `src`, of the type `ty`, in `dst`: the runtime
     /// allocates it and the value goes into the payload word.
     fn box_value(&mut self, dst: ValueId, src: ValueId, boxed: Ty, type_name: &str) -> Res<()> {
-        let tmp = self.tmp_local;
+        let tmp = self.tmp()?;
         self.data_address(type_name, 0)?;
         let alloc = self.runtime("hlp_alloc_dynamic")?;
         self.call(alloc);
@@ -2291,7 +2328,7 @@ impl<P: Program> Fx<'_, P> {
                 let Some(name) = self.program.type_symbol(src_type.0 as usize) else {
                     return unsupported("a type with no descriptor symbol");
                 };
-                let tmp = self.tmp_local;
+                let tmp = self.tmp()?;
                 self.get(src);
                 self.emit(&I::I32Eqz);
                 self.emit(&I::If(BlockType::Result(ValType::I32)));
@@ -2372,7 +2409,7 @@ impl<P: Program> Fx<'_, P> {
             }
             if boxed == Ty::I64 && matches!(ts, Ty::I32 | Ty::Bool) {
                 // Null<Int64> from an Int widens first.
-                let tmp = self.tmp_local;
+                let tmp = self.tmp()?;
                 self.data_address(&name, 0)?;
                 let alloc = self.runtime("hlp_alloc_dynamic")?;
                 self.call(alloc);
@@ -2466,7 +2503,7 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a closure in a program with no function table");
         };
         let slot = i32::try_from(fun * 4).map_err(|_| Unsupported("a function past 512 MiB".into()))?;
-        let tmp = self.tmp_local;
+        let tmp = self.tmp()?;
         self.data_address(&type_name, 0)?;
         self.get(obj);
         self.emit(&I::I32Load(we::MemArg {
@@ -2807,7 +2844,7 @@ impl<P: Program> Fx<'_, P> {
         if ordered {
             // A pair with no order answers a sentinel that must not pass an
             // ordering test.
-            let tmp = self.tmp_local;
+            let tmp = self.tmp()?;
             self.emit(&I::LocalTee(tmp));
             self.emit(&I::I32Const(0));
             self.emit(&op);

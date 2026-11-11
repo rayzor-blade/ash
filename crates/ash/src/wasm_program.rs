@@ -573,6 +573,11 @@ impl Image<'_> {
             self.data(&format!("Bytes_{i}"), blob, 0, Linkage::Hidden);
         }
 
+        // The slots of natives in host libraries.
+        for slot in slots.keys() {
+            self.obj.declare_data(slot, 4, 2, Linkage::Local);
+        }
+
         // Function addresses and types.
         let mut fns = Blob::default();
         let mut fts = Blob::default();
@@ -621,16 +626,109 @@ impl Image<'_> {
         ctx.ptr(Some(self.function_types), 0);
         self.obj.set_data(self.module_ctx, &ctx.bytes, &ctx.refs);
 
-        // The slots of natives in host libraries.
-        for slot in slots.keys() {
-            self.obj.declare_data(slot, 4, 2, Linkage::Local);
-        }
-
+        let placed = self.static_constants();
         let trampolines = self.trampolines()?;
         let late = self.late_init(slots, &trampolines)?;
-        let init = self.module_init(barriers)?;
+        let init = self.module_init(barriers, &placed)?;
         self.entry(init, late)?;
         Ok(())
+    }
+
+    /// The constant objects whose fields are all known without running
+    /// anything, laid out as data: a class header, strings and type
+    /// descriptors by address, and integers. The global slots point at them
+    /// from the start. What cannot be placed (a field holding a closure or
+    /// another constant) is built by the start-up routine.
+    fn static_constants(&mut self) -> (std::collections::HashSet<usize>, Option<(Sym, u32)>) {
+        let bc = self.bc;
+        let mut handled = std::collections::HashSet::new();
+        let mut blob = Blob::default();
+        let mut members: Vec<(usize, u32)> = Vec::new();
+        for c in &bc.constants {
+            let g = c.global as usize;
+            if g >= bc.globals.len() {
+                continue;
+            }
+            let type_index = bc.globals[g].0;
+            let t = &bc.types[type_index];
+            if t.kind != hl::hl_type_kind_HOBJ && t.kind != hl::hl_type_kind_HSTRUCT {
+                continue;
+            }
+            let Some(o) = t.obj.as_ref() else { continue };
+            let Some(layout) = crate::layout::object_layout_for(&bc.types, type_index, 4) else {
+                continue;
+            };
+            if c.fields.len() > o.fields.len() || layout.field_offsets.len() < o.fields.len() {
+                continue;
+            }
+            let placeable = c.fields.iter().enumerate().all(|(j, _)| {
+                let k = bc.types[o.fields[j].type_.0].kind;
+                !(k == hl::hl_type_kind_HFUN
+                    || k == hl::hl_type_kind_HMETHOD
+                    || k == hl::hl_type_kind_HOBJ
+                    || k == hl::hl_type_kind_HSTRUCT)
+            });
+            if !placeable {
+                continue;
+            }
+            // Each member starts where a boxed value may: eight-aligned.
+            blob.pad(8);
+            let base = blob.bytes.len();
+            let start = layout.field_offsets.len() - o.fields.len();
+            let mut cursor: i32 = 0;
+            if t.kind == hl::hl_type_kind_HOBJ {
+                blob.ptr(Some(self.types[type_index]), 0);
+                cursor = 4;
+            }
+            let mut fits = true;
+            for (j, &value) in c.fields.iter().enumerate() {
+                let off = layout.field_offsets[start + j];
+                if off < cursor {
+                    fits = false;
+                    break;
+                }
+                while (blob.bytes.len() - base) < off as usize {
+                    blob.u8(0);
+                }
+                let at = value as usize;
+                let k = bc.types[o.fields[j].type_.0].kind;
+                if k == hl::hl_type_kind_HBYTES {
+                    blob.ptr(self.strings.get(at).copied(), 0);
+                } else if k == hl::hl_type_kind_HTYPE {
+                    blob.ptr(self.types.get(at).copied(), 0);
+                } else {
+                    // The field value is an index into the integer pool.
+                    blob.i32(bc.ints.get(at).copied().unwrap_or(value));
+                }
+                cursor = off + 4;
+            }
+            if !fits {
+                blob.bytes.truncate(base);
+                blob.refs.retain(|(o, _)| (*o as usize) < base);
+                continue;
+            }
+            while (blob.bytes.len() - base) < layout.size.max(cursor) as usize {
+                blob.u8(0);
+            }
+            members.push((g, base as u32));
+            handled.insert(g);
+        }
+        blob.pad(8);
+        if members.is_empty() {
+            return (handled, None);
+        }
+        let size = blob.bytes.len() as u32;
+        let sym = self.data("ash_constants", blob, 3, Linkage::Hidden);
+        // The global slots hold their addresses already.
+        let mut slots = Blob::default();
+        for g in 0..self.nglobals.max(1) {
+            match members.iter().find(|(m, _)| *m == g) {
+                Some((_, base)) => slots.ptr(Some(sym), *base as i32),
+                None => slots.u32(0),
+            }
+        }
+        self.obj.set_data(self.globals, &slots.bytes, &slots.refs);
+        (handled, Some((sym, size)))
     }
 
     /// One function per distinct signature the program calls through a
@@ -787,7 +885,11 @@ impl Image<'_> {
 
     /// `ash_module_init`: tell the runtime what the program is, then build the
     /// constant objects the bytecode expects to exist.
-    fn module_init(&mut self, barriers: bool) -> Result<Sym> {
+    fn module_init(
+        &mut self,
+        barriers: bool,
+        placed: &(std::collections::HashSet<usize>, Option<(Sym, u32)>),
+    ) -> Result<Sym> {
         let bc = self.bc;
         let init = self
             .obj
@@ -817,6 +919,12 @@ impl Image<'_> {
 
         let set_globals = self.imp("hlp_gc_set_globals", &[I32, I32], &[]);
         f.addr(self.globals, 0).c(self.nglobals as i32).call(set_globals);
+        // The constants laid out as data are immortal, but a field of one can
+        // be assigned a heap object later, so the collector scans the range.
+        if let Some((blob, size)) = placed.1 {
+            let add = self.imp("hlp_gc_add_static_range", &[I32, I32], &[]);
+            f.addr(blob, 0).c(size as i32).call(add);
+        }
 
         // Names of fields, methods and dynamic fields, so a hash can be turned
         // back into one.
@@ -905,7 +1013,7 @@ impl Image<'_> {
         let closure = self.imp("hlp_alloc_closure_void", &[I32, I32], &[I32]);
         for constant in &bc.constants {
             let g = constant.global as usize;
-            if g >= bc.globals.len() {
+            if g >= bc.globals.len() || placed.0.contains(&g) {
                 continue;
             }
             let type_index = bc.globals[g].0;

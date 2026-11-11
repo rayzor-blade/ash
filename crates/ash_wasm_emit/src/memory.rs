@@ -186,7 +186,7 @@ impl<P: Program> Fx<'_, P> {
 
     pub(crate) fn make_enum(&mut self, dst: ValueId, construct: usize, args: &[ValueId]) -> Res<()> {
         let enum_ty = self.f.values[dst.0 as usize].ty;
-        let tmp = self.tmp_local;
+        let tmp = self.tmp()?;
         self.type_of_value(dst)?;
         self.emit(&I::I32Const(construct as i32));
         let alloc = self.runtime("hlp_alloc_enum")?;

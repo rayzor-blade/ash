@@ -26,10 +26,10 @@ impl<P: Program> Fx<'_, P> {
 
     /// The scratch words are locals a body has only when it has a frame.
     pub(crate) fn need_scratch(&self) -> Res<()> {
-        if self.has_frame {
+        if self.has_scratch {
             Ok(())
         } else {
-            unsupported(NEEDS_FRAME)
+            unsupported(NEEDS_SCRATCH)
         }
     }
 
@@ -230,9 +230,10 @@ impl<P: Program> Fx<'_, P> {
                 Shape::Virtual => {
                     // The callee returns its own view; the caller's type is
                     // what the rest of this body expects.
-                    self.emit(&I::LocalSet(self.tmp_local));
+                    let tmp = self.tmp()?;
+                    self.emit(&I::LocalSet(tmp));
                     self.type_of_value(dst)?;
-                    self.emit(&I::LocalGet(self.tmp_local));
+                    self.emit(&I::LocalGet(tmp));
                     let wrap = self.runtime("hl_to_virtual")?;
                     self.call(wrap);
                 }
@@ -244,9 +245,10 @@ impl<P: Program> Fx<'_, P> {
                         return unsupported("a type with no descriptor symbol");
                     };
                     let slot = self.frame_alloc(4, 4)?;
-                    self.emit(&I::LocalSet(self.tmp_local));
+                    let tmp = self.tmp()?;
+                    self.emit(&I::LocalSet(tmp));
                     self.frame_address(slot);
-                    self.emit(&I::LocalGet(self.tmp_local));
+                    self.emit(&I::LocalGet(tmp));
                     self.emit(&I::I32Store(mem(0, 2)));
                     self.frame_address(slot);
                     self.data_address(&dyn_name, 0)?;

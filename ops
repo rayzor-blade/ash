@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":2,"timestamp":1794398989,"nonce":"90QwdWY3opEQm8rYxt8xNB0dTlU=","title":"The AIR interpreter keeps dead values reachable, so a rooted abstract is never finalized","was":"Interpreter and hybrid never finalize an abstract whose native side roots a Haxe closure"}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1794398989,"nonce":"ZiDoxXD4G0R9+3gT/+zZuMbUfng=","added":["area:air"],"removed":null}]}

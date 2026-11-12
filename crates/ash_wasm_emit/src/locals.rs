@@ -26,10 +26,18 @@ pub struct Assignment {
     pub types: Vec<ValType>,
 }
 
-pub fn assign(f: &Function, cfg: &CfgInfo, tys: &[Ty]) -> Assignment {
+/// With `split_refs` a local holds either references or other values, never
+/// both, so that the ones that must be visible to the collector can be told
+/// apart by local.
+pub fn assign(
+    f: &Function,
+    cfg: &CfgInfo,
+    live: &Liveness,
+    tys: &[Ty],
+    split_refs: bool,
+) -> Assignment {
     let n = f.values.len();
-    let class = |v: usize| tys[v].wasm();
-    let live = Liveness::analyze(f, cfg);
+    let class = |v: usize| tys[v].wasm().map(|t| (t, split_refs && tys[v] == Ty::Ptr));
 
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut edge = |a: ValueId, b: ValueId| {
@@ -90,7 +98,7 @@ pub fn assign(f: &Function, cfg: &CfgInfo, tys: &[Ty]) -> Assignment {
 
     let none = u32::MAX;
     let mut slot = vec![none; n];
-    let mut types: Vec<ValType> = Vec::new();
+    let mut types: Vec<(ValType, bool)> = Vec::new();
     let mut taken: Vec<u32> = Vec::new();
     let mut stamp = 0u32;
     for v in order {
@@ -113,11 +121,66 @@ pub fn assign(f: &Function, cfg: &CfgInfo, tys: &[Ty]) -> Assignment {
     }
     // Values with no representation never hold anything; they share one local.
     let dummy = types.len() as u32;
-    types.push(ValType::I32);
+    types.push((ValType::I32, false));
     for s in &mut slot {
         if *s == none {
             *s = dummy;
         }
     }
-    Assignment { slot, types }
+    Assignment {
+        slot,
+        types: types.into_iter().map(|t| t.0).collect(),
+    }
+}
+
+/// The allocated locals that hold a reference some collection could need to
+/// find: one live across an instruction that can reach the collector, or live
+/// at a loop header, where the safepoint is.
+///
+/// Wasm locals are in the engine's frame, which the collector cannot scan. It
+/// scans the shadow stack, so a body mirrors these into its frame as it
+/// defines them. `may_collect` says which instructions can reach the
+/// collector: a call, an allocation, a store with a barrier.
+pub fn rooted(
+    f: &Function,
+    live: &Liveness,
+    tys: &[Ty],
+    assignment: &Assignment,
+    polls: bool,
+    loop_header: &[bool],
+    may_collect: impl Fn(&air::v2::ir::Instr) -> bool,
+) -> Vec<bool> {
+    let mut out = vec![false; assignment.types.len()];
+    let mark = |v: ValueId, out: &mut Vec<bool>| {
+        if tys[v.0 as usize] == Ty::Ptr {
+            out[assignment.slot[v.0 as usize] as usize] = true;
+        }
+    };
+    for (bi, blk) in f.blocks.iter().enumerate() {
+        let mut now: BTreeSet<ValueId> = live.live_out(BlockId(bi as u32)).clone();
+        now.extend(blk.term.uses());
+        for ins in blk.instrs.iter().rev() {
+            let dst = ins.dst();
+            if may_collect(ins) {
+                for &v in &now {
+                    if Some(v) != dst {
+                        mark(v, &mut out);
+                    }
+                }
+            }
+            if let Some(d) = dst {
+                now.remove(&d);
+            }
+            now.extend(ins.uses());
+        }
+        if polls && loop_header[bi] {
+            for &v in live.live_in(BlockId(bi as u32)) {
+                mark(v, &mut out);
+            }
+            for p in &blk.phis {
+                mark(p.dst, &mut out);
+            }
+        }
+    }
+    out
 }

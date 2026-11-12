@@ -37,6 +37,7 @@ pub mod object;
 pub use wasm_encoder;
 
 use air::v2::CfgInfo;
+use air::v2::liveness::Liveness;
 use air::v2::ir::{
     BinOp, CastKind, CondKind, Function, Instr, IntrinsicKind, MemAccess, Terminator, TypeRef, UnOp,
     ValueId,
@@ -911,6 +912,8 @@ struct Runtime {
 #[derive(Clone, Copy, PartialEq)]
 enum Frame {
     Loop(usize),
+    /// The strip loop inside `Loop(n)`; see `strip_phi`.
+    Inner(usize),
     Block(usize),
     If,
 }
@@ -939,6 +942,9 @@ struct Fx<'a, P: Program> {
     vector_scratch: u32,
     /// Where in the frame each cell of the function is.
     cell_offsets: Vec<u32>,
+    /// Where in the frame each allocated local that holds a reference the
+    /// collector must find is mirrored, by allocated local.
+    roots: Vec<Option<u32>>,
     /// The trap regions of the body, by handler block.
     traps: HashMap<usize, traps::TrapInfo>,
     /// Stores that need no barrier, by (block, instruction).
@@ -957,6 +963,54 @@ struct Fx<'a, P: Program> {
     loop_header: Vec<bool>,
     merge: Vec<bool>,
     kids: Vec<Vec<usize>>,
+}
+
+/// Whether `ins` can reach the collector: it calls, allocates, or stores with
+/// a barrier. A reference live across one has to be where the collector can
+/// find it. The instructions listed only read or write memory and compute.
+fn may_collect(ins: &Instr) -> bool {
+    !matches!(
+        ins,
+        Instr::Param { .. }
+            | Instr::Pos { .. }
+            | Instr::Copy { .. }
+            | Instr::Int { .. }
+            | Instr::Float { .. }
+            | Instr::Bool { .. }
+            | Instr::Null { .. }
+            | Instr::Bytes { .. }
+            | Instr::String { .. }
+            | Instr::BinOp { .. }
+            | Instr::UnOp { .. }
+            | Instr::Fma { .. }
+            | Instr::VecLoad { .. }
+            | Instr::VecStore { .. }
+            | Instr::VecSplat { .. }
+            | Instr::VecBinOp { .. }
+            | Instr::VecReduce { .. }
+            | Instr::VecOp { .. }
+            | Instr::VecExtract { .. }
+            | Instr::VecInsert { .. }
+            | Instr::FieldGet { .. }
+            | Instr::GetGlobal { .. }
+            | Instr::MemGet { .. }
+            | Instr::MemSet { .. }
+            | Instr::ArraySize { .. }
+            | Instr::TypeConst { .. }
+            | Instr::GetType { .. }
+            | Instr::GetTID { .. }
+            | Instr::EnumIndex { .. }
+            | Instr::EnumField { .. }
+            | Instr::CellGet { .. }
+            | Instr::CellSet { .. }
+            | Instr::CellIncr { .. }
+            | Instr::CellDecr { .. }
+            | Instr::CellRef { .. }
+            | Instr::NullCheck { .. }
+            | Instr::EndTrap { .. }
+            | Instr::Assert
+            | Instr::Prefetch { .. }
+    )
 }
 
 fn emit_function<P: Program>(
@@ -1043,7 +1097,10 @@ fn emit_function_in<P: Program>(
         return unsupported(format!("a value of type {t:?}"));
     }
     let cfg = CfgInfo::build(f);
-    let assignment = locals::assign(f, &cfg, &tys);
+    let live = Liveness::analyze(f, &cfg);
+    // With a stack to mirror into, references get locals of their own, so that
+    // the ones the collector must find can be told by local.
+    let assignment = locals::assign(f, &cfg, &live, &tys, rt.frames);
     let n = f.blocks.len();
     let rpo = cfg.rpo();
     let mut rpo_num = vec![usize::MAX; n];
@@ -1095,6 +1152,14 @@ fn emit_function_in<P: Program>(
             }
         }
         kids[i].sort_by_key(|k| rpo_num[*k]);
+    }
+    let rooted = if rt.frames {
+        locals::rooted(f, &live, &tys, &assignment, opts.polls, &loop_header, may_collect)
+    } else {
+        vec![false; assignment.types.len()]
+    };
+    if rooted.iter().any(|r| *r) && !with_frame {
+        return unsupported(NEEDS_FRAME);
     }
     let nparams = inp.sig.params.len() as u32;
     let mut trap_order: Vec<(usize, air::v2::ir::CellId, Option<usize>)> = Vec::new();
@@ -1184,6 +1249,7 @@ fn emit_function_in<P: Program>(
         has_vectors,
         vector_scratch,
         cell_offsets: Vec::new(),
+        roots: vec![None; rooted.len()],
         traps: trap_infos,
         barrier_free: air::v2::analysis::barrier_free_stores(f),
         at: (0, 0),
@@ -1215,6 +1281,11 @@ fn emit_function_in<P: Program>(
         fx.emit(&I::LocalTee(fp_local));
         fx.out.stack_pointer_set();
         fx.open_cells()?;
+        for (k, r) in rooted.iter().enumerate() {
+            if *r {
+                fx.roots[k] = Some(fx.frame_alloc(4, 4)?);
+            }
+        }
     }
     if opts.shadow {
         let findex = inp.findex as i32;
@@ -1290,6 +1361,24 @@ impl<P: Program> Fx<'_, P> {
         }
     }
 
+    /// The header phi whose low bits pace the safepoint of the loop at
+    /// `header`: a loop with an induction variable is emitted as an outer loop
+    /// that polls and an inner loop that runs a strip of iterations without
+    /// one. The poll is then outside the hot loop, so the fiber transform's
+    /// rewind entry lands on the outer loop and the inner one is entered the
+    /// ordinary way.
+    fn strip_phi(&self, header: usize) -> Option<ValueId> {
+        if !self.opts.polls {
+            return None;
+        }
+        self.f
+            .strip_tests
+            .iter()
+            .find(|t| t.header.idx() == header)
+            .map(|t| t.phi)
+            .filter(|v| matches!(self.ty(*v), Ty::I32 | Ty::U8 | Ty::U16 | Ty::I64))
+    }
+
     /// A safepoint at a loop header.
     fn poll(&mut self) {
         let poll = self.rt.poll;
@@ -1327,8 +1416,26 @@ impl<P: Program> Fx<'_, P> {
         self.emit(&I::LocalGet(self.slot[v.0 as usize]));
     }
 
+    /// Define `v` from the top of the stack. A reference the collector must
+    /// find is also written to its place in the frame: the collector scans
+    /// the shadow stack, and a wasm local is not on it.
     fn set(&mut self, v: ValueId) {
-        self.emit(&I::LocalSet(self.slot[v.0 as usize]));
+        let local = self.slot[v.0 as usize];
+        self.emit(&I::LocalSet(local));
+        let root = local
+            .checked_sub(self.nparams)
+            .and_then(|k| self.roots.get(k as usize))
+            .copied()
+            .flatten();
+        if let Some(at) = root {
+            self.emit(&I::LocalGet(self.fp_local));
+            self.emit(&I::LocalGet(local));
+            self.emit(&I::I32Store(we::MemArg {
+                offset: u64::from(at),
+                align: 2,
+                memory_index: 0,
+            }));
+        }
     }
 
     fn ty(&self, v: ValueId) -> Ty {
@@ -1351,7 +1458,16 @@ impl<P: Program> Fx<'_, P> {
             if self.opts.polls {
                 self.poll();
             }
+            let strip = self.strip_phi(x).is_some();
+            if strip {
+                self.emit(&I::Loop(BlockType::Empty));
+                self.ctx.push(Frame::Inner(x));
+            }
             self.node_within(x, &ys)?;
+            if strip {
+                self.ctx.pop();
+                self.emit(&I::End);
+            }
             self.ctx.pop();
             self.emit(&I::End);
         } else {
@@ -1413,6 +1529,23 @@ impl<P: Program> Fx<'_, P> {
     fn branch(&mut self, from: usize, to: usize) -> Res<()> {
         self.phi_copies(from, to)?;
         if self.is_back_edge(from, to) {
+            // Back to the inner loop unless the strip is spent, in which case
+            // the outer loop polls first.
+            if let Some(phi) = self.strip_phi(to) {
+                let mask = i64::from(air::v2::passes::stripmine::STRIP - 1);
+                self.get(phi);
+                if self.ty(phi) == Ty::I64 {
+                    self.emit(&I::I64Const(mask));
+                    self.emit(&I::I64And);
+                    self.emit(&I::I64Const(0));
+                    self.emit(&I::I64Ne);
+                } else {
+                    self.emit(&I::I32Const(mask as i32));
+                    self.emit(&I::I32And);
+                }
+                let inner = self.label(Frame::Inner(to));
+                self.emit(&I::BrIf(inner));
+            }
             let l = self.label(Frame::Loop(to));
             self.emit(&I::Br(l));
         } else if self.merge[to] {

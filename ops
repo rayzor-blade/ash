@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1794520261,"nonce":"3Osns0lgYFvPPm6O7KY8+AsBwSo=","added":["debt","area:portability","area:aot","area:cli","priority:medium"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1794520261,"nonce":"o8ALDauM1hNIFnuR6XWzQv27GMM=","message":"The iOS counterpart is 5415ec5; the entry point and release-workflow work are shared.","files":null}]}

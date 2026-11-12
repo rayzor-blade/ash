@@ -120,6 +120,28 @@ fn wasm32_object_is_a_valid_module_with_the_expected_boundary() {
         "the object makes no indirect calls, which bench_fib does"
     );
 
+    // A hosting runtime owns the poll epoch its scheduler and collector tick,
+    // so the object asks the runtime for its address at start-up. Naming the
+    // symbol `ash_fiber_poll_epoch` instead reads ash's own epoch, which a host
+    // never moves: its collections then wait for the heap to run out.
+    let names = |needle: &[u8]| {
+        bytes
+            .windows(needle.len() + 1)
+            .filter(|w| w.starts_with(needle) && w[needle.len()] != b'_')
+            .count()
+    };
+    assert!(
+        bytes
+            .windows(b"hlp_fiber_poll_epoch_address".len())
+            .any(|w| w == b"hlp_fiber_poll_epoch_address"),
+        "the object does not ask the runtime for the poll epoch's address"
+    );
+    assert_eq!(
+        names(b"ash_fiber_poll_epoch"),
+        0,
+        "the object names the runtime's own poll epoch instead of the runtime's answer"
+    );
+
     let Some(lld) = rust_lld() else {
         eprintln!("no rust-lld found: link and module checks skipped");
         return;

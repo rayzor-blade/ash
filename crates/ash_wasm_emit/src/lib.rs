@@ -590,8 +590,12 @@ const NEEDS_FRAME: &str = "\u{0}needs a frame in memory";
 const NEEDS_TMP: &str = "\u{0}needs a scratch local";
 const NEEDS_SCRATCH: &str = "\u{0}needs scratch words";
 const NEEDS_VECTORS: &str = "a vector operation in a body that was not scanned for them";
-/// The runtime's `AtomicU64` that ticks when a safepoint is wanted.
-pub const RT_EPOCH: &str = "ash_fiber_poll_epoch";
+/// The data word that holds the address of the runtime's `AtomicU64` that
+/// ticks when a safepoint is wanted. The object defines it and start-up fills
+/// it from the runtime's `hlp_fiber_poll_epoch_address`: a hosting runtime
+/// owns the epoch its scheduler and collector tick, and the symbol
+/// `ash_fiber_poll_epoch` is only the epoch of ash's own.
+pub const RT_EPOCH_SLOT: &str = "ash_fiber_poll_epoch_ptr";
 
 pub fn emit_object<P: Program>(program: &P, inputs: &[Input], opts: Options) -> ObjectEmitted {
     let mut obj = object::ObjectBuilder::new();
@@ -732,7 +736,7 @@ pub fn emit_into<P: Program>(
         } else {
             none
         },
-        epoch: opts.polls.then(|| obj.import_data(RT_EPOCH)),
+        epoch: opts.polls.then(|| obj.import_data(RT_EPOCH_SLOT)),
         funcs: {
             rt_names.sort_unstable();
             rt_names.dedup();
@@ -937,9 +941,10 @@ struct Runtime {
     push: Ref,
     pop: Ref,
     poll: Ref,
-    /// The runtime's poll epoch, when the body tests it inline: a loop header
-    /// loads it and calls `poll` only if it has moved since this body last
-    /// looked. Without it every header calls `poll`.
+    /// The slot holding the address of the runtime's poll epoch, when the body
+    /// tests it inline: a loop header loads the epoch and calls `poll` only if
+    /// it has moved since this body last looked. Without it every header calls
+    /// `poll`.
     epoch: Option<object::Sym>,
     /// Runtime functions by name. Empty in a standalone module, which has no
     /// runtime to ask.
@@ -1347,6 +1352,11 @@ fn emit_function_in<P: Program>(
         && let Some(epoch) = rt.epoch
     {
         fx.out.address_of(epoch, 0);
+        fx.emit(&I::I32Load(we::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
         fx.emit(&I::I64Load(we::MemArg {
             offset: 0,
             align: 3,
@@ -1437,6 +1447,11 @@ impl<P: Program> Fx<'_, P> {
         let handled = self.handled_local;
         let load = |fx: &mut Self| {
             fx.out.address_of(epoch, 0);
+            fx.emit(&I::I32Load(we::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
             fx.emit(&I::I64Load(we::MemArg {
                 offset: 0,
                 align: 3,

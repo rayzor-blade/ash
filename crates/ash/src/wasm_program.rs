@@ -176,6 +176,9 @@ struct Image<'a> {
     closures: Vec<crate::host_export::ResolvedClosure>,
     /// Program members the host calls by symbol, each with what guards it.
     exports: Vec<(crate::host_export::ResolvedExport, exports::Guard)>,
+    /// The word the poll tests read the epoch's address from, when any body
+    /// polls.
+    epoch_slot: Option<Sym>,
     /// Classes, by type index, whose instances carry bytes of the host's own,
     /// and classes whose instances the host is told about when they die.
     tails: Vec<(usize, u64)>,
@@ -626,6 +629,7 @@ pub fn build(
             links,
             closures,
             exports,
+            epoch_slot: None,
             tails: {
                 let mut t: Vec<(usize, u64)> = object_tails.into_iter().collect();
                 t.sort_unstable();
@@ -724,6 +728,11 @@ impl Image<'_> {
         ctx.ptr(Some(self.function_types), 0);
         self.obj.set_data(self.module_ctx, &ctx.bytes, &ctx.refs);
 
+        // The poll epoch's address, which start-up asks the runtime for: a
+        // hosting runtime owns the word its scheduler and collector tick.
+        if self.obj.is_undefined_data(ash_wasm_emit::RT_EPOCH_SLOT) {
+            self.epoch_slot = Some(self.obj.declare_data(ash_wasm_emit::RT_EPOCH_SLOT, 4, 2, Linkage::Local));
+        }
         let placed = self.static_constants();
         let trampolines = self.trampolines()?;
         let late = self.late_init(slots, &link_slots, &trampolines)?;
@@ -1012,6 +1021,11 @@ impl Image<'_> {
                 let s = self.cstr(lib);
                 f.addr(s, 0).c(lib.len() as i32).c(0).call(loaded);
             }
+        }
+
+        if let Some(slot) = self.epoch_slot {
+            let address = self.imp("hlp_fiber_poll_epoch_address", &[], &[I32]);
+            f.addr(slot, 0).call(address).i(I::I32Store(mem(0, 2)));
         }
 
         // The classes whose instances carry a host's tail, before anything

@@ -413,6 +413,16 @@ pub unsafe fn verify_against_runtime(
     out
 }
 
+/// Whether `New` allocates through the sized entry. `ASH_ALLOC_SIZED=0` sends
+/// every allocation back through `hlp_alloc_obj`, which is how the two are
+/// compared without a rebuild. Hot reload does too: a reload can add fields to
+/// a class, so its size is the runtime's to say.
+pub(crate) fn sized_alloc_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("ASH_ALLOC_SIZED").as_deref(), Ok("0")))
+        && !crate::air_pipeline::hot_reload()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

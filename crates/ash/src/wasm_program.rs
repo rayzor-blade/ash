@@ -431,7 +431,7 @@ pub fn build(
 ) -> Result<Vec<u8>> {
     crate::native_lib::choose_std_linkage(path);
     crate::native_lib::init_std_library()?;
-    let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
+    let abi = crate::target_abi::TargetAbi::for_triple_str(triple)?;
     let mut bc = crate::bytecode::BytecodeDecoder::decode_for_abi(path, &abi)?;
 
     // The host's additions come first: they append functions and types, which
@@ -465,7 +465,7 @@ pub fn build(
         globals: Some("ash_globals".to_string()),
         functions: Some("ash_functions".to_string()),
         types: (0..bc.types.len()).map(|i| (i, format!("ash_type_{i}"))).collect(),
-        sized_alloc: crate::llvm::function::sized_alloc_enabled(),
+        sized_alloc: crate::layout::sized_alloc_enabled(),
         object_tails: object_tails.clone(),
         object_drops: object_drops.clone(),
         barriers,

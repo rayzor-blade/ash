@@ -130,9 +130,13 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     // Decided before anything is lowered: a function's AIR is built once,
     // through the shared cache, and on a target whose frames record their own
     // positions every body needs the markers from its first lowering.
-    crate::air_pipeline::set_shadow_frames(
-        crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
-    );
+    // A wasm triple's ABI comes from its name: nothing of LLVM's is made for it.
+    let abi = if crate::llvm::aot_link::is_wasm_triple(&triple) {
+        crate::target_abi::TargetAbi::for_triple_str(&triple)?
+    } else {
+        crate::target_abi::TargetAbi::for_triple(&triple)?
+    };
+    crate::air_pipeline::set_shadow_frames(abi.shadow_call_stack);
     // A wasm program is built by the direct AIR-to-wasm backend: no LLVM
     // context is ever made for it.
     if crate::llvm::aot_link::is_wasm_triple(&triple) {
@@ -494,7 +498,7 @@ fn emit_wasm(
     let (switch_polls, switch_shadow) =
         wasm_switches(&std::env::var("ASH_WASM_DIRECT").unwrap_or_default())?;
     let polls = switch_polls && !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"));
-    let shadow = switch_shadow && crate::target_abi::TargetAbi::for_triple(triple)?.shadow_call_stack;
+    let shadow = switch_shadow && crate::target_abi::TargetAbi::for_triple_str(triple)?.shadow_call_stack;
 
     if !quiet {
         eprintln!("[aot] optimization: air={:?}", crate::air_pipeline::default_level());
@@ -535,7 +539,7 @@ fn emit_wasm(
     // which brings its own copy of the runtime unless this program shares one.
     let host_libraries = crate::bytecode::BytecodeDecoder::decode_for_abi(
         file,
-        &crate::target_abi::TargetAbi::for_triple(triple)?,
+        &crate::target_abi::TargetAbi::for_triple_str(triple)?,
     )?
     .natives
     .iter()

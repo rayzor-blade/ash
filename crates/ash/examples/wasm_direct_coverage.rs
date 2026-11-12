@@ -75,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             ash_wasm_emit::Options {
                 polls: true,
                 shadow: true,
+                stub_skipped: false,
             },
         );
         let total = bc.functions.len();

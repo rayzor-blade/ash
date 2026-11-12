@@ -239,6 +239,50 @@ fn a_wasm_build_is_whole_program_direct_by_default() {
     }
 }
 
+/// A function the backend cannot emit fails the build and is named, as it does
+/// under LLVM; `--allow-refused` writes a module whose call to it raises.
+#[test]
+fn a_function_the_backend_cannot_emit_is_an_error_or_a_raising_stub() {
+    if runtime_object().is_none() {
+        eprintln!("skipped: no wasm runtime object for {TARGET}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hl = dir.path().join("program.hl");
+    std::fs::copy(tests_dir().join("asm_add.hl"), &hl).unwrap();
+    let wasm = dir.path().join("program.wasm");
+
+    let mut refused = Command::new(ash_cli_bin());
+    refused.env_remove("ASH_WASM_DIRECT");
+    refused
+        .args(["--target", TARGET, "--build"])
+        .arg(&wasm)
+        .arg(&hl);
+    let built = run_with_timeout(refused, Duration::from_secs(600));
+    let log = String::from_utf8_lossy(&built.output.stderr).into_owned();
+    assert!(!built.timed_out && !built.output.status.success(), "{log}");
+    assert!(log.contains("could not be lowered") && log.contains("findex="), "{log}");
+    assert!(!wasm.exists());
+
+    let mut allowed = Command::new(ash_cli_bin());
+    allowed.env_remove("ASH_WASM_DIRECT");
+    allowed
+        .args(["--target", TARGET, "--allow-refused", "--build"])
+        .arg(&wasm)
+        .arg(&hl);
+    let built = run_with_timeout(allowed, Duration::from_secs(600));
+    let log = String::from_utf8_lossy(&built.output.stderr).into_owned();
+    assert!(!built.timed_out && built.output.status.success(), "{log}");
+    assert!(log.contains("no LLVM"), "{log}");
+
+    let mut run = Command::new(ash_cli_bin());
+    run.arg("run").arg(&wasm);
+    let ran = run_with_timeout(run, Duration::from_secs(120));
+    let out = render_output(&ran.output);
+    assert!(!ran.timed_out && !ran.output.status.success(), "{out}");
+    assert!(out.contains("Refused at compile time"), "{out}");
+}
+
 /// The `simd` primitives and the vector values they promote to, against a
 /// scalar reference: wasm `v128` operations. Built from the committed
 /// bytecode, since the fixture needs the library's class path.

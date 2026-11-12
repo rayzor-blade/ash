@@ -266,6 +266,9 @@ pub struct Options {
     pub polls: bool,
     /// Open a shadow frame per function and store source positions into it.
     pub shadow: bool,
+    /// Define a function that cannot be emitted as a body that raises through
+    /// `hlp_error`, so its callers still link.
+    pub stub_skipped: bool,
 }
 
 /// Which optional runtime functions a body ended up calling.
@@ -637,6 +640,14 @@ pub fn emit_into<P: Program>(
         }
     }
 
+    let stub_message = |findex: usize| format!("{UTF16}Refused at compile time: {}", program.symbol(findex));
+    if opts.stub_skipped {
+        for (findex, _) in &skipped {
+            rt_names.push("hlp_error");
+            data_names.push(stub_message(*findex));
+        }
+    }
+
     // Pass two: symbols first, so a body can call a function defined after it.
     // Field accesses and the frame and poll words all go through memory.
     obj.import_memory(1);
@@ -654,6 +665,18 @@ pub fn emit_into<P: Program>(
             inp.findex,
             obj.declare_function(&program.symbol(inp.findex), p, r, object::Linkage::Hidden),
         );
+    }
+    if opts.stub_skipped {
+        for (findex, _) in &skipped {
+            let Some(sig) = program.signature(*findex) else {
+                continue;
+            };
+            let (p, r) = wasm_sig(&sig);
+            syms.insert(
+                *findex,
+                obj.declare_function(&program.symbol(*findex), p, r, object::Linkage::Hidden),
+            );
+        }
     }
     called.sort_unstable();
     called.dedup();
@@ -767,6 +790,21 @@ pub fn emit_into<P: Program>(
                 "f{} emitted in the first pass and not the second: {}",
                 inp.findex, e.0
             ),
+        }
+    }
+    if opts.stub_skipped && !skipped.is_empty() {
+        let error = runtime.funcs["hlp_error"].sym.expect("hlp_error was imported");
+        for (findex, _) in &skipped {
+            let Some(&sym) = syms.get(findex) else {
+                continue;
+            };
+            let mut body = object::Body::new(Vec::new());
+            body.address_of(runtime.data[&stub_message(*findex)], 0);
+            body.instruction(&I::I32Const(0));
+            body.call(error);
+            body.instruction(&I::Unreachable);
+            body.instruction(&I::End);
+            obj.set_body(sym, body);
         }
     }
     data_names.sort_unstable();

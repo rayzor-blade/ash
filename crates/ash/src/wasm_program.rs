@@ -374,13 +374,15 @@ pub enum Outcome {
     Declined(String),
 }
 
-/// Build `path` for wasm32 as one object, if every function of it can be
-/// emitted directly and nothing the program asks for is outside this path.
+/// Build `path` for wasm32 as one object, if nothing the program asks for is
+/// outside this path. A function that cannot be emitted fails the build, or,
+/// with `allow_refused`, becomes a body that raises when it is called.
 pub fn build(
     path: &std::path::Path,
     triple: &str,
     polls: bool,
     shadow: bool,
+    allow_refused: bool,
     quiet: bool,
 ) -> Result<Outcome> {
     crate::native_lib::choose_std_linkage(path);
@@ -433,13 +435,26 @@ pub fn build(
         &bc,
         &symbols,
         &data,
-        ash_wasm_emit::Options { polls, shadow },
+        ash_wasm_emit::Options {
+            polls,
+            shadow,
+            stub_skipped: true,
+        },
     );
-    if let Some((f, why)) = emitted.skipped.first() {
-        return Ok(Outcome::Declined(format!(
-            "{} functions stay with LLVM, the first f{f}: {why}",
+    if !emitted.skipped.is_empty() && !allow_refused {
+        let mut msg = format!(
+            "{} function(s) could not be lowered; refusing to write a binary \
+             that would abort when one is reached:",
             emitted.skipped.len()
-        )));
+        );
+        for (fx, why) in emitted.skipped.iter().take(10) {
+            msg.push_str(&format!("\n    findex={fx}: {}", why.lines().next().unwrap_or("")));
+        }
+        if emitted.skipped.len() > 10 {
+            msg.push_str(&format!("\n    ... and {} more", emitted.skipped.len() - 10));
+        }
+        msg.push_str("\n  --allow-refused emits anyway, if those paths are never taken.");
+        anyhow::bail!(msg);
     }
     if !quiet {
         eprintln!(

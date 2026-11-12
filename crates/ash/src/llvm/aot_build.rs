@@ -161,7 +161,7 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         let shadow = crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack
             && !mode.contains("noshadow");
         let began = std::time::Instant::now();
-        match crate::wasm_program::build(file, &triple, polls, shadow, quiet)? {
+        match crate::wasm_program::build(file, &triple, polls, shadow, allow_refused, quiet)? {
             crate::wasm_program::Outcome::Built(bytes) => {
                 crate::air_disk_cache::stage("direct_program", began.elapsed());
                 let object = out.with_extension("direct.o");
@@ -604,7 +604,11 @@ fn emit_direct_object(
         &jit.bytecode,
         &symbols,
         &data,
-        ash_wasm_emit::Options { polls, shadow },
+        ash_wasm_emit::Options {
+            polls,
+            shadow,
+            stub_skipped: false,
+        },
     );
     // Natives of host libraries are reached through slots the LLVM module
     // owns and fills at start-up.

@@ -68,11 +68,7 @@ impl<'ctx> JITModule<'ctx> {
         name: &str,
         linkage: Linkage,
     ) -> Result<()> {
-        if self.traps_are_wasm_handlers() {
-            self.export_boundary_wasm(e, body, name, linkage)
-        } else {
-            self.export_boundary(e, body, name, linkage)
-        }
+        self.export_boundary(e, body, name, linkage)
     }
 
     /// `symbol` for a member that cannot throw, whose casts cannot either:
@@ -192,84 +188,6 @@ impl<'ctx> JITModule<'ctx> {
         self.builder
             .build_return(Some(&i64_type.const_int(x.unit, false)))?;
 
-        if let Some(block) = saved_block {
-            self.builder.position_at_end(block);
-        }
-        if !wrapper.verify(true) {
-            return Err(anyhow!("export `{}`: invalid function", x.symbol));
-        }
-        Ok(())
-    }
-
-    /// `symbol` on wasm: the body called under a trap that is an exception
-    /// handler (see `wasm_traps`), so entering it costs no `setjmp` and the
-    /// function is optimized.
-    fn export_boundary_wasm(
-        &mut self,
-        e: &ResolvedExport,
-        body: FunctionValue<'ctx>,
-        name: &str,
-        linkage: Linkage,
-    ) -> Result<()> {
-        let x = &e.export;
-        let i64_type = self.context.i64_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        if self.module.get_function(name).is_some() {
-            return Err(anyhow!(
-                "export `{}`: `{name}` is already defined",
-                x.symbol
-            ));
-        }
-        let saved_block = self.builder.get_insert_block();
-        let wrapper = self
-            .module
-            .add_function(name, body.get_type(), Some(linkage));
-        self.stamp_host_cpu(wrapper);
-        let start = self.context.append_basic_block(wrapper, "start");
-        let thrown = self.context.append_basic_block(wrapper, "thrown");
-        self.builder.position_at_end(start);
-
-        const HANDLER: u32 = 0;
-        let slot = self.builder.build_alloca(ptr_type, "export_trap_slot")?;
-        self.builder.build_store(slot, ptr_type.const_null())?;
-        let mut traps = super::wasm_traps::WasmTraps::default();
-        traps.slots.insert(HANDLER, slot);
-        traps.landings.push((HANDLER, thrown));
-        traps.covered.push((start, HANDLER));
-        self.wasm_traps = Some(traps);
-
-        self.arm_wasm_trap(HANDLER)?;
-        let args: Vec<BasicMetadataValueEnum> =
-            wrapper.get_param_iter().map(|p| p.into()).collect();
-        let result = self
-            .builder
-            .build_call(body, &args, "result")?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| anyhow!("export body returned nothing"))?;
-        let remove = self.declare_native("hlp_remove_trap_jit", &[], None);
-        self.builder.build_call(remove, &[], "")?;
-        self.builder.build_return(Some(&result))?;
-
-        self.builder.position_at_end(thrown);
-        let get_exc = self.declare_native("hlp_get_exc_value", &[], Some(ptr_type.into()));
-        let exc = self
-            .builder
-            .build_call(get_exc, &[], "exception")?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| anyhow!("hlp_get_exc_value returned nothing"))?;
-        let clear = self.declare_native("hlp_clear_exc_value", &[], None);
-        self.builder.build_call(clear, &[], "")?;
-        let raise = self.aot_runtime_fn(
-            &x.raise,
-            self.context.void_type().fn_type(&[ptr_type.into()], false),
-        );
-        self.builder.build_call(raise, &[exc.into()], "")?;
-        self.builder
-            .build_return(Some(&i64_type.const_int(x.unit, false)))?;
-
-        self.finish_wasm_traps(wrapper)?;
         if let Some(block) = saved_block {
             self.builder.position_at_end(block);
         }

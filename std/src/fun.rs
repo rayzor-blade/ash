@@ -114,7 +114,7 @@ pub unsafe extern "C" fn ash_static_call(
 /// The key a signature is registered under.
 ///
 /// FNV-1a over the return kind, the argument count and each argument kind.
-/// `crates/ash/src/llvm/aot_trampoline.rs` computes the same value while
+/// `signature_key` in `crates/ash/src/wasm_program.rs` computes the same value while
 /// emitting, and the two must not drift; a mismatch is a lookup that misses,
 /// which reports itself rather than calling the wrong shape.
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]

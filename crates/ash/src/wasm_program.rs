@@ -116,6 +116,28 @@ impl F {
 
 const I32: ValType = ValType::I32;
 
+/// The key both sides compute for a signature.
+///
+/// FNV-1a over the return kind, the argument count and each argument kind, in
+/// that order. `std/src/fun.rs` computes the same value from the `hl_type` it
+/// is handed, and the two must not drift: a mismatch is a call that finds no
+/// trampoline, which reports itself rather than misbehaving.
+fn signature_key(ret_kind: u32, arg_kinds: &[u32]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |value: u32| {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(ret_kind);
+    mix(arg_kinds.len() as u32);
+    for kind in arg_kinds {
+        mix(*kind);
+    }
+    hash
+}
+
 /// The wasm type a kind of value has, if it has one.
 fn wasm_of(t: ash_wasm_emit::Ty) -> Option<ValType> {
     use ash_wasm_emit::Ty;
@@ -811,7 +833,6 @@ impl Image<'_> {
     /// pointer, taking `(fun, args, out)`, so that the runtime can call a
     /// function whose shape it learns at run time.
     fn trampolines(&mut self) -> Result<Option<(Sym, Sym, usize)>> {
-        use crate::llvm::aot_trampoline::signature_key;
         let bc = self.bc;
         let mut wanted: BTreeMap<u64, (u32, Vec<u32>)> = BTreeMap::new();
         let kind_of = |t: &crate::types::TypeRef| bc.types[t.0].kind as u32;

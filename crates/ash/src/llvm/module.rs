@@ -76,13 +76,6 @@ pub struct JITModule<'ctx> {
     /// ABI of the code being produced. JITs use the host; AOT may select a
     /// cross target before decoding or lowering starts.
     pub(crate) target_abi: crate::target_abi::TargetAbi,
-    /// The call-trampoline table, once emitted: keys, functions, count. See
-    /// `aot_trampoline`; `emit_module_init` registers it with the runtime.
-    pub(crate) trampoline_registry: Option<(
-        inkwell::values::PointerValue<'ctx>,
-        inkwell::values::PointerValue<'ctx>,
-        usize,
-    )>,
     /// Alias metadata for emitted loads and stores; see [`super::tbaa`].
     pub(crate) tbaa: super::tbaa::TbaaTree<'ctx>,
     pub(crate) module: Module<'ctx>,
@@ -118,8 +111,6 @@ pub struct JITModule<'ctx> {
     pub(crate) object_tails: HashMap<usize, u64>,
     /// Classes whose instances must be allocated with a host drop hook.
     pub(crate) object_drops: std::collections::HashSet<usize>,
-    /// The trap regions of the function being lowered, on wasm.
-    pub(crate) wasm_traps: Option<super::function::wasm_traps::WasmTraps<'ctx>>,
     /// Whether the function being lowered is frameless: no trace can be
     /// taken inside it, so it keeps no shadow frame.
     pub(crate) frameless_body: bool,
@@ -523,7 +514,6 @@ impl<'ctx> JITModule<'ctx> {
         let mut module = JITModule {
             context,
             target_abi,
-            trampoline_registry: None,
             tbaa: super::tbaa::TbaaTree::new(context),
             module,
             builder: context.create_builder(),
@@ -539,7 +529,6 @@ impl<'ctx> JITModule<'ctx> {
             aot_closures,
             object_tails,
             object_drops,
-            wasm_traps: None,
             frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
@@ -983,7 +972,6 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut module = JITModule {
             context,
-            trampoline_registry: None,
             target_abi: host_abi,
             tbaa: super::tbaa::TbaaTree::new(context),
             module: llvm_module,
@@ -1000,7 +988,6 @@ impl<'ctx> JITModule<'ctx> {
             aot_closures: Vec::new(),
             object_tails: HashMap::new(),
             object_drops: std::collections::HashSet::new(),
-            wasm_traps: None,
             frameless_body: false,
             poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),

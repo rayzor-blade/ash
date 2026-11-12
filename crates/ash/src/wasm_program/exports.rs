@@ -152,8 +152,8 @@ impl Image<'_> {
     }
 
     /// `name`, the body inside a trap, so a throw reaches `raise` rather than
-    /// the caller. The trap is an exception handler (see `wasm_traps`), as
-    /// the program's own entry point's is.
+    /// the caller. The trap is an exception handler, as the program's own
+    /// entry point's is.
     fn export_trapped(&mut self, e: &ResolvedExport, body: Sym, name: &str, linkage: Linkage) -> Sym {
         let x = &e.export;
         let n = e.params.len() as u32;

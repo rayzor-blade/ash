@@ -63,7 +63,6 @@ mod memory;
 mod natives;
 mod objects;
 mod simd;
-pub(crate) mod wasm_traps;
 
 /// Compile unresolved natives to call-time trap stubs instead of failing the
 /// whole function compile — matching HashLink's disabled_primitive semantics
@@ -4181,10 +4180,6 @@ impl<'ctx> JITModule<'ctx> {
             inkwell::attributes::Attribute::get_named_enum_kind_id("optnone"),
             0,
         );
-        // A wasm trap is an exception handler, whose edges the optimizer sees.
-        if self.traps_are_wasm_handlers() {
-            return 0;
-        }
         let mut n = 0;
         for (findex, fv) in cache {
             let has_trap = match self.findexes.get(findex) {

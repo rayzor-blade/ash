@@ -480,28 +480,6 @@ impl<'ctx> JITModule<'ctx> {
             .flatten()
             .ok_or_else(|| anyhow!("AIR entry block b{} is not selected", entry_target.0))?;
         self.builder.position_at_end(entry);
-        self.wasm_traps = None;
-        if self.traps_are_wasm_handlers() {
-            let mut traps = super::wasm_traps::WasmTraps::default();
-            let ptr_type = self.context.ptr_type(AddressSpace::default());
-            for (bi, b) in air.blocks.iter().enumerate() {
-                if !included.get(bi).copied().unwrap_or(false) {
-                    continue;
-                }
-                if let AirTerminator::Trap { handler, .. } = &b.term
-                    && !traps.slots.contains_key(&handler.0)
-                {
-                    let slot = self
-                        .builder
-                        .build_alloca(ptr_type, &format!("air_trap_slot_b{}", handler.0))?;
-                    self.builder.build_store(slot, ptr_type.const_null())?;
-                    traps.slots.insert(handler.0, slot);
-                }
-            }
-            if !traps.slots.is_empty() {
-                self.wasm_traps = Some(traps);
-            }
-        }
         self.builder.build_unconditional_branch(first)?;
 
         let mut poll_blocks: Vec<Vec<BasicBlock<'ctx>>> = vec![Vec::new(); air.blocks.len()];
@@ -623,10 +601,6 @@ impl<'ctx> JITModule<'ctx> {
         for (bi, block) in air.blocks.iter().enumerate() {
             if !included.get(bi).copied().unwrap_or(false) {
                 continue;
-            }
-            let lowered_before = function.get_last_basic_block();
-            if let Some(traps) = self.wasm_traps.as_mut() {
-                traps.current = block.handler.map(|h| h.0);
             }
             for (ii, instr) in block.instrs.iter().enumerate() {
                 self.skip_barrier.set(barrier_free.contains(&(bi, ii)));
@@ -1178,23 +1152,8 @@ impl<'ctx> JITModule<'ctx> {
                 reg_types,
                 cell_base,
             )?;
-            if let Some(handler) = block.handler
-                && let Some(traps) = self.wasm_traps.as_mut()
-            {
-                let h = handler.0;
-                traps.covered.extend(blocks[bi].iter().map(|&b| (b, h)));
-                traps
-                    .covered
-                    .extend(poll_blocks[bi].iter().map(|&b| (b, h)));
-                traps.covered.extend(
-                    blocks_after(function, lowered_before)
-                        .into_iter()
-                        .map(|b| (b, h)),
-                );
-            }
         }
         self.skip_barrier.set(false);
-        self.finish_wasm_traps(function)?;
 
         // Leave the caller in a valid insertion block. It is unreachable;
         // every verified AIR block already has a terminator.
@@ -1917,45 +1876,29 @@ impl<'ctx> JITModule<'ctx> {
                     .context
                     .append_basic_block(function, "air_trap_handler");
 
-                if self.wasm_traps.is_some() {
-                    self.arm_wasm_trap(handler.0)?;
-                    self.builder.build_unconditional_branch(normal_edge)?;
-                } else {
-                    let setup =
-                        self.declare_native("hlp_setup_trap_jit", &[], Some(ptr_type.into()));
-                    let buf = self
-                        .builder
-                        .build_call(setup, &[], "air_trap_buf")?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| anyhow!("hlp_setup_trap_jit returned void"))?
-                        .into_pointer_value();
-                    let jumped = self.build_setjmp_call(buf, "air_setjmp")?;
-                    let is_exception = self.builder.build_int_compare(
-                        IntPredicate::NE,
-                        jumped,
-                        i32_type.const_zero(),
-                        "air_trap_exception",
-                    )?;
-                    self.builder.build_conditional_branch(
-                        is_exception,
-                        handler_entry,
-                        normal_edge,
-                    )?;
-                }
+                let setup = self.declare_native("hlp_setup_trap_jit", &[], Some(ptr_type.into()));
+                let buf = self
+                    .builder
+                    .build_call(setup, &[], "air_trap_buf")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_setup_trap_jit returned void"))?
+                    .into_pointer_value();
+                let jumped = self.build_setjmp_call(buf, "air_setjmp")?;
+                let is_exception = self.builder.build_int_compare(
+                    IntPredicate::NE,
+                    jumped,
+                    i32_type.const_zero(),
+                    "air_trap_exception",
+                )?;
+                self.builder
+                    .build_conditional_branch(is_exception, handler_entry, normal_edge)?;
 
                 self.builder.position_at_end(normal_edge);
                 self.emit_air_phi_edge(air, bid, *normal, registers, reg_types)?;
                 self.builder.build_unconditional_branch(block(*normal)?)?;
 
                 self.builder.position_at_end(handler_entry);
-                if self.wasm_traps.is_some() {
-                    // Reached from the catch block; the throw disarmed the trap.
-                    self.disarm_wasm_trap(handler.0)?;
-                    if let Some(traps) = self.wasm_traps.as_mut() {
-                        traps.landings.push((handler.0, handler_entry));
-                    }
-                }
                 let get_exc = self.declare_native("hlp_get_exc_value", &[], Some(ptr_type.into()));
                 let exc = self
                     .builder

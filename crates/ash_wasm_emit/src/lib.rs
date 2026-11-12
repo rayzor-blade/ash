@@ -149,6 +149,13 @@ pub trait Program {
     fn method(&self, obj_ty: TypeRef, slot: usize) -> Option<Sig>;
     /// The function the class `obj_ty` itself names at method slot `slot`.
     fn method_function(&self, obj_ty: TypeRef, slot: usize) -> Option<usize>;
+    /// The functions a call of method `slot` on a receiver of `obj_ty`, made
+    /// by function `caller`, is expected to reach, most likely first: a
+    /// profile's. The call is guarded by comparing the slot it loads, so an
+    /// expectation that is wrong costs a compare and never correctness.
+    fn method_targets(&self, _caller: usize, _obj_ty: TypeRef, _slot: usize) -> Vec<usize> {
+        Vec::new()
+    }
     /// Whether a value of this type is its own Dynamic: it starts with the
     /// type descriptor that says what it is.
     fn self_describing(&self, t: TypeRef) -> bool;
@@ -958,6 +965,8 @@ enum Frame {
 
 struct Fx<'a, P: Program> {
     program: &'a P,
+    /// The function being emitted.
+    findex: usize,
     f: &'a Function,
     sig: &'a Sig,
     callees: &'a dyn Fn(usize) -> Option<Callee>,
@@ -1270,6 +1279,7 @@ fn emit_function_in<P: Program>(
     }
     let mut fx = Fx {
         program,
+        findex: inp.findex,
         f,
         sig: &inp.sig,
         callees,

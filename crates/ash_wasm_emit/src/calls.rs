@@ -75,17 +75,76 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a method slot whose function is not known");
         };
         self.check_arguments(&sig, args)?;
+        let targets = self.devirtualized(obj_ty, field, &sig);
+        if targets.is_empty() {
+            for a in args {
+                self.push_arg(*a);
+            }
+            self.method_slot(this, field);
+            let (p, r) = wasm_signature(&sig);
+            self.out.call_indirect(p, r);
+            return self.call_result(dst, sig.ret);
+        }
+
+        // The slot, compared with each function the call is expected to
+        // reach: a hit calls it directly, a miss goes through the slot.
+        self.need_scratch()?;
+        let slot = self.scratch_word(0);
+        self.method_slot(this, field);
+        self.emit(&I::LocalSet(slot));
+        let (p, r) = wasm_signature(&sig);
+        let result = match sig.ret.wasm() {
+            Some(t) => BlockType::Result(t),
+            None => BlockType::Empty,
+        };
+        for callee in &targets {
+            self.emit(&I::LocalGet(slot));
+            match callee.to.sym {
+                Some(sym) => self.out.function_pointer(sym),
+                // The first pass only learns what the body calls.
+                None => self.emit(&I::I32Const(0)),
+            }
+            self.emit(&I::I32Eq);
+            self.emit(&I::If(result));
+            for a in args {
+                self.push_arg(*a);
+            }
+            self.call(callee.to);
+            self.emit(&I::Else);
+        }
         for a in args {
             self.push_arg(*a);
         }
-        // object -> type -> method table -> slot
+        self.emit(&I::LocalGet(slot));
+        self.out.call_indirect(p, r);
+        for _ in &targets {
+            self.emit(&I::End);
+        }
+        self.call_result(dst, sig.ret)
+    }
+
+    /// The method table's entry for `slot` in the class of `this`, on the
+    /// stack: object -> type -> method table -> slot.
+    fn method_slot(&mut self, this: ValueId, slot: usize) {
         self.get(this);
         self.emit(&I::I32Load(mem(0, 2)));
         self.emit(&I::I32Load(mem(TYPE_VOBJ_PROTO, 2)));
-        self.emit(&I::I32Load(mem(4 * field as u64, 2)));
-        let (p, r) = wasm_signature(&sig);
-        self.out.call_indirect(p, r);
-        self.call_result(dst, sig.ret)
+        self.emit(&I::I32Load(mem(4 * slot as u64, 2)));
+    }
+
+    /// The functions a call of `slot` is expected to reach, resolved, with
+    /// the signature the slot's method has.
+    fn devirtualized(&mut self, obj_ty: TypeRef, slot: usize, sig: &Sig) -> Vec<Callee> {
+        let mut out = Vec::new();
+        for target in self.program.method_targets(self.findex, obj_ty, slot) {
+            let Some(callee) = (self.callees)(target) else { continue };
+            if callee.sig != *sig {
+                continue;
+            }
+            self.called.push(target);
+            out.push(callee);
+        }
+        out
     }
 
     /// A method of a structural type. The value it views carries the real

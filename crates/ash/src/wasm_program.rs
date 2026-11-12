@@ -460,11 +460,7 @@ pub fn build(
     let mut links: Vec<LinkNative> = Vec::new();
     {
         use ash_wasm_emit::Program;
-        let program = crate::wasm_direct::BytecodeProgram {
-            bc: &bc,
-            symbols: &symbols,
-            data: &data,
-        };
+        let program = crate::wasm_direct::BytecodeProgram::new(&bc, &symbols, &data);
         for n in &bc.natives {
             let findex = n.findex as usize;
             let Some(link) = crate::native_lib::host_link(&n.lib, &n.name) else { continue };
@@ -561,11 +557,7 @@ pub fn build(
     let mut value_natives: Vec<ValueNative> = Vec::new();
     {
         use ash_wasm_emit::Program;
-        let program = crate::wasm_direct::BytecodeProgram {
-            bc: &bc,
-            symbols: &symbols,
-            data: &data,
-        };
+        let program = crate::wasm_direct::BytecodeProgram::new(&bc, &symbols, &data);
         for &findex in &as_values {
             let Some(n) = bc.natives.iter().find(|n| n.findex as usize == findex) else { continue };
             if links.iter().any(|l| l.findex == findex) {

@@ -149,7 +149,6 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     if crate::llvm::aot_link::is_wasm_triple(&triple)
         && let Some(exe) = exe
         && direct_mode == WasmDirect::Only
-        && pgo.is_none()
     {
         let polls = !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"))
             && !mode.contains("nopolls");
@@ -172,6 +171,18 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         )? {
             crate::wasm_program::Outcome::Built(bytes) => {
                 crate::air_disk_cache::stage("direct_program", began.elapsed());
+                if pgo.is_some() && !quiet {
+                    let loaded = crate::callsite_profile::aot_profile_size();
+                    let hits = crate::callsite_profile::aot_profile_hits();
+                    if loaded > 0 && hits == 0 {
+                        eprintln!(
+                            "[ash] pgo: WARNING none of the {loaded} profiled caller(s) matched \
+                             this bytecode -- the profile is stale, regenerate it"
+                        );
+                    } else if loaded > 0 {
+                        eprintln!("[ash] pgo: {hits} of {loaded} profiled caller(s) matched");
+                    }
+                }
                 let object = out.with_extension("direct.o");
                 std::fs::write(&object, &bytes)?;
                 let host_libraries = crate::bytecode::BytecodeDecoder::decode_for_abi(

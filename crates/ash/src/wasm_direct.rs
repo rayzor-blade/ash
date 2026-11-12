@@ -16,6 +16,9 @@ pub struct BytecodeProgram<'a> {
     pub symbols: &'a HashMap<usize, String>,
     /// The data the module that lowers the rest of the program defines.
     pub data: &'a ProgramData,
+    /// The target a loaded call-site profile names for each caller, by
+    /// findex; built when a method call first asks.
+    profile: std::sync::OnceLock<HashMap<usize, usize>>,
 }
 
 /// Names of the data a program's other object defines, for an object that
@@ -37,6 +40,42 @@ pub struct ProgramData {
     /// Whether the object defines a function named `Fun_<findex>` for each
     /// native the host links, so a body calls it like any other function.
     pub link_thunks: bool,
+}
+
+impl<'a> BytecodeProgram<'a> {
+    pub fn new(
+        bc: &'a DecodedBytecode,
+        symbols: &'a HashMap<usize, String>,
+        data: &'a ProgramData,
+    ) -> Self {
+        BytecodeProgram {
+            bc,
+            symbols,
+            data,
+            profile: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Each caller the loaded profile names a target for, with that target.
+    fn profile_targets(&self) -> &HashMap<usize, usize> {
+        self.profile.get_or_init(|| {
+            if crate::callsite_profile::aot_profile_size() == 0 {
+                return HashMap::new();
+            }
+            let names = crate::types::function_keys(&self.bc.types, &self.bc.functions);
+            let mut by_name: HashMap<&str, usize> = HashMap::new();
+            for (findex, name) in &names {
+                by_name.entry(name.as_str()).or_insert(*findex as usize);
+            }
+            names
+                .iter()
+                .filter_map(|(findex, name)| {
+                    let target = crate::callsite_profile::aot_target_for(name)?;
+                    Some((*findex as usize, *by_name.get(target.as_str())?))
+                })
+                .collect()
+        })
+    }
 }
 
 impl BytecodeProgram<'_> {
@@ -293,6 +332,10 @@ impl Program for BytecodeProgram<'_> {
         crate::devirt::proto_findex_for_slot(&self.bc.types, obj_ty.0 as usize, slot)
     }
 
+    fn method_targets(&self, caller: usize, _obj_ty: air::v2::ir::TypeRef, _slot: usize) -> Vec<usize> {
+        self.profile_targets().get(&caller).copied().into_iter().collect()
+    }
+
     fn native_slot(&self, findex: usize) -> Option<ash_wasm_emit::NativeSlot> {
         let n = self.slot_native(findex)?;
         let lib = n.lib.strip_prefix('?').unwrap_or(&n.lib).to_string();
@@ -427,7 +470,9 @@ pub fn emit_into(
     data: &ProgramData,
     opts: Options,
 ) -> ObjectEmitted {
-    let program = BytecodeProgram { bc, symbols, data };
+    let program = BytecodeProgram::new(bc, symbols, data);
+    // Counts the profile's matches whether or not a method call asks.
+    program.profile_targets();
     let module = crate::air_pipeline::AshModule::new(bc);
     let mut optimized = Vec::new();
     for f in &bc.functions {

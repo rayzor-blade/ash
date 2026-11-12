@@ -283,6 +283,71 @@ fn a_function_the_backend_cannot_emit_is_an_error_or_a_raising_stub() {
     assert!(out.contains("Refused at compile time"), "{out}");
 }
 
+/// A call-site profile names the function a caller's method calls reach. The
+/// direct backend calls it behind a test of the slot, so a receiver of another
+/// class still goes through the slot: the program prints what it does without
+/// the profile.
+#[test]
+fn a_profiled_method_call_is_guarded_and_matches_the_interpreter() {
+    if runtime_object().is_none() {
+        eprintln!("skipped: no wasm runtime object for {TARGET}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hl = dir.path().join("program.hl");
+    std::fs::copy(tests_dir().join("test_wasm_dispatch.hl"), &hl).unwrap();
+    // `Base.scale` calls `get`, which `Derived` overrides: the profile saw it
+    // reach the override, and `main` also calls it on a `Base`.
+    let profile = dir.path().join("dispatch.prof");
+    std::fs::write(&profile, "m Base.scale Derived.get\n").unwrap();
+
+    let mut interp = Command::new(ash_cli_bin());
+    interp.args(["--mode", "interp"]).arg(&hl);
+    let reference = run_with_timeout(interp, Duration::from_secs(60));
+    assert!(!reference.timed_out && reference.output.status.success());
+    let expected = lines(&reference.output.stdout);
+    assert!(expected.len() >= 5, "the reference printed {} lines", expected.len());
+
+    for fibers in [false, true] {
+        let build = |name: &str, pgo: bool| {
+            let wasm = dir.path().join(format!("{name}_{fibers}.wasm"));
+            let mut cmd = Command::new(ash_cli_bin());
+            cmd.env("ASH_WASM_DIRECT", "only");
+            if fibers {
+                cmd.env("ASH_WASM_FIBERS", "1");
+            }
+            cmd.args(["--target", TARGET, "--build"]).arg(&wasm);
+            if pgo {
+                cmd.arg(format!("--pgo={}", profile.display()));
+            }
+            cmd.arg(&hl);
+            let built = run_with_timeout(cmd, Duration::from_secs(600));
+            let log = String::from_utf8_lossy(&built.output.stderr).into_owned();
+            assert!(!built.timed_out && built.output.status.success(), "{log}");
+            assert!(log.contains("functions, no LLVM"), "{log}");
+            (wasm, log)
+        };
+        let (plain, _) = build("plain", false);
+        let (guarded, log) = build("guarded", true);
+        assert!(log.contains("pgo: 1 of 1 profiled caller(s) matched"), "{log}");
+        assert_ne!(
+            std::fs::read(&plain).unwrap(),
+            std::fs::read(&guarded).unwrap(),
+            "fibers={fibers}: the profile changed nothing"
+        );
+
+        let mut run = Command::new(ash_cli_bin());
+        run.arg("run").arg(&guarded);
+        let ran = run_with_timeout(run, Duration::from_secs(120));
+        assert!(
+            !ran.timed_out && ran.output.status.success(),
+            "{}",
+            render_output(&ran.output)
+        );
+        assert_eq!(lines(&ran.output.stdout), expected, "fibers={fibers}");
+    }
+}
+
 /// The `simd` primitives and the vector values they promote to, against a
 /// scalar reference: wasm `v128` operations. Built from the committed
 /// bytecode, since the fixture needs the library's class path.

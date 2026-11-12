@@ -143,12 +143,12 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
     // The direct wasm backend on its own, with no LLVM module at all, when it
-    // can take the whole program. `ASH_WASM_DIRECT` containing `only` asks for
-    // it; a program it cannot take goes the ordinary way.
+    // can take the whole program. It is the default for a wasm build; a
+    // program it cannot take goes the ordinary way.
+    let (direct_mode, mode) = wasm_direct_mode();
     if crate::llvm::aot_link::is_wasm_triple(&triple)
         && let Some(exe) = exe
-        && let Ok(mode) = std::env::var("ASH_WASM_DIRECT")
-        && mode.contains("only")
+        && direct_mode == WasmDirect::Only
         && pgo.is_none()
         && links.is_empty()
         && exports.is_empty()
@@ -256,9 +256,11 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         .unwrap_or(500);
     let mut slowest: Vec<(u128, usize)> = Vec::new();
     // The direct wasm backend takes the functions it can and leaves the rest to
-    // LLVM. Opt-in while it grows; see `wasm_direct`.
+    // LLVM. Reached by `ASH_WASM_DIRECT=1`, or by `only` when the whole
+    // program was declined; a program the default mode declined stays on LLVM.
     let direct = if crate::llvm::aot_link::is_wasm_triple(&triple)
-        && std::env::var_os("ASH_WASM_DIRECT").is_some()
+        && (direct_mode == WasmDirect::Mixed
+            || (direct_mode == WasmDirect::Only && std::env::var_os("ASH_WASM_DIRECT").is_some()))
     {
         Some(emit_direct_object(&mut jit, &triple, &findexes, out, quiet)?)
     } else {
@@ -521,6 +523,56 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
 struct DirectObject {
     path: PathBuf,
     functions: Vec<usize>,
+}
+
+/// How a wasm build uses the direct backend.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WasmDirect {
+    /// No direct backend: LLVM emits everything.
+    Llvm,
+    /// Direct bodies where the backend covers them, LLVM for the rest.
+    Mixed,
+    /// A whole program with no LLVM module.
+    Only,
+}
+
+/// `ASH_WASM_DIRECT`: unset, empty or containing `only` is the whole-program
+/// build; `0`, `off` or `llvm` is LLVM alone; any other value is the mixed
+/// build. `log`, `nopolls` and `noshadow` are measurement switches that may
+/// be combined with the others, and a build with either of the last two is not
+/// sound to run. Returns the raw value too.
+fn wasm_direct_mode() -> (WasmDirect, String) {
+    let raw = std::env::var("ASH_WASM_DIRECT").unwrap_or_default();
+    (WasmDirect::parse(&raw), raw)
+}
+
+impl WasmDirect {
+    fn parse(raw: &str) -> Self {
+        if raw.is_empty() || raw.contains("only") {
+            WasmDirect::Only
+        } else if matches!(raw, "0" | "off" | "llvm") {
+            WasmDirect::Llvm
+        } else {
+            WasmDirect::Mixed
+        }
+    }
+}
+
+#[cfg(test)]
+mod wasm_direct_tests {
+    use super::WasmDirect;
+
+    #[test]
+    fn a_wasm_build_is_whole_program_direct_unless_told_otherwise() {
+        assert!(WasmDirect::parse("") == WasmDirect::Only);
+        assert!(WasmDirect::parse("only") == WasmDirect::Only);
+        assert!(WasmDirect::parse("log,only") == WasmDirect::Only);
+        assert!(WasmDirect::parse("1") == WasmDirect::Mixed);
+        assert!(WasmDirect::parse("log") == WasmDirect::Mixed);
+        for off in ["0", "off", "llvm"] {
+            assert!(WasmDirect::parse(off) == WasmDirect::Llvm);
+        }
+    }
 }
 
 /// Emit the functions the direct wasm backend covers as an object beside `out`,

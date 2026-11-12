@@ -134,6 +134,7 @@ values or `emit_aot` calls.
 | `ASH_AIR_NO_WIDEN=1` | turn off loop widening, the one AIR pass that rewrites arithmetic |
 | `ASH_MIDDLE_END_LOG=1` | report how many functions were shielded from the optimiser |
 | `ASH_AOT_NO_STATIC_DEVIRT=1` | do not guess method-call targets from the classes the program instantiates; only a `--pgo` profile devirtualises. Safe; slower on monomorphic dispatch |
+| `ASH_WASM_DIRECT=<mode>` | wasm targets only. Unset or `only`: the whole program is emitted by the direct AIR-to-wasm backend, with no LLVM module, when the backend can take it (it cannot with `--pgo`, or with an embedder's host exports, closures and object hooks); a program it cannot take is built by LLVM. `1`: direct bodies where the backend covers them, LLVM for the rest. `0`, `off` or `llvm`: LLVM alone. Safe in every mode |
 
 Flags:
 

@@ -183,6 +183,62 @@ fn whole_programs_without_llvm_match_the_interpreter() {
     check_only("TestWasmFlow", "test_wasm_flow.hl");
 }
 
+/// A wasm build with `ASH_WASM_DIRECT` unset is the whole-program build; `llvm`
+/// asks for LLVM alone.
+#[test]
+fn a_wasm_build_is_whole_program_direct_by_default() {
+    if runtime_object().is_none() {
+        eprintln!("skipped: no wasm runtime object for {TARGET}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hl = dir.path().join("program.hl");
+    std::fs::copy(tests_dir().join("test_wasm_flow.hl"), &hl).unwrap();
+
+    let mut interp = Command::new(ash_cli_bin());
+    interp.args(["--mode", "interp"]).arg(&hl);
+    let reference = run_with_timeout(interp, Duration::from_secs(60));
+    assert!(!reference.timed_out && reference.output.status.success());
+    let expected = lines(&reference.output.stdout);
+
+    for (mode, whole) in [(None, true), (Some("llvm"), false)] {
+        let wasm = dir
+            .path()
+            .join(format!("program_{}.wasm", mode.unwrap_or("default")));
+        let mut build = Command::new(ash_cli_bin());
+        build.env_remove("ASH_WASM_DIRECT");
+        if let Some(mode) = mode {
+            build.env("ASH_WASM_DIRECT", mode);
+        }
+        build
+            .args(["--target", TARGET, "--build"])
+            .arg(&wasm)
+            .arg(&hl);
+        let built = run_with_timeout(build, Duration::from_secs(600));
+        assert!(
+            !built.timed_out && built.output.status.success(),
+            "{}",
+            render_output(&built.output)
+        );
+        let log = String::from_utf8_lossy(&built.output.stderr).into_owned();
+        assert_eq!(
+            log.contains("functions, no LLVM"),
+            whole,
+            "mode {mode:?}: {log}"
+        );
+
+        let mut run = Command::new(ash_cli_bin());
+        run.arg("run").arg(&wasm);
+        let ran = run_with_timeout(run, Duration::from_secs(120));
+        assert!(
+            !ran.timed_out && ran.output.status.success(),
+            "{}",
+            render_output(&ran.output)
+        );
+        assert_eq!(lines(&ran.output.stdout), expected, "mode {mode:?}");
+    }
+}
+
 /// The `simd` primitives and the vector values they promote to, against a
 /// scalar reference: wasm `v128` operations. Built from the committed
 /// bytecode, since the fixture needs the library's class path.

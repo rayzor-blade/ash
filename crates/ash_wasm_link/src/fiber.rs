@@ -333,6 +333,10 @@ struct Enclosing {
     /// function's reserved pool once a resume point inside makes that entry a
     /// real boundary.
     entry_need: BTreeMap<ValType, usize>,
+    /// Where in the pool `entry_need` starts, by type: past what every frame
+    /// around this one spills, which is still waiting for a rewind to push it
+    /// back when this frame is entered.
+    entry_base: SpillBase,
     /// Ladder blocks of this frame still to close.
     open: usize,
     /// Splits of this frame already passed.
@@ -346,10 +350,41 @@ impl Enclosing {
             entry: Boundary::default(),
             entry_at: FUNCTION_FRAME,
             entry_need: BTreeMap::new(),
+            entry_base: SpillBase::default(),
             open: 0,
             passed: 0,
         }
     }
+}
+
+/// How many pool locals of each type are taken, indexed by [`spill_slot`].
+type SpillBase = [u32; 5];
+
+/// Which entry of a [`SpillBase`] a type counts in.
+fn spill_slot(ty: ValType) -> usize {
+    match ty {
+        ValType::I32 => 0,
+        ValType::I64 => 1,
+        ValType::F32 => 2,
+        ValType::F64 => 3,
+        _ => 4,
+    }
+}
+
+/// What the frames in `chain` have spilled between them.
+///
+/// A spilled operand is read back when a rewind re-enters the frame, which
+/// can be long after deeper frames spilled their own. Two that shared a local
+/// would hand the outer frame the inner one's value: an `if` entered the
+/// wrong way. So a boundary spills past everything its enclosing frames do.
+fn chain_base(chain: &[Enclosing]) -> SpillBase {
+    let mut base = SpillBase::default();
+    for f in chain {
+        for (ty, n) in &f.entry_need {
+            base[spill_slot(*ty)] += *n as u32;
+        }
+    }
+    base
 }
 
 /// A point execution can be resumed at, and what it costs to land there.
@@ -362,6 +397,8 @@ struct Boundary {
     /// Whether landing here means the resumed call is next, so the resume
     /// value must be cleared.
     is_call: bool,
+    /// The pool locals the spill uses start here, by type.
+    base: SpillBase,
 }
 
 /// Where one frame has to be able to jump to, and what reaches each place.
@@ -446,6 +483,7 @@ fn plan(
     } else {
         BTreeMap::new()
     };
+    let writes = if_writes(bytes, instrument)?;
     let mut plans: BTreeMap<u32, Plan> = BTreeMap::new();
     let mut refused: BTreeSet<u32> = BTreeSet::new();
     let mut unsavable = 0usize;
@@ -455,6 +493,8 @@ fn plan(
     // How many operators ending here are a `local.get` or a constant, each of
     // which pushes one value a rewind can recompute for free.
     let mut trivial = 0usize;
+    // The local each of those was read from, if it was a `local.get`.
+    let mut recent: Vec<Option<u32>> = Vec::new();
 
     rewrite_module(bytes, |index, c, op| {
         if index != current {
@@ -463,6 +503,7 @@ fn plan(
             chain.push(Enclosing::function());
             at = 0;
             trivial = 0;
+            recent.clear();
         }
         let watching = instrument(index) && !refused.contains(&index);
         if watching {
@@ -483,12 +524,14 @@ fn plan(
                     plans.remove(&index);
                     at += 1;
                     trivial = 0;
+                    recent.clear();
                     return c.emit(op);
                 }
                 let plan = plans.entry(index).or_default();
+                let base = chain_base(&chain);
                 for (ty, n) in need {
                     let have = plan.pool.entry(ty).or_default();
-                    *have = (*have).max(n);
+                    *have = (*have).max(base[spill_slot(ty)] as usize + n);
                 }
                 let ordinal = plan.calls as u32;
                 plan.calls += 1;
@@ -497,6 +540,7 @@ fn plan(
                     Boundary {
                         spill,
                         is_call: true,
+                        base,
                     },
                 );
                 // The innermost frame jumps to the call; each enclosing one
@@ -511,7 +555,7 @@ fn plan(
                     plan.boundaries.insert(f.entry_at, f.entry);
                     for (ty, n) in &f.entry_need {
                         let have = plan.pool.entry(*ty).or_default();
-                        *have = (*have).max(*n);
+                        *have = (*have).max(f.entry_base[spill_slot(*ty)] as usize + *n);
                     }
                     target = f.entry_at;
                 }
@@ -528,6 +572,7 @@ fn plan(
                     entry: Boundary::default(),
                     entry_at: at,
                     entry_need: BTreeMap::new(),
+                    entry_base: SpillBase::default(),
                     open: 0,
                     passed: 0,
                 });
@@ -536,16 +581,32 @@ fn plan(
                 // An `if` pops its condition, so re-entering it means having
                 // that value on the stack again -- the same problem as a
                 // call's arguments, and the same answer.
-                let (entry_at, spill) = boundary(at, c.stack_height(), trivial);
+                let height = c.stack_height();
+                let (mut entry_at, mut spill) = boundary(at, height, trivial);
+                // A condition that is a `local.get` is read again on a rewind,
+                // so the local has to hold the same thing then: if an arm
+                // writes it, the condition is spilled like any computed one.
+                if spill == 0 && height > 0 {
+                    let clobbered = writes.get(&index).and_then(|w| w.get(&at));
+                    let read = recent.iter().rev().take(height as usize).flatten();
+                    if let Some(w) = clobbered
+                        && read.into_iter().any(|l| w.contains(l))
+                    {
+                        (entry_at, spill) = (at, height);
+                    }
+                }
                 let entry_need = spill_types(c, spill)?;
+                let entry_base = chain_base(&chain);
                 chain.push(Enclosing {
                     key: at,
                     entry: Boundary {
                         spill,
                         is_call: false,
+                        base: entry_base,
                     },
                     entry_at,
                     entry_need,
+                    entry_base,
                     open: 0,
                     passed: 0,
                 });
@@ -563,12 +624,66 @@ fn plan(
             _ => {}
         }
         trivial = if is_trivial(op) { trivial + 1 } else { 0 };
+        if is_trivial(op) {
+            recent.push(match op {
+                Operator::LocalGet { local_index } => Some(*local_index),
+                _ => None,
+            });
+        } else {
+            recent.clear();
+        }
         at += 1;
         c.emit(op)
     })?;
 
     plans.retain(|i, _| !refused.contains(i));
     Ok((plans, refused.len(), unsavable))
+}
+
+/// For every `if` of every instrumented function, the locals written between
+/// its opening and its `end`, keyed by the operator index of the `if`.
+///
+/// A rewind recomputes a condition that is a `local.get` instead of restoring
+/// it, which is only right if nothing in the arms overwrote the local by the
+/// time a fiber stopped inside one.
+fn if_writes(
+    bytes: &[u8],
+    instrument: &dyn Fn(u32) -> bool,
+) -> Result<BTreeMap<u32, BTreeMap<usize, BTreeSet<u32>>>> {
+    let mut all: BTreeMap<u32, BTreeMap<usize, BTreeSet<u32>>> = BTreeMap::new();
+    // The open frames, an `if` carrying its writes so far and its position.
+    let mut open: Vec<Option<(usize, BTreeSet<u32>)>> = Vec::new();
+    let mut at = 0usize;
+    let mut current = u32::MAX;
+    rewrite_module(bytes, |index, c, op| {
+        if index != current {
+            current = index;
+            at = 0;
+            open.clear();
+        }
+        if instrument(index) {
+            match op {
+                Operator::If { .. } => open.push(Some((at, BTreeSet::new()))),
+                Operator::Block { .. } | Operator::Loop { .. } | Operator::TryTable { .. } => {
+                    open.push(None)
+                }
+                Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
+                    for (_, writes) in open.iter_mut().flatten() {
+                        writes.insert(*local_index);
+                    }
+                }
+                Operator::End => {
+                    if let Some(Some((opened, writes))) = open.pop() {
+                        all.entry(index).or_default().insert(opened, writes);
+                    }
+                }
+                _ => {}
+            }
+        }
+        at += 1;
+        c.emit(op)
+    })?;
+    Ok(all)
 }
 
 /// Where every function's reference-typed locals are written and read.
@@ -819,7 +934,7 @@ pub fn add_rewind_dispatch(
             let key = chain.last().map(|f| f.key).unwrap_or(FUNCTION_FRAME);
             let has_block = at != first_operator_of(key);
             let slots = if has_block && b.spill > 0 {
-                spill_stack(c, &pool, b.spill).map_err(|e| {
+                spill_stack(c, &pool, b.spill, b.base).map_err(|e| {
                     e.context(format!(
                         "function {index} (module index), operator {at}, spilling {} operand(s)",
                         b.spill
@@ -889,6 +1004,7 @@ pub fn add_rewind_dispatch(
                     entry: Boundary::default(),
                     entry_at: at,
                     entry_need: BTreeMap::new(),
+                    entry_base: SpillBase::default(),
                     open: 0,
                     passed: 0,
                 });
@@ -900,6 +1016,7 @@ pub fn add_rewind_dispatch(
                     entry: Boundary::default(),
                     entry_at: at,
                     entry_need: BTreeMap::new(),
+                    entry_base: SpillBase::default(),
                     open: 0,
                     passed: 0,
                 });
@@ -1006,7 +1123,12 @@ fn open_ladder(
 
 /// Move the top `count` operands into locals, leaving the stack that much
 /// shorter, and return the locals holding them, top first.
-fn spill_stack(c: &mut Cursor, pool: &BTreeMap<ValType, Vec<u32>>, count: u32) -> Result<Vec<u32>> {
+fn spill_stack(
+    c: &mut Cursor,
+    pool: &BTreeMap<ValType, Vec<u32>>,
+    count: u32,
+    base: SpillBase,
+) -> Result<Vec<u32>> {
     let mut used: BTreeMap<ValType, usize> = BTreeMap::new();
     let mut slots = Vec::with_capacity(count as usize);
     for depth in 0..count as usize {
@@ -1016,7 +1138,7 @@ fn spill_stack(c: &mut Cursor, pool: &BTreeMap<ValType, Vec<u32>>, count: u32) -
             .ok_or_else(|| anyhow!("operand {depth} has no type"))?;
         let ty = encode_val_type(ty)?;
         let nth = used.entry(ty).or_default();
-        let at = *nth;
+        let at = base[spill_slot(ty)] as usize + *nth;
         *nth += 1;
         let have = pool.get(&ty).map(Vec::as_slice).unwrap_or_default();
         slots.push(*have.get(at).ok_or_else(|| {
@@ -2178,6 +2300,215 @@ mod tests {
             i32::from_le_bytes(memory.data(&store)[16..20].try_into().unwrap()),
             1024,
             "the side stack is empty again"
+        );
+    }
+
+    /// A rewind re-enters each `if` on the way to the call it resumes, and an
+    /// `if` whose condition was computed gets that condition back from a
+    /// local it was spilled to. Two ifs nested on the path to the call must
+    /// not spill to the same one: the inner condition would be taken for the
+    /// outer, and the rewind would enter the wrong arm.
+    #[test]
+    fn nested_ifs_with_computed_conditions_are_re_entered_by_their_own() {
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        types.ty().function([ValType::I32], []);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("t", "yield", wasm_encoder::EntityType::Function(0));
+        imports.import("t", "rec", wasm_encoder::EntityType::Function(1));
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0);
+        let mut mems = wasm_encoder::MemorySection::new();
+        mems.memory(wasm_encoder::MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        let mut exports = wasm_encoder::ExportSection::new();
+        exports.export("f", wasm_encoder::ExportKind::Func, 2);
+        exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
+
+        // The outer condition is false and the inner one true, so the two
+        // differ where the call is.
+        let mut f = wasm_encoder::Function::new([]);
+        let computed = |f: &mut wasm_encoder::Function, v: i32| {
+            f.instruction(&Instruction::I32Const(v));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32Ne);
+        };
+        let record = |f: &mut wasm_encoder::Function, v: i32| {
+            f.instruction(&Instruction::I32Const(v));
+            f.instruction(&Instruction::Call(1));
+        };
+        computed(&mut f, 0);
+        f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        record(&mut f, 100);
+        f.instruction(&Instruction::Else);
+        computed(&mut f, 1);
+        f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        record(&mut f, 1);
+        f.instruction(&Instruction::Call(0));
+        record(&mut f, 2);
+        f.instruction(&Instruction::Else);
+        record(&mut f, 200);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        record(&mut f, 3);
+        f.instruction(&Instruction::End);
+
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&f);
+        let mut m = wasm_encoder::Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&mems);
+        m.section(&globals);
+        m.section(&exports);
+        m.section(&code);
+        let module = m.finish();
+
+        let (module, g) = add_exported_i32_globals(
+            &module,
+            &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
+        )
+        .expect("state globals");
+        let machine = Machine {
+            state: g[0],
+            data: g[1],
+            resume: g[2],
+        };
+        let (out, report) =
+            add_rewind_dispatch(&module, &|i| matches!(i, 0 | 2), Drive::Full(machine))
+                .expect("transform");
+        assert_eq!(report.refused, 0);
+        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&out)
+            .expect("the transformed module must validate");
+
+        let (mut store, f, state) = drive_fiber(&out);
+        f.call(&mut store, ()).expect("the first call");
+        assert_eq!(store.data(), &vec![1], "ran into the inner arm and unwound");
+        state
+            .set(&mut store, wasmtime::Val::I32(REWINDING))
+            .expect("start the rewind");
+        f.call(&mut store, ()).expect("the second call");
+        assert_eq!(
+            store.data(),
+            &vec![1, 2, 3],
+            "resumed in the arm the first call was in, past both ifs"
+        );
+    }
+
+    /// A condition that is a bare `local.get` is read again when a rewind
+    /// re-enters the `if`, and the local has to hold what it held. An arm that
+    /// overwrote it before the fiber stopped would send the rewind down the
+    /// other arm.
+    #[test]
+    fn an_if_on_a_local_the_arm_overwrites_is_re_entered_the_same_way() {
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        types.ty().function([ValType::I32], []);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("t", "yield", wasm_encoder::EntityType::Function(0));
+        imports.import("t", "rec", wasm_encoder::EntityType::Function(1));
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0);
+        let mut mems = wasm_encoder::MemorySection::new();
+        mems.memory(wasm_encoder::MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        let mut exports = wasm_encoder::ExportSection::new();
+        exports.export("f", wasm_encoder::ExportKind::Func, 2);
+        exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
+
+        // local 0 is 1 when the `if` is evaluated and 0 by the time the arm
+        // calls `yield`.
+        let mut f = wasm_encoder::Function::new([(1, ValType::I32)]);
+        let record = |f: &mut wasm_encoder::Function, v: i32| {
+            f.instruction(&Instruction::I32Const(v));
+            f.instruction(&Instruction::Call(1));
+        };
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(0));
+        record(&mut f, 1);
+        f.instruction(&Instruction::Call(0));
+        record(&mut f, 2);
+        f.instruction(&Instruction::Else);
+        record(&mut f, 100);
+        f.instruction(&Instruction::End);
+        record(&mut f, 3);
+        f.instruction(&Instruction::End);
+
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&f);
+        let mut m = wasm_encoder::Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&mems);
+        m.section(&globals);
+        m.section(&exports);
+        m.section(&code);
+        let module = m.finish();
+
+        let (module, g) = add_exported_i32_globals(
+            &module,
+            &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
+        )
+        .expect("state globals");
+        let machine = Machine {
+            state: g[0],
+            data: g[1],
+            resume: g[2],
+        };
+        let (out, report) =
+            add_rewind_dispatch(&module, &|i| matches!(i, 0 | 2), Drive::Full(machine))
+                .expect("transform");
+        assert_eq!(report.refused, 0);
+        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&out)
+            .expect("the transformed module must validate");
+
+        let (mut store, f, state) = drive_fiber(&out);
+        f.call(&mut store, ()).expect("the first call");
+        assert_eq!(store.data(), &vec![1], "ran into the arm and unwound");
+        state
+            .set(&mut store, wasmtime::Val::I32(REWINDING))
+            .expect("start the rewind");
+        f.call(&mut store, ()).expect("the second call");
+        assert_eq!(
+            store.data(),
+            &vec![1, 2, 3],
+            "resumed in the arm the first call was in"
         );
     }
 

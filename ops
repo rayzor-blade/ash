@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1794520261,"nonce":"l3cknPFSveOypFi05UzZcs39Hy4=","added":["debt","area:portability","area:aot","area:cli","priority:medium"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1794520261,"nonce":"ed9Kn4Rpty4kV7oCdF7Coa9WcrE=","message":"The Android counterpart is 08bc732; the entry point and release-workflow work are shared.","files":null}]}

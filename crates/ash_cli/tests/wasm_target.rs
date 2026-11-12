@@ -191,20 +191,15 @@ fn wasm32_object_is_a_valid_module_with_the_expected_boundary() {
         "the module imports symbols that are not the ash runtime: {unexpected:?}"
     );
 
-    // A trap must have both halves of its lowering.
-    //
-    // `__wasm_setjmp` alone is what a wasm object looks like when the target
-    // machine's exception model was left unset: the setjmp is rewritten, the
-    // catch that receives the jump is discarded, and the object still links
-    // and still runs -- until the first throw, which leaves the program as an
-    // engine-level exception no handler can see. `__wasm_setjmp_test` is the
-    // catch side, so its absence is the failure that otherwise reports itself
-    // as a puzzling crash in someone's exception handler.
+    // A trap must have both halves of its lowering: the entry point arms
+    // one (`hlp_setup_trap_jit`), and a throw that is not its own goes on to
+    // the trap outside (`__wasm_longjmp`). Without the second, a throw through
+    // a boundary stops at the first one it meets.
     let imports: Vec<&str> = report.imports.iter().map(|i| i.name.as_str()).collect();
-    for half in ["__wasm_setjmp", "__wasm_setjmp_test"] {
+    for half in ["hlp_setup_trap_jit", "__wasm_longjmp"] {
         assert!(
             imports.contains(&half),
-            "the object does not reference {half}, so its setjmp lowering is \
+            "the object does not reference {half}, so its trap lowering is \
              incomplete and a throw will escape the program; it imports {imports:?}"
         );
     }

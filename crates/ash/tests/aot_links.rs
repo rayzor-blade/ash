@@ -207,16 +207,11 @@ fn run_case(dir: &Path, file: &Path, target: Option<&str>, runtime_path: &Path, 
 
 #[test]
 fn linked_natives_cast_the_same_natively_and_on_wasm() {
-    // The backend that builds a wasm program is the direct one, or the build
-    // fails: a fallback to LLVM would pass this test and prove nothing.
-    unsafe { std::env::set_var("ASH_WASM_DIRECT", "only") };
     let dir = tempfile::tempdir().unwrap();
     let file = fixture(dir.path());
     let native = runtime("libash_std.a").expect("native ash_std runtime archive");
     // The native build is LLVM's, which is what the wasm builds are held to.
-    unsafe { std::env::remove_var("ASH_WASM_DIRECT") };
     run_case(dir.path(), &file, None, &native, false);
-    unsafe { std::env::set_var("ASH_WASM_DIRECT", "only") };
     if let Some(wasm) = runtime("wasm32-wasip1/ash_runtime.o") {
         run_case(dir.path(), &file, Some("wasm32-wasip1"), &wasm, false);
         run_case(dir.path(), &file, Some("wasm32-wasip1"), &wasm, true);

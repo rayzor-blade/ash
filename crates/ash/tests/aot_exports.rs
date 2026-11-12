@@ -241,12 +241,6 @@ fn build(
         },
     ];
     let exe = dir.join(exe_name);
-    if target.is_some() {
-        // A wasm program is built by the direct backend or not at all: a
-        // fallback to LLVM would pass this test and prove nothing.
-        static STRICT: std::sync::Once = std::sync::Once::new();
-        STRICT.call_once(|| unsafe { std::env::set_var("ASH_WASM_DIRECT", "only") });
-    }
     emit_aot(AotRequest {
         file: &fixture().join("test_exports.hl"),
         out: &dir.join(format!("{exe_name}.o")),

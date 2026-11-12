@@ -16,7 +16,7 @@ fn run(command: Command) -> Output {
 }
 
 #[test]
-fn wasm_optimization_levels_and_independent_overrides_preserve_catches() {
+fn wasm_air_levels_preserve_catches() {
     if !haxe_available() {
         return;
     }
@@ -50,21 +50,17 @@ class OptFixture {
         .args(["-main", "OptFixture", "-hl"])
         .arg(&hl);
     run(haxe);
-    let variants: &[(&[&str], &str, u8)] = &[
-        (&["-O0"], "default<O0>", 0),
-        (&["-O1"], "default<O1>", 1),
-        (&["-O2"], "default<O2>", 2),
-        (&["-O3"], "default<O3>", 3),
-        (&["-Os"], "default<Os>", 2),
-        (&["-Oz"], "default<Oz>", 2),
-        (&["-O3", "--codegen-opt-level", "0"], "default<O3>", 0),
-        (
-            &["-O2", "--air-opt-level", "0", "--codegen-opt-level", "0"],
-            "default<O2>",
-            0,
-        ),
+    // Flags that choose LLVM's pipeline have nothing to act on in a wasm
+    // build, and are accepted; the AIR level is the one that applies.
+    let variants: &[&[&str]] = &[
+        &[],
+        &["-O0"],
+        &["-O3"],
+        &["-Os"],
+        &["-O3", "--codegen-opt-level", "0"],
+        &["-O2", "--air-opt-level", "0"],
     ];
-    for (flags, pipeline, codegen) in variants {
+    for flags in variants {
         let mut build = Command::new(ash_cli_bin());
         build
             .arg("--air-cache-dir")
@@ -75,16 +71,9 @@ class OptFixture {
             .args(*flags)
             .arg(&hl)
             .env("ASH_RUNTIME", &runtime)
-            .env("ASH_AOT_SHARDS", "2")
-            .env("ASH_LLVM_PASSES", "off")
-            .env("ASH_AIR_LEVEL", "3")
-            .env("ASH_AOT_CODEGEN_LEVEL", "3");
+            .env("ASH_AIR_LEVEL", "3");
         let output = run(build);
         let log = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            log.contains(&format!("llvm={pipeline} codegen={codegen}")),
-            "{flags:?}: {log}"
-        );
         let air = if flags.contains(&"--air-opt-level") {
             "O0"
         } else {
@@ -94,17 +83,7 @@ class OptFixture {
             log.contains(&format!("optimization: air={air}")),
             "{flags:?}: {log}"
         );
-        let workers: Vec<_> = log
-            .lines()
-            .filter(|line| line.contains("[aot] shard "))
-            .collect();
-        assert_eq!(workers.len(), 2, "{flags:?}: {log}");
-        assert!(
-            workers
-                .iter()
-                .all(|line| line.contains(&format!("codegen_level={codegen}"))),
-            "{flags:?}: {log}"
-        );
+        assert!(log.contains("functions, no LLVM"), "{flags:?}: {log}");
         let mut execute = Command::new(ash_cli_bin());
         execute.arg("run").arg(&wasm);
         let result = run(execute);

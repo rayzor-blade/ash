@@ -146,12 +146,6 @@ pub struct JITModule<'ctx> {
     pub(crate) aot_shared_runtime: bool,
     pub(crate) type_info_globals: HashMap<usize, GlobalValue<'ctx>>,
     pub(crate) findexes: HashMap<usize, FuncPtr>,
-    /// Symbols an object built elsewhere calls, which must stay visible to the
-    /// linker when the function behind them has a body here.
-    pub(crate) aot_extern_names: std::collections::HashSet<String>,
-    /// Functions an object built elsewhere defines. They are declared here and
-    /// never lowered, whoever asks for them.
-    pub(crate) aot_defined_elsewhere: std::collections::HashSet<usize>,
     /// Symbol names for bytecode functions the type table binds to a field
     /// or proto, by findex; see `symbol_name`.
     pub(crate) function_names: HashMap<usize, String>,
@@ -551,8 +545,6 @@ impl<'ctx> JITModule<'ctx> {
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
             findexes: HashMap::new(),
-            aot_extern_names: std::collections::HashSet::new(),
-            aot_defined_elsewhere: std::collections::HashSet::new(),
             function_names: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),
@@ -846,103 +838,6 @@ impl<'ctx> JITModule<'ctx> {
         &self.bytecode.functions
     }
 
-    /// The symbol function `findex` has in this module, declaring it if nothing
-    /// has yet. A function another object defines is called by this name, and
-    /// declaring it is also what puts it in `ash_functions`, the table a
-    /// dynamic call goes through.
-    pub fn function_symbol(&mut self, findex: usize) -> Result<String> {
-        let (f, _) = self.get_or_create_function_value(findex)?;
-        // A bytecode function is named for its Haxe method, and the runtime
-        // links libc: a method called `close` would be a second definition of
-        // libc's, or worse, silently resolve to it. Every function an object
-        // built elsewhere defines or calls gets a name no library has.
-        let unique = format!("ash_direct_{findex}");
-        if f.get_name().to_str() != Ok(unique.as_str()) {
-            f.as_global_value().set_name(&unique);
-        }
-        // Hidden: the definition is in this link unit, so taking the function's
-        // address is a table index and not a GOT entry, which the linker has
-        // for data only.
-        f.as_global_value()
-            .set_visibility(inkwell::GlobalVisibility::Hidden);
-        Ok(f.get_name().to_string_lossy().into_owned())
-    }
-
-    /// The names of the data other objects may take the address of: the global
-    /// slot table, and each type's descriptor by type index. Available once
-    /// the AOT data is emitted.
-    pub fn aot_data_symbols(&self) -> crate::wasm_direct::ProgramData {
-        let globals = self
-            .aot_globals
-            .map(|g| g.get_name().to_string_lossy().into_owned());
-        let mut types = std::collections::HashMap::new();
-        for (&type_index, &descriptor) in &self.type_index_to_c_ptr {
-            if let Some(g) = self.aot_types.get(&(descriptor as usize)) {
-                types.insert(type_index, g.get_name().to_string_lossy().into_owned());
-            }
-        }
-        let functions = self
-            .aot_functions
-            .map(|g| g.get_name().to_string_lossy().into_owned());
-        crate::wasm_direct::ProgramData {
-            globals,
-            functions,
-            types,
-            sized_alloc: super::function::sized_alloc_enabled(),
-            object_tails: self.object_tails.clone(),
-            object_drops: self.object_drops.clone(),
-            barriers: self.aot_wants_barriers(),
-            link_thunks: false,
-        }
-    }
-
-    /// Make these data symbols visible to the linker, for an object built
-    /// elsewhere to address.
-    pub fn keep_data_external(&mut self, names: impl IntoIterator<Item = String>) {
-        for name in names {
-            // A constant the direct backend reads is created here if no
-            // lowered function has asked for it.
-            let pooled = |prefix: &str| name.strip_prefix(prefix).and_then(|n| n.parse::<usize>().ok());
-            if let Some(i) = pooled("String_") {
-                self.ensure_string_global(i);
-            } else if let Some(i) = pooled("Bytes_") {
-                self.ensure_bytes_global(i);
-            }
-            self.aot_extern_names.insert(name.clone());
-            if let Some(g) = self.module.get_global(&name) {
-                g.set_linkage(inkwell::module::Linkage::External);
-                g.set_visibility(inkwell::GlobalVisibility::Hidden);
-            }
-        }
-    }
-
-    /// The slot a native of a host library is reached through, made if no
-    /// lowered function asked for it; start-up fills it, and it stays null
-    /// when the library does not open.
-    pub fn ensure_native_slot(&mut self, lib: &str, prim: &str) {
-        let name = format!("ash_native_{lib}_{prim}");
-        if self.module.get_global(&name).is_some() {
-            return;
-        }
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
-        let g = self.module.add_global(ptr_type, None, &name);
-        g.set_initializer(&ptr_type.const_null());
-        g.set_linkage(inkwell::module::Linkage::Internal);
-        self.aot_hdll_natives.push((lib.to_string(), prim.to_string()));
-    }
-
-    /// Declare these functions and never lower them: another object defines
-    /// them.
-    pub fn define_elsewhere(&mut self, findexes: impl IntoIterator<Item = usize>) {
-        self.aot_defined_elsewhere.extend(findexes);
-    }
-
-    /// Keep these symbols external when their functions are lowered here, for
-    /// an object built elsewhere to call.
-    pub fn keep_external(&mut self, names: impl IntoIterator<Item = String>) {
-        self.aot_extern_names.extend(names);
-    }
-
     /// The findex the module starts at.
     pub fn entrypoint_findex(&self) -> u32 {
         self.bytecode.entrypoint
@@ -1111,8 +1006,6 @@ impl<'ctx> JITModule<'ctx> {
             natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,
             findexes: HashMap::new(),
-            aot_extern_names: std::collections::HashSet::new(),
-            aot_defined_elsewhere: std::collections::HashSet::new(),
             function_names: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),

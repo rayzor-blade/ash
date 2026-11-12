@@ -698,10 +698,6 @@ impl<'ctx> JITModule<'ctx> {
 
     pub(crate) fn compile_function(&mut self, index: usize) -> Result<()> {
         let _phase = crate::profile::scope("AIR v2 -> LLVM");
-        // An object built elsewhere defines this one; it stays a declaration.
-        if self.aot_defined_elsewhere.contains(&index) {
-            return Ok(());
-        }
         // Skip if already compiled (has entry block with instructions)
         if let Some(func) = self.func_cache.get(&index) {
             if func.count_basic_blocks() > 0

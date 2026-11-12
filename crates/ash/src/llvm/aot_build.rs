@@ -62,10 +62,6 @@ pub fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
 
 pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_options::AotOptions) -> anyhow::Result<()> {
     let _options = crate::aot_options::enter(options)?;
-    if !request.quiet {
-        eprintln!("[aot] optimization: air={:?} llvm={} codegen={}",
-            crate::air_pipeline::default_level(), crate::aot_options::pass_pipeline("default<O3>"), crate::aot_options::codegen_level()?);
-    }
     let AotRequest {
         file,
         out,
@@ -131,106 +127,51 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
             && exports.is_empty() && closures.is_empty() && object_tails.is_empty() && object_drops.is_empty(),
     );
 
-    // Leaked on purpose: the module borrows the context for as long as it
-    // exists, and this one lives until the process ends.
-    crate::llvm_init::ensure();
-    let context: &'static inkwell::context::Context =
-        Box::leak(Box::new(inkwell::context::Context::create()));
     // Decided before anything is lowered: a function's AIR is built once,
     // through the shared cache, and on a target whose frames record their own
     // positions every body needs the markers from its first lowering.
     crate::air_pipeline::set_shadow_frames(
         crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
     );
-    // The direct wasm backend on its own, with no LLVM module at all, when it
-    // can take the whole program. It is the default for a wasm build; a
-    // program it cannot take goes the ordinary way.
-    let (direct_mode, mode) = wasm_direct_mode();
-    if crate::llvm::aot_link::is_wasm_triple(&triple)
-        && let Some(exe) = exe
-        && direct_mode == WasmDirect::Only
-    {
-        let polls = !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"))
-            && !mode.contains("nopolls");
-        let shadow = crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack
-            && !mode.contains("noshadow");
-        let began = std::time::Instant::now();
-        match crate::wasm_program::build(
-            file,
-            &triple,
-            polls,
-            shadow,
-            allow_refused,
+    // A wasm program is built by the direct AIR-to-wasm backend: no LLVM
+    // context is ever made for it.
+    if crate::llvm::aot_link::is_wasm_triple(&triple) {
+        return emit_wasm(
+            WasmBuild {
+                file,
+                out,
+                exe,
+                runtime,
+                triple: &triple,
+                allow_refused,
+                abi_version,
+                quiet,
+                wasm_fibers,
+                profiled: pgo.is_some(),
+            },
             &crate::wasm_program::Host {
                 exports: &exports,
                 closures: &closures,
                 object_tails: &object_tails,
                 object_drops: &object_drops,
             },
-            quiet,
-        )? {
-            crate::wasm_program::Outcome::Built(bytes) => {
-                crate::air_disk_cache::stage("direct_program", began.elapsed());
-                if pgo.is_some() && !quiet {
-                    let loaded = crate::callsite_profile::aot_profile_size();
-                    let hits = crate::callsite_profile::aot_profile_hits();
-                    if loaded > 0 && hits == 0 {
-                        eprintln!(
-                            "[ash] pgo: WARNING none of the {loaded} profiled caller(s) matched \
-                             this bytecode -- the profile is stale, regenerate it"
-                        );
-                    } else if loaded > 0 {
-                        eprintln!("[ash] pgo: {hits} of {loaded} profiled caller(s) matched");
-                    }
-                }
-                let object = out.with_extension("direct.o");
-                std::fs::write(&object, &bytes)?;
-                let host_libraries = crate::bytecode::BytecodeDecoder::decode_for_abi(
-                    file,
-                    &crate::target_abi::TargetAbi::for_triple(&triple)?,
-                )?
-                .natives
-                .iter()
-                .any(|n| {
-                    !crate::native_lib::is_runtime_lib(&n.lib)
-                        && crate::native_lib::host_link(&n.lib, &n.name).is_none()
-                });
-                let kind = if host_libraries {
-                    crate::llvm::aot_link::Runtime::Shared
-                } else {
-                    crate::llvm::aot_link::Runtime::Static
-                };
-                let mut objects = vec![object.clone()];
-                objects.extend(language_objects.iter().cloned());
-                let began = std::time::Instant::now();
-                let linked = crate::llvm::aot_link::link_executable(
-                    &objects,
-                    exe,
-                    &triple,
-                    kind,
-                    runtime,
-                    abi_version,
-                    wasm_fibers,
-                    quiet,
-                );
-                if linked.is_ok() {
-                    let _ = std::fs::remove_file(&object);
-                }
-                crate::air_disk_cache::stage("link", began.elapsed());
-                return linked;
-            }
-            crate::wasm_program::Outcome::Declined(why) => {
-                // Asked for by name, the backend is not a preference.
-                if std::env::var_os("ASH_WASM_DIRECT").is_some_and(|v| !v.is_empty()) {
-                    anyhow::bail!("the direct wasm backend declined the whole program: {why}");
-                }
-                if !quiet {
-                    eprintln!("[aot] the direct wasm backend declined the whole program: {why}");
-                }
-            }
-        }
+            language_objects,
+        );
+    }
+    if !quiet {
+        eprintln!(
+            "[aot] optimization: air={:?} llvm={} codegen={}",
+            crate::air_pipeline::default_level(),
+            crate::aot_options::pass_pipeline("default<O3>"),
+            crate::aot_options::codegen_level()?
+        );
     }
 
+    // Leaked on purpose: the module borrows the context for as long as it
+    // exists, and this one lives until the process ends.
+    crate::llvm_init::ensure();
+    let context: &'static inkwell::context::Context =
+        Box::leak(Box::new(inkwell::context::Context::create()));
     // A one-command build of a native executable nothing else registers into
     // is a fresh standalone program, which is what tree fusion's contract
     // needs; an object a host links, or a wasm module, is not.
@@ -242,7 +183,6 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         && closures.is_empty()
         && object_tails.is_empty()
         && object_drops.is_empty()
-        && !triple.starts_with("wasm")
         && crate::tree_fusion::enabled();
     let began = std::time::Instant::now();
     let mut jit = if standalone {
@@ -281,25 +221,8 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         .and_then(|v| v.parse().ok())
         .unwrap_or(500);
     let mut slowest: Vec<(u128, usize)> = Vec::new();
-    // The direct wasm backend takes the functions it can and leaves the rest to
-    // LLVM. Reached by `ASH_WASM_DIRECT=1`; a program the default mode
-    // declined stays on LLVM.
-    let direct = if crate::llvm::aot_link::is_wasm_triple(&triple) && direct_mode == WasmDirect::Mixed {
-        Some(emit_direct_object(&mut jit, &triple, &findexes, out, quiet)?)
-    } else {
-        None
-    };
-    let direct_set: std::collections::HashSet<usize> = direct
-        .as_ref()
-        .map(|d| d.functions.iter().copied().collect())
-        .unwrap_or_default();
     let began = std::time::Instant::now();
     for fx in &findexes {
-        if direct_set.contains(fx) {
-            lowered += 1;
-            crate::progress::advance(1);
-            continue;
-        }
         let began = std::time::Instant::now();
         let outcome = jit.promote_function_strict(*fx);
         let took = began.elapsed().as_millis();
@@ -347,16 +270,6 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         anyhow::bail!(msg);
     }
 
-    // Every function type the program contains gets a trampoline, so a
-    // dynamic call can be looked up rather than assembled. Only a target that
-    // cannot assemble one needs them; see `aot_trampoline`.
-    if triple.to_ascii_lowercase().starts_with("wasm") {
-        let emitted = jit.emit_call_trampolines()?;
-        if !quiet {
-            eprintln!("[aot] {emitted} call trampolines");
-        }
-    }
-
     jit.emit_host_exports()?;
     jit.finalize_aot_data()?;
     jit.emit_late_init()?;
@@ -367,25 +280,11 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     // More than one shard splits the middle end and codegen across threads
     // (see `aot_shard`); one shard is the single-module path, which also
     // honours ASH_AOT_NO_OPT and ASH_AOT_DUMP_IR itself.
-    // A wasm OBJECT is the one output the shards cannot make: ash's linker
-    // produces a finished module, not a relocatable one, and `ld -r` does
-    // not read wasm. Only a `--build` shards there.
-    let wasm = crate::llvm::aot_link::is_wasm_triple(&triple);
-    let shards = if wasm && exe.is_none() {
-        1
-    } else {
-        crate::llvm::aot_shard::shard_count_for(&triple)
-    };
+    let shards = crate::llvm::aot_shard::shard_count_for(&triple);
     if !quiet && shards == 1 && crate::llvm::aot_shard::shard_count() > 1 {
-        if wasm {
-            eprintln!(
-                "[aot] one module: a wasm object cannot be sharded, since ash's linker emits a module and `ld -r` does not read wasm; `--build` would shard"
-            );
-        } else {
-            eprintln!(
-                "[aot] cross-compiling to {triple}: one module, since `ld -r` joins the shards and reads the host's object format only"
-            );
-        }
+        eprintln!(
+            "[aot] cross-compiling to {triple}: one module, since `ld -r` joins the shards and reads the host's object format only"
+        );
     }
     // Heading for a binary, the parts go straight to the linker: it takes any
     // number of objects, so joining them into one first would rewrite every
@@ -482,7 +381,7 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
                 crate::target_abi::cpu_for(&triple)
             ));
         }
-        if shared_runtime && !triple.starts_with("wasm") {
+        if shared_runtime {
             // An HDLL brings its own copy of the runtime unless the binary
             // shares one, and two collectors in a process crash as soon as one
             // meets the other's objects. So this object must take the runtime
@@ -508,9 +407,6 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         } else {
             crate::llvm::aot_link::Runtime::Static
         };
-        if let Some(d) = &direct {
-            objects.push(d.path.clone());
-        }
         let scratch_objects = objects.clone();
         objects.extend(language_objects);
         let began = std::time::Instant::now();
@@ -542,136 +438,146 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     Ok(())
 }
 
-/// What the direct backend emitted for this build.
-struct DirectObject {
-    path: PathBuf,
-    functions: Vec<usize>,
+/// What a wasm build needs beyond the host's additions.
+struct WasmBuild<'a> {
+    file: &'a std::path::Path,
+    out: &'a std::path::Path,
+    exe: Option<&'a std::path::Path>,
+    runtime: Option<&'a std::path::Path>,
+    triple: &'a str,
+    allow_refused: bool,
+    abi_version: u32,
+    quiet: bool,
+    wasm_fibers: bool,
+    /// Whether a call-site profile was asked for.
+    profiled: bool,
 }
 
-/// How a wasm build uses the direct backend.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WasmDirect {
-    /// No direct backend: LLVM emits everything.
-    Llvm,
-    /// Direct bodies where the backend covers them, LLVM for the rest.
-    Mixed,
-    /// A whole program with no LLVM module.
-    Only,
-}
-
-/// `ASH_WASM_DIRECT`: unset, empty or containing `only` is the whole-program
-/// build; `0`, `off` or `llvm` is LLVM alone; any other value is the mixed
-/// build. `log`, `nopolls` and `noshadow` are measurement switches that may
-/// be combined with the others, and a build with either of the last two is not
-/// sound to run. Returns the raw value too.
-fn wasm_direct_mode() -> (WasmDirect, String) {
-    let raw = std::env::var("ASH_WASM_DIRECT").unwrap_or_default();
-    (WasmDirect::parse(&raw), raw)
-}
-
-impl WasmDirect {
-    fn parse(raw: &str) -> Self {
-        if raw.is_empty() || raw.contains("only") {
-            WasmDirect::Only
-        } else if matches!(raw, "0" | "off" | "llvm") {
-            WasmDirect::Llvm
-        } else {
-            WasmDirect::Mixed
+/// `ASH_WASM_DIRECT` holds measurement switches for a wasm build: `nopolls`
+/// leaves out the safepoint test at loop heads, `noshadow` the shadow frames.
+/// A build with either is not sound to run. A wasm build is always the direct
+/// backend, so a value that once chose another is refused.
+fn wasm_switches(raw: &str) -> anyhow::Result<(bool, bool)> {
+    let (mut polls, mut shadow) = (true, true);
+    for word in raw.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        match word {
+            "nopolls" => polls = false,
+            "noshadow" => shadow = false,
+            other => anyhow::bail!(
+                "ASH_WASM_DIRECT={other}: a wasm build is always the direct backend; \
+                 the switches are `nopolls` and `noshadow`"
+            ),
         }
     }
+    Ok((polls, shadow))
+}
+
+/// A wasm program, written as one relocatable object and, for a binary,
+/// linked with the runtime.
+fn emit_wasm(
+    build: WasmBuild<'_>,
+    host: &crate::wasm_program::Host,
+    language_objects: Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    let WasmBuild {
+        file,
+        out,
+        exe,
+        runtime,
+        triple,
+        allow_refused,
+        abi_version,
+        quiet,
+        wasm_fibers,
+        profiled,
+    } = build;
+    let (switch_polls, switch_shadow) =
+        wasm_switches(&std::env::var("ASH_WASM_DIRECT").unwrap_or_default())?;
+    let polls = switch_polls && !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"));
+    let shadow = switch_shadow && crate::target_abi::TargetAbi::for_triple(triple)?.shadow_call_stack;
+
+    if !quiet {
+        eprintln!("[aot] optimization: air={:?}", crate::air_pipeline::default_level());
+    }
+    let began = std::time::Instant::now();
+    let bytes = crate::wasm_program::build(file, triple, polls, shadow, allow_refused, host, quiet)?;
+    crate::air_disk_cache::stage("direct_program", began.elapsed());
+    if profiled && !quiet {
+        let loaded = crate::callsite_profile::aot_profile_size();
+        let hits = crate::callsite_profile::aot_profile_hits();
+        if loaded > 0 && hits == 0 {
+            eprintln!(
+                "[ash] pgo: WARNING none of the {loaded} profiled caller(s) matched \
+                 this bytecode -- the profile is stale, regenerate it"
+            );
+        } else if loaded > 0 {
+            eprintln!("[ash] pgo: {hits} of {loaded} profiled caller(s) matched");
+        }
+    }
+
+    let Some(exe) = exe else {
+        std::fs::write(out, &bytes)?;
+        if !quiet {
+            eprintln!(
+                "[ash] wrote {} ({} bytes) for {triple}\n\
+                 [ash] this is an object; `--build {}` would have linked it too",
+                out.display(),
+                bytes.len(),
+                out.with_extension("").display()
+            );
+        }
+        return Ok(());
+    };
+
+    let object = out.with_extension("direct.o");
+    std::fs::write(&object, &bytes)?;
+    // Any native outside the runtime that the host did not link is an HDLL,
+    // which brings its own copy of the runtime unless this program shares one.
+    let host_libraries = crate::bytecode::BytecodeDecoder::decode_for_abi(
+        file,
+        &crate::target_abi::TargetAbi::for_triple(triple)?,
+    )?
+    .natives
+    .iter()
+    .any(|n| {
+        !crate::native_lib::is_runtime_lib(&n.lib) && crate::native_lib::host_link(&n.lib, &n.name).is_none()
+    });
+    let kind = if host_libraries {
+        crate::llvm::aot_link::Runtime::Shared
+    } else {
+        crate::llvm::aot_link::Runtime::Static
+    };
+    let mut objects = vec![object.clone()];
+    objects.extend(language_objects);
+    let began = std::time::Instant::now();
+    let linked = crate::llvm::aot_link::link_executable(
+        &objects,
+        exe,
+        triple,
+        kind,
+        runtime,
+        abi_version,
+        wasm_fibers,
+        quiet,
+    );
+    if linked.is_ok() {
+        let _ = std::fs::remove_file(&object);
+    }
+    crate::air_disk_cache::stage("link", began.elapsed());
+    linked
 }
 
 #[cfg(test)]
-mod wasm_direct_tests {
-    use super::WasmDirect;
+mod wasm_switch_tests {
+    use super::wasm_switches;
 
     #[test]
-    fn a_wasm_build_is_whole_program_direct_unless_told_otherwise() {
-        assert!(WasmDirect::parse("") == WasmDirect::Only);
-        assert!(WasmDirect::parse("only") == WasmDirect::Only);
-        assert!(WasmDirect::parse("log,only") == WasmDirect::Only);
-        assert!(WasmDirect::parse("1") == WasmDirect::Mixed);
-        assert!(WasmDirect::parse("log") == WasmDirect::Mixed);
-        for off in ["0", "off", "llvm"] {
-            assert!(WasmDirect::parse(off) == WasmDirect::Llvm);
+    fn a_wasm_build_takes_only_measurement_switches() {
+        assert_eq!(wasm_switches("").unwrap(), (true, true));
+        assert_eq!(wasm_switches("nopolls").unwrap(), (false, true));
+        assert_eq!(wasm_switches("noshadow, nopolls").unwrap(), (false, false));
+        for removed in ["0", "off", "llvm", "1", "only", "log"] {
+            assert!(wasm_switches(removed).is_err(), "{removed}");
         }
     }
-}
-
-/// Emit the functions the direct wasm backend covers as an object beside `out`,
-/// and arrange the LLVM module so the two link: every direct function is
-/// declared (which puts it in the dynamic-call table), and the functions the
-/// object calls stay visible to the linker.
-fn emit_direct_object(
-    jit: &mut crate::llvm::module::JITModule<'_>,
-    triple: &str,
-    findexes: &[usize],
-    out: &std::path::Path,
-    quiet: bool,
-) -> anyhow::Result<DirectObject> {
-    let began = std::time::Instant::now();
-    let mut symbols = std::collections::HashMap::new();
-    for fx in findexes {
-        symbols.insert(*fx, jit.function_symbol(*fx)?);
-    }
-    // `ASH_WASM_DIRECT` takes any value to turn the backend on; `noshadow`,
-    // `nopolls` and `log` in it are measurement switches, and a build with
-    // either of the first two is not sound to run.
-    let mode = std::env::var("ASH_WASM_DIRECT").unwrap_or_default();
-    let polls = !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"))
-        && !mode.contains("nopolls");
-    let shadow = crate::target_abi::TargetAbi::for_triple(triple)?.shadow_call_stack
-        && !mode.contains("noshadow");
-    let data = jit.aot_data_symbols();
-    let emitted = crate::wasm_direct::emit_object(
-        &jit.bytecode,
-        &symbols,
-        &data,
-        ash_wasm_emit::Options {
-            polls,
-            shadow,
-            stub_skipped: false,
-        },
-    );
-    // Natives of host libraries are reached through slots the LLVM module
-    // owns and fills at start-up.
-    let wanted: Vec<(String, String)> = jit
-        .bytecode
-        .natives
-        .iter()
-        .filter_map(|n| {
-            let lib = n.lib.strip_prefix('?').unwrap_or(&n.lib);
-            emitted
-                .data
-                .contains(&format!("ash_native_{lib}_{}", n.name))
-                .then(|| (lib.to_string(), n.name.clone()))
-        })
-        .collect();
-    for (lib, prim) in wanted {
-        jit.ensure_native_slot(&lib, &prim);
-    }
-    jit.keep_external(emitted.imports.iter().filter_map(|f| symbols.get(f).cloned()));
-    jit.keep_data_external(emitted.data.iter().cloned());
-    jit.define_elsewhere(emitted.functions.iter().copied());
-    let path = out.with_extension("direct.o");
-    std::fs::write(&path, &emitted.bytes)?;
-    if mode.contains("log") {
-        eprintln!("[aot] direct: {:?}", emitted.functions);
-        for (f, why) in emitted.skipped.iter().take(40) {
-            eprintln!("[aot] not direct: f{f}: {why}");
-        }
-    }
-    if !quiet {
-        eprintln!(
-            "[aot] direct wasm backend: {} of {} functions, {} bytes",
-            emitted.functions.len(),
-            findexes.len(),
-            emitted.bytes.len()
-        );
-    }
-    crate::air_disk_cache::stage("direct_emit", began.elapsed());
-    Ok(DirectObject {
-        path,
-        functions: emitted.functions,
-    })
 }

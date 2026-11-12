@@ -383,13 +383,6 @@ impl<'a> Image<'a> {
     }
 }
 
-/// What `build` found it could not do, which sends the caller to the LLVM
-/// path.
-pub enum Outcome {
-    Built(Vec<u8>),
-    Declined(String),
-}
-
 /// What the embedder's request adds to the program, beyond its natives.
 #[derive(Default)]
 pub struct Host<'a> {
@@ -399,9 +392,9 @@ pub struct Host<'a> {
     pub object_drops: &'a [String],
 }
 
-/// Build `path` for wasm32 as one object, if nothing the program asks for is
-/// outside this path. A function that cannot be emitted fails the build, or,
-/// with `allow_refused`, becomes a body that raises when it is called.
+/// Build `path` for wasm32 as one object. A function that cannot be emitted
+/// fails the build, or, with `allow_refused`, becomes a body that raises when
+/// it is called.
 pub fn build(
     path: &std::path::Path,
     triple: &str,
@@ -410,7 +403,7 @@ pub fn build(
     allow_refused: bool,
     host: &Host,
     quiet: bool,
-) -> Result<Outcome> {
+) -> Result<Vec<u8>> {
     crate::native_lib::choose_std_linkage(path);
     crate::native_lib::init_std_library()?;
     let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
@@ -624,7 +617,7 @@ pub fn build(
         }
     };
     image.finish(&slots, barriers)?;
-    Ok(Outcome::Built(obj.finish()))
+    Ok(obj.finish())
 }
 
 impl Image<'_> {

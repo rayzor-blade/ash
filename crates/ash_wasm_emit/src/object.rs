@@ -694,16 +694,18 @@ impl ObjectBuilder {
         };
         // A memory-address relocation of a 5-byte immediate carries its
         // addend; the signature, table, global and function kinds do not.
-        let code_relocs: Vec<(u8, u32, u32, Option<i32>)> = relocs
+        let mut code_relocs: Vec<(u8, u32, u32, Option<i32>)> = relocs
             .iter()
             .map(|&(ty, off, sym, add)| (ty, off, sym, if ty == MEMORY_ADDR_SLEB { add } else { None }))
             .collect();
+        // A linker reads a section's relocations in offset order.
+        code_relocs.sort_by_key(|r| r.1);
         module.section(&we::CustomSection {
             name: "reloc.CODE".into(),
             data: write_relocs(&code_relocs, code_section_index).into(),
         });
         if !self.data_relocs.is_empty() {
-            let entries: Vec<(u8, u32, u32, Option<i32>)> = self
+            let mut entries: Vec<(u8, u32, u32, Option<i32>)> = self
                 .data_relocs
                 .iter()
                 .map(|&(at, target)| {
@@ -714,6 +716,7 @@ impl ObjectBuilder {
                     }
                 })
                 .collect();
+            entries.sort_by_key(|r| r.1);
             module.section(&we::CustomSection {
                 name: "reloc.DATA".into(),
                 data: write_relocs(&entries, data_section_index).into(),

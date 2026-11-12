@@ -190,7 +190,6 @@ impl<'ctx> JITModule<'ctx> {
                 || name == "ash_module_init"
                 || name == crate::llvm::function::wasm_traps::PERSONALITY
                 || self.aot_exports.iter().any(|e| e.export.symbol == name)
-                || self.aot_extern_names.contains(&*name)
             {
                 continue;
             }
@@ -210,7 +209,6 @@ impl<'ctx> JITModule<'ctx> {
                 || name.starts_with("Float_")
                 || name.starts_with("Bytes_"))
                 && g.get_initializer().is_some()
-                && !self.aot_extern_names.contains(&*name)
             {
                 g.set_linkage(Linkage::Internal);
             }

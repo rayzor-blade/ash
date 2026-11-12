@@ -55,6 +55,7 @@ fn build(
     target: Option<&str>,
     runtime: &Path,
     exe_name: &str,
+    fibers: bool,
 ) -> Option<(PathBuf, PathBuf)> {
     let dir = std::env::temp_dir().join(format!("ash-aot-exports-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -240,6 +241,12 @@ fn build(
         },
     ];
     let exe = dir.join(exe_name);
+    if target.is_some() {
+        // A wasm program is built by the direct backend or not at all: a
+        // fallback to LLVM would pass this test and prove nothing.
+        static STRICT: std::sync::Once = std::sync::Once::new();
+        STRICT.call_once(|| unsafe { std::env::set_var("ASH_WASM_DIRECT", "only") });
+    }
     emit_aot(AotRequest {
         file: &fixture().join("test_exports.hl"),
         out: &dir.join(format!("{exe_name}.o")),
@@ -255,7 +262,7 @@ fn build(
         closures,
         object_tails: vec![("Counter".to_string(), 64)],
         object_drops: vec!["Counter".to_string()],
-        wasm_fibers: false,
+        wasm_fibers: fibers,
         exports,
     })
     .unwrap_or_else(|e| panic!("build for {name}: {e:#}"));
@@ -282,8 +289,14 @@ fn a_host_object_calls_program_members_by_symbol() {
         eprintln!("skipped: no libash_std.a under target/");
         return;
     };
-    let Some((dir, exe)) = build("native", &mut Command::new("cc"), None, &runtime, "exports")
-    else {
+    let Some((dir, exe)) = build(
+        "native",
+        &mut Command::new("cc"),
+        None,
+        &runtime,
+        "exports",
+        false,
+    ) else {
         eprintln!("skipped: no C compiler");
         return;
     };
@@ -294,6 +307,16 @@ fn a_host_object_calls_program_members_by_symbol() {
 
 #[test]
 fn a_host_object_calls_program_members_by_symbol_on_wasm() {
+    wasm_case(false);
+}
+
+/// The same with the fiber transform: the export's trap is under it.
+#[test]
+fn a_host_object_calls_program_members_by_symbol_on_wasm_with_fibers() {
+    wasm_case(true);
+}
+
+fn wasm_case(fibers: bool) {
     let (Some(runtime), Some(ash)) = (
         built(&["wasm32-wasip1/ash_runtime.o"]),
         built(&["ash", "ash.exe"]),
@@ -306,11 +329,12 @@ fn a_host_object_calls_program_members_by_symbol_on_wasm() {
     let mut cc = Command::new(clang);
     cc.arg("--target=wasm32-wasip1");
     let Some((dir, module)) = build(
-        "wasm",
+        if fibers { "wasm_fibers" } else { "wasm" },
         &mut cc,
         Some("wasm32-wasip1"),
         &runtime,
         "exports.wasm",
+        fibers,
     ) else {
         eprintln!("skipped: no clang that targets wasm32 (set ASH_WASM_CC)");
         return;

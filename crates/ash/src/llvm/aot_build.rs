@@ -150,17 +150,26 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         && let Some(exe) = exe
         && direct_mode == WasmDirect::Only
         && pgo.is_none()
-        && exports.is_empty()
-        && closures.is_empty()
-        && object_tails.is_empty()
-        && object_drops.is_empty()
     {
         let polls = !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0"))
             && !mode.contains("nopolls");
         let shadow = crate::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack
             && !mode.contains("noshadow");
         let began = std::time::Instant::now();
-        match crate::wasm_program::build(file, &triple, polls, shadow, allow_refused, quiet)? {
+        match crate::wasm_program::build(
+            file,
+            &triple,
+            polls,
+            shadow,
+            allow_refused,
+            &crate::wasm_program::Host {
+                exports: &exports,
+                closures: &closures,
+                object_tails: &object_tails,
+                object_drops: &object_drops,
+            },
+            quiet,
+        )? {
             crate::wasm_program::Outcome::Built(bytes) => {
                 crate::air_disk_cache::stage("direct_program", began.elapsed());
                 let object = out.with_extension("direct.o");
@@ -171,7 +180,10 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
                 )?
                 .natives
                 .iter()
-                .any(|n| !crate::native_lib::is_runtime_lib(&n.lib));
+                .any(|n| {
+                    !crate::native_lib::is_runtime_lib(&n.lib)
+                        && crate::native_lib::host_link(&n.lib, &n.name).is_none()
+                });
                 let kind = if host_libraries {
                     crate::llvm::aot_link::Runtime::Shared
                 } else {

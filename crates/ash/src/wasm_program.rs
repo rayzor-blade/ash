@@ -18,6 +18,9 @@ use crate::bytecode::{DecodedBytecode, enum_construct_layout};
 use crate::hl_bindings as hl;
 use crate::wasm_direct::{ProgramData, emit_into};
 
+mod casts;
+mod closures;
+mod exports;
 mod links;
 use links::LinkNative;
 
@@ -147,6 +150,14 @@ struct Image<'a> {
     value_natives: Vec<ValueNative>,
     /// Natives the host links, each defined as a function of the object.
     links: Vec<LinkNative>,
+    /// Function types whose values the host supplies.
+    closures: Vec<crate::host_export::ResolvedClosure>,
+    /// Program members the host calls by symbol, each with what guards it.
+    exports: Vec<(crate::host_export::ResolvedExport, exports::Guard)>,
+    /// Classes, by type index, whose instances carry bytes of the host's own,
+    /// and classes whose instances the host is told about when they die.
+    tails: Vec<(usize, u64)>,
+    drops: Vec<usize>,
 }
 
 /// A native with an entry in the function table.
@@ -379,6 +390,15 @@ pub enum Outcome {
     Declined(String),
 }
 
+/// What the embedder's request adds to the program, beyond its natives.
+#[derive(Default)]
+pub struct Host<'a> {
+    pub exports: &'a [crate::host_export::HostExport],
+    pub closures: &'a [crate::host_export::HostClosure],
+    pub object_tails: &'a [(String, usize)],
+    pub object_drops: &'a [String],
+}
+
 /// Build `path` for wasm32 as one object, if nothing the program asks for is
 /// outside this path. A function that cannot be emitted fails the build, or,
 /// with `allow_refused`, becomes a body that raises when it is called.
@@ -388,26 +408,21 @@ pub fn build(
     polls: bool,
     shadow: bool,
     allow_refused: bool,
+    host: &Host,
     quiet: bool,
 ) -> Result<Outcome> {
     crate::native_lib::choose_std_linkage(path);
     crate::native_lib::init_std_library()?;
     let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
-    let bc = crate::bytecode::BytecodeDecoder::decode_for_abi(path, &abi)?;
+    let mut bc = crate::bytecode::BytecodeDecoder::decode_for_abi(path, &abi)?;
 
-    // A cast to a host closure needs the host's closure types, which the
-    // request carries and this path does not read yet.
-    let host_closure_cast = bc.natives.iter().any(|n| {
-        crate::native_lib::host_link(&n.lib, &n.name).is_some_and(|l| {
-            l.arg_casts
-                .iter()
-                .chain(std::iter::once(&l.ret_cast))
-                .any(|c| c.as_deref() == Some("ash:closure"))
-        })
-    });
-    if host_closure_cast {
-        return Ok(Outcome::Declined("a link casts to a host closure".into()));
-    }
+    // The host's additions come first: they append functions and types, which
+    // everything after reads.
+    let resolved_exports = bc.add_host_exports(host.exports)?;
+    let closures = bc.add_host_closures(host.closures)?;
+    let object_tails = bc.object_tails(host.object_tails)?;
+    let object_drops = bc.object_drops(host.object_drops)?;
+    let exports = exports::guard_exports(&bc, resolved_exports);
 
     let nfun = bc
         .functions
@@ -433,8 +448,8 @@ pub fn build(
         functions: Some("ash_functions".to_string()),
         types: (0..bc.types.len()).map(|i| (i, format!("ash_type_{i}"))).collect(),
         sized_alloc: crate::llvm::function::sized_alloc_enabled(),
-        object_tails: HashMap::new(),
-        object_drops: std::collections::HashSet::new(),
+        object_tails: object_tails.clone(),
+        object_drops: object_drops.clone(),
         barriers,
         link_thunks: true,
     };
@@ -602,6 +617,18 @@ pub fn build(
             module_ctx,
             value_natives,
             links,
+            closures,
+            exports,
+            tails: {
+                let mut t: Vec<(usize, u64)> = object_tails.into_iter().collect();
+                t.sort_unstable();
+                t
+            },
+            drops: {
+                let mut d: Vec<usize> = object_drops.into_iter().collect();
+                d.sort_unstable();
+                d
+            },
         }
     };
     image.finish(&slots, barriers)?;
@@ -647,6 +674,7 @@ impl Image<'_> {
             type_of[n.findex as usize] = Some(n.type_.0);
         }
         let link_slots = self.link_thunks()?;
+        self.export_wrappers()?;
         let is_function: std::collections::HashSet<usize> = bc
             .functions
             .iter()
@@ -978,6 +1006,28 @@ impl Image<'_> {
                 let s = self.cstr(lib);
                 f.addr(s, 0).c(lib.len() as i32).c(0).call(loaded);
             }
+        }
+
+        // The classes whose instances carry a host's tail, before anything
+        // allocates one.
+        if !self.tails.is_empty() {
+            let mut table = Blob::default();
+            for &(t, bytes) in &self.tails {
+                table.ptr(Some(self.types[t]), 0);
+                table.u32(bytes as u32);
+            }
+            let sym = self.data("ash_object_tails", table, 2, Linkage::Local);
+            let set = self.imp("hlp_set_object_tails", &[I32, I32], &[]);
+            f.addr(sym, 0).c(self.tails.len() as i32).call(set);
+        }
+        if !self.drops.is_empty() {
+            let mut table = Blob::default();
+            for &t in &self.drops {
+                table.ptr(Some(self.types[t]), 0);
+            }
+            let sym = self.data("ash_object_drops", table, 2, Linkage::Local);
+            let set = self.imp("hlp_set_object_drops", &[I32, I32], &[]);
+            f.addr(sym, 0).c(self.drops.len() as i32).call(set);
         }
 
         let set_globals = self.imp("hlp_gc_set_globals", &[I32, I32], &[]);

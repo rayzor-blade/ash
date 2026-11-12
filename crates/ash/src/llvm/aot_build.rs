@@ -150,7 +150,6 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         && let Some(exe) = exe
         && direct_mode == WasmDirect::Only
         && pgo.is_none()
-        && links.is_empty()
         && exports.is_empty()
         && closures.is_empty()
         && object_tails.is_empty()
@@ -198,6 +197,10 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
                 return linked;
             }
             crate::wasm_program::Outcome::Declined(why) => {
+                // Asked for by name, the backend is not a preference.
+                if std::env::var_os("ASH_WASM_DIRECT").is_some_and(|v| !v.is_empty()) {
+                    anyhow::bail!("the direct wasm backend declined the whole program: {why}");
+                }
                 if !quiet {
                     eprintln!("[aot] the direct wasm backend declined the whole program: {why}");
                 }
@@ -256,12 +259,9 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         .unwrap_or(500);
     let mut slowest: Vec<(u128, usize)> = Vec::new();
     // The direct wasm backend takes the functions it can and leaves the rest to
-    // LLVM. Reached by `ASH_WASM_DIRECT=1`, or by `only` when the whole
-    // program was declined; a program the default mode declined stays on LLVM.
-    let direct = if crate::llvm::aot_link::is_wasm_triple(&triple)
-        && (direct_mode == WasmDirect::Mixed
-            || (direct_mode == WasmDirect::Only && std::env::var_os("ASH_WASM_DIRECT").is_some()))
-    {
+    // LLVM. Reached by `ASH_WASM_DIRECT=1`; a program the default mode
+    // declined stays on LLVM.
+    let direct = if crate::llvm::aot_link::is_wasm_triple(&triple) && direct_mode == WasmDirect::Mixed {
         Some(emit_direct_object(&mut jit, &triple, &findexes, out, quiet)?)
     } else {
         None

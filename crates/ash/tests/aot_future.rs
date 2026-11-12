@@ -75,17 +75,38 @@ fn fixture(dir: &Path) -> PathBuf {
     file
 }
 
-fn run_case(dir: &Path, file: &Path, target: Option<&str>, runtime_path: &Path, wasm_fibers: bool) {
-    let name = match (target.is_some(), wasm_fibers) {
-        (false, _) => "native",
-        (true, false) => "wasm_plain",
-        (true, true) => "wasm_fibers",
+/// How the C library reaches the program.
+#[derive(Clone, Copy, PartialEq)]
+enum Linking {
+    /// Compiled and linked with the program (native and wasm).
+    Object,
+    /// A wasm side module found by symbol at start-up.
+    SideModule,
+}
+
+fn run_case(
+    dir: &Path,
+    file: &Path,
+    target: Option<&str>,
+    runtime_path: &Path,
+    wasm_fibers: bool,
+    linking: Linking,
+) {
+    let side_module = target.is_some() && linking == Linking::SideModule;
+    let name = match (target.is_some(), side_module, wasm_fibers) {
+        (false, _, _) => "native",
+        (true, true, false) => "wasm_plain",
+        (true, true, true) => "wasm_fibers",
+        (true, false, false) => "wasm_linked",
+        (true, false, true) => "wasm_linked_fibers",
     };
     let object = dir.join(format!("future_driver_{name}.o"));
     let mut cc = Command::new("clang");
     if let Some(target) = target {
         cc.arg(format!("--target={target}"));
-        cc.arg("-fPIC");
+        if side_module {
+            cc.arg("-fPIC");
+        }
     }
     let output = cc
         .arg("-c")
@@ -107,7 +128,7 @@ fn run_case(dir: &Path, file: &Path, target: Option<&str>, runtime_path: &Path, 
 
     // A wasm plugin is a separate dylink.0 module. Its imports must be
     // exported by the main module and resolved by the side-module loader.
-    if target.is_some() {
+    if side_module {
         let target_libdir = Command::new("rustc")
             .args(["--print", "target-libdir"])
             .output()
@@ -153,13 +174,10 @@ fn run_case(dir: &Path, file: &Path, target: Option<&str>, runtime_path: &Path, 
         pgo: None,
         allow_refused: false,
         abi_version: 1,
-        quiet: true,
-        links: links(target.is_some()),
-        objects: if target.is_some() {
-            Vec::new()
-        } else {
-            vec![object]
-        },
+        // AOT_FUTURE_LOG=1 shows which backend took the build.
+        quiet: std::env::var_os("AOT_FUTURE_LOG").is_none(),
+        links: links(side_module),
+        objects: if side_module { Vec::new() } else { vec![object] },
         exports: Vec::new(),
         closures: Vec::new(),
         object_tails: Vec::new(),
@@ -195,10 +213,13 @@ fn c_future_carrier_works_in_native_and_wasm_programs() {
     let dir = tempfile::tempdir().unwrap();
     let file = fixture(dir.path());
     let native = runtime("libash_std.a").expect("native ash_std runtime archive");
-    run_case(dir.path(), &file, None, &native, false);
+    run_case(dir.path(), &file, None, &native, false, Linking::Object);
     if let Some(wasm) = runtime("wasm32-wasip1/ash_runtime.o") {
-        run_case(dir.path(), &file, Some("wasm32-wasip1"), &wasm, false);
-        run_case(dir.path(), &file, Some("wasm32-wasip1"), &wasm, true);
+        for fibers in [false, true] {
+            for linking in [Linking::SideModule, Linking::Object] {
+                run_case(dir.path(), &file, Some("wasm32-wasip1"), &wasm, fibers, linking);
+            }
+        }
     } else {
         eprintln!("skipped wasm: no prelinked runtime object");
     }

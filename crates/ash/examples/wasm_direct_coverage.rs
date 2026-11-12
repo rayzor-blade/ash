@@ -67,6 +67,7 @@ fn main() -> anyhow::Result<()> {
             object_tails: HashMap::new(),
             object_drops: std::collections::HashSet::new(),
             barriers: true,
+            link_thunks: false,
         };
         let emitted = ash_core::wasm_direct::emit_object(
             &bc,

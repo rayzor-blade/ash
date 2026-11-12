@@ -18,6 +18,9 @@ use crate::bytecode::{DecodedBytecode, enum_construct_layout};
 use crate::hl_bindings as hl;
 use crate::wasm_direct::{ProgramData, emit_into};
 
+mod links;
+use links::LinkNative;
+
 fn mem(offset: u64, align: u32) -> MemArg {
     MemArg {
         offset,
@@ -142,6 +145,8 @@ struct Image<'a> {
     /// Natives the program takes as values -- binds to a method, closes over --
     /// and so needs an address for in the function table.
     value_natives: Vec<ValueNative>,
+    /// Natives the host links, each defined as a function of the object.
+    links: Vec<LinkNative>,
 }
 
 /// A native with an entry in the function table.
@@ -390,14 +395,18 @@ pub fn build(
     let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
     let bc = crate::bytecode::BytecodeDecoder::decode_for_abi(path, &abi)?;
 
-    let any_host_link = bc
-        .natives
-        .iter()
-        .any(|n| crate::native_lib::host_link(&n.lib, &n.name).is_some()
-            || crate::native_lib::host_native_context(&n.lib, &n.name) != 0
-            || crate::native_lib::host_native_record(&n.lib, &n.name));
-    if any_host_link {
-        return Ok(Outcome::Declined("the program uses natives the host links".into()));
+    // A cast to a host closure needs the host's closure types, which the
+    // request carries and this path does not read yet.
+    let host_closure_cast = bc.natives.iter().any(|n| {
+        crate::native_lib::host_link(&n.lib, &n.name).is_some_and(|l| {
+            l.arg_casts
+                .iter()
+                .chain(std::iter::once(&l.ret_cast))
+                .any(|c| c.as_deref() == Some("ash:closure"))
+        })
+    });
+    if host_closure_cast {
+        return Ok(Outcome::Declined("a link casts to a host closure".into()));
     }
 
     let nfun = bc
@@ -427,9 +436,39 @@ pub fn build(
         object_tails: HashMap::new(),
         object_drops: std::collections::HashSet::new(),
         barriers,
+        link_thunks: true,
     };
 
     let mut obj = ObjectBuilder::new();
+    // The functions that stand for the host's linked natives, declared before
+    // the bodies that call them are emitted.
+    let mut links: Vec<LinkNative> = Vec::new();
+    {
+        use ash_wasm_emit::Program;
+        let program = crate::wasm_direct::BytecodeProgram {
+            bc: &bc,
+            symbols: &symbols,
+            data: &data,
+        };
+        for n in &bc.natives {
+            let findex = n.findex as usize;
+            let Some(link) = crate::native_lib::host_link(&n.lib, &n.name) else { continue };
+            let Some(sig) = program.signature(findex) else { continue };
+            let Some(fun) = bc.types[n.type_.0].fun.as_ref() else { continue };
+            let params: Vec<ValType> = sig.params.iter().filter_map(|t| wasm_of(*t)).collect();
+            let results: Vec<ValType> = wasm_of(sig.ret).into_iter().collect();
+            let sym = obj.declare_function(&program.symbol(findex), params.clone(), results.clone(), Linkage::Hidden);
+            links.push(LinkNative {
+                findex,
+                sym,
+                link,
+                args: fun.args.iter().map(|a| a.0).collect(),
+                ret: fun.ret.0,
+                params,
+                results,
+            });
+        }
+    }
     let emitted = emit_into(
         &mut obj,
         &bc,
@@ -514,6 +553,9 @@ pub fn build(
         };
         for &findex in &as_values {
             let Some(n) = bc.natives.iter().find(|n| n.findex as usize == findex) else { continue };
+            if links.iter().any(|l| l.findex == findex) {
+                continue;
+            }
             let Some(sig) = program.signature(findex) else { continue };
             let params: Vec<ValType> = sig.params.iter().filter_map(|t| wasm_of(*t)).collect();
             let results: Vec<ValType> = wasm_of(sig.ret).into_iter().collect();
@@ -559,6 +601,7 @@ pub fn build(
             function_types,
             module_ctx,
             value_natives,
+            links,
         }
     };
     image.finish(&slots, barriers)?;
@@ -603,8 +646,13 @@ impl Image<'_> {
         for n in &bc.natives {
             type_of[n.findex as usize] = Some(n.type_.0);
         }
-        let is_function: std::collections::HashSet<usize> =
-            bc.functions.iter().map(|f| f.findex as usize).collect();
+        let link_slots = self.link_thunks()?;
+        let is_function: std::collections::HashSet<usize> = bc
+            .functions
+            .iter()
+            .map(|f| f.findex as usize)
+            .chain(self.links.iter().map(|l| l.findex))
+            .collect();
         let mut native_entry: HashMap<usize, Sym> = HashMap::new();
         for i in 0..self.value_natives.len() {
             let (findex, params, results) = {
@@ -643,7 +691,7 @@ impl Image<'_> {
 
         let placed = self.static_constants();
         let trampolines = self.trampolines()?;
-        let late = self.late_init(slots, &trampolines)?;
+        let late = self.late_init(slots, &link_slots, &trampolines)?;
         let init = self.module_init(barriers, &placed)?;
         self.entry(init, late)?;
         Ok(())
@@ -1109,6 +1157,7 @@ impl Image<'_> {
     fn late_init(
         &mut self,
         slots: &BTreeMap<String, (String, String)>,
+        link_slots: &[(String, String)],
         trampolines: &Option<(Sym, Sym, usize)>,
     ) -> Result<Sym> {
         let late = self
@@ -1132,6 +1181,24 @@ impl Image<'_> {
                     .addr(lib_s, 0)
                     .addr(prim_s, 0)
                     .call(resolve)
+                    .i(I::I32Store(mem(0, 2)));
+            }
+        }
+        // The callees of linked natives that are in side modules, found by
+        // their own names.
+        if !link_slots.is_empty() {
+            let find = self.imp("hlp_aot_symbol", &[I32, I32], &[I32]);
+            for (lib, symbol) in link_slots {
+                let slot = self
+                    .obj
+                    .lookup(&format!("ash_link_{lib}_{symbol}"))
+                    .ok_or_else(|| anyhow!("no link slot for {symbol} in {lib}"))?;
+                let lib_s = self.cstr(lib);
+                let sym_s = self.cstr(symbol);
+                f.addr(slot, 0)
+                    .addr(lib_s, 0)
+                    .addr(sym_s, 0)
+                    .call(find)
                     .i(I::I32Store(mem(0, 2)));
             }
         }

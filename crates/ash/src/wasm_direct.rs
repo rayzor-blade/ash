@@ -34,6 +34,9 @@ pub struct ProgramData {
     pub object_drops: std::collections::HashSet<usize>,
     /// Whether reference stores mark cards for the generational collector.
     pub barriers: bool,
+    /// Whether the object defines a function named `Fun_<findex>` for each
+    /// native the host links, so a body calls it like any other function.
+    pub link_thunks: bool,
 }
 
 impl BytecodeProgram<'_> {
@@ -84,6 +87,17 @@ impl BytecodeProgram<'_> {
             && lib::host_native_context(&n.lib, &n.name) == 0
             && !lib::host_native_record(&n.lib, &n.name);
         plain.then_some(n)
+    }
+
+    /// A native the host links ahead of time, when the object defines the
+    /// function that calls the host's symbol.
+    pub fn link_native(&self, findex: usize) -> Option<&crate::types::HLNative> {
+        use crate::native_lib as lib;
+        if !self.data.link_thunks {
+            return None;
+        }
+        let n = self.bc.natives.iter().find(|n| n.findex as usize == findex)?;
+        lib::host_link(&n.lib, &n.name).is_some().then_some(n)
     }
 
     fn sig_of(&self, fun: &crate::types::HLTypeFun) -> Sig {
@@ -377,7 +391,10 @@ impl Program for BytecodeProgram<'_> {
 
     fn signature(&self, findex: usize) -> Option<Sig> {
         let Some(f) = self.bc.functions.iter().find(|f| f.findex as usize == findex) else {
-            let n = self.runtime_native(findex).or_else(|| self.slot_native(findex))?;
+            let n = self
+                .runtime_native(findex)
+                .or_else(|| self.slot_native(findex))
+                .or_else(|| self.link_native(findex))?;
             let sig = self.sig_of(self.bc.types[n.type_.0].fun.as_ref()?);
             let narrow = |t: &Ty| *t == Ty::Other;
             return (!sig.params.iter().any(narrow) && !narrow(&sig.ret)).then_some(sig);

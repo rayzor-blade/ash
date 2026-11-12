@@ -110,7 +110,7 @@ fn emitted_wasm_matches_the_interpreter() {
         .map(str::to_owned)
         .collect();
 
-    let opts = Options { polls: true, shadow: true };
+    let opts = Options { polls: true, shadow: true, stub_skipped: false };
     let (bc, emitted) = emit(&hl, opts);
 
     let (mut store, instance) = instantiate(&emitted.bytes);
@@ -214,7 +214,7 @@ fn emitted_wasm_speed() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     for (label, opts) in [
         ("plain", Options::default()),
-        ("polls+shadow", Options { polls: true, shadow: true }),
+        ("polls+shadow", Options { polls: true, shadow: true, stub_skipped: false }),
     ] {
         let (bc, emitted) = emit(&hl, opts);
         let (mut store, instance) = instantiate(&emitted.bytes);

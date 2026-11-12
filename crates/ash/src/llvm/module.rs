@@ -892,6 +892,7 @@ impl<'ctx> JITModule<'ctx> {
             object_tails: self.object_tails.clone(),
             object_drops: self.object_drops.clone(),
             barriers: self.aot_wants_barriers(),
+            link_thunks: false,
         }
     }
 

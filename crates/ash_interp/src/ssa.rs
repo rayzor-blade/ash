@@ -135,9 +135,13 @@ pub struct Prepared {
     kills: OnceLock<Kills>,
 }
 
-/// Per block, the call-family instructions (by index in the block) that leave
-/// values dead, with the slots to clear once the call has returned.
-type Kills = Box<[Box<[(u32, Box<[u32]>)]>]>;
+/// One call-family instruction (by index in its block) and the slots to clear
+/// once it has returned.
+type Kill = (u32, Box<[u32]>);
+
+/// Per block, the call-family instructions that leave values dead, with the
+/// slots to clear once the call has returned.
+type Kills = Box<[Box<[Kill]>]>;
 
 struct OsrState {
     liveness: air::v2::liveness::Liveness,
@@ -194,7 +198,7 @@ impl Prepared {
     /// handlers all count as reads. A value that dies with no call after it on
     /// its path keeps its slot. `ASH_AIR_KILLS=0` turns clearing off; it is
     /// safe either way.
-    pub fn kills(&self, bc: &DecodedBytecode) -> &[Box<[(u32, Box<[u32]>)]>] {
+    pub fn kills(&self, bc: &DecodedBytecode) -> &[Box<[Kill]>] {
         self.kills.get_or_init(|| self.build_kills(bc))
     }
 
@@ -247,7 +251,7 @@ impl Prepared {
 
         // Forward, over what is dead but still in its slot. A definition puts
         // a fresh value in the slot, so it leaves the set; a call clears it.
-        let walk = |b: usize, entry: &BTreeSet<u32>| -> (BTreeSet<u32>, Vec<(u32, Box<[u32]>)>) {
+        let walk = |b: usize, entry: &BTreeSet<u32>| -> (BTreeSet<u32>, Vec<Kill>) {
             let blk = &ir.blocks[b];
             let mut stale = entry.clone();
             for phi in &blk.phis {

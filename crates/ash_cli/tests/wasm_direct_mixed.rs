@@ -250,6 +250,71 @@ fn a_profiled_method_call_is_guarded_and_matches_the_interpreter() {
     }
 }
 
+/// With no profile, a slot with at most two implementations among the classes
+/// the program allocates is called directly behind a test of the slot, and
+/// `ASH_AOT_NO_STATIC_DEVIRT` leaves that out. Either way the program prints
+/// what it does under the interpreter.
+#[test]
+fn static_devirtualization_changes_the_module_and_keeps_its_behavior() {
+    if runtime_object().is_none() {
+        eprintln!("skipped: no wasm runtime object for {TARGET}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hl = dir.path().join("program.hl");
+    std::fs::copy(tests_dir().join("test_wasm_dispatch.hl"), &hl).unwrap();
+
+    let mut interp = Command::new(ash_cli_bin());
+    interp.args(["--mode", "interp"]).arg(&hl);
+    let reference = run_with_timeout(interp, Duration::from_secs(60));
+    assert!(!reference.timed_out && reference.output.status.success());
+    let expected = lines(&reference.output.stdout);
+    assert!(expected.len() >= 5, "the reference printed {} lines", expected.len());
+
+    for fibers in [false, true] {
+        let build = |name: &str, off: bool| {
+            let wasm = dir.path().join(format!("{name}_{fibers}.wasm"));
+            let mut cmd = Command::new(ash_cli_bin());
+            cmd.env_remove("ASH_AOT_NO_STATIC_DEVIRT");
+            if off {
+                cmd.env("ASH_AOT_NO_STATIC_DEVIRT", "1");
+            }
+            if fibers {
+                cmd.env("ASH_WASM_FIBERS", "1");
+            }
+            cmd.args(["--target", TARGET, "--build"])
+                .arg(&wasm)
+                .arg(&hl)
+                .arg("--quiet");
+            let built = run_with_timeout(cmd, Duration::from_secs(600));
+            assert!(
+                !built.timed_out && built.output.status.success(),
+                "{}",
+                render_output(&built.output)
+            );
+            wasm
+        };
+        let on = build("devirt", false);
+        let off = build("plain", true);
+        assert_ne!(
+            std::fs::read(&on).unwrap(),
+            std::fs::read(&off).unwrap(),
+            "fibers={fibers}: the analysis changed nothing"
+        );
+        for (name, wasm) in [("with", &on), ("without", &off)] {
+            let mut run = Command::new(ash_cli_bin());
+            run.arg("run").arg(wasm);
+            let ran = run_with_timeout(run, Duration::from_secs(120));
+            assert!(
+                !ran.timed_out && ran.output.status.success(),
+                "{}",
+                render_output(&ran.output)
+            );
+            assert_eq!(lines(&ran.output.stdout), expected, "fibers={fibers} {name}");
+        }
+    }
+}
+
 /// The `simd` primitives and the vector values they promote to, against a
 /// scalar reference: wasm `v128` operations. Built from the committed
 /// bytecode, since the fixture needs the library's class path.

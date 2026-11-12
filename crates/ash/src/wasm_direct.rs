@@ -19,6 +19,8 @@ pub struct BytecodeProgram<'a> {
     /// The target a loaded call-site profile names for each caller, by
     /// findex; built when a method call first asks.
     profile: std::sync::OnceLock<HashMap<usize, usize>>,
+    /// The classes the program allocates, for the call with no profile.
+    reachable: std::sync::OnceLock<crate::devirt::ReachableTargets>,
 }
 
 /// Names of the data a program's other object defines, for an object that
@@ -53,6 +55,7 @@ impl<'a> BytecodeProgram<'a> {
             symbols,
             data,
             profile: std::sync::OnceLock::new(),
+            reachable: std::sync::OnceLock::new(),
         }
     }
 
@@ -332,8 +335,22 @@ impl Program for BytecodeProgram<'_> {
         crate::devirt::proto_findex_for_slot(&self.bc.types, obj_ty.0 as usize, slot)
     }
 
-    fn method_targets(&self, caller: usize, _obj_ty: air::v2::ir::TypeRef, _slot: usize) -> Vec<usize> {
-        self.profile_targets().get(&caller).copied().into_iter().collect()
+    /// A loaded profile's target for the caller, else the implementations of
+    /// the slot among the classes the program allocates, when there are at
+    /// most two. `ASH_AOT_NO_STATIC_DEVIRT` leaves the second out.
+    fn method_targets(&self, caller: usize, obj_ty: air::v2::ir::TypeRef, slot: usize) -> Vec<usize> {
+        if let Some(&target) = self.profile_targets().get(&caller) {
+            return vec![target];
+        }
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("ASH_AOT_NO_STATIC_DEVIRT").is_none()) {
+            return Vec::new();
+        }
+        let reachable = self
+            .reachable
+            .get_or_init(|| crate::devirt::ReachableTargets::analyze(self.bc));
+        let targets = reachable.slot_targets(&self.bc.types, obj_ty.0 as usize, slot);
+        if targets.len() > 2 { Vec::new() } else { targets }
     }
 
     fn native_slot(&self, findex: usize) -> Option<ash_wasm_emit::NativeSlot> {

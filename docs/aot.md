@@ -133,7 +133,7 @@ values or `emit_aot` calls.
 | `ASH_AIR_LEVEL=0..3` | how hard the AIR optimiser works before LLVM sees the code |
 | `ASH_AIR_NO_WIDEN=1` | turn off loop widening, the one AIR pass that rewrites arithmetic |
 | `ASH_MIDDLE_END_LOG=1` | report how many functions were shielded from the optimiser |
-| `ASH_AOT_NO_STATIC_DEVIRT=1` | native targets: do not guess method-call targets from the classes the program instantiates; only a `--pgo` profile devirtualises. A wasm build always devirtualises from a profile alone. Safe; slower on monomorphic dispatch |
+| `ASH_AOT_NO_STATIC_DEVIRT=1` | do not guess method-call targets from the classes the program instantiates; only a `--pgo` profile devirtualises. Applies to native and wasm targets alike. Safe; slower on monomorphic dispatch |
 | `ASH_WASM_DIRECT=nopolls,noshadow` | wasm targets only, which are always built by the direct AIR-to-wasm backend, with no LLVM module. `nopolls` leaves out the safepoint test at loop heads and `noshadow` the shadow frames: measurement switches, and a module built with either is not sound to run. Any other value is an error |
 
 Flags:

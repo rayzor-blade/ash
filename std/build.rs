@@ -129,6 +129,108 @@ fn sysroot_beside(compiler: &Path, triple: &str) -> Option<String> {
         .then(|| sysroot.display().to_string())
 }
 
+/// The clang arguments for an iOS target: Xcode's SDK for the device or the
+/// simulator, whichever the triple is. `-sim` is Rust's name for the arm64
+/// simulator, which clang spells `-simulator`; `x86_64-apple-ios` has only
+/// ever been a simulator.
+fn ios_clang_args(target: &str) -> Vec<String> {
+    let arch = if target.starts_with("x86_64") { "x86_64" } else { "arm64" };
+    let simulator = target.ends_with("-sim") || arch == "x86_64";
+    let (sdk, clang) = if simulator {
+        ("iphonesimulator", format!("{arch}-apple-ios-simulator"))
+    } else {
+        ("iphoneos", format!("{arch}-apple-ios"))
+    };
+    let path = std::process::Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "building ash_std for {target} needs the iOS SDK, and `xcrun --sdk {sdk} \
+                 --show-sdk-path` found none. Install Xcode and select it with \
+                 `sudo xcode-select -s /Applications/Xcode.app`"
+            )
+        });
+    vec![format!("--target={clang}"), format!("--sysroot={path}")]
+}
+
+/// The NDK, found the way Android's own tools find it: a variable that names
+/// it, then the newest one under an SDK the environment names, then under
+/// Android Studio's default SDK location.
+fn find_ndk() -> Option<PathBuf> {
+    let vars = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT"];
+    for var in vars {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    let is_ndk = |dir: &Path| dir.join("toolchains/llvm/prebuilt").is_dir();
+    let named = vars[..3].iter().filter_map(env::var_os).map(PathBuf::from);
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")).map(PathBuf::from);
+    let mut sdks: Vec<PathBuf> = vars[3..].iter().filter_map(env::var_os).map(PathBuf::from).collect();
+    if let Some(local) = env::var_os("LOCALAPPDATA") {
+        sdks.push(PathBuf::from(local).join("Android/Sdk"));
+    }
+    if let Some(home) = home {
+        sdks.push(home.join("Library/Android/sdk"));
+        sdks.push(home.join("Android/Sdk"));
+    }
+    let installed = sdks.into_iter().flat_map(|sdk| {
+        // Versions compare by number: 29.0.1 is newer than 4.0.1.
+        let mut versions: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(sdk.join("ndk"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| {
+                let key = e
+                    .file_name()
+                    .to_string_lossy()
+                    .split(|c: char| !c.is_ascii_digit())
+                    .filter_map(|n| n.parse().ok())
+                    .collect();
+                (key, e.path())
+            })
+            .collect();
+        versions.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut dirs: Vec<PathBuf> = versions.into_iter().map(|(_, p)| p).collect();
+        dirs.push(sdk.join("ndk-bundle"));
+        dirs
+    });
+    named.chain(installed).find(|dir| is_ndk(dir))
+}
+
+/// The clang arguments for an Android target: the NDK's sysroot and the API
+/// level (`ASH_ANDROID_API`, 24 when unset) the headers are read at.
+fn android_clang_args(target: &str) -> Vec<String> {
+    println!("cargo:rerun-if-env-changed=ASH_ANDROID_API");
+    let ndk = find_ndk().unwrap_or_else(|| {
+        panic!(
+            "building ash_std for {target} needs the Android NDK. Install it from Android \
+             Studio's SDK Manager (SDK Tools, NDK), or set ANDROID_NDK_HOME to it"
+        )
+    });
+    let root = ndk.join("toolchains/llvm/prebuilt");
+    let host = ["darwin-x86_64", "linux-x86_64", "windows-x86_64"]
+        .iter()
+        .map(|tag| root.join(tag))
+        .find(|p| p.is_dir())
+        .unwrap_or_else(|| panic!("the NDK at {} has no host toolchain", ndk.display()));
+    let api = env::var("ASH_ANDROID_API").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "24".into());
+    let base = match target.split('-').next().unwrap_or("") {
+        "aarch64" => "aarch64-linux-android",
+        "x86_64" => "x86_64-linux-android",
+        "i686" => "i686-linux-android",
+        a if a.starts_with("armv7") || a.starts_with("thumbv7") => "armv7a-linux-androideabi",
+        other => panic!("no Android target for the architecture `{other}` in {target}"),
+    };
+    vec![
+        format!("--target={base}{api}"),
+        format!("--sysroot={}", host.join("sysroot").display()),
+    ]
+}
+
 /// The clang arguments bindgen needs to read a C header written for a machine
 /// that is not this one.
 ///
@@ -194,6 +296,15 @@ fn cross_clang_args(target: &str, host: &str) -> Vec<String> {
         if env::var_os(&var).is_some() {
             return Vec::new();
         }
+    }
+
+    // A mobile target's headers are in the SDK its platform's tools install,
+    // and those tools say where.
+    if target.contains("apple-ios") {
+        return ios_clang_args(target);
+    }
+    if target.contains("android") {
+        return android_clang_args(target);
     }
 
     // Otherwise ask the target's own gcc. Two things separate its name from

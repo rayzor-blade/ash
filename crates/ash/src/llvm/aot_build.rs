@@ -280,7 +280,9 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     jit.emit_main()?;
     crate::air_disk_cache::stage("llvm_ir", began.elapsed());
     let backend_began = std::time::Instant::now();
-    let shared_runtime = jit.aot_needs_shared_runtime();
+    // A mobile program links the runtime statically whatever it names.
+    let shared_runtime =
+        jit.aot_needs_shared_runtime() && crate::llvm::mobile_sdk::os(&triple).is_none();
     // More than one shard splits the middle end and codegen across threads
     // (see `aot_shard`); one shard is the single-module path, which also
     // honours ASH_AOT_NO_OPT and ASH_AOT_DUMP_IR itself.

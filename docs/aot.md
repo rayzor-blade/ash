@@ -227,6 +227,38 @@ ASH_DEV=1 curl -fsSL https://ash.rayzor.tech/install.sh | sh
 ash --emit-aot game.o --target mips64el-unknown-linux-gnuabi64 game.hl
 ```
 
+## Android and iOS
+
+`--build` links a program for a phone using only the platform SDK; nothing
+needs to be set.
+
+```sh
+ash --build app --target aarch64-apple-ios-sim --runtime libash_std.a app.hl
+ash --build app --target aarch64-linux-android --runtime libash_std.a app.hl
+```
+
+- iOS uses Xcode's compiler and SDK, found with `xcrun`. The device
+  (`aarch64-apple-ios`) and the simulator (`aarch64-apple-ios-sim`,
+  `x86_64-apple-ios`) are different outputs: the object records which it is
+  for, and `IPHONEOS_DEPLOYMENT_TARGET` sets the minimum version (14.0 when
+  unset).
+- Android uses the NDK's clang. The NDK is `ANDROID_NDK_HOME`, else the newest
+  under `ANDROID_HOME` or `ANDROID_SDK_ROOT`, else the newest under Android
+  Studio's default SDK location. `ASH_ANDROID_API` sets the API level (24
+  when unset).
+- The program is linked with the static runtime whether or not it names HDLLs;
+  a phone has no library to open beside it. A bare `CC` is ignored for these
+  targets because it names the host's compiler; `ASH_LINKER_<triple>` still
+  overrides the driver.
+- The result is an executable that runs under `xcrun simctl spawn` and
+  `adb shell`. It is not yet an app: there is no entry point for an app's
+  `main`, and natives cannot be linked statically yet.
+- The runtime is built per target with
+  `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
+  Android with `cargo rustc -p ash_std --target aarch64-linux-android
+  --release --crate-type staticlib`, because the library's shared build would
+  need the NDK as cargo's linker. The headers come from the same SDK.
+
 ## WebAssembly
 
 ```sh

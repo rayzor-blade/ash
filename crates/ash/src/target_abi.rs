@@ -534,7 +534,9 @@ pub(crate) fn target_machine_for(
     generic: bool,
 ) -> Result<(TargetTriple, TargetMachine)> {
     initialize_targets();
-    let tt = TargetTriple::create(triple);
+    let tt = TargetTriple::create(
+        &crate::llvm::mobile_sdk::ios_llvm_triple(triple).unwrap_or_else(|| triple.to_string()),
+    );
     let target = Target::from_triple(&tt).map_err(|e| {
         if all_targets_build() {
             anyhow!("no target for {triple}: {e}")

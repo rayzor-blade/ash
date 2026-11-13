@@ -155,7 +155,9 @@ pub fn find_runtime(kind: Runtime) -> Result<PathBuf> {
 }
 
 fn target_os(triple: &str) -> Result<&'static str> {
-    if triple.contains("windows") {
+    if let Some(mobile) = super::mobile_sdk::os(triple) {
+        Ok(mobile)
+    } else if triple.contains("windows") {
         Ok("windows")
     } else if triple.contains("darwin") || triple.contains("apple-macos") {
         Ok("macos")
@@ -163,7 +165,7 @@ fn target_os(triple: &str) -> Result<&'static str> {
         Ok("linux")
     } else {
         bail!(
-            "native executable linking is not configured for {triple}; use --emit-aot or a supported Linux, macOS or Windows target"
+            "native executable linking is not configured for {triple}; use --emit-aot or a supported Linux, macOS, Windows, Android or iOS target"
         )
     }
 }
@@ -251,7 +253,15 @@ fn driver_for(triple: &str, os: &str) -> Result<Driver> {
         .or_else(|| std::env::var(format!("CARGO_TARGET_{rust_key}_LINKER")).ok())
         .or_else(|| target_override("CC", triple))
         .or_else(|| std::env::var("ASH_LINKER").ok())
-        .or_else(|| std::env::var("CC").ok());
+        // A bare `CC` names the host's compiler, which cannot link a phone's
+        // program, so a mobile target looks past it to the platform SDK.
+        .or_else(|| {
+            if super::mobile_sdk::os(triple).is_some() {
+                None
+            } else {
+                std::env::var("CC").ok()
+            }
+        });
     let preferred = if cross && triple.contains("windows-msvc") {
         vec!["clang-cl".into(), "clang".into()]
     } else if cross {
@@ -265,6 +275,16 @@ fn driver_for(triple: &str, os: &str) -> Result<Driver> {
     } else {
         vec!["cc".into(), "clang".into(), "gcc".into()]
     };
+    // A mobile target's compiler is found in the platform SDK, where the
+    // platform's own tools put it; an explicit driver above still wins.
+    if explicit.is_none() && super::mobile_sdk::os(triple).is_some() {
+        let found = super::mobile_sdk::driver(triple)?;
+        return Ok(Driver {
+            program: found.program,
+            args: found.args,
+            dialect: Dialect::Unix,
+        });
+    }
     let candidates = if let Some(explicit) = explicit {
         vec![explicit]
     } else {
@@ -424,6 +444,12 @@ fn platform_args(dialect: Dialect, os: &str, triple: &str) -> Result<Vec<String>
             "-Wl,-rpath,@executable_path",
             "-Wl,-rpath,@loader_path",
         ],
+        // A static program: the app's `main` owns the process, and there is
+        // no HDLL to find beside it, so no rpath.
+        (Dialect::Unix, "ios") => &["-framework", "CoreFoundation", "-liconv", "-lm"],
+        // Bionic has libc, libm and libdl but no separate libpthread. The page
+        // size is the one Android 15 devices require of every library.
+        (Dialect::Unix, "android") => &["-ldl", "-lm", "-Wl,-z,max-page-size=16384"],
         (Dialect::Unix, _) => &[
             "-lpthread",
             "-ldl",
@@ -843,6 +869,13 @@ pub fn link_executable(
     }
     let os = target_os(triple)?;
     let cross = cross_target(triple);
+    // A mobile program is one static image the app loads: there is no library
+    // to open beside it, and a second runtime is what the shared kind avoids.
+    let kind = if super::mobile_sdk::os(triple).is_some() {
+        Runtime::Static
+    } else {
+        kind
+    };
     let runtime = match runtime {
         Some(p) if p.is_file() => p.to_path_buf(),
         Some(p) => bail!("runtime {} does not exist", p.display()),
@@ -936,6 +969,18 @@ mod cross_link_tests {
         let mac = platform_args(Dialect::Unix, "macos", "aarch64-apple-darwin").unwrap();
         assert!(mac.contains(&"CoreFoundation".into()));
         assert!(!mac.contains(&"-ldl".into()));
+    }
+
+    #[test]
+    fn a_phone_target_links_a_static_program_with_its_platform_libraries() {
+        assert_eq!(target_os("aarch64-linux-android").unwrap(), "android");
+        assert_eq!(target_os("aarch64-apple-ios-sim").unwrap(), "ios");
+        let ios = platform_args(Dialect::Unix, "ios", "aarch64-apple-ios-sim").unwrap();
+        assert!(ios.contains(&"CoreFoundation".into()));
+        assert!(!ios.iter().any(|a| a.contains("rpath")));
+        let android = platform_args(Dialect::Unix, "android", "aarch64-linux-android").unwrap();
+        assert!(android.contains(&"-ldl".into()));
+        assert!(!android.contains(&"-lpthread".into()));
     }
 
     #[test]

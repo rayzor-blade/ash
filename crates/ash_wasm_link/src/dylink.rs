@@ -256,16 +256,30 @@ pub const TLS_BASE_EXPORT: &str = "__ash_tls_base";
 /// `__tls_base` at zero. Exporting the global lets the loader read the first
 /// instance's block and give every other instance a block of its own.
 ///
-/// The global is the one the start function assigns: the only mutable `i32`
-/// global the module defines that it sets there. A module whose start function
-/// sets no such global, or several, has no thread-local base to find and is
+/// The module's `__tls_base` is found without depending on how its start
+/// function is laid out, in this order:
+///
+/// 1. the global the name section calls `__tls_base`, when there is a name
+///    section;
+/// 2. else the only mutable `i32` global set by the functions the start
+///    function runs that initialise passive data (`memory.init` or
+///    `data.drop`), which is `__wasm_init_memory`. The start function is
+///    often a wrapper, `__wasm_start`, that calls it beside
+///    `__wasm_apply_global_relocs`, which sets the module's internal GOT
+///    globals; those are also mutable `i32`s, so the start function's own body
+///    says nothing;
+/// 3. else the only mutable `i32` global the start function's own body sets.
+///
+/// A module that none of these finds has no thread-local base to find and is
 /// returned unchanged.
 pub fn expose_tls_base(bytes: &[u8]) -> Result<Vec<u8>> {
     let (mut imported_functions, mut imported_globals) = (0u32, 0u32);
     let mut start = None;
     let mut mutable_i32: Vec<u32> = Vec::new();
-    let mut set_in_start: Vec<u32> = Vec::new();
-    let mut body = 0u32;
+    // The bodies are kept, not read: only the start function's and its
+    // callees' are looked into.
+    let mut code: Vec<wasmparser::FunctionBody<'_>> = Vec::new();
+    let mut named = None;
     let mut exported = false;
     for payload in Parser::new(0).parse_all(bytes) {
         match payload? {
@@ -292,31 +306,91 @@ pub fn expose_tls_base(bytes: &[u8]) -> Result<Vec<u8>> {
                 }
             }
             Payload::StartSection { func, .. } => start = Some(func),
-            Payload::CodeSectionEntry(function) => {
-                if start == Some(imported_functions + body) {
-                    for op in function.get_operators_reader()? {
-                        if let wasmparser::Operator::GlobalSet { global_index } = op? {
-                            set_in_start.push(global_index);
+            Payload::CodeSectionEntry(function) => code.push(function),
+            Payload::CustomSection(custom) if custom.name() == "name" => {
+                let reader = wasmparser::NameSectionReader::new(wasmparser::BinaryReader::new(
+                    custom.data(),
+                    custom.data_offset(),
+                ));
+                for name in reader {
+                    // A damaged name section is not a reason to refuse the module.
+                    let Ok(wasmparser::Name::Global(map)) = name else {
+                        continue;
+                    };
+                    for global in map.into_iter().flatten() {
+                        if global.name == "__tls_base" {
+                            named = Some(global.index);
                         }
                     }
                 }
-                body += 1;
             }
             _ => {}
         }
     }
-    set_in_start.sort_unstable();
-    set_in_start.dedup();
-    let candidates: Vec<u32> = set_in_start
-        .into_iter()
-        .filter(|g| mutable_i32.contains(g))
-        .collect();
-    let [global] = candidates[..] else {
-        return Ok(bytes.to_vec());
-    };
     if exported {
         return Ok(bytes.to_vec());
     }
+
+    /// What a function does that matters here.
+    #[derive(Default)]
+    struct Body {
+        sets: Vec<u32>,
+        calls: Vec<u32>,
+        initialises_data: bool,
+    }
+    let look = |function: u32| -> Result<Body> {
+        let mut body = Body::default();
+        let Some(index) = function.checked_sub(imported_functions) else {
+            return Ok(body);
+        };
+        let Some(function) = code.get(index as usize) else {
+            return Ok(body);
+        };
+        for op in function.get_operators_reader()? {
+            match op? {
+                wasmparser::Operator::GlobalSet { global_index } => body.sets.push(global_index),
+                wasmparser::Operator::Call { function_index } => body.calls.push(function_index),
+                wasmparser::Operator::MemoryInit { .. } | wasmparser::Operator::DataDrop { .. } => {
+                    body.initialises_data = true
+                }
+                _ => {}
+            }
+        }
+        Ok(body)
+    };
+    let only = |globals: Vec<u32>| -> Option<u32> {
+        let mut globals: Vec<u32> = globals.into_iter().filter(|g| mutable_i32.contains(g)).collect();
+        globals.sort_unstable();
+        globals.dedup();
+        match globals[..] {
+            [global] => Some(global),
+            _ => None,
+        }
+    };
+
+    let mut found = named.filter(|g| mutable_i32.contains(g));
+    if found.is_none()
+        && let Some(start) = start
+    {
+        let entry = look(start)?;
+        let mut initialiser_sets = Vec::new();
+        if entry.initialises_data {
+            initialiser_sets.extend(entry.sets.iter().copied());
+        }
+        let mut callees = entry.calls.clone();
+        callees.sort_unstable();
+        callees.dedup();
+        for callee in callees {
+            let body = look(callee)?;
+            if body.initialises_data {
+                initialiser_sets.extend(body.sets);
+            }
+        }
+        found = only(initialiser_sets).or_else(|| only(entry.sets));
+    }
+    let Some(global) = found else {
+        return Ok(bytes.to_vec());
+    };
     let mut module = wasm_encoder::Module::new();
     ExposeTlsBase { global }.parse_core_module(&mut module, Parser::new(0), bytes)?;
     Ok(module.finish())
@@ -459,6 +533,128 @@ mod tests {
         );
         let without = build(false);
         assert_eq!(expose_tls_base(&without).unwrap(), without);
+    }
+
+    /// A module whose function `bodies[i]` is function `i`, with two mutable
+    /// `i32` globals, one passive data segment and `start` as its start
+    /// function; `names` are the globals' names, if the module has a name
+    /// section.
+    fn tls_module(
+        bodies: &[Vec<wasm_encoder::Instruction<'static>>],
+        start: u32,
+        names: Option<&[(u32, &str)]>,
+    ) -> Vec<u8> {
+        use wasm_encoder::{
+            CodeSection, ConstExpr, DataCountSection, DataSection, ExportSection, Function,
+            FunctionSection, GlobalSection, GlobalType, Instruction, Module, NameMap, NameSection,
+            StartSection, TypeSection, ValType,
+        };
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        for _ in bodies {
+            functions.function(0);
+        }
+        module.section(&functions);
+        let mut globals = GlobalSection::new();
+        let ty = GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        };
+        globals.global(ty, &ConstExpr::i32_const(0));
+        globals.global(ty, &ConstExpr::i32_const(0));
+        module.section(&globals);
+        // A side module exports its primitives; this one its start function.
+        let mut exports = ExportSection::new();
+        exports.export("start", ExportKind::Func, start);
+        module.section(&exports);
+        module.section(&StartSection {
+            function_index: start,
+        });
+        module.section(&DataCountSection { count: 1 });
+        let mut code = CodeSection::new();
+        for body in bodies {
+            let mut function = Function::new([]);
+            for instruction in body {
+                function.instruction(instruction);
+            }
+            function.instruction(&Instruction::End);
+            code.function(&function);
+        }
+        module.section(&code);
+        let mut data = DataSection::new();
+        data.passive([0u8; 4]);
+        module.section(&data);
+        if let Some(names) = names {
+            let mut map = NameMap::new();
+            for (index, name) in names {
+                map.append(*index, name);
+            }
+            let mut section = NameSection::new();
+            section.globals(&map);
+            module.section(&section);
+        }
+        module.finish()
+    }
+
+    /// The index of the global a module exports as the thread-local base.
+    fn exposed(bytes: &[u8]) -> Option<u32> {
+        for payload in Parser::new(0).parse_all(bytes) {
+            if let Payload::ExportSection(section) = payload.unwrap() {
+                for export in section {
+                    let export = export.unwrap();
+                    if export.name == TLS_BASE_EXPORT {
+                        return Some(export.index);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The shape wasm-ld gives a module that takes a function's address: the
+    /// start function is a wrapper that calls the routine setting the GOT
+    /// globals and the one initialising passive data, which sets `__tls_base`.
+    #[test]
+    fn the_base_is_found_when_the_start_function_is_a_wrapper() {
+        use wasm_encoder::Instruction as I;
+        let module = tls_module(
+            &[
+                vec![I::Call(1), I::Call(2)],
+                // __wasm_apply_global_relocs: sets the GOT global.
+                vec![I::I32Const(7), I::GlobalSet(0)],
+                // __wasm_init_memory: initialises data and sets __tls_base.
+                vec![
+                    I::I32Const(0),
+                    I::I32Const(0),
+                    I::I32Const(4),
+                    I::MemoryInit {
+                        mem: 0,
+                        data_index: 0,
+                    },
+                    I::I32Const(64),
+                    I::GlobalSet(1),
+                    I::DataDrop(0),
+                ],
+            ],
+            0,
+            None,
+        );
+        assert_eq!(exposed(&expose_tls_base(&module).unwrap()), Some(1));
+    }
+
+    /// The name section decides when the start function sets two candidates.
+    #[test]
+    fn the_name_section_decides_between_two_globals() {
+        use wasm_encoder::Instruction as I;
+        let sets_both = vec![I::I32Const(1), I::GlobalSet(0), I::I32Const(2), I::GlobalSet(1)];
+        let bare = tls_module(std::slice::from_ref(&sets_both), 0, None);
+        assert_eq!(expose_tls_base(&bare).unwrap(), bare, "two candidates, no way to choose");
+        let named = tls_module(&[sets_both], 0, Some(&[(0, "GOT.func.internal.f"), (1, "__tls_base")]));
+        assert_eq!(exposed(&expose_tls_base(&named).unwrap()), Some(1));
     }
 
     /// Active segments become empty passive ones; passive ones are kept, and

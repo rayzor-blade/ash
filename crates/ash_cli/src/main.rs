@@ -169,6 +169,15 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "build")]
     runtime: Option<PathBuf>,
 
+    /// A static library or object to link into the program (--build); repeatable.
+    ///
+    /// For an Android or iOS program this is where its natives come from: a
+    /// phone app cannot open an HDLL, so each library the program uses
+    /// (`libhlwindow.a`) is linked in whole and its `hlp_<name>` entries
+    /// answer the program's native calls.
+    #[arg(long = "native-lib", value_name = "PATH", requires = "build")]
+    native_libs: Vec<PathBuf>,
+
     /// Target triple for --build/--emit-aot. Defaults to this machine, built
     /// for this machine's CPU.
     ///
@@ -1508,7 +1517,7 @@ fn run() -> Result<()> {
             abi_version: cli.abi_version,
             quiet: cli.quiet,
             links: Default::default(),
-            objects: Default::default(),
+            objects: cli.native_libs.clone(),
             wasm_fibers: false,
             exports: Vec::new(),
             closures: Vec::new(),

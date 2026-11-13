@@ -258,9 +258,15 @@ build one (below) and put it there or name it with `--runtime`.
   a phone has no library to open beside it. A bare `CC` is ignored for these
   targets because it names the host's compiler; `ASH_LINKER_<triple>` still
   overrides the driver.
+- A program cannot open an HDLL on a phone. The libraries whose natives it
+  calls are linked in instead: `--native-lib libfoo.a` (repeatable) adds a
+  static library, linked whole, and each primitive the program calls is
+  looked up as the library's `hlp_<name>` entry, the same entry an HDLL
+  exports. A primitive no linked library defines raises when it is called, and
+  not before. The library must be built for the same target.
 - The result is an executable that runs under `xcrun simctl spawn` and
   `adb shell`. It is not yet an app: there is no entry point for an app's
-  `main`, and natives cannot be linked statically yet.
+  `main`.
 - A runtime is built per target with
   `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
   Android with `cargo rustc -p ash_std --target aarch64-linux-android

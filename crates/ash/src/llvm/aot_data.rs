@@ -1776,6 +1776,14 @@ impl<'ctx> JITModule<'ctx> {
             if !self.aot_hdll_natives.is_empty() {
                 let resolve_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
                 let resolve = self.aot_symbol("hlp_aot_native", resolve_ty);
+                // A phone's app links its libraries in. Each primitive's
+                // `hlp_<name>` resolver is a weak reference, so a library the
+                // app did not link leaves it null and the slot falls back.
+                let linked_ty = ptr_type
+                    .fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+                let linked = self.target_abi.static_natives.then(|| {
+                    self.aot_symbol("hlp_aot_native_linked", linked_ty)
+                });
                 let natives = self.aot_hdll_natives.clone();
                 for (lib, prim) in &natives {
                     let slot_name = format!("ash_native_{lib}_{prim}");
@@ -1784,9 +1792,21 @@ impl<'ctx> JITModule<'ctx> {
                     };
                     let lib_s = self.builder.build_global_string_ptr(lib, "aot_lib_n")?;
                     let prim_s = self.builder.build_global_string_ptr(prim, "aot_prim_n")?;
-                    let addr = self
-                        .builder
-                        .build_indirect_call(
+                    let call = match linked {
+                        Some(linked) => {
+                            let resolver = self.weak_resolver(prim);
+                            self.builder.build_indirect_call(
+                                linked_ty,
+                                linked,
+                                &[
+                                    resolver.into(),
+                                    lib_s.as_pointer_value().into(),
+                                    prim_s.as_pointer_value().into(),
+                                ],
+                                "native_addr",
+                            )?
+                        }
+                        None => self.builder.build_indirect_call(
                             resolve_ty,
                             resolve,
                             &[
@@ -1794,7 +1814,9 @@ impl<'ctx> JITModule<'ctx> {
                                 prim_s.as_pointer_value().into(),
                             ],
                             "native_addr",
-                        )?
+                        )?,
+                    };
+                    let addr = call
                         .try_as_basic_value()
                         .basic()
                         .ok_or_else(|| anyhow!("hlp_aot_native returned void"))?;
@@ -1876,6 +1898,23 @@ impl<'ctx> JITModule<'ctx> {
         let gc_init = self.aot_symbol("hlp_gc_init", gc_init_ty);
         self.builder
             .build_indirect_call(gc_init_ty, gc_init, &[], "")?;
+
+        // The process arguments, which the standard library cannot find on
+        // every target when `main` is not its own.
+        let set_args_ty = void_type.fn_type(&[i32_type.into(), ptr_type.into()], false);
+        let set_args = self.aot_symbol("hlp_aot_set_args", set_args_ty);
+        let (argc, argv) = (
+            main.get_nth_param(0)
+                .ok_or_else(|| anyhow!("main has no argc"))?,
+            main.get_nth_param(1)
+                .ok_or_else(|| anyhow!("main has no argv"))?,
+        );
+        self.builder.build_indirect_call(
+            set_args_ty,
+            set_args,
+            &[argc.into(), argv.into()],
+            "",
+        )?;
 
         let anchor = self
             .builder
@@ -2066,5 +2105,20 @@ impl<'ctx> JITModule<'ctx> {
         self.aot_runtime_fn(name, fallback)
             .as_global_value()
             .as_pointer_value()
+    }
+
+    /// The address of the library's `hlp_<prim>` resolver, weakly referenced:
+    /// null when nothing the app links defines it.
+    fn weak_resolver(&self, prim: &str) -> PointerValue<'ctx> {
+        let name = format!("hlp_{prim}");
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let function = self.module.get_function(&name).unwrap_or_else(|| {
+            self.module.add_function(
+                &name,
+                ptr_type.fn_type(&[ptr_type.into()], false),
+                Some(Linkage::ExternalWeak),
+            )
+        });
+        function.as_global_value().as_pointer_value()
     }
 }

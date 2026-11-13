@@ -467,6 +467,22 @@ fn platform_args(dialect: Dialect, os: &str, triple: &str) -> Result<Vec<String>
     Ok(args)
 }
 
+/// How one link input is passed. A static library on a phone is the app's own
+/// natives, each reached by a weak reference, which pulls no archive member:
+/// the whole archive goes in.
+fn object_args(object: &Path, os: &str) -> Vec<std::ffi::OsString> {
+    let archive = object.extension().is_some_and(|e| e == "a");
+    match (archive, os) {
+        (true, "ios") => vec![format!("-Wl,-force_load,{}", object.display()).into()],
+        (true, "android") => vec![
+            "-Wl,--whole-archive".into(),
+            object.into(),
+            "-Wl,--no-whole-archive".into(),
+        ],
+        _ => vec![object.into()],
+    }
+}
+
 fn run(command: &mut Command, what: &str) -> Result<()> {
     let output = command
         .output()
@@ -860,6 +876,7 @@ pub fn link_executable(
     abi: u32,
     wasm_fibers: bool,
     quiet: bool,
+    native_symbols: &[String],
 ) -> Result<()> {
     if objects.is_empty() {
         bail!("nothing to link");
@@ -918,7 +935,18 @@ pub fn link_executable(
 
     crate::progress::begin("linking", 0);
     let mut cmd = Command::new(&driver.program);
-    cmd.args(&driver.args).args(objects).arg(&runtime);
+    cmd.args(&driver.args);
+    for object in objects {
+        cmd.args(object_args(object, os));
+    }
+    cmd.arg(&runtime);
+    // The program weakly references these resolvers; Mach-O's linker only
+    // accepts an undefined weak reference when it is told which ones.
+    if os == "ios" {
+        for symbol in native_symbols {
+            cmd.arg(format!("-Wl,-U,_{symbol}"));
+        }
+    }
     match driver.dialect {
         Dialect::Unix => {
             cmd.arg("-o").arg(out);

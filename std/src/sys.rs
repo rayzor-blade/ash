@@ -779,6 +779,33 @@ pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile:
     }
 }
 
+/// An ahead-of-time program's own `argv`, handed over by its `main`.
+///
+/// The standard library finds the process arguments by itself only on glibc
+/// and Apple targets; on Android and musl a `main` that is not Rust's gets an
+/// empty list. Windows keeps the wide-character path through `args_os`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_aot_set_args(argc: i32, argv: *const *const vbyte) {
+    #[cfg(not(windows))]
+    unsafe {
+        if argv.is_null() {
+            return;
+        }
+        let mut args = Vec::new();
+        for i in 1..argc.max(0) as usize {
+            let a = *argv.add(i);
+            if !a.is_null() {
+                args.push(pchar_slice(a).to_vec());
+            }
+        }
+        if let Ok(mut g) = SYS_ARGS.lock() {
+            *g = Some(args);
+        }
+    }
+    #[cfg(windows)]
+    let _ = (argc, argv);
+}
+
 /// Upstream returns argv from `hl_sys_init`, which the host sets to the
 /// arguments *after* the .hl file. Reconstructed here by dropping everything
 /// up to and including the first `.hl` argument, mirroring how the ash CLIs

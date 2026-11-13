@@ -278,6 +278,15 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     jit.finalize_aot_data()?;
     jit.emit_late_init()?;
     jit.emit_main()?;
+    // The resolvers a phone program weakly references; the link names them.
+    let native_symbols: Vec<String> = if jit.target_abi.static_natives {
+        jit.aot_hdll_natives
+            .iter()
+            .map(|(_, prim)| format!("hlp_{prim}"))
+            .collect()
+    } else {
+        Vec::new()
+    };
     crate::air_disk_cache::stage("llvm_ir", began.elapsed());
     let backend_began = std::time::Instant::now();
     // A mobile program links the runtime statically whatever it names.
@@ -425,6 +434,7 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
             abi_version,
             wasm_fibers,
             quiet,
+            &native_symbols,
         );
         // The objects are scratch either way. Keeping them after a failure
         // only helps if someone is told they exist.
@@ -565,6 +575,7 @@ fn emit_wasm(
         abi_version,
         wasm_fibers,
         quiet,
+        &[],
     );
     if linked.is_ok() {
         let _ = std::fs::remove_file(&object);

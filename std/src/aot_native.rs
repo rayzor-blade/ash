@@ -308,6 +308,34 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
     }
 }
 
+/// Address of `lib@name` for a program whose natives are linked in.
+///
+/// `resolver` is the program's own `hlp_<name>` symbol, null when nothing
+/// linked into the app defines it. A linked resolver is run the way a
+/// library's is, so the answer is the primitive and not the resolver; a null
+/// one falls back to `hlp_aot_native`, which still has this runtime's own
+/// copies (`fmt`) to offer and answers null for the rest.
+///
+/// # Safety
+/// `resolver` is null or a `DEFINE_PRIM` resolver; `lib` and `name` are valid
+/// NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hlp_aot_native_linked(
+    resolver: *const c_void,
+    lib: *const c_char,
+    name: *const c_char,
+) -> *mut c_void {
+    unsafe {
+        if resolver.is_null() {
+            return hlp_aot_native(lib, name);
+        }
+        type Resolver = unsafe extern "C" fn(*mut *const c_char) -> *mut c_void;
+        let resolver: Resolver = std::mem::transmute(resolver);
+        let mut sign: *const c_char = std::ptr::null();
+        resolver(&mut sign)
+    }
+}
+
 /// Address of `symbol` in the native library `lib`, or null: a host's
 /// linked native whose callee is in a side module, found by its own name
 /// rather than through a `DEFINE_PRIM` resolver.

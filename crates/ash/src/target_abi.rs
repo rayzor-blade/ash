@@ -26,6 +26,9 @@ pub struct TargetAbi {
     pub threads: bool,
     pub sjlj_eh: bool,
     pub native_dynamic_loading: bool,
+    /// Whether a library's primitives are linked into the program rather than
+    /// found in a library file at startup: a phone's app is one static image.
+    pub static_natives: bool,
     /// Whether a reference to an undefined DATA symbol can be relocated.
     ///
     /// Every native object format can: the linker resolves it, or the dynamic
@@ -114,6 +117,7 @@ impl TargetAbi {
         let lower = triple.to_ascii_lowercase();
         let wasm = lower.starts_with("wasm32-") || lower.starts_with("wasm64-");
         let wasi = wasm && (lower.contains("wasi") || lower.contains("wasip"));
+        let phone = lower.contains("android") || lower.contains("apple-ios");
         Ok(Self {
             triple: triple.to_owned(),
             pointer_bytes,
@@ -121,7 +125,8 @@ impl TargetAbi {
             // The first wasm artifact is deliberately single-threaded.
             threads: !wasm,
             sjlj_eh: !wasm,
-            native_dynamic_loading: !wasm,
+            native_dynamic_loading: !wasm && !phone,
+            static_natives: phone,
             direct_data_relocations: !wasm,
             shadow_call_stack: wasm,
             setjmp_takes_frame: lower.contains("windows") && pointer_bytes == 8,

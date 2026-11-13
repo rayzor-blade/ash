@@ -24,13 +24,27 @@ fn runtime(triple: &str) -> Option<PathBuf> {
 /// `ash --build` for `triple`, the way a developer with only the SDK runs it.
 /// `Err` carries the CLI's complaint.
 fn build(triple: &str, runtime: &Path, out: &Path) -> Result<(), String> {
+    build_program(triple, runtime, out, "test_basic.hl", &[])
+}
+
+/// The same build of a named test program, with `extra` arguments before it.
+fn build_program(
+    triple: &str,
+    runtime: &Path,
+    out: &Path,
+    program: &str,
+    extra: &[&Path],
+) -> Result<(), String> {
     let mut cmd = Command::new(ash_cli_bin());
     cmd.arg("--build")
         .arg(out)
         .args(["--target", triple])
         .arg("--runtime")
-        .arg(runtime)
-        .arg(tests_dir().join("test_basic.hl"))
+        .arg(runtime);
+    for path in extra {
+        cmd.arg("--native-lib").arg(path);
+    }
+    cmd.arg(tests_dir().join(program))
         .env("CC", "/usr/bin/clang");
     for var in [
         "ASH_LINKER",
@@ -91,6 +105,70 @@ fn an_ios_program_links_and_says_which_platform_it_is_for() {
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(macho_platform(&bytes), Some(platform), "{triple}");
     }
+}
+
+/// `static_native/toy.c`, compiled for the iOS simulator and archived.
+#[cfg(target_os = "macos")]
+fn toy_archive(dir: &Path) -> Option<PathBuf> {
+    let xcrun = |args: &[&str]| {
+        let out = Command::new("xcrun").args(args).output().ok()?;
+        out.status.success().then_some(out)
+    };
+    let sdk = xcrun(&["--sdk", "iphonesimulator", "--show-sdk-path"])?;
+    let sdk = String::from_utf8_lossy(&sdk.stdout).trim().to_string();
+    let object = dir.join("toy.o");
+    let archive = dir.join("libtoy.a");
+    let source = tests_dir().join("static_native/toy.c");
+    xcrun(&[
+        "--sdk",
+        "iphonesimulator",
+        "clang",
+        "-target",
+        "arm64-apple-ios14.0-simulator",
+        "-isysroot",
+        &sdk,
+        "-c",
+        source.to_str()?,
+        "-o",
+        object.to_str()?,
+    ])?;
+    xcrun(&["ar", "rcs", archive.to_str()?, object.to_str()?])?;
+    Some(archive)
+}
+
+/// A phone app cannot open an HDLL, so the natives it calls come from the
+/// archive it links: the program carries the archive's resolvers, and the
+/// primitive nothing defines stays unresolved.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ios_program_links_the_natives_it_calls_from_an_archive() {
+    let triple = "aarch64-apple-ios-sim";
+    let Some(runtime) = runtime(triple) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(archive) = toy_archive(dir.path()) else {
+        return eprintln!("skipped: no Xcode");
+    };
+    let out = dir.path().join("native");
+    if let Err(e) = build_program(
+        triple,
+        &runtime,
+        &out,
+        "test_static_native.hl",
+        &[archive.as_path()],
+    ) {
+        panic!("{e}");
+    }
+    let nm = Command::new("xcrun")
+        .args(["nm", "-gU"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let defined = String::from_utf8_lossy(&nm.stdout);
+    assert!(defined.contains("_hlp_toy_add"), "{defined}");
+    assert!(defined.contains("_hlp_toy_scale"), "{defined}");
+    assert!(!defined.contains("_hlp_toy_absent"), "{defined}");
 }
 
 #[test]

@@ -237,10 +237,10 @@ ash --build app --target aarch64-apple-ios-sim app.hl
 ash --build app --target aarch64-linux-android app.hl
 ```
 
-The program links the target's `libash_std.a`, which is looked for in
-`<ash directory>/<triple>/` like the other cross runtimes. The release bundles
-them: the Android ones (`aarch64-linux-android`, `armv7-linux-androideabi`,
-`x86_64-linux-android`) in every tarball, and the iOS ones
+ash looks for the target's `libash_std.a` in `<ash directory>/<triple>/`, as
+it does for the other cross runtimes, and links it into the program. The
+release bundles them: the Android ones (`aarch64-linux-android`,
+`armv7-linux-androideabi`, `x86_64-linux-android`) in every tarball, and the iOS ones
 (`aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`) in the
 macOS tarballs, since only a Mac can link for iOS. A source build has none:
 build one (below) and put it there or name it with `--runtime`.
@@ -250,30 +250,30 @@ build one (below) and put it there or name it with `--runtime`.
   `x86_64-apple-ios`) are different outputs: the object records which it is
   for, and `IPHONEOS_DEPLOYMENT_TARGET` sets the minimum version (14.0 when
   unset).
-- Android uses the NDK's clang. The NDK is `ANDROID_NDK_HOME`, else the newest
-  under `ANDROID_HOME` or `ANDROID_SDK_ROOT`, else the newest under Android
-  Studio's default SDK location. `ASH_ANDROID_API` sets the API level (24
-  when unset).
-- The program is linked with the static runtime whether or not it names HDLLs;
-  a phone has no library to open beside it. A bare `CC` is ignored for these
-  targets because it names the host's compiler; `ASH_LINKER_<triple>` still
-  overrides the driver.
-- A program cannot open an HDLL on a phone. The libraries whose natives it
-  calls are linked in instead: `--native-lib libfoo.a` (repeatable) adds a
-  static library, linked whole, and each primitive the program calls is
-  looked up as the library's `hlp_<name>` entry, the same entry an HDLL
-  exports. A primitive no linked library defines raises when it is called, and
-  not before. The library must be built for the same target.
-- A Rust static library carries its own copy of the standard library, and two
-  copies in one link define `rust_eh_personality` twice. Apple's linker
-  cannot be told to accept that, so the runtimes in the release keep their
-  copy local and export only their C interface, and a Rust library links
-  beside them. A runtime built from source does not, and fails to link beside
-  one.
-- The result is an executable that runs under `xcrun simctl spawn` and
-  `adb shell`. It is not yet an app: there is no entry point for an app's
-  `main`.
-- A runtime is built per target with
+- Android uses the NDK's clang. ash finds the NDK at `ANDROID_NDK_HOME`, else
+  the newest under `ANDROID_HOME` or `ANDROID_SDK_ROOT`, else the newest under
+  Android Studio's default SDK location. `ASH_ANDROID_API` sets the API level
+  (24 when unset).
+- ash links the static runtime into a phone program whether or not it names
+  HDLLs, because a phone has no library to open beside it. ash ignores a bare
+  `CC` for these targets, because it names the host's compiler;
+  `ASH_LINKER_<triple>` still overrides the driver.
+- A program cannot open an HDLL on a phone. Pass each library the program
+  needs as `--native-lib libfoo.a` (repeatable), and ash links the whole
+  static library into the program. At startup the program finds each primitive
+  it calls through the library's `hlp_<name>` entry, the same entry an HDLL
+  exports. If no library defines that entry, calling the primitive raises an
+  error, and a program that never calls it runs normally. Build the library
+  for the same target as the program.
+- A Rust static library contains its own copy of the standard library. Two
+  copies in one link both define `rust_eh_personality`, and Apple's linker has
+  no option to accept the duplicate. The runtimes in the release therefore
+  export only their C interface and keep their copy of the standard library
+  local, so a Rust library links beside them. A runtime built from source
+  exports the standard library's symbols, and the link fails.
+- ash writes an executable, which runs under `xcrun simctl spawn` and
+  `adb shell`. It does not write an app bundle or an APK.
+- Build a runtime per target with
   `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
   Android with `cargo rustc -p ash_std --target aarch64-linux-android
   --release --crate-type staticlib`, because the library's shared build would

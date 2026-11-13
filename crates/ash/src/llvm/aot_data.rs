@@ -2004,6 +2004,34 @@ impl<'ctx> JITModule<'ctx> {
         if !main.verify(true) {
             return Err(anyhow!("main failed LLVM verification"));
         }
+        if self.target_abi.triple().contains("android") {
+            self.emit_xwindow_main(main)?;
+        }
+        Ok(())
+    }
+
+    /// `xwindow_main`, the program entry hlwindow's `android_main` calls on the
+    /// activity's thread once it has kept the activity. It runs the same
+    /// startup and program as `main`, with no arguments.
+    fn emit_xwindow_main(&mut self, main: FunctionValue<'ctx>) -> Result<()> {
+        let i32_type = self.context.i32_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let entry = self.module.add_function(
+            "xwindow_main",
+            self.context.void_type().fn_type(&[], false),
+            None,
+        );
+        let block = self.context.append_basic_block(entry, "entry");
+        self.builder.position_at_end(block);
+        self.builder.build_call(
+            main,
+            &[i32_type.const_zero().into(), ptr_type.const_null().into()],
+            "",
+        )?;
+        self.builder.build_return(None)?;
+        if !entry.verify(true) {
+            return Err(anyhow!("xwindow_main failed LLVM verification"));
+        }
         Ok(())
     }
 

@@ -227,6 +227,28 @@ fn an_android_program_links_with_only_the_ndk() {
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), EM_AARCH64);
 }
 
+/// hlwindow's `android_main` calls the program's `xwindow_main` on the
+/// activity's thread, so an Android program defines it. An iOS program does
+/// not: its `main` is the app's.
+#[test]
+fn an_android_program_defines_the_entry_hlwindow_calls() {
+    let Some(runtime) = runtime("aarch64-linux-android") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("basic");
+    match build("aarch64-linux-android", &runtime, &out) {
+        Ok(()) => {}
+        Err(e) if e.contains("no Android NDK found") => return eprintln!("skipped: no NDK"),
+        Err(e) => panic!("{e}"),
+    }
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        bytes.windows(12).any(|w| w == b"xwindow_main"),
+        "xwindow_main is not in the symbol table"
+    );
+}
+
 #[test]
 fn a_macho_without_a_build_version_has_no_platform() {
     assert_eq!(macho_platform(b"not a macho"), None);

@@ -267,10 +267,11 @@ build one (below) and put it there or name it with `--runtime`.
   for the same target as the program.
 - A Rust static library contains its own copy of the standard library. Two
   copies in one link both define `rust_eh_personality`, and Apple's linker has
-  no option to accept the duplicate. The runtimes in the release therefore
-  export only their C interface and keep their copy of the standard library
-  local, so a Rust library links beside them. A runtime built from source
-  exports the standard library's symbols, and the link fails.
+  no option to accept the duplicate. When a program links a Rust library with
+  `--native-lib`, ash first merges that library, and the runtime if it exports
+  the same internals, into one object that keeps only its C interface global.
+  This needs the tools the SDK already provides: Xcode's compiler driver and
+  `nm`, or the NDK's `llvm-nm` and `llvm-objcopy`.
 - ash writes an executable, which runs under `xcrun simctl spawn` and
   `adb shell`. It does not write an app bundle or an APK.
 - Build a runtime per target with

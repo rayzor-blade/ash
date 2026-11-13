@@ -1794,6 +1794,18 @@ impl<'ctx> JITModule<'ctx> {
                     let prim_s = self.builder.build_global_string_ptr(prim, "aot_prim_n")?;
                     let call = match linked {
                         Some(linked) => {
+                            // A phone program links every library into one
+                            // image, so a primitive cannot share its
+                            // `hlp_<name>` with a function of the runtime.
+                            if crate::native_lib::std_symbol_addr(&format!("hlp_{prim}")).is_some()
+                            {
+                                return Err(anyhow!(
+                                    "the primitive `{prim}` of library `{lib}` has the same name as \
+                                     ash_std's `hlp_{prim}`, and a phone program links both into one \
+                                     image. Name the library's primitives with the library's prefix, \
+                                     as HashLink's libraries do (`{lib}_{prim}`)."
+                                ));
+                            }
                             let resolver = self.weak_resolver(prim);
                             self.builder.build_indirect_call(
                                 linked_ty,

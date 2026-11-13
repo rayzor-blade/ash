@@ -171,60 +171,138 @@ fn an_ios_program_links_the_natives_it_calls_from_an_archive() {
     assert!(!defined.contains("_hlp_toy_absent"), "{defined}");
 }
 
-/// The release makes the runtime's Rust-internal symbols local, so it links
-/// beside another Rust static library, which carries its own `std`. Apple's
-/// linker cannot be told to take a duplicate definition, so the runtime must
-/// not export them; the program still links against the edited archive.
+/// A small Rust static library for the iOS simulator that exports one
+/// primitive of the toy library. Each carries its own copy of `std`.
+fn rust_archive(
+    dir: &Path,
+    triple: &str,
+    name: &str,
+    primitive: &str,
+    sign: &str,
+    body: &str,
+) -> Option<PathBuf> {
+    let source = dir.join(format!("{name}.rs"));
+    std::fs::write(
+        &source,
+        format!(
+            r#"use std::os::raw::{{c_char, c_void}};
+static SIGN: &[u8] = b"{sign}\0";
+{body}
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_{primitive}(sign: *mut *const c_char) -> *const c_void {{
+    unsafe {{ *sign = SIGN.as_ptr() as *const c_char }};
+    run as *const c_void
+}}
+"#
+        ),
+    )
+    .ok()?;
+    let archive = dir.join(format!("lib{name}.a"));
+    let built = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
+        .args(["--edition", "2024", "--crate-type", "staticlib"])
+        .args(["--target", triple, "-C", "opt-level=1"])
+        .args(["--crate-name", name, "-o"])
+        .arg(&archive)
+        .arg(&source)
+        .output()
+        .ok()?;
+    built.status.success().then_some(archive)
+}
+
+/// An app links several Rust static libraries, each with its own copy of the
+/// standard library, beside the runtime. The duplicates are isolated when the
+/// program links, so no archive has to be prepared beforehand.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_runtime_with_local_rust_internals_still_links_a_program() {
+fn an_ios_program_links_several_rust_libraries_beside_the_runtime() {
     let triple = "aarch64-apple-ios-sim";
     let Some(runtime) = runtime(triple) else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let copy = dir.path().join("libash_std.a");
-    std::fs::copy(&runtime, &copy).unwrap();
-    let script = repo_root().join("scripts/localize_runtime.sh");
-    let edited = Command::new(&script).arg(&copy).arg("ios").output().unwrap();
-    if !edited.status.success() {
-        let why = String::from_utf8_lossy(&edited.stderr);
-        if why.contains("xcrun") {
-            return eprintln!("skipped: no Xcode\n{why}");
-        }
-        panic!("{why}");
-    }
-    let nm = Command::new("xcrun")
-        .args(["nm", "-g", "--defined-only"])
-        .arg(&copy)
-        .output()
-        .unwrap();
-    let exported = String::from_utf8_lossy(&nm.stdout);
-    assert!(!exported.contains("_rust_eh_personality"), "still exported");
-    assert!(!exported.contains("EMPTY_PANIC"), "still exported");
-    let out = dir.path().join("basic");
-    if let Err(e) = build(triple, &copy, &out) {
+    let add = rust_archive(
+        dir.path(),
+        triple,
+        "toy_add",
+        "toy_add",
+        "ii_i",
+        "extern \"C\" fn run(a: i32, b: i32) -> i32 { std::panic::catch_unwind(|| a + b).unwrap_or(0) }",
+    );
+    let scale = rust_archive(
+        dir.path(),
+        triple,
+        "toy_scale",
+        "toy_scale",
+        "dd_d",
+        "extern \"C\" fn run(x: f64, k: f64) -> f64 { std::panic::catch_unwind(|| x * k).unwrap_or(0.0) }",
+    );
+    let (Some(add), Some(scale)) = (add, scale) else {
+        return eprintln!("skipped: rustc cannot build for {triple}");
+    };
+    let out = dir.path().join("native");
+    if let Err(e) = build_program(
+        triple,
+        &runtime,
+        &out,
+        "test_static_native.hl",
+        &[add.as_path(), scale.as_path()],
+    ) {
         panic!("{e}");
     }
+    let nm = Command::new("xcrun")
+        .args(["nm", "-gU"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let defined = String::from_utf8_lossy(&nm.stdout);
+    assert!(defined.contains("_hlp_toy_add"), "{defined}");
+    assert!(defined.contains("_hlp_toy_scale"), "{defined}");
+    assert!(!defined.contains("rust_eh_personality"), "{defined}");
 }
 
+/// The same on Android, where the merge ends with the NDK's `llvm-objcopy`.
 #[test]
-fn an_android_program_links_with_only_the_ndk() {
-    let Some(runtime) = runtime("aarch64-linux-android") else {
+fn an_android_program_links_several_rust_libraries_beside_the_runtime() {
+    let triple = "aarch64-linux-android";
+    let Some(runtime) = runtime(triple) else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("basic");
-    match build("aarch64-linux-android", &runtime, &out) {
+    let add = rust_archive(
+        dir.path(),
+        triple,
+        "toy_add",
+        "toy_add",
+        "ii_i",
+        "extern \"C\" fn run(a: i32, b: i32) -> i32 { std::panic::catch_unwind(|| a + b).unwrap_or(0) }",
+    );
+    let scale = rust_archive(
+        dir.path(),
+        triple,
+        "toy_scale",
+        "toy_scale",
+        "dd_d",
+        "extern \"C\" fn run(x: f64, k: f64) -> f64 { std::panic::catch_unwind(|| x * k).unwrap_or(0.0) }",
+    );
+    let (Some(add), Some(scale)) = (add, scale) else {
+        return eprintln!("skipped: rustc cannot build for {triple}");
+    };
+    let out = dir.path().join("native");
+    match build_program(
+        triple,
+        &runtime,
+        &out,
+        "test_static_native.hl",
+        &[add.as_path(), scale.as_path()],
+    ) {
         Ok(()) => {}
         Err(e) if e.contains("no Android NDK found") => return eprintln!("skipped: no NDK"),
         Err(e) => panic!("{e}"),
     }
-    const EM_AARCH64: u16 = 183;
     let bytes = std::fs::read(&out).unwrap();
-    assert_eq!(&bytes[..4], b"\x7fELF");
-    assert_eq!(bytes[4], 2, "64-bit");
-    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), EM_AARCH64);
+    for symbol in [&b"hlp_toy_add"[..], b"hlp_toy_scale"] {
+        assert!(bytes.windows(symbol.len()).any(|w| w == symbol));
+    }
 }
 
 /// hlwindow's `android_main` calls the program's `xwindow_main` on the
@@ -246,6 +324,30 @@ fn an_android_program_defines_the_entry_hlwindow_calls() {
     assert!(
         bytes.windows(12).any(|w| w == b"xwindow_main"),
         "xwindow_main is not in the symbol table"
+    );
+}
+
+/// A phone program links every library into one image, so a library's
+/// `hlp_future_state` and the runtime's cannot both exist. The build says so,
+/// and which primitive, instead of leaving a linker's duplicate symbol.
+#[test]
+fn a_library_primitive_named_like_a_runtime_function_is_refused() {
+    let Some(runtime) = runtime("aarch64-linux-android") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("clash");
+    let error = build_program(
+        "aarch64-linux-android",
+        &runtime,
+        &out,
+        "test_native_clash.hl",
+        &[],
+    )
+    .expect_err("the clashing primitive must not build");
+    assert!(
+        error.contains("`future_state` of library `clash` has the same name as ash_std's `hlp_future_state`"),
+        "{error}"
     );
 }
 

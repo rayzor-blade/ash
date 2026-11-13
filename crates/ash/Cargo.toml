@@ -39,6 +39,9 @@ ash_std = { path = "../../std" }
 once_cell = {workspace=true}
 tempfile = "3.2"
 shlex = "1.3"
+# Reading the symbols of a phone program's static libraries (llvm/rust_isolate.rs);
+# the version already in the tree.
+object = { version = "0.38", default-features = false, features = ["read", "std"] }
 memchr = "2.7.4"
 byteorder = {workspace=true}
 ash_macro = {workspace=true}

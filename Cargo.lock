@@ -218,6 +218,7 @@ dependencies = [
  "libloading",
  "memchr",
  "num_enum",
+ "object",
  "once_cell",
  "postcard",
  "rustc-demangle",

@@ -8,6 +8,7 @@ pub mod lines;
 pub mod mobile_sdk;
 pub mod module;
 pub mod object;
+pub mod rust_isolate;
 pub mod tbaa;
 pub mod type_utils;
 pub mod types;

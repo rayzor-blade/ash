@@ -933,6 +933,25 @@ pub fn link_executable(
         );
     }
 
+    // Rust libraries beside the runtime each carry their own standard library.
+    let isolated = if super::mobile_sdk::os(triple).is_some() {
+        Some(super::rust_isolate::prepare(
+            objects,
+            &runtime,
+            &super::rust_isolate::Tools {
+                program: &driver.program,
+                args: &driver.args,
+                os,
+            },
+        )?)
+    } else {
+        None
+    };
+    let (objects, runtime): (&[PathBuf], &Path) = match &isolated {
+        Some(prepared) => (&prepared.objects, &prepared.runtime),
+        None => (objects, &runtime),
+    };
+
     crate::progress::begin("linking", 0);
     let mut cmd = Command::new(&driver.program);
     cmd.args(&driver.args);

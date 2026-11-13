@@ -124,9 +124,6 @@ jobs:
             cargo rustc -p ash_std --target "$triple" --release --crate-type staticlib
             mkdir -p "ios-assets/$triple"
             cp "target/$triple/release/libash_std.a" "ios-assets/$triple/"
-            # Only the C interface stays global, so the runtime links beside
-            # another Rust static library (see the script).
-            scripts/localize_runtime.sh "ios-assets/$triple/libash_std.a" ios
             strip -S "ios-assets/$triple/libash_std.a"
           done
           find ios-assets -type f -exec ls -la {} \;
@@ -168,8 +165,6 @@ jobs:
             cargo rustc -p ash_std --target "$triple" --release --crate-type staticlib
             mkdir -p "android-assets/$triple"
             cp "target/$triple/release/libash_std.a" "android-assets/$triple/"
-            scripts/localize_runtime.sh "android-assets/$triple/libash_std.a" android \
-              "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
             "$strip" --strip-debug "android-assets/$triple/libash_std.a"
           done
           find android-assets -type f -exec ls -la {} \;

@@ -92,9 +92,92 @@ jobs:
           path: wasm-assets
           if-no-files-found: error
 
+  # What `ash --build --target <ios triple>` links against: the runtime for
+  # each iOS target, packaged beside the macOS binaries. A Mac is the only
+  # machine that can link for iOS, so no other tarball carries these. A failed
+  # build leaves iOS out of the tarballs rather than stopping the release.
+  ios-assets:
+    name: build (iOS runtimes)
+    runs-on: macos-15
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-ios-assets
+
+      # ash_std's build runs bindgen, which needs libclang.
+      - uses: ./.github/actions/llvm21
+
+      # The static library alone: the shared one would be linked by the host
+      # linker, and only the archive is used.
+      - name: Build and strip the runtimes
+        run: |
+          for triple in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            cargo rustc -p ash_std --target "$triple" --release --crate-type staticlib
+            mkdir -p "ios-assets/$triple"
+            cp "target/$triple/release/libash_std.a" "ios-assets/$triple/"
+            strip -S "ios-assets/$triple/libash_std.a"
+          done
+          find ios-assets -type f -exec ls -la {} \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-assets
+          path: ios-assets
+          if-no-files-found: error
+
+  # The same for Android, which any host can link for with the NDK. The
+  # runner image carries the NDK; ash finds it the way a developer's machine
+  # does (ANDROID_NDK_HOME).
+  android-assets:
+    name: build (Android runtimes)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-android-assets
+
+      - uses: ./.github/actions/llvm21
+
+      - name: Build and strip the runtimes
+        run: |
+          ndk="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
+          strip="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          test -x "$strip" || { echo "::error::no NDK at '$ndk'"; exit 1; }
+          for triple in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
+            cargo rustc -p ash_std --target "$triple" --release --crate-type staticlib
+            mkdir -p "android-assets/$triple"
+            cp "target/$triple/release/libash_std.a" "android-assets/$triple/"
+            "$strip" --strip-debug "android-assets/$triple/libash_std.a"
+          done
+          find android-assets -type f -exec ls -la {} \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-assets
+          path: android-assets
+          if-no-files-found: error
+
   build:
     name: build (${{ matrix.target }})
-    needs: wasm-assets
+    needs: [wasm-assets, ios-assets, android-assets]
     runs-on: ${{ matrix.os }}
     # A retired or saturated runner image must fail this leg, not stall the
     # release behind it.
@@ -197,9 +280,25 @@ jobs:
           name: wasm-assets
           path: wasm-assets
 
+      # Each is optional: a runtime that failed to build is left out.
+      - name: Fetch the Android runtimes
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: android-assets
+          path: mobile-assets
+
+      - name: Fetch the iOS runtimes
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-assets
+          path: mobile-assets
+
       - name: Package
         run: |
-          ./scripts/package_release.sh "${{ matrix.target }}" wasm-assets
+          ./scripts/package_release.sh "${{ matrix.target }}" wasm-assets mobile-assets
           if [[ "$(uname -s)" == "Darwin" ]]; then
             cp target/release/libash_hdll_future.dylib "dist/ash_future-${{ matrix.target }}.hdll"
             install_name_tool -id "@loader_path/ash_future.hdll" "dist/ash_future-${{ matrix.target }}.hdll"
@@ -226,6 +325,18 @@ jobs:
           subprocess.run([sys.argv[1], "run", sys.argv[2]], check=True, timeout=60)
           PY
           test -s "$RUNNER_TEMP/web/index.html" && test -s "$RUNNER_TEMP/web/ash_browser_bg.wasm"
+          # And for a phone: the runtime beside the binary, the SDK found
+          # from the machine alone.
+          if [[ "$RUNNER_OS" == "macOS" && -d "$RUNNER_TEMP/aarch64-apple-ios-sim" ]]; then
+            "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/basic-ios" --target aarch64-apple-ios-sim \
+              crates/ash/test/tests/test_basic.hl
+            test -s "$RUNNER_TEMP/basic-ios"
+          fi
+          if [[ -d "$RUNNER_TEMP/aarch64-linux-android" && -n "${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]]; then
+            "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/basic-android" --target aarch64-linux-android \
+              crates/ash/test/tests/test_basic.hl
+            test -s "$RUNNER_TEMP/basic-android"
+          fi
 
       # What the -dev tarball exists for: an object for a triple the default
       # build refuses.
@@ -250,7 +361,7 @@ jobs:
   # files, so this one installs them before it can build at all.
   windows:
     name: build (${{ matrix.target }})
-    needs: wasm-assets
+    needs: [wasm-assets, android-assets]
     runs-on: windows-2022
     # Same budget as the matrix: a stalled runner must fail this leg rather
     # than hold the release behind it.
@@ -397,12 +508,25 @@ jobs:
           name: wasm-assets
           path: wasm-assets
 
+      - name: Fetch the Android runtimes
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: android-assets
+          path: android-assets
+
       - name: Package (windows)
         shell: bash
         run: |
           mkdir -p dist
           cp target/release/ash.exe dist/
           cp -R wasm-assets/. dist/
+          # Present when the Android runtimes built; named for tar below.
+          mobile=""
+          if [ -d android-assets ]; then
+            cp -R android-assets/. dist/
+            mobile=$(cd android-assets && ls -d */)
+          fi
           test -s target/release/ash_hdll_simd.dll
           cp target/release/ash_hdll_simd.dll dist/simd.hdll
           
@@ -432,7 +556,7 @@ jobs:
 
           # Compress inside the dist directory
           cd dist
-          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe ash_std.lib simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads
+          tar -czf ash-${{ matrix.target }}.tar.gz ash.exe ash_std.lib simd.hdll *.dll wasm32-wasip1 wasm32-wasip1-threads $mobile
           rm ash_std.lib
           cp simd.hdll simd-${{ matrix.target }}.hdll
           cp ../target/release/ash_hdll_future.dll ash_future-${{ matrix.target }}.hdll
@@ -455,7 +579,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [wasm-assets, build, windows]
+    needs: [wasm-assets, ios-assets, android-assets, build, windows]
 
     # `always()` so one platform failing still publishes the others -- the
     # "at least one tarball" step below is what makes an empty release an

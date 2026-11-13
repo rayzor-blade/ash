@@ -66,22 +66,31 @@ fn macho_platform(bytes: &[u8]) -> Option<u32> {
     None
 }
 
+/// Each iOS target links and records the platform it is for: the device is a
+/// different output from either simulator.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_ios_simulator_program_links_and_says_it_is_for_the_simulator() {
-    let Some(runtime) = runtime("aarch64-apple-ios-sim") else {
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("basic");
-    match build("aarch64-apple-ios-sim", &runtime, &out) {
-        Ok(()) => {}
-        Err(e) if e.contains("xcrun") => return eprintln!("skipped: no Xcode\n{e}"),
-        Err(e) => panic!("{e}"),
-    }
+fn an_ios_program_links_and_says_which_platform_it_is_for() {
+    const IOS: u32 = 2;
     const IOS_SIMULATOR: u32 = 7;
-    let bytes = std::fs::read(&out).unwrap();
-    assert_eq!(macho_platform(&bytes), Some(IOS_SIMULATOR));
+    for (triple, platform) in [
+        ("aarch64-apple-ios", IOS),
+        ("aarch64-apple-ios-sim", IOS_SIMULATOR),
+        ("x86_64-apple-ios", IOS_SIMULATOR),
+    ] {
+        let Some(runtime) = runtime(triple) else {
+            continue;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("basic");
+        match build(triple, &runtime, &out) {
+            Ok(()) => {}
+            Err(e) if e.contains("xcrun") => return eprintln!("skipped: no Xcode\n{e}"),
+            Err(e) => panic!("{triple}: {e}"),
+        }
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(macho_platform(&bytes), Some(platform), "{triple}");
+    }
 }
 
 #[test]

@@ -11,16 +11,21 @@
 # install; they stay dynamic and the installer prints the apt line if one
 # is missing.
 #
-# Usage: scripts/package_release.sh <target-name> [wasm-assets-dir]
-#   e.g. scripts/package_release.sh macos-aarch64 wasm-assets
+# Usage: scripts/package_release.sh <target-name> [wasm-assets-dir [mobile-assets-dir]]
+#   e.g. scripts/package_release.sh macos-aarch64 wasm-assets mobile-assets
 #
-# The optional directory holds the wasm runtime objects
-# (release.yml's wasm-assets job); its contents go beside the binary, where
-# `ash --build x.wasm` looks for them.
+# The first directory holds the wasm runtime objects (release.yml's
+# wasm-assets job); its contents go beside the binary, where
+# `ash --build x.wasm` looks for them. The second holds one directory per
+# phone target, each with that target's libash_std.a (the ios-assets and
+# android-assets jobs); they go beside the binary the same way, for
+# `ash --build --target <triple>`. iOS ones are packaged on macOS only, the
+# one host that can link for iOS.
 set -euo pipefail
 
-TARGET="${1:?usage: package_release.sh <target-name> [wasm-assets-dir]}"
+TARGET="${1:?usage: package_release.sh <target-name> [wasm-assets-dir [mobile-assets-dir]]}"
 WASM_ASSETS="${2:-}"
+MOBILE_ASSETS="${3:-}"
 BIN="target/release/ash"
 test -x "$BIN" || { echo "error: $BIN not built" >&2; exit 1; }
 
@@ -164,6 +169,21 @@ if [[ -n "$WASM_ASSETS" ]]; then
     || { echo "error: $WASM_ASSETS holds no wasm32-wasip1/ash_runtime.o" >&2; exit 1; }
   cp -R "$WASM_ASSETS/." "$DIST/"
   echo "bundled the wasm runtime from $WASM_ASSETS"
+fi
+
+# A missing or empty directory is fine: a runtime that failed to build leaves
+# its target out, and the rest of the release goes ahead.
+if [[ -n "$MOBILE_ASSETS" && -d "$MOBILE_ASSETS" ]]; then
+  for dir in "$MOBILE_ASSETS"/*/; do
+    [[ -f "${dir}libash_std.a" ]] || continue
+    triple="$(basename "$dir")"
+    case "$triple" in
+      *apple-ios*) [[ "$(uname -s)" == "Darwin" ]] || continue ;;
+    esac
+    mkdir -p "$DIST/$triple"
+    cp "${dir}libash_std.a" "$DIST/$triple/"
+    echo "bundled the $triple runtime"
+  done
 fi
 
 mkdir -p dist

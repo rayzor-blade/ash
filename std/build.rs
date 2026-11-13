@@ -360,7 +360,9 @@ fn main() {
     pin_libclang();
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target.starts_with("x86_64") && target.contains("linux") {
+    // The helper is for glibc and musl Linux; Android's `target_os` is not
+    // `linux`, so nothing there refers to it.
+    if target.starts_with("x86_64") && target.contains("linux") && !target.contains("android") {
         cc::Build::new()
             .file("src/stack_boundary.c")
             .flag_if_supported("-fno-omit-frame-pointer")

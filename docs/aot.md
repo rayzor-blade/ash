@@ -233,9 +233,17 @@ ash --emit-aot game.o --target mips64el-unknown-linux-gnuabi64 game.hl
 needs to be set.
 
 ```sh
-ash --build app --target aarch64-apple-ios-sim --runtime libash_std.a app.hl
-ash --build app --target aarch64-linux-android --runtime libash_std.a app.hl
+ash --build app --target aarch64-apple-ios-sim app.hl
+ash --build app --target aarch64-linux-android app.hl
 ```
+
+The program links the target's `libash_std.a`, which is looked for in
+`<ash directory>/<triple>/` like the other cross runtimes. The release bundles
+them: the Android ones (`aarch64-linux-android`, `armv7-linux-androideabi`,
+`x86_64-linux-android`) in every tarball, and the iOS ones
+(`aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`) in the
+macOS tarballs, since only a Mac can link for iOS. A source build has none:
+build one (below) and put it there or name it with `--runtime`.
 
 - iOS uses Xcode's compiler and SDK, found with `xcrun`. The device
   (`aarch64-apple-ios`) and the simulator (`aarch64-apple-ios-sim`,
@@ -253,7 +261,7 @@ ash --build app --target aarch64-linux-android --runtime libash_std.a app.hl
 - The result is an executable that runs under `xcrun simctl spawn` and
   `adb shell`. It is not yet an app: there is no entry point for an app's
   `main`, and natives cannot be linked statically yet.
-- The runtime is built per target with
+- A runtime is built per target with
   `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
   Android with `cargo rustc -p ash_std --target aarch64-linux-android
   --release --crate-type staticlib`, because the library's shared build would

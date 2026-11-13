@@ -120,13 +120,18 @@ fn xcrun(args: &[&str]) -> Result<String> {
     Ok(text)
 }
 
+/// The link names the same versioned triple the object was written under. A
+/// bare `arm64-apple-ios` makes clang assume a minimum of iOS 7, which an
+/// x86_64 simulator link cannot satisfy (it asks for a `start` symbol only
+/// that old a target has) and which a device binary would then claim.
 fn ios_driver(triple: &str) -> Result<MobileDriver> {
     let target = ios_target(triple)?;
+    let versioned = ios_llvm_triple(triple).unwrap_or_else(|| target.clang.clone());
     let sdk = xcrun(&["--sdk", target.sdk, "--show-sdk-path"])?;
     let clang = xcrun(&["--sdk", target.sdk, "--find", "clang"])?;
     Ok(MobileDriver {
         program: clang,
-        args: vec!["-target".into(), target.clang, "-isysroot".into(), sdk],
+        args: vec!["-target".into(), versioned, "-isysroot".into(), sdk],
     })
 }
 

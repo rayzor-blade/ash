@@ -171,6 +171,43 @@ fn an_ios_program_links_the_natives_it_calls_from_an_archive() {
     assert!(!defined.contains("_hlp_toy_absent"), "{defined}");
 }
 
+/// The release makes the runtime's Rust-internal symbols local, so it links
+/// beside another Rust static library, which carries its own `std`. Apple's
+/// linker cannot be told to take a duplicate definition, so the runtime must
+/// not export them; the program still links against the edited archive.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_runtime_with_local_rust_internals_still_links_a_program() {
+    let triple = "aarch64-apple-ios-sim";
+    let Some(runtime) = runtime(triple) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("libash_std.a");
+    std::fs::copy(&runtime, &copy).unwrap();
+    let script = repo_root().join("scripts/localize_runtime.sh");
+    let edited = Command::new(&script).arg(&copy).arg("ios").output().unwrap();
+    if !edited.status.success() {
+        let why = String::from_utf8_lossy(&edited.stderr);
+        if why.contains("xcrun") {
+            return eprintln!("skipped: no Xcode\n{why}");
+        }
+        panic!("{why}");
+    }
+    let nm = Command::new("xcrun")
+        .args(["nm", "-g", "--defined-only"])
+        .arg(&copy)
+        .output()
+        .unwrap();
+    let exported = String::from_utf8_lossy(&nm.stdout);
+    assert!(!exported.contains("_rust_eh_personality"), "still exported");
+    assert!(!exported.contains("EMPTY_PANIC"), "still exported");
+    let out = dir.path().join("basic");
+    if let Err(e) = build(triple, &copy, &out) {
+        panic!("{e}");
+    }
+}
+
 #[test]
 fn an_android_program_links_with_only_the_ndk() {
     let Some(runtime) = runtime("aarch64-linux-android") else {

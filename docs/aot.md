@@ -264,6 +264,12 @@ build one (below) and put it there or name it with `--runtime`.
   looked up as the library's `hlp_<name>` entry, the same entry an HDLL
   exports. A primitive no linked library defines raises when it is called, and
   not before. The library must be built for the same target.
+- A Rust static library carries its own copy of the standard library, and two
+  copies in one link define `rust_eh_personality` twice. Apple's linker
+  cannot be told to accept that, so the runtimes in the release keep their
+  copy local and export only their C interface, and a Rust library links
+  beside them. A runtime built from source does not, and fails to link beside
+  one.
 - The result is an executable that runs under `xcrun simctl spawn` and
   `adb shell`. It is not yet an app: there is no entry point for an app's
   `main`.

@@ -617,7 +617,7 @@
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         Supported platforms</h2>
       <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash
-        <em>runs on</em> macOS, Linux, and Windows. The table below lists runtime platforms, WebAssembly support, and targets that support object-file output.</p>
+        <em>runs on</em> macOS, Linux, and Windows. The table below lists runtime platforms, WebAssembly and mobile platforms support, and targets that support object-file output.</p>
 
       <div
         style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden;max-width:640px;background:#ffffff">
@@ -661,12 +661,28 @@
           style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-top:1px solid rgba(34,29,26,0.08)">
           <div
             style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
+            Android &middot; preview</div>
+          <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">Builds for arm64, armv7 and x86_64 with
+            only the Android NDK. Run so far on an arm64 emulator; there is no app packaging yet.</div>
+        </div>
+        <div
+          style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-top:1px solid rgba(34,29,26,0.08)">
+          <div
+            style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
+            iOS &middot; preview</div>
+          <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">Builds for the device and the simulator
+            with only Xcode, on a Mac. Run so far on the simulator; there is no app packaging yet.</div>
+        </div>
+        <div
+          style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-top:1px solid rgba(34,29,26,0.08)">
+          <div
+            style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
             Objects only</div>
           <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">x86 &middot; ARM &middot; RISC-V 32 and 64 &middot; PowerPC64LE &middot; s390x &middot; every other LLVM backend with the <code>-dev</code> build</div>
         </div>
         <div
           style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.08)">
-          CI checks object-file generation for the targets in the last row; it does not execute the output. <code>ash --emit-aot out.o --target &lt;triple&gt; prog.hl</code>
+          CI checks object-file generation for the targets in the last row; it does not execute the output. The Android and iOS rows are checked by hand on an emulator and a simulator, not in CI. <code>ash --emit-aot out.o --target &lt;triple&gt; prog.hl</code>
           writes an object file. Linking requires the target platform's toolchain and runtime. The
           <code>-dev</code> release (<code>curl -fsSL https://ash.rayzor.tech/install.sh | sh -s -- --dev</code>,
           Linux x86_64, macOS aarch64 and Windows x86_64) includes all LLVM backends, including MIPS, LoongArch,

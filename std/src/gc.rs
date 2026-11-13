@@ -624,10 +624,10 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
 /// scanning fault, especially with custom thread stack sizes.
 #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 pub(crate) fn gc_register_current_os_thread() {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     let stack_top = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) as usize };
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let stack_top = unsafe {
         let mut attr: libc::pthread_attr_t = mem::zeroed();
         let mut top = 0usize;
@@ -669,7 +669,9 @@ pub(crate) fn gc_register_current_os_thread() {
 
     #[cfg(not(any(
         target_os = "macos",
+        target_os = "ios",
         target_os = "linux",
+        target_os = "android",
         windows,
         target_family = "wasm"
     )))]

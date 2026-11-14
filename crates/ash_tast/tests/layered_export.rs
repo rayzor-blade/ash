@@ -208,6 +208,13 @@ fn the_same_holds_with_full_dead_code_removal_and_the_analyzer_on() {
     );
 }
 
+/// The exporter's own switch is not part of what a layer was built with: a layer built
+/// verbosely serves a program that is not.
+#[test]
+fn the_exporters_own_defines_do_not_count() {
+    check_equivalence(&["-D", "ash_tast_verbose"], &[]);
+}
+
 /// A define nothing in the layer's sources tests, and the compiler does not type by,
 /// leaves the layer usable.
 #[test]

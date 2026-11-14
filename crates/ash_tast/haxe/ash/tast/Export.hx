@@ -823,8 +823,9 @@ class Export {
 	function currentDefines():Map<String, String> {
 		var out:Map<String, String> = new Map();
 		var defs = Context.getDefines();
+		// The compiler reports each define under both spellings, `a-b` and `a_b`.
 		for (k in defs.keys())
-			if (k != "dce" && !StringTools.startsWith(k, "ash_tast")) out.set(k, defs.get(k));
+			if (k != "dce" && !StringTools.startsWith(StringTools.replace(k, "-", "_"), "ash_tast")) out.set(k, defs.get(k));
 		return out;
 	}
 

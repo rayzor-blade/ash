@@ -330,6 +330,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_tast"
+version = "0.1.0"
+dependencies = [
+ "zerocopy",
+]
+
+[[package]]
 name = "ash_trace"
 version = "0.1.0"
 dependencies = [

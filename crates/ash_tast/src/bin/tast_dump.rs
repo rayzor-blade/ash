@@ -161,6 +161,12 @@ fn compare(stack: &Stack, whole: &str, allowed: &[String]) {
         actual.len(),
         differing.len()
     );
+    for key in expected.keys().filter(|k| !actual.contains_key(*k)).take(8) {
+        println!("  missing: {key}");
+    }
+    for key in actual.keys().filter(|k| !expected.contains_key(*k)).take(8) {
+        println!("  extra: {key}");
+    }
     for key in differing.iter().take(8) {
         println!("  differs: {key}");
         let (a, b) = (&expected[*key], &actual[*key]);

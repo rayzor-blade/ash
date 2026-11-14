@@ -76,7 +76,6 @@ class Export {
 	var typedefIds:Map<String, Int> = new Map();
 	var textIds:Map<String, Int> = new Map();
 	var dynId = -1;
-	var monoId = -1;
 	var typeIds:Map<String, Int> = new Map();
 	var classIds:Map<String, Int> = new Map();
 	var classTypes:Array<Ref<ClassType>> = [];
@@ -191,8 +190,10 @@ class Export {
 			case TType(d, ps):
 				return typedefId(t, d, ps);
 			case TMono(r):
+				// A monomorph nothing bound is Dynamic to every backend; the compilation
+				// server leaves such types bound to Dynamic, so this keeps its output equal.
 				var inner = r.get();
-				return inner == null ? monoType() : typeId(inner);
+				return inner == null ? dynamicType() : typeId(inner);
 			case TLazy(f):
 				return typeId(f());
 			case TInst(_, _) | TEnum(_, _) | TAbstract(_, _) | TFun(_, _) | TAnonymous(_):
@@ -341,11 +342,6 @@ class Export {
 	function dynamicType():Int {
 		if (dynId < 0) dynId = rec(types, [TypeKind.DYNAMIC, Format.NONE, Format.NONE, 0, 0]);
 		return dynId;
-	}
-
-	function monoType():Int {
-		if (monoId < 0) monoId = rec(types, [TypeKind.MONO, Format.NONE, Format.NONE, 0, 0]);
-		return monoId;
 	}
 
 	// ---- type definitions
@@ -1157,8 +1153,25 @@ class Export {
 
 	// ---- writing
 
-	function run(all:Array<Type>):Void {
+	/** The kind and path of a type, which orders the types the compiler hands over. */
+	function sortKey(t:Type):String {
+		return switch (t) {
+			case TInst(c, _): "1" + c.toString();
+			case TEnum(e, _): "2" + e.toString();
+			case TAbstract(a, _): "3" + a.toString();
+			default: "4";
+		}
+	}
+
+	function run(compilerTypes:Array<Type>):Void {
 		var t0 = Sys.time();
+		// The compiler's order depends on what it had cached (a compilation server hands over
+		// modules in the order it first met them); sorting makes the file the same either way.
+		var all = compilerTypes.copy();
+		var keys = [for (t in all) sortKey(t)];
+		var order = [for (i in 0...all.length) i];
+		order.sort(function(a, b) return Reflect.compare(keys[a], keys[b]));
+		all = [for (i in order) all[i]];
 		loadParents();
 		if (parentLayers > 0 && !layersCoverClasses(all)) resetParents();
 		var tLayers = Sys.time();

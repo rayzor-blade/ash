@@ -38,6 +38,7 @@ pub mod hl_bindings {
     #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/hl_bindings.rs"));
 }
+pub mod archive;
 pub mod jit_map;
 pub mod jit_memory;
 pub mod layout;

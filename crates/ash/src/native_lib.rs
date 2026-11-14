@@ -976,7 +976,7 @@ impl NativeFunctionResolver {
                 names.sort_unstable();
                 eprintln!(
                     "[ash] the target cannot load libraries, so {} is not loaded; \
-                     any primitive from it raises when reached",
+                     a primitive from it raises when reached",
                     names.join(", ")
                 );
             }

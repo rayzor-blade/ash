@@ -16,6 +16,8 @@ use std::process::Command;
 
 use anyhow::{Result, anyhow, bail};
 
+use crate::archive::defined_in;
+
 /// How to run the platform's tools.
 pub(crate) struct Tools<'a> {
     /// The compiler driver and the arguments that select the target.
@@ -58,51 +60,6 @@ fn has_legacy_hash(name: &str) -> bool {
         return false;
     };
     body[..body.len() - 16].ends_with("17h") && hash.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// A symbol a library defines: its name, and whether it is hidden.
-#[derive(Debug, PartialEq, Eq)]
-struct Defined {
-    name: String,
-    hidden: bool,
-}
-
-/// The global symbols the archive's objects define. A member that is not an
-/// object file, such as raw bitcode, has none to give; an archive with no
-/// readable member is an error.
-fn defined_in(archive: &Path) -> Result<Vec<Defined>> {
-    use object::{Object, ObjectSymbol, SymbolScope};
-
-    let data = std::fs::read(archive)
-        .map_err(|e| anyhow!("could not read {}: {e}", archive.display()))?;
-    let members = object::read::archive::ArchiveFile::parse(&*data)
-        .map_err(|e| anyhow!("{} is not an archive: {e}", archive.display()))?;
-    let mut defined = Vec::new();
-    let mut readable = 0;
-    for member in members.members() {
-        let Ok(member) = member else { continue };
-        let Ok(bytes) = member.data(&*data) else {
-            continue;
-        };
-        let Ok(file) = object::File::parse(bytes) else {
-            continue;
-        };
-        readable += 1;
-        for symbol in file.symbols() {
-            if symbol.is_undefined() || !symbol.is_global() {
-                continue;
-            }
-            let Ok(name) = symbol.name() else { continue };
-            defined.push(Defined {
-                name: name.to_string(),
-                hidden: symbol.scope() == SymbolScope::Linkage,
-            });
-        }
-    }
-    if readable == 0 {
-        bail!("{} has no object file whose symbols can be read", archive.display());
-    }
-    Ok(defined)
 }
 
 /// An NDK tool, found beside the compiler driver.

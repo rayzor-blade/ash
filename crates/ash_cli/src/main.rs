@@ -1318,18 +1318,27 @@ fn run() -> Result<()> {
         // can. Cross-compiling to a sandbox, the HDLLs found here would be
         // the host's and would never be used, so a missing one must not
         // refuse the build.
-        let target_loads_libraries = cli
+        let abi = cli
             .target
             .as_deref()
-            .map(|t| {
-                ash_core::target_abi::TargetAbi::for_triple_str(t)
-                    .map(|abi| abi.native_dynamic_loading)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(true);
+            .and_then(|t| ash_core::target_abi::TargetAbi::for_triple_str(t).ok());
+        let target_loads_libraries = abi.as_ref().is_none_or(|abi| abi.native_dynamic_loading);
+        // A phone program links its libraries from `--native-lib` archives, so
+        // a primitive one of them defines is not missing.
+        let natives: Vec<_> = if abi.as_ref().is_some_and(|abi| abi.static_natives) {
+            let defined = ash_core::archive::defined_symbols(&cli.native_libs);
+            bytecode
+                .natives
+                .iter()
+                .filter(|n| !defined.contains(&format!("hlp_{}", n.name.trim_start_matches("hlp_"))))
+                .cloned()
+                .collect()
+        } else {
+            bytecode.natives.clone()
+        };
         native_resolver.discover_and_load_libraries(
             search_dir,
-            &bytecode.natives,
+            &natives,
             target_loads_libraries,
         )?;
     }

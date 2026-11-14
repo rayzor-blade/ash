@@ -1627,14 +1627,32 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     }
 }
 
+/// What every new fiber starts with: its id, and the counts and timers that
+/// make the scheduler treat it as a live thread.
+unsafe fn begin_fiber(ctx: *mut c_void) -> u32 {
+    let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
+    LOGICAL_THREADS.fetch_add(1, Ordering::Release);
+    ensure_preemption_timer();
+    request_fiber_poll();
+    worker_trace("create", id as u64, ctx as u64);
+    id
+}
+
+/// Put `body(ctx)` on this thread's scheduler as a fiber that waits for the
+/// scheduler's next step, instead of running at once as `spawn` does. For a
+/// host whose loop owns the thread and decides when the program runs.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) unsafe fn install_deferred(body: FiberBody, ctx: *mut c_void) {
+    unsafe {
+        let id = begin_fiber(ctx);
+        install_fiber(id, body, ctx);
+    }
+}
+
 /// The scheduler half of `thread_create`: a fiber running `body(ctx)`.
 pub(crate) unsafe fn spawn(body: FiberBody, ctx: *mut c_void, flags: u32) -> *mut c_void {
     unsafe {
-        let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
-        LOGICAL_THREADS.fetch_add(1, Ordering::Release);
-        ensure_preemption_timer();
-        request_fiber_poll();
-        worker_trace("create", id as u64, ctx as u64);
+        let id = begin_fiber(ctx);
         if flags & RT_THREAD_COMPILED != 0 && dispatch_to_worker(id, body, ctx) {
             return ((id as usize) << 4 | 1) as *mut c_void;
         }
@@ -1923,6 +1941,9 @@ pub(crate) unsafe fn block_yield() {
         }
     }
 }
+
+#[cfg(not(target_family = "wasm"))]
+mod host_program;
 
 #[cfg(test)]
 mod host_wait_tests {

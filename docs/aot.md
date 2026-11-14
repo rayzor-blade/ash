@@ -272,8 +272,20 @@ build one (below) and put it there or name it with `--runtime`.
   the same internals, into one object that keeps only its C interface global.
   This needs the tools the SDK already provides: Xcode's compiler driver and
   `nm`, or the NDK's `llvm-nm` and `llvm-objcopy`.
+- On iOS, UIKit owns the main thread and calls the app once per pass of its
+  loop. When the program links hlwindow, `main` therefore hands the program to
+  the window host's loop, `xwindow_run_turns`, and the program becomes a fiber
+  on the main thread. Each turn of the loop resumes the fiber. When the
+  program waits on a window with nothing to return, the host suspends the
+  fiber until the next turn. When the program's entry returns, the process
+  exits with its status. A program that links no window host runs on the main
+  thread as it does on every other target. On Android, hlwindow's
+  `android_main` calls the `xwindow_main` that ash defines, and the program
+  runs on the activity's thread.
 - ash writes an executable, which runs under `xcrun simctl spawn` and
-  `adb shell`. It does not write an app bundle or an APK.
+  `adb shell`. It does not write an app bundle or an APK. A UIKit app needs a
+  bundle: put the executable and an `Info.plist` in a `.app` directory and
+  install it with `xcrun simctl install`.
 - Build a runtime per target with
   `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
   Android with `cargo rustc -p ash_std --target aarch64-linux-android

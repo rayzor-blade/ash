@@ -2002,16 +2002,19 @@ impl<'ctx> JITModule<'ctx> {
             &[boundary.as_global_value().as_pointer_value().into()],
             "",
         )?;
-        let status = self
-            .builder
-            .build_call(safe_entry, &[], "entrypoint")?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| anyhow!("safe entrypoint wrapper returned void"))?
-            .into_int_value();
-        let status = self
-            .builder
-            .build_int_truncate(status, i32_type, "exit_status")?;
+        let status = if self.target_abi.triple().contains("apple-ios") {
+            self.build_host_run(safe_entry)?
+        } else {
+            let status = self
+                .builder
+                .build_call(safe_entry, &[], "entrypoint")?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| anyhow!("safe entrypoint wrapper returned void"))?
+                .into_int_value();
+            self.builder
+                .build_int_truncate(status, i32_type, "exit_status")?
+        };
         self.builder.build_return(Some(&status))?;
         if !main.verify(true) {
             return Err(anyhow!("main failed LLVM verification"));
@@ -2150,15 +2153,61 @@ impl<'ctx> JITModule<'ctx> {
     /// The address of the library's `hlp_<prim>` resolver, weakly referenced:
     /// null when nothing the app links defines it.
     fn weak_resolver(&self, prim: &str) -> PointerValue<'ctx> {
-        let name = format!("hlp_{prim}");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let function = self.module.get_function(&name).unwrap_or_else(|| {
-            self.module.add_function(
-                &name,
-                ptr_type.fn_type(&[ptr_type.into()], false),
-                Some(Linkage::ExternalWeak),
-            )
+        self.weak_function(
+            &format!("hlp_{prim}"),
+            ptr_type.fn_type(&[ptr_type.into()], false),
+        )
+    }
+
+    /// The address of `name`, weakly referenced: null when nothing the app
+    /// links defines it.
+    fn weak_function(
+        &self,
+        name: &str,
+        ty: inkwell::types::FunctionType<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let function = self.module.get_function(name).unwrap_or_else(|| {
+            self.module
+                .add_function(name, ty, Some(Linkage::ExternalWeak))
         });
         function.as_global_value().as_pointer_value()
+    }
+
+    /// Run the program under the window host's event loop, which owns an iOS
+    /// app's main thread. With no such host linked the symbols are null and the
+    /// runtime runs the entry in place. Answers the exit status.
+    fn build_host_run(
+        &self,
+        entry: FunctionValue<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>> {
+        let i32_type = self.context.i32_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let void_type = self.context.void_type();
+        let run_turns = self.weak_function(
+            "xwindow_run_turns",
+            i32_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+        );
+        let set_yield = self.weak_function(
+            "xwindow_set_turn_yield",
+            void_type.fn_type(&[ptr_type.into()], false),
+        );
+        let run_ty = i32_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let run = self.aot_symbol("hlp_host_run_program", run_ty);
+        self.builder
+            .build_indirect_call(
+                run_ty,
+                run,
+                &[
+                    run_turns.into(),
+                    set_yield.into(),
+                    entry.as_global_value().as_pointer_value().into(),
+                ],
+                "exit_status",
+            )?
+            .try_as_basic_value()
+            .basic()
+            .map(|status| status.into_int_value())
+            .ok_or_else(|| anyhow!("hlp_host_run_program returned void"))
     }
 }

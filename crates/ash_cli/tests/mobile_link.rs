@@ -107,18 +107,18 @@ fn an_ios_program_links_and_says_which_platform_it_is_for() {
     }
 }
 
-/// `static_native/toy.c`, compiled for the iOS simulator and archived.
+/// `static_native/<name>.c`, compiled for the iOS simulator and archived.
 #[cfg(target_os = "macos")]
-fn toy_archive(dir: &Path) -> Option<PathBuf> {
+fn c_archive(dir: &Path, name: &str) -> Option<PathBuf> {
     let xcrun = |args: &[&str]| {
         let out = Command::new("xcrun").args(args).output().ok()?;
         out.status.success().then_some(out)
     };
     let sdk = xcrun(&["--sdk", "iphonesimulator", "--show-sdk-path"])?;
     let sdk = String::from_utf8_lossy(&sdk.stdout).trim().to_string();
-    let object = dir.join("toy.o");
-    let archive = dir.join("libtoy.a");
-    let source = tests_dir().join("static_native/toy.c");
+    let object = dir.join(format!("{name}.o"));
+    let archive = dir.join(format!("lib{name}.a"));
+    let source = tests_dir().join(format!("static_native/{name}.c"));
     xcrun(&[
         "--sdk",
         "iphonesimulator",
@@ -147,7 +147,7 @@ fn an_ios_program_links_the_natives_it_calls_from_an_archive() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let Some(archive) = toy_archive(dir.path()) else {
+    let Some(archive) = c_archive(dir.path(), "toy") else {
         return eprintln!("skipped: no Xcode");
     };
     let out = dir.path().join("native");
@@ -169,6 +169,63 @@ fn an_ios_program_links_the_natives_it_calls_from_an_archive() {
     assert!(defined.contains("_hlp_toy_add"), "{defined}");
     assert!(defined.contains("_hlp_toy_scale"), "{defined}");
     assert!(!defined.contains("_hlp_toy_absent"), "{defined}");
+}
+
+/// The program runs as a fiber under the loop a window host links beside it,
+/// which iOS needs because the platform owns the main thread: the host's loop
+/// entry points are the ones the program calls.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ios_program_runs_under_the_loop_of_a_host_it_links() {
+    let triple = "aarch64-apple-ios-sim";
+    let Some(runtime) = runtime(triple) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(archive) = c_archive(dir.path(), "hostloop") else {
+        return eprintln!("skipped: no Xcode");
+    };
+    let out = dir.path().join("hosted");
+    if let Err(e) = build_program(
+        triple,
+        &runtime,
+        &out,
+        "test_host_loop.hl",
+        &[archive.as_path()],
+    ) {
+        panic!("{e}");
+    }
+    let nm = Command::new("xcrun")
+        .args(["nm", "-gU"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let defined = String::from_utf8_lossy(&nm.stdout);
+    assert!(defined.contains("_xwindow_run_turns"), "{defined}");
+    assert!(defined.contains("_hlp_hostloop_wait"), "{defined}");
+}
+
+/// Without a host's loop the entry points are null, and a program with no
+/// window links and starts as it always has.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ios_program_without_a_host_loop_links() {
+    let triple = "aarch64-apple-ios-sim";
+    let Some(runtime) = runtime(triple) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("plain");
+    if let Err(e) = build_program(triple, &runtime, &out, "test_basic.hl", &[]) {
+        panic!("{e}");
+    }
+    let nm = Command::new("xcrun")
+        .args(["nm", "-u"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let undefined = String::from_utf8_lossy(&nm.stdout);
+    assert!(undefined.contains("_xwindow_run_turns"), "{undefined}");
 }
 
 /// A small Rust static library for the iOS simulator that exports one

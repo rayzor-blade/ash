@@ -866,6 +866,10 @@ fn link_wasm_module(
     Ok(())
 }
 
+/// The window host's loop entry points an iOS program references weakly, so
+/// that a program without the host still links.
+const HOST_LOOP_SYMBOLS: [&str; 2] = ["xwindow_run_turns", "xwindow_set_turn_yield"];
+
 #[allow(clippy::too_many_arguments)]
 pub fn link_executable(
     objects: &[PathBuf],
@@ -959,10 +963,15 @@ pub fn link_executable(
         cmd.args(object_args(object, os));
     }
     cmd.arg(&runtime);
-    // The program weakly references these resolvers; Mach-O's linker only
-    // accepts an undefined weak reference when it is told which ones.
+    // The program weakly references these resolvers, and the window host's
+    // loop entry points; Mach-O's linker only accepts an undefined weak
+    // reference when it is told which ones.
     if os == "ios" {
-        for symbol in native_symbols {
+        for symbol in native_symbols
+            .iter()
+            .map(String::as_str)
+            .chain(HOST_LOOP_SYMBOLS)
+        {
             cmd.arg(format!("-Wl,-U,_{symbol}"));
         }
     }

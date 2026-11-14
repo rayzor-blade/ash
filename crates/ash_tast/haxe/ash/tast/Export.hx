@@ -76,6 +76,8 @@ class Export {
 	var typedefIds:Map<String, Int> = new Map();
 	var textIds:Map<String, Int> = new Map();
 	var dynId = -1;
+	/** Seconds spent in the compiler turning field bodies into macro values. */
+	var bodyTime = 0.0;
 	var typeIds:Map<String, Int> = new Map();
 	var classIds:Map<String, Int> = new Map();
 	var classTypes:Array<Ref<ClassType>> = [];
@@ -508,7 +510,9 @@ class Export {
 	}
 
 	function funcOfField(f:ClassField):Int {
+		var t = Sys.time();
 		var e = f.expr();
+		bodyTime += Sys.time() - t;
 		if (e == null) return Format.NONE;
 		switch (e.expr) {
 			case TFunction(tf):
@@ -1229,7 +1233,7 @@ class Export {
 			Sys.println('[ash_tast] ${path}: ${bytes.length} bytes, ${nodeCount} nodes, ${Std.int(types.length / 5)} types, '
 				+ '${classTypes.length} classes, ${Std.int(fields.length / 6)} fields, ${Std.int(funcs.length / 6)} functions, '
 				+ '${Std.int(locals.length / 3)} locals, ${strOffsets.length} strings');
-			Sys.println('[ash_tast] build ${ms(t0, tBuilt)} ms (layers ${ms(t0, tLayers)} ms), assemble and write ${ms(tBuilt, Sys.time())} ms');
+			Sys.println('[ash_tast] build ${ms(t0, tBuilt)} ms (layers ${ms(t0, tLayers)} ms, field.expr() ${Std.int(bodyTime * 1000)} ms), assemble and write ${ms(tBuilt, Sys.time())} ms');
 			if (parentLayers > 0 || parentPaths.length > 0)
 				Sys.println('[ash_tast] layers used: $parentLayers of ${parentPaths.length}, kept from them: ${Std.int(keptRecs.length / 2)} entries');
 			if (dynamicFields > 0) Sys.println('[ash_tast] fields written by name only: $dynamicFields');

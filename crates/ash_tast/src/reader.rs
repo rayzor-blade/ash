@@ -43,6 +43,9 @@ pub enum TastError {
     KidsNotAfterParent { node: usize },
     /// A node has a kind the format does not define.
     UnknownNodeKind { node: usize, kind: u8 },
+    /// The layers given do not stack: a layer's `Parents` is not the identities of
+    /// the layers below it.
+    ParentMismatch { layer: usize },
     /// A node has the wrong number of children for its kind.
     BadArity {
         node: usize,
@@ -90,6 +93,12 @@ impl fmt::Display for TastError {
             TastError::UnknownNodeKind { node, kind } => {
                 write!(f, "node {node} has unknown kind {kind}")
             }
+            TastError::ParentMismatch { layer } => {
+                write!(
+                    f,
+                    "layer {layer} was built on different layers than the ones it is stacked on"
+                )
+            }
             TastError::BadArity { node, kind, kids } => {
                 write!(
                     f,
@@ -101,6 +110,41 @@ impl fmt::Display for TastError {
 }
 
 impl std::error::Error for TastError {}
+
+/// The tables an id can name in a lower layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    Types,
+    Classes,
+    Fields,
+    Abstracts,
+    Enums,
+    EnumCtors,
+}
+
+/// How many entries each taggable table of a layer has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub types: usize,
+    pub classes: usize,
+    pub fields: usize,
+    pub abstracts: usize,
+    pub enums: usize,
+    pub enum_ctors: usize,
+}
+
+impl Counts {
+    fn of(&self, table: Table) -> usize {
+        match table {
+            Table::Types => self.types,
+            Table::Classes => self.classes,
+            Table::Fields => self.fields,
+            Table::Abstracts => self.abstracts,
+            Table::Enums => self.enums,
+            Table::EnumCtors => self.enum_ctors,
+        }
+    }
+}
 
 /// A validated TAST file, borrowed from its bytes.
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +165,9 @@ pub struct Tast<'a> {
     params: &'a [ParamRec],
     funcs: &'a [FuncRec],
     nodes: &'a [NodeRec],
+    keys: &'a [KeyRec],
+    kept: &'a [KeptRec],
+    parents: &'a [ParentRec],
 }
 
 fn slice<'a, T: FromBytes + KnownLayout + Immutable>(
@@ -138,6 +185,50 @@ fn slice<'a, T: FromBytes + KnownLayout + Immutable>(
         .filter(|end| *end <= bytes.len())
         .ok_or_else(|| out.clone())?;
     <[T]>::ref_from_bytes(&bytes[offset..end]).map_err(|_| out)
+}
+
+/// The header and the section table of `bytes`, after the checks that say the
+/// file is a TAST file of this layout.
+fn open(bytes: &[u8]) -> Result<(&Header, &[SectionRec]), TastError> {
+    let (header, rest) = Header::ref_from_prefix(bytes).map_err(|_| TastError::TooShort)?;
+    if header.magic.get() != MAGIC {
+        return Err(TastError::BadMagic(header.magic.get()));
+    }
+    if header.version.get() != VERSION {
+        return Err(TastError::BadVersion(header.version.get()));
+    }
+    let file =
+        u64::from(header.schema_hash_hi.get()) << 32 | u64::from(header.schema_hash_lo.get());
+    let reader = schema_hash();
+    if file != reader {
+        return Err(TastError::SchemaMismatch { file, reader });
+    }
+    let found = header.section_count.get();
+    if (found as usize) < SECTIONS.len() {
+        return Err(TastError::MissingSections {
+            found,
+            need: SECTIONS.len(),
+        });
+    }
+    let table_bytes = (found as usize)
+        .checked_mul(SectionRec::SIZE)
+        .filter(|n| *n <= rest.len())
+        .ok_or(TastError::TooShort)?;
+    let table =
+        <[SectionRec]>::ref_from_bytes(&rest[..table_bytes]).map_err(|_| TastError::TooShort)?;
+    Ok((header, table))
+}
+
+/// A file's own identity and the identities of the layers it names below it, read
+/// without checking the rest.
+pub fn lineage(bytes: &[u8]) -> Result<(u64, Vec<u64>), TastError> {
+    let (header, table) = open(bytes)?;
+    let parents: &[ParentRec] = slice(bytes, table, section::PARENTS)?;
+    let id = |lo: U32, hi: U32| u64::from(hi.get()) << 32 | u64::from(lo.get());
+    Ok((
+        id(header.layer_id_lo, header.layer_id_hi),
+        parents.iter().map(|p| id(p.id_lo, p.id_hi)).collect(),
+    ))
 }
 
 /// `value` names an entry of a table of `limit` records. `optional` allows [`NONE`].
@@ -187,34 +278,16 @@ fn range(
 }
 
 impl<'a> Tast<'a> {
-    /// Check `bytes` and borrow them as a TAST file.
+    /// Check `bytes` and borrow them as a TAST file with no layers below it.
     pub fn parse(bytes: &'a [u8]) -> Result<Tast<'a>, TastError> {
-        let (header, rest) = Header::ref_from_prefix(bytes).map_err(|_| TastError::TooShort)?;
-        if header.magic.get() != MAGIC {
-            return Err(TastError::BadMagic(header.magic.get()));
-        }
-        if header.version.get() != VERSION {
-            return Err(TastError::BadVersion(header.version.get()));
-        }
-        let file =
-            u64::from(header.schema_hash_hi.get()) << 32 | u64::from(header.schema_hash_lo.get());
-        let reader = schema_hash();
-        if file != reader {
-            return Err(TastError::SchemaMismatch { file, reader });
-        }
-        let found = header.section_count.get();
-        if (found as usize) < SECTIONS.len() {
-            return Err(TastError::MissingSections {
-                found,
-                need: SECTIONS.len(),
-            });
-        }
-        let table_bytes = (found as usize)
-            .checked_mul(SectionRec::SIZE)
-            .filter(|n| *n <= rest.len())
-            .ok_or(TastError::TooShort)?;
-        let table = <[SectionRec]>::ref_from_bytes(&rest[..table_bytes])
-            .map_err(|_| TastError::TooShort)?;
+        Tast::parse_in(bytes, &[])
+    }
+
+    /// Check `bytes` and borrow them as a layer stacked on layers whose table sizes
+    /// are `parents`, bottom first. A tagged id is valid when the parent it names
+    /// has that entry.
+    pub fn parse_in(bytes: &'a [u8], parents: &[Counts]) -> Result<Tast<'a>, TastError> {
+        let (header, table) = open(bytes)?;
 
         let blob_bytes: &[u8] = {
             let rec = &table[section::STRINGS];
@@ -245,12 +318,66 @@ impl<'a> Tast<'a> {
             params: slice(bytes, table, section::PARAMS)?,
             funcs: slice(bytes, table, section::FUNCS)?,
             nodes: slice(bytes, table, section::NODES)?,
+            keys: slice(bytes, table, section::KEYS)?,
+            kept: slice(bytes, table, section::KEPT)?,
+            parents: slice(bytes, table, section::PARENTS)?,
         };
-        tast.validate()?;
+        tast.validate(parents)?;
         Ok(tast)
     }
 
-    fn validate(&self) -> Result<(), TastError> {
+    /// The size of each taggable table of this layer.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            types: self.types.len(),
+            classes: self.classes.len(),
+            fields: self.fields.len(),
+            abstracts: self.abstracts.len(),
+            enums: self.enums.len(),
+            enum_ctors: self.enum_ctors.len(),
+        }
+    }
+
+    /// `value` names an entry of `table`: in this layer, or in the parent a tag names.
+    fn id_ref(
+        &self,
+        parents: &[Counts],
+        at: (&'static str, usize, &'static str),
+        value: U32,
+        table: Table,
+        optional: bool,
+    ) -> Result<(), TastError> {
+        let (name, index, field) = at;
+        let raw = value.get();
+        if optional && raw == NONE {
+            return Ok(());
+        }
+        let limit = match tag::split(raw) {
+            Some((layer, entry)) => {
+                let size = parents.get(layer as usize).map_or(0, |c| c.of(table));
+                if (entry as usize) < size {
+                    return Ok(());
+                }
+                size
+            }
+            None => {
+                let size = self.counts().of(table);
+                if raw != NONE && (raw as usize) < size {
+                    return Ok(());
+                }
+                size
+            }
+        };
+        Err(TastError::BadReference {
+            table: name,
+            index,
+            field,
+            value: raw,
+            limit,
+        })
+    }
+
+    fn validate(&self, parents: &[Counts]) -> Result<(), TastError> {
         let (strs, types, classes, fields) = (
             self.str_index.len(),
             self.types.len(),
@@ -259,6 +386,7 @@ impl<'a> Tast<'a> {
         );
         let (funcs, locals, nodes) = (self.funcs.len(), self.locals.len(), self.nodes.len());
         let (positions, type_args) = (self.positions.len(), self.type_args.len());
+        let id = |at, value, table, optional| self.id_ref(parents, at, value, table, optional);
 
         reference("Header", 0, "entry", self.header.entry, funcs, true)?;
 
@@ -276,18 +404,16 @@ impl<'a> Tast<'a> {
         for (i, p) in self.positions.iter().enumerate() {
             reference("Positions", i, "file", p.file, strs, true)?;
         }
-        for (i, id) in self.type_args.iter().enumerate() {
-            reference("TypeArgs", i, "type", *id, types, false)?;
+        for (i, t) in self.type_args.iter().enumerate() {
+            id(("TypeArgs", i, "type"), *t, Table::Types, false)?;
         }
         for (i, t) in self.types.iter().enumerate() {
             reference("Types", i, "name", t.name, strs, true)?;
             match t.kind {
-                type_kind::ENUM => reference("Types", i, "def", t.def, self.enums.len(), false)?,
-                type_kind::CLASS => reference("Types", i, "def", t.def, classes, false)?,
-                type_kind::ABSTRACT => {
-                    reference("Types", i, "def", t.def, self.abstracts.len(), false)?
-                }
-                type_kind::FUN => reference("Types", i, "def", t.def, types, false)?,
+                type_kind::ENUM => id(("Types", i, "def"), t.def, Table::Enums, false)?,
+                type_kind::CLASS => id(("Types", i, "def"), t.def, Table::Classes, false)?,
+                type_kind::ABSTRACT => id(("Types", i, "def"), t.def, Table::Abstracts, false)?,
+                type_kind::FUN => id(("Types", i, "def"), t.def, Table::Types, false)?,
                 type_kind::ANON => range(
                     "Types",
                     i,
@@ -320,7 +446,12 @@ impl<'a> Tast<'a> {
         }
         for (i, c) in self.classes.iter().enumerate() {
             reference("Classes", i, "name", c.name, strs, true)?;
-            reference("Classes", i, "super_type", c.super_type, types, true)?;
+            id(
+                ("Classes", i, "super_type"),
+                c.super_type,
+                Table::Types,
+                true,
+            )?;
             range(
                 "Classes",
                 i,
@@ -340,15 +471,25 @@ impl<'a> Tast<'a> {
         }
         for (i, f) in self.fields.iter().enumerate() {
             reference("Fields", i, "name", f.name, strs, false)?;
-            reference("Fields", i, "ty", f.ty, types, false)?;
-            reference("Fields", i, "owner", f.owner, classes, false)?;
+            id(("Fields", i, "ty"), f.ty, Table::Types, false)?;
+            id(("Fields", i, "owner"), f.owner, Table::Classes, false)?;
             reference("Fields", i, "func", f.func, funcs, true)?;
             reference("Fields", i, "pos", f.pos, positions, true)?;
         }
         for (i, a) in self.abstracts.iter().enumerate() {
             reference("Abstracts", i, "name", a.name, strs, true)?;
-            reference("Abstracts", i, "underlying", a.underlying, types, true)?;
-            reference("Abstracts", i, "impl_class", a.impl_class, classes, true)?;
+            id(
+                ("Abstracts", i, "underlying"),
+                a.underlying,
+                Table::Types,
+                true,
+            )?;
+            id(
+                ("Abstracts", i, "impl_class"),
+                a.impl_class,
+                Table::Classes,
+                true,
+            )?;
         }
         for (i, e) in self.enums.iter().enumerate() {
             reference("Enums", i, "name", e.name, strs, true)?;
@@ -363,15 +504,8 @@ impl<'a> Tast<'a> {
         }
         for (i, c) in self.enum_ctors.iter().enumerate() {
             reference("EnumCtors", i, "name", c.name, strs, false)?;
-            reference(
-                "EnumCtors",
-                i,
-                "enum_id",
-                c.enum_id,
-                self.enums.len(),
-                false,
-            )?;
-            reference("EnumCtors", i, "ty", c.ty, types, false)?;
+            id(("EnumCtors", i, "enum_id"), c.enum_id, Table::Enums, false)?;
+            id(("EnumCtors", i, "ty"), c.ty, Table::Types, false)?;
             range(
                 "EnumCtors",
                 i,
@@ -383,18 +517,18 @@ impl<'a> Tast<'a> {
         }
         for (i, f) in self.anon_fields.iter().enumerate() {
             reference("AnonFields", i, "name", f.name, strs, false)?;
-            reference("AnonFields", i, "ty", f.ty, types, false)?;
+            id(("AnonFields", i, "ty"), f.ty, Table::Types, false)?;
         }
         for (i, l) in self.locals.iter().enumerate() {
             reference("Locals", i, "name", l.name, strs, true)?;
-            reference("Locals", i, "ty", l.ty, types, false)?;
+            id(("Locals", i, "ty"), l.ty, Table::Types, false)?;
         }
         for (i, p) in self.params.iter().enumerate() {
             reference("Params", i, "local", p.local, locals, false)?;
             reference("Params", i, "default_value", p.default_value, nodes, true)?;
         }
         for (i, f) in self.funcs.iter().enumerate() {
-            reference("Funcs", i, "ret", f.ret, types, true)?;
+            id(("Funcs", i, "ret"), f.ret, Table::Types, true)?;
             range(
                 "Funcs",
                 i,
@@ -406,16 +540,67 @@ impl<'a> Tast<'a> {
             reference("Funcs", i, "root", f.root, nodes, true)?;
             reference("Funcs", i, "pos", f.pos, positions, true)?;
         }
+        for (i, k) in self.keys.iter().enumerate() {
+            reference("Keys", i, "key", k.key, strs, false)?;
+            match k.kind.get() {
+                key_kind::INST_TYPE
+                | key_kind::ABSTRACT_TYPE
+                | key_kind::ENUM_TYPE
+                | key_kind::TYPEDEF_TYPE
+                | key_kind::TEXT_TYPE
+                | key_kind::STRUCT_TYPE => reference("Keys", i, "value", k.value, types, false)?,
+                key_kind::CLASS => reference("Keys", i, "value", k.value, classes, false)?,
+                key_kind::ENUM => reference("Keys", i, "value", k.value, self.enums.len(), false)?,
+                key_kind::ABSTRACT => {
+                    reference("Keys", i, "value", k.value, self.abstracts.len(), false)?
+                }
+                key_kind::FIELD => reference("Keys", i, "value", k.value, fields, false)?,
+                key_kind::ENUM_CTOR => {
+                    reference("Keys", i, "value", k.value, self.enum_ctors.len(), false)?
+                }
+                key_kind::ROOT | key_kind::DIGEST => {}
+                other => {
+                    return Err(TastError::BadReference {
+                        table: "Keys",
+                        index: i,
+                        field: "kind",
+                        value: other,
+                        limit: KEY_KINDS.len(),
+                    });
+                }
+            }
+        }
+        for (i, k) in self.kept.iter().enumerate() {
+            let table = match k.kind.get() {
+                kept_kind::CLASS => Table::Classes,
+                kept_kind::FIELD => Table::Fields,
+                kept_kind::ENUM => Table::Enums,
+                kept_kind::ABSTRACT => Table::Abstracts,
+                other => {
+                    return Err(TastError::BadReference {
+                        table: "Kept",
+                        index: i,
+                        field: "kind",
+                        value: other,
+                        limit: KEPT_KINDS.len(),
+                    });
+                }
+            };
+            id(("Kept", i, "id"), k.id, table, false)?;
+        }
         for i in 0..nodes {
-            self.validate_node(i)?;
+            self.validate_node(i, parents)?;
         }
         Ok(())
     }
 
-    fn validate_node(&self, i: usize) -> Result<(), TastError> {
+    fn validate_node(&self, i: usize, parents: &[Counts]) -> Result<(), TastError> {
         use node_kind as k;
         let n = &self.nodes[i];
-        reference("Nodes", i, "ty", n.ty, self.types.len(), true)?;
+        let id = |field, value, table, optional| {
+            self.id_ref(parents, ("Nodes", i, field), value, table, optional)
+        };
+        id("ty", n.ty, Table::Types, true)?;
         reference("Nodes", i, "pos", n.pos, self.positions.len(), true)?;
         let kids = n.kid_count.get();
         if kids > 0 && (n.first_kid.get() as usize) <= i {
@@ -449,10 +634,10 @@ impl<'a> Tast<'a> {
                 }
             };
         let module = |kind: u8, index: U32| -> Result<(), TastError> {
-            let limit = match kind {
-                module_kind::CLASS => self.classes.len(),
-                module_kind::ENUM => self.enums.len(),
-                module_kind::ABSTRACT => self.abstracts.len(),
+            let table = match kind {
+                module_kind::CLASS => Table::Classes,
+                module_kind::ENUM => Table::Enums,
+                module_kind::ABSTRACT => Table::Abstracts,
                 _ => {
                     return Err(TastError::BadReference {
                         table: "Nodes",
@@ -463,7 +648,7 @@ impl<'a> Tast<'a> {
                     });
                 }
             };
-            reference("Nodes", i, "a", index, limit, false)
+            id("a", index, table, false)
         };
 
         match n.kind {
@@ -512,12 +697,14 @@ impl<'a> Tast<'a> {
             }
             k::FIELD => {
                 arity("FIELD", Some(1), 0)?;
-                let limit = match a.get() {
+                match a.get() {
                     field_access::INSTANCE | field_access::STATIC | field_access::CLOSURE => {
-                        self.fields.len()
+                        id("b", b, Table::Fields, false)?
                     }
-                    field_access::ANON | field_access::DYNAMIC => strs,
-                    field_access::ENUM => self.enum_ctors.len(),
+                    field_access::ANON | field_access::DYNAMIC => {
+                        reference("Nodes", i, "b", b, strs, false)?
+                    }
+                    field_access::ENUM => id("b", b, Table::EnumCtors, false)?,
                     other => {
                         return Err(TastError::BadReference {
                             table: "Nodes",
@@ -527,8 +714,7 @@ impl<'a> Tast<'a> {
                             limit: FIELD_ACCESSES.len(),
                         });
                     }
-                };
-                reference("Nodes", i, "b", b, limit, false)?;
+                }
             }
             k::TYPE_EXPR => {
                 arity("TYPE_EXPR", Some(0), 0)?;
@@ -537,7 +723,7 @@ impl<'a> Tast<'a> {
             k::PARENTHESIS => arity("PARENTHESIS", Some(1), 0)?,
             k::OBJECT_DECL | k::ARRAY_DECL | k::BLOCK => {}
             k::CALL => arity("CALL", None, 1)?,
-            k::NEW => reference("Nodes", i, "a", a, self.classes.len(), false)?,
+            k::NEW => id("a", a, Table::Classes, false)?,
             k::UNOP => {
                 arity("UNOP", Some(1), 0)?;
                 reference("Nodes", i, "a", a, UNOPS.len(), false)?;
@@ -577,7 +763,7 @@ impl<'a> Tast<'a> {
             }
             k::ENUM_PARAMETER => {
                 arity("ENUM_PARAMETER", Some(1), 0)?;
-                reference("Nodes", i, "a", a, self.enum_ctors.len(), false)?;
+                id("a", a, Table::EnumCtors, false)?;
             }
             k::ENUM_INDEX => arity("ENUM_INDEX", Some(1), 0)?,
             k::IDENT => {
@@ -597,6 +783,28 @@ impl<'a> Tast<'a> {
             kind => return Err(TastError::UnknownNodeKind { node: i, kind }),
         }
         Ok(())
+    }
+
+    /// This layer's identity, which layers above it name in `Parents`.
+    pub fn layer_id(&self) -> u64 {
+        u64::from(self.header.layer_id_hi.get()) << 32 | u64::from(self.header.layer_id_lo.get())
+    }
+
+    /// The identities of the layers this one was built on, bottom first.
+    pub fn parent_ids(&self) -> impl Iterator<Item = u64> + 'a {
+        self.parents
+            .iter()
+            .map(|p| u64::from(p.id_hi.get()) << 32 | u64::from(p.id_lo.get()))
+    }
+
+    /// The key index layers above use to find what is in this one.
+    pub fn keys(&self) -> &'a [KeyRec] {
+        self.keys
+    }
+
+    /// What the compiler's dead-code removal kept from lower layers.
+    pub fn kept(&self) -> &'a [KeptRec] {
+        self.kept
     }
 
     /// The program's entry function id.

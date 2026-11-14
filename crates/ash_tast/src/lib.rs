@@ -11,8 +11,11 @@
 //! validation pass checks every cross-reference; after it, ids are trusted.
 
 pub mod builder;
+pub mod dump;
 pub mod format;
 pub mod haxe;
 pub mod reader;
+pub mod stack;
 
-pub use reader::{Tast, TastError};
+pub use reader::{Tast, TastError, lineage};
+pub use stack::Stack;

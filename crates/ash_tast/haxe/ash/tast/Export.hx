@@ -44,6 +44,10 @@ class Export {
 	var params:Array<Int> = []; // local, default_value
 	var funcs:Array<Int> = []; // ret, params_first, params_count, root, flags, pos
 	var positions:Array<Int> = []; // file, start, end
+	var keyRecs:Array<Int> = []; // kind, key (string id), value
+	var keptRecs:Array<Int> = []; // kind, id
+	var parentRecs:Array<Int> = []; // id_lo, id_hi
+	var layerId = [0, 0]; // lo, hi
 
 	// Expression nodes, written as records straight into a buffer that doubles when full.
 	var nodeBytes:Bytes = Bytes.alloc(1 << 20);
@@ -809,25 +813,27 @@ class Export {
 			blobLen, strOffsets.length, Std.int(positions.length / 3), Std.int(types.length / 5), typeArgs.length,
 			Std.int(classes.length / 7), Std.int(fields.length / 6), Std.int(abstracts.length / 4),
 			Std.int(enums.length / 4), Std.int(enumCtors.length / 6), Std.int(anonFields.length / 3),
-			Std.int(locals.length / 3), Std.int(params.length / 2), Std.int(funcs.length / 6), nodeCount
+			Std.int(locals.length / 3), Std.int(params.length / 2), Std.int(funcs.length / 6), nodeCount,
+			Std.int(keyRecs.length / 3), Std.int(keptRecs.length / 2), Std.int(parentRecs.length / 2)
 		];
 		var elems = [
 			Format.STRINGS_ELEM, Format.STRING_INDEX_ELEM, Format.POSITIONS_ELEM, Format.TYPES_ELEM,
 			Format.TYPE_ARGS_ELEM, Format.CLASSES_ELEM, Format.FIELDS_ELEM, Format.ABSTRACTS_ELEM,
 			Format.ENUMS_ELEM, Format.ENUM_CTORS_ELEM, Format.ANON_FIELDS_ELEM, Format.LOCALS_ELEM,
-			Format.PARAMS_ELEM, Format.FUNCS_ELEM, Format.NODES_ELEM
+			Format.PARAMS_ELEM, Format.FUNCS_ELEM, Format.NODES_ELEM, Format.KEYS_ELEM, Format.KEPT_ELEM,
+			Format.PARENTS_ELEM
 		];
 		var offsets:Array<Int> = [];
-		var at = 32 + Format.SECTION_COUNT * Format.SECTION_REC_SIZE;
+		var at = Format.HEADER_SIZE + Format.SECTION_COUNT * Format.SECTION_REC_SIZE;
 		for (s in 0...Format.SECTION_COUNT) {
 			offsets.push(at);
 			at += counts[s] * elems[s];
 		}
 		var out = Bytes.alloc(at);
 		Format.writeHeader(out, 0, Format.MAGIC, Format.VERSION, Format.SCHEMA_HASH_LO, Format.SCHEMA_HASH_HI,
-			haxeVersion(), 0, entry, Format.SECTION_COUNT);
+			haxeVersion(), layerId[0], layerId[1], 0, entry, Format.SECTION_COUNT);
 		for (s in 0...Format.SECTION_COUNT)
-			Format.writeSectionRec(out, 32 + s * Format.SECTION_REC_SIZE, offsets[s], counts[s]);
+			Format.writeSectionRec(out, Format.HEADER_SIZE + s * Format.SECTION_REC_SIZE, offsets[s], counts[s]);
 
 		out.blit(offsets[Format.SECTION_STRINGS], blob.getBytes(), 0, blobLen);
 		for (i in 0...strOffsets.length)
@@ -885,6 +891,14 @@ class Export {
 				funcs[r + 2], funcs[r + 3], funcs[r + 4], funcs[r + 5]);
 		}
 		out.blit(offsets[Format.SECTION_NODES], nodeBytes, 0, nodeCount * Format.NODE_REC_SIZE);
+		for (i in 0...counts[Format.SECTION_KEYS])
+			Format.writeKeyRec(out, offsets[Format.SECTION_KEYS] + i * Format.KEY_REC_SIZE, keyRecs[i * 3], keyRecs[i * 3 + 1],
+				keyRecs[i * 3 + 2]);
+		for (i in 0...counts[Format.SECTION_KEPT])
+			Format.writeKeptRec(out, offsets[Format.SECTION_KEPT] + i * Format.KEPT_REC_SIZE, keptRecs[i * 2], keptRecs[i * 2 + 1]);
+		for (i in 0...counts[Format.SECTION_PARENTS])
+			Format.writeParentRec(out, offsets[Format.SECTION_PARENTS] + i * Format.PARENT_REC_SIZE, parentRecs[i * 2],
+				parentRecs[i * 2 + 1]);
 		return out;
 	}
 

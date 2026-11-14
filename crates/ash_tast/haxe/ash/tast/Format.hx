@@ -12,9 +12,9 @@ class Format {
 	public static inline final VERSION = 1;
 	/** A reference to nothing (`u32::MAX`, which is -1 as an Int). */
 	public static inline final NONE = -1;
-	public static inline final SCHEMA_HASH_LO = 0xd725f01b;
-	public static inline final SCHEMA_HASH_HI = 0xb2c0332f;
-	public static inline final SECTION_COUNT = 15;
+	public static inline final SCHEMA_HASH_LO = 0x2f345f78;
+	public static inline final SCHEMA_HASH_HI = 0xc8676d05;
+	public static inline final SECTION_COUNT = 18;
 	public static inline final SECTION_STRINGS = 0;
 	public static inline final SECTION_STRING_INDEX = 1;
 	public static inline final SECTION_POSITIONS = 2;
@@ -30,6 +30,9 @@ class Format {
 	public static inline final SECTION_PARAMS = 12;
 	public static inline final SECTION_FUNCS = 13;
 	public static inline final SECTION_NODES = 14;
+	public static inline final SECTION_KEYS = 15;
+	public static inline final SECTION_KEPT = 16;
+	public static inline final SECTION_PARENTS = 17;
 	public static inline final STRINGS_ELEM = 1;
 	public static inline final STRING_INDEX_ELEM = 8;
 	public static inline final POSITIONS_ELEM = 12;
@@ -45,7 +48,10 @@ class Format {
 	public static inline final PARAMS_ELEM = 8;
 	public static inline final FUNCS_ELEM = 24;
 	public static inline final NODES_ELEM = 28;
-	public static inline final HEADER_SIZE = 32;
+	public static inline final KEYS_ELEM = 12;
+	public static inline final KEPT_ELEM = 8;
+	public static inline final PARENTS_ELEM = 8;
+	public static inline final HEADER_SIZE = 40;
 	public static inline final SECTION_REC_SIZE = 8;
 	public static inline final STR_REC_SIZE = 8;
 	public static inline final POS_REC_SIZE = 12;
@@ -60,17 +66,22 @@ class Format {
 	public static inline final PARAM_REC_SIZE = 8;
 	public static inline final FUNC_REC_SIZE = 24;
 	public static inline final NODE_REC_SIZE = 28;
+	public static inline final KEY_REC_SIZE = 12;
+	public static inline final KEPT_REC_SIZE = 8;
+	public static inline final PARENT_REC_SIZE = 8;
 
 	/** Write one `Header` at byte `at`. */
-	public static inline function writeHeader(out:Bytes, at:Int, magic:Int, version:Int, schemaHashLo:Int, schemaHashHi:Int, haxeVersion:Int, flags:Int, entry:Int, sectionCount:Int):Void {
+	public static inline function writeHeader(out:Bytes, at:Int, magic:Int, version:Int, schemaHashLo:Int, schemaHashHi:Int, haxeVersion:Int, layerIdLo:Int, layerIdHi:Int, flags:Int, entry:Int, sectionCount:Int):Void {
 		out.setInt32(at + 0, magic);
 		out.setInt32(at + 4, version);
 		out.setInt32(at + 8, schemaHashLo);
 		out.setInt32(at + 12, schemaHashHi);
 		out.setInt32(at + 16, haxeVersion);
-		out.setInt32(at + 20, flags);
-		out.setInt32(at + 24, entry);
-		out.setInt32(at + 28, sectionCount);
+		out.setInt32(at + 20, layerIdLo);
+		out.setInt32(at + 24, layerIdHi);
+		out.setInt32(at + 28, flags);
+		out.setInt32(at + 32, entry);
+		out.setInt32(at + 36, sectionCount);
 	}
 
 	/** Write one `SectionRec` at byte `at`. */
@@ -187,6 +198,25 @@ class Format {
 		out.setInt32(at + 16, b);
 		out.setInt32(at + 20, firstKid);
 		out.setInt32(at + 24, kidCount);
+	}
+
+	/** Write one `KeyRec` at byte `at`. */
+	public static inline function writeKeyRec(out:Bytes, at:Int, kind:Int, key:Int, value:Int):Void {
+		out.setInt32(at + 0, kind);
+		out.setInt32(at + 4, key);
+		out.setInt32(at + 8, value);
+	}
+
+	/** Write one `KeptRec` at byte `at`. */
+	public static inline function writeKeptRec(out:Bytes, at:Int, kind:Int, id:Int):Void {
+		out.setInt32(at + 0, kind);
+		out.setInt32(at + 4, id);
+	}
+
+	/** Write one `ParentRec` at byte `at`. */
+	public static inline function writeParentRec(out:Bytes, at:Int, idLo:Int, idHi:Int):Void {
+		out.setInt32(at + 0, idLo);
+		out.setInt32(at + 4, idHi);
 	}
 
 	#if macro

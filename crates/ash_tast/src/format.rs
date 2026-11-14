@@ -6,6 +6,17 @@
 //! reference". All words are little-endian `u32` unless a field says
 //! otherwise, and no record needs alignment, so a mapped file is read in place.
 //!
+//! # Layers
+//!
+//! A file can be a layer of a stack: the standard library, then a library, then
+//! the program. A layer's ids are plain indexes into its own tables. A reference
+//! to something in a lower layer is a tagged id (see [`tag`]), so a layer is
+//! written without knowing what is below it beyond a key index, and a lower layer
+//! is built once and read in place by every program above it. A layer lists the
+//! layers below it in `Parents`, bottom first, by identity. `Keys` is the index a
+//! layer above uses to find what is in this one by name, and `Kept` lists what the
+//! compiler's dead-code removal kept from the layers below.
+//!
 //! # Node trees
 //!
 //! A function body is a tree of [`NodeRec`]s in the `Nodes` section. Nodes are
@@ -136,6 +147,10 @@ record! {
         schema_hash_hi: U32,
         /// The Haxe compiler version, `major * 10000 + minor * 100 + patch`.
         haxe_version: U32,
+        /// Low word of the layer's identity: what a layer above it names in `Parents`.
+        layer_id_lo: U32,
+        /// High word of the layer's identity.
+        layer_id_hi: U32,
         /// Reserved; zero.
         flags: U32,
         /// The program's entry function id, or [`NONE`].
@@ -322,6 +337,37 @@ record! {
     }
 }
 
+record! {
+    /// One entry of a layer's key index: how the exporter found a type, class, field
+    /// or enum by name, so a program built on this layer finds it again.
+    KeyRec {
+        /// A [`key_kind`].
+        kind: U32,
+        /// A string id: the key's text.
+        key: U32,
+        /// The entry's id in this layer, or 0 for a kind with no id.
+        value: U32,
+    }
+}
+
+record! {
+    /// An entry the compiler's dead-code removal kept in a lower layer.
+    KeptRec {
+        /// A [`kept_kind`].
+        kind: U32,
+        /// A tagged id of the kept class, field, enum or abstract.
+        id: U32,
+    }
+}
+
+record! {
+    /// A lower layer this one was built on: its identity, in stacking order.
+    ParentRec {
+        id_lo: U32,
+        id_hi: U32,
+    }
+}
+
 /// A section's name and element size.
 #[derive(Debug, Clone, Copy)]
 pub struct SectionDesc {
@@ -346,6 +392,9 @@ pub mod section {
     pub const PARAMS: usize = 12;
     pub const FUNCS: usize = 13;
     pub const NODES: usize = 14;
+    pub const KEYS: usize = 15;
+    pub const KEPT: usize = 16;
+    pub const PARENTS: usize = 17;
 }
 
 /// Every section, in [`section`] order, with its element size.
@@ -410,6 +459,18 @@ pub const SECTIONS: &[SectionDesc] = &[
         name: "Nodes",
         elem: NodeRec::SIZE,
     },
+    SectionDesc {
+        name: "Keys",
+        elem: KeyRec::SIZE,
+    },
+    SectionDesc {
+        name: "Kept",
+        elem: KeptRec::SIZE,
+    },
+    SectionDesc {
+        name: "Parents",
+        elem: ParentRec::SIZE,
+    },
 ];
 
 /// Every record, for the generators and the schema hash.
@@ -429,6 +490,9 @@ pub const RECORDS: &[&RecordDesc] = &[
     &ParamRec::DESC,
     &FuncRec::DESC,
     &NodeRec::DESC,
+    &KeyRec::DESC,
+    &KeptRec::DESC,
+    &ParentRec::DESC,
 ];
 
 /// A group of named byte constants, as an enum for the generators.
@@ -617,6 +681,74 @@ constants! {
     }
 }
 
+constants! {
+    /// `KeyRec::kind`: which of the exporter's maps an entry belongs to.
+    key_kind, KEY_KINDS, u32 {
+        /// A class type with no arguments, by the class path, to a type id.
+        INST_TYPE = 0,
+        /// An abstract type with no arguments, by the abstract path, to a type id.
+        ABSTRACT_TYPE = 1,
+        /// An enum type with no arguments, by the enum path, to a type id.
+        ENUM_TYPE = 2,
+        /// A typedef with no arguments, by the typedef path, to a type id.
+        TYPEDEF_TYPE = 3,
+        /// Any other type, by the compiler's text for it, to a type id.
+        TEXT_TYPE = 4,
+        /// A type by its structure, to a type id.
+        STRUCT_TYPE = 5,
+        /// A class path to a class id.
+        CLASS = 6,
+        /// An enum path to an enum id.
+        ENUM = 7,
+        /// An abstract path to an abstract id.
+        ABSTRACT = 8,
+        /// A class path, `#i:` or `#s:`, and a field name, to a field id.
+        FIELD = 9,
+        /// An enum path, a dot and a constructor name, to an enum constructor id.
+        ENUM_CTOR = 10,
+        /// A source root the layer was built from; `value` is unused.
+        ROOT = 11,
+        /// What the layer was built from: its defines and its source files.
+        DIGEST = 12,
+    }
+}
+
+constants! {
+    /// `KeptRec::kind`.
+    kept_kind, KEPT_KINDS, u32 {
+        CLASS = 0,
+        FIELD = 1,
+        ENUM = 2,
+        ABSTRACT = 3,
+    }
+}
+
+/// The ids that name something in a lower layer. A layer's own ids are plain
+/// indexes into its own tables. A reference into a lower layer sets the top bit
+/// and carries the layer's position among the parents and the index in its table:
+/// `0x8000_0000 | layer << 24 | index`. Only ids of types, classes, fields,
+/// abstracts, enums and enum constructors can be tagged.
+pub mod tag {
+    use super::NONE;
+
+    pub const BIT: u32 = 0x8000_0000;
+    /// The most layers a stack can have below the top one.
+    pub const MAX_LAYERS: u32 = 126;
+    /// The most entries a table of a layer can have and still be named from above.
+    pub const MAX_INDEX: u32 = (1 << 24) - 1;
+
+    /// The id of entry `index` of the table of the parent at position `layer`.
+    pub fn tagged(layer: u32, index: u32) -> u32 {
+        debug_assert!(layer < MAX_LAYERS && index <= MAX_INDEX);
+        BIT | (layer << 24) | index
+    }
+
+    /// `(layer, index)` when `id` names an entry of a parent.
+    pub fn split(id: u32) -> Option<(u32, u32)> {
+        (id != NONE && id & BIT != 0).then_some(((id >> 24) & 0x7f, id & MAX_INDEX))
+    }
+}
+
 /// `Binop` constructors of `haxe.macro.Expr`, by the index `BINOP` nodes carry.
 pub const BINOPS: [&str; 25] = [
     "OpAdd",
@@ -718,6 +850,21 @@ pub fn schema_hash() -> u64 {
     group(
         "local_flag",
         LOCAL_FLAGS.iter().map(|(n, v)| (*n, *v as u64)).collect(),
+    );
+    group(
+        "key_kind",
+        KEY_KINDS.iter().map(|(n, v)| (*n, *v as u64)).collect(),
+    );
+    group(
+        "kept_kind",
+        KEPT_KINDS.iter().map(|(n, v)| (*n, *v as u64)).collect(),
+    );
+    group(
+        "tag",
+        vec![
+            ("bit", tag::BIT as u64),
+            ("max_layers", tag::MAX_LAYERS as u64),
+        ],
     );
     group(
         "binops",

@@ -80,9 +80,14 @@ pub struct Builder {
     pub locals: Vec<LocalRec>,
     pub params: Vec<ParamRec>,
     pub funcs: Vec<FuncRec>,
+    pub keys: Vec<KeyRec>,
+    pub kept: Vec<KeptRec>,
+    pub parents: Vec<u64>,
     bodies: Vec<(usize, Tree)>,
     pub entry: Option<u32>,
     pub haxe_version: u32,
+    /// This layer's identity, which layers above name in `Parents`.
+    pub layer_id: u64,
 }
 
 impl Builder {
@@ -129,6 +134,24 @@ impl Builder {
             args_count: U32::new(count),
         });
         (self.types.len() - 1) as u32
+    }
+
+    /// Index `text` as `kind`, answering to `value`, for layers above this one.
+    pub fn add_key(&mut self, kind: u32, text: &str, value: u32) {
+        let key = self.string(text);
+        self.keys.push(KeyRec {
+            kind: U32::new(kind),
+            key: U32::new(key),
+            value: U32::new(value),
+        });
+    }
+
+    /// Record that the dead-code removal kept `id` (a tagged id) of a lower layer.
+    pub fn add_kept(&mut self, kind: u32, id: u32) {
+        self.kept.push(KeptRec {
+            kind: U32::new(kind),
+            id: U32::new(id),
+        });
     }
 
     /// Add a local and answer its id.
@@ -193,7 +216,15 @@ impl Builder {
             queue.extend(tree.kids.iter());
         }
 
-        let sections: [&[u8]; 15] = [
+        let parents: Vec<ParentRec> = self
+            .parents
+            .iter()
+            .map(|id| ParentRec {
+                id_lo: U32::new(*id as u32),
+                id_hi: U32::new((*id >> 32) as u32),
+            })
+            .collect();
+        let sections: [&[u8]; 18] = [
             &self.blob,
             self.str_index.as_slice().as_bytes(),
             self.positions.as_slice().as_bytes(),
@@ -209,8 +240,11 @@ impl Builder {
             self.params.as_slice().as_bytes(),
             self.funcs.as_slice().as_bytes(),
             nodes.as_slice().as_bytes(),
+            self.keys.as_slice().as_bytes(),
+            self.kept.as_slice().as_bytes(),
+            parents.as_slice().as_bytes(),
         ];
-        let counts: [usize; 15] = [
+        let counts: [usize; 18] = [
             self.blob.len(),
             self.str_index.len(),
             self.positions.len(),
@@ -226,6 +260,9 @@ impl Builder {
             self.params.len(),
             self.funcs.len(),
             nodes.len(),
+            self.keys.len(),
+            self.kept.len(),
+            parents.len(),
         ];
         debug_assert_eq!(sections.len(), SECTIONS.len());
 
@@ -236,6 +273,8 @@ impl Builder {
             schema_hash_lo: U32::new(hash as u32),
             schema_hash_hi: U32::new((hash >> 32) as u32),
             haxe_version: U32::new(self.haxe_version),
+            layer_id_lo: U32::new(self.layer_id as u32),
+            layer_id_hi: U32::new((self.layer_id >> 32) as u32),
             flags: U32::new(0),
             entry: U32::new(self.entry.unwrap_or(NONE)),
             section_count: U32::new(SECTIONS.len() as u32),

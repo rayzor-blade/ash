@@ -1,95 +1,168 @@
-//! Checks a TAST file and prints what is in it.
+//! Checks TAST files and prints what is in them.
 //!
-//!     cargo run -p ash_tast --bin tast_dump -- program.tast [--tree]
+//!     cargo run -p ash_tast --bin tast_dump -- [--tree] [--keys] [layer.tast ...] program.tast
+//!
+//! The files are a stack, bottom first. The last one is the program; with `--tree`
+//! its entry function is printed with names in place of ids.
 
-use ash_tast::Tast;
+use ash_tast::Stack;
+use ash_tast::dump::Dumper;
 use ash_tast::format::*;
 
-fn kind_name(kind: u8) -> &'static str {
-    NODE_KINDS
-        .iter()
-        .find(|(_, k)| *k == kind)
-        .map_or("?", |(name, _)| name)
-}
-
-fn print_tree(tast: &Tast, id: u32, depth: usize) {
-    let node = tast.node(id);
-    println!(
-        "{:indent$}{} flags={} a={} b={}",
-        "",
-        kind_name(node.kind),
-        node.flags,
-        node.a.get(),
-        node.b.get(),
-        indent = depth * 2
-    );
-    for kid in tast.kid_ids(node) {
-        print_tree(tast, kid, depth + 1);
-    }
-}
-
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let Some(path) = args.next() else {
-        eprintln!("usage: tast_dump <file> [--tree]");
+    let mut tree = false;
+    let mut keys = false;
+    let mut against: Option<String> = None;
+    let mut paths = Vec::new();
+    for arg in std::env::args().skip(1) {
+        if arg == "--tree" {
+            tree = true;
+        } else if arg == "--keys" {
+            keys = true;
+        } else if let Some(path) = arg.strip_prefix("--against=") {
+            against = Some(path.to_owned());
+        } else {
+            paths.push(arg);
+        }
+    }
+    if paths.is_empty() {
+        eprintln!("usage: tast_dump [--tree] [layer.tast ...] program.tast");
         std::process::exit(2);
-    };
-    let tree = args.next().as_deref() == Some("--tree");
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-        eprintln!("{path}: {e}");
-        std::process::exit(1);
-    });
+    }
+    let files: Vec<Vec<u8>> = paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).unwrap_or_else(|e| {
+                eprintln!("{path}: {e}");
+                std::process::exit(1);
+            })
+        })
+        .collect();
+    let slices: Vec<&[u8]> = files.iter().map(Vec::as_slice).collect();
+
     let started = std::time::Instant::now();
-    let parsed = Tast::parse(&bytes);
+    let parsed = Stack::parse(&slices);
     let elapsed = started.elapsed();
-    let tast = match parsed {
-        Ok(tast) => tast,
+    let stack = match parsed {
+        Ok(stack) => stack,
         Err(e) => {
-            eprintln!("{path}: {e}");
+            eprintln!("{e}");
             std::process::exit(1);
         }
     };
     println!(
-        "{path}: valid, {} bytes, Haxe {}, opened and checked in {elapsed:?}",
-        bytes.len(),
-        tast.haxe_version()
+        "valid, {} layer(s), {} bytes, opened and checked in {elapsed:?}",
+        stack.layers().len(),
+        files.iter().map(Vec::len).sum::<usize>()
     );
-    println!(
-        "strings {}  types {}  classes {}  fields {}  enums {}  locals {}  funcs {}  nodes {}",
-        tast.strings_len(),
-        tast.types().len(),
-        tast.classes().len(),
-        tast.fields().len(),
-        tast.enums().len(),
-        tast.locals().len(),
-        tast.funcs().len(),
-        tast.nodes().len()
-    );
-    match tast.entry() {
+    for (i, (layer, path)) in stack.layers().iter().zip(&paths).enumerate() {
+        println!(
+            "layer {i} {path}: Haxe {}, id {:#018x}, strings {}  types {}  classes {}  fields {}  enums {}  locals {}  funcs {}  nodes {}  keys {}  kept {}",
+            layer.haxe_version(),
+            layer.layer_id(),
+            layer.strings_len(),
+            layer.types().len(),
+            layer.classes().len(),
+            layer.fields().len(),
+            layer.enums().len(),
+            layer.locals().len(),
+            layer.funcs().len(),
+            layer.nodes().len(),
+            layer.keys().len(),
+            layer.kept().len()
+        );
+    }
+    if keys {
+        for (i, layer) in stack.layers().iter().enumerate() {
+            for kind in [
+                key_kind::ROOT,
+                key_kind::DIGEST,
+                key_kind::DEFINE,
+                key_kind::USED_DEFINE,
+            ] {
+                let name = KEY_KINDS
+                    .iter()
+                    .find(|(_, v)| *v == kind)
+                    .map_or("?", |(n, _)| *n);
+                let texts: Vec<&str> = layer
+                    .keys()
+                    .iter()
+                    .filter(|k| k.kind.get() == kind)
+                    .filter_map(|k| layer.opt_string(k.key))
+                    .collect();
+                println!("layer {i} {name} ({}): {}", texts.len(), texts.join(" "));
+            }
+        }
+    }
+    if let Some(path) = &against {
+        compare(&stack, path);
+    }
+    let top = stack.top();
+    let at = stack.layers().len() - 1;
+    match top.entry() {
         Some(entry) => {
-            let owner = tast
+            let owner = top
                 .fields()
                 .iter()
                 .find(|f| f.func.get() == entry)
                 .map(|f| {
-                    let class = &tast.classes()[f.owner.get() as usize];
+                    let class = &top.classes()[f.owner.get() as usize];
                     format!(
                         "{}.{}",
-                        tast.opt_string(class.name).unwrap_or("?"),
-                        tast.opt_string(f.name).unwrap_or("?")
+                        top.opt_string(class.name).unwrap_or("?"),
+                        top.opt_string(f.name).unwrap_or("?")
                     )
                 });
             println!(
                 "entry function {entry}: {}",
                 owner.as_deref().unwrap_or("the main expression")
             );
+            if tree && top.funcs()[entry as usize].root.get() != NONE {
+                print!("{}", Dumper::new(&stack).function_text(at, entry as usize));
+            }
         }
         None => println!("entry none"),
     }
-    if tree && let Some(entry) = tast.entry() {
-        let root = tast.funcs()[entry as usize].root.get();
-        if root != NONE {
-            print_tree(&tast, root, 0);
+}
+
+/// Check that `stack` is the program in `whole` (the same program exported without
+/// layers): the same functions with the same text, the stack's own plus what it kept.
+fn compare(stack: &Stack, whole: &str) {
+    let bytes = std::fs::read(whole).unwrap_or_else(|e| {
+        eprintln!("{whole}: {e}");
+        std::process::exit(1);
+    });
+    let one = Stack::parse(&[&bytes]).unwrap_or_else(|e| {
+        eprintln!("{whole}: {e}");
+        std::process::exit(1);
+    });
+    let top = stack.layers().len() - 1;
+    let expected = Dumper::new(&one).own_functions(0);
+    let dumper = Dumper::new(stack);
+    let mut actual = dumper.own_functions(top);
+    for (key, text) in dumper.kept_functions(top) {
+        if actual.insert(key.clone(), text).is_some() {
+            println!("DUPLICATE {key}: in the program and in a layer");
         }
     }
+    let missing = expected.keys().filter(|k| !actual.contains_key(*k)).count();
+    let extra = actual.keys().filter(|k| !expected.contains_key(*k)).count();
+    let differing: Vec<&String> = expected
+        .iter()
+        .filter(|(k, v)| actual.get(*k).is_some_and(|a| a != *v))
+        .map(|(k, _)| k)
+        .collect();
+    println!(
+        "against {whole}: {} functions whole, {} on the layers; missing {missing}, extra {extra}, differing {}",
+        expected.len(),
+        actual.len(),
+        differing.len()
+    );
+    for key in differing.iter().take(5) {
+        println!("  differs: {key}");
+    }
+    if missing + extra + differing.len() > 0 {
+        std::process::exit(1);
+    }
+    println!("same program");
 }

@@ -12,8 +12,8 @@ class Format {
 	public static inline final VERSION = 1;
 	/** A reference to nothing (`u32::MAX`, which is -1 as an Int). */
 	public static inline final NONE = -1;
-	public static inline final SCHEMA_HASH_LO = 0x2f345f78;
-	public static inline final SCHEMA_HASH_HI = 0xc8676d05;
+	public static inline final SCHEMA_HASH_LO = 0x193eb42d;
+	public static inline final SCHEMA_HASH_HI = 0x631473a0;
 	public static inline final SECTION_COUNT = 18;
 	public static inline final SECTION_STRINGS = 0;
 	public static inline final SECTION_STRING_INDEX = 1;
@@ -52,23 +52,102 @@ class Format {
 	public static inline final KEPT_ELEM = 8;
 	public static inline final PARENTS_ELEM = 8;
 	public static inline final HEADER_SIZE = 40;
+	public static inline final HEADER_MAGIC_AT = 0;
+	public static inline final HEADER_VERSION_AT = 4;
+	public static inline final HEADER_SCHEMA_HASH_LO_AT = 8;
+	public static inline final HEADER_SCHEMA_HASH_HI_AT = 12;
+	public static inline final HEADER_HAXE_VERSION_AT = 16;
+	public static inline final HEADER_LAYER_ID_LO_AT = 20;
+	public static inline final HEADER_LAYER_ID_HI_AT = 24;
+	public static inline final HEADER_FLAGS_AT = 28;
+	public static inline final HEADER_ENTRY_AT = 32;
+	public static inline final HEADER_SECTION_COUNT_AT = 36;
 	public static inline final SECTION_REC_SIZE = 8;
+	public static inline final SECTION_REC_OFFSET_AT = 0;
+	public static inline final SECTION_REC_COUNT_AT = 4;
 	public static inline final STR_REC_SIZE = 8;
+	public static inline final STR_REC_OFFSET_AT = 0;
+	public static inline final STR_REC_LEN_AT = 4;
 	public static inline final POS_REC_SIZE = 12;
+	public static inline final POS_REC_FILE_AT = 0;
+	public static inline final POS_REC_START_AT = 4;
+	public static inline final POS_REC_END_AT = 8;
 	public static inline final TYPE_REC_SIZE = 20;
+	public static inline final TYPE_REC_KIND_AT = 0;
+	public static inline final TYPE_REC_FLAGS_AT = 1;
+	public static inline final TYPE_REC_NAME_AT = 4;
+	public static inline final TYPE_REC_DEF_AT = 8;
+	public static inline final TYPE_REC_ARGS_FIRST_AT = 12;
+	public static inline final TYPE_REC_ARGS_COUNT_AT = 16;
 	public static inline final CLASS_REC_SIZE = 28;
+	public static inline final CLASS_REC_NAME_AT = 0;
+	public static inline final CLASS_REC_SUPER_TYPE_AT = 4;
+	public static inline final CLASS_REC_FLAGS_AT = 8;
+	public static inline final CLASS_REC_FIELDS_FIRST_AT = 12;
+	public static inline final CLASS_REC_FIELDS_COUNT_AT = 16;
+	public static inline final CLASS_REC_INTERFACES_FIRST_AT = 20;
+	public static inline final CLASS_REC_INTERFACES_COUNT_AT = 24;
 	public static inline final FIELD_REC_SIZE = 24;
+	public static inline final FIELD_REC_NAME_AT = 0;
+	public static inline final FIELD_REC_TY_AT = 4;
+	public static inline final FIELD_REC_OWNER_AT = 8;
+	public static inline final FIELD_REC_FLAGS_AT = 12;
+	public static inline final FIELD_REC_FUNC_AT = 16;
+	public static inline final FIELD_REC_POS_AT = 20;
 	public static inline final ABSTRACT_REC_SIZE = 16;
+	public static inline final ABSTRACT_REC_NAME_AT = 0;
+	public static inline final ABSTRACT_REC_UNDERLYING_AT = 4;
+	public static inline final ABSTRACT_REC_IMPL_CLASS_AT = 8;
+	public static inline final ABSTRACT_REC_FLAGS_AT = 12;
 	public static inline final ENUM_REC_SIZE = 16;
+	public static inline final ENUM_REC_NAME_AT = 0;
+	public static inline final ENUM_REC_CTORS_FIRST_AT = 4;
+	public static inline final ENUM_REC_CTORS_COUNT_AT = 8;
+	public static inline final ENUM_REC_FLAGS_AT = 12;
 	public static inline final ENUM_CTOR_REC_SIZE = 24;
+	public static inline final ENUM_CTOR_REC_NAME_AT = 0;
+	public static inline final ENUM_CTOR_REC_ENUM_ID_AT = 4;
+	public static inline final ENUM_CTOR_REC_INDEX_AT = 8;
+	public static inline final ENUM_CTOR_REC_TY_AT = 12;
+	public static inline final ENUM_CTOR_REC_ARGS_FIRST_AT = 16;
+	public static inline final ENUM_CTOR_REC_ARGS_COUNT_AT = 20;
 	public static inline final ANON_FIELD_REC_SIZE = 12;
+	public static inline final ANON_FIELD_REC_NAME_AT = 0;
+	public static inline final ANON_FIELD_REC_TY_AT = 4;
+	public static inline final ANON_FIELD_REC_FLAGS_AT = 8;
 	public static inline final LOCAL_REC_SIZE = 12;
+	public static inline final LOCAL_REC_NAME_AT = 0;
+	public static inline final LOCAL_REC_TY_AT = 4;
+	public static inline final LOCAL_REC_FLAGS_AT = 8;
 	public static inline final PARAM_REC_SIZE = 8;
+	public static inline final PARAM_REC_LOCAL_AT = 0;
+	public static inline final PARAM_REC_DEFAULT_VALUE_AT = 4;
 	public static inline final FUNC_REC_SIZE = 24;
+	public static inline final FUNC_REC_RET_AT = 0;
+	public static inline final FUNC_REC_PARAMS_FIRST_AT = 4;
+	public static inline final FUNC_REC_PARAMS_COUNT_AT = 8;
+	public static inline final FUNC_REC_ROOT_AT = 12;
+	public static inline final FUNC_REC_FLAGS_AT = 16;
+	public static inline final FUNC_REC_POS_AT = 20;
 	public static inline final NODE_REC_SIZE = 28;
+	public static inline final NODE_REC_KIND_AT = 0;
+	public static inline final NODE_REC_FLAGS_AT = 1;
+	public static inline final NODE_REC_TY_AT = 4;
+	public static inline final NODE_REC_POS_AT = 8;
+	public static inline final NODE_REC_A_AT = 12;
+	public static inline final NODE_REC_B_AT = 16;
+	public static inline final NODE_REC_FIRST_KID_AT = 20;
+	public static inline final NODE_REC_KID_COUNT_AT = 24;
 	public static inline final KEY_REC_SIZE = 12;
+	public static inline final KEY_REC_KIND_AT = 0;
+	public static inline final KEY_REC_KEY_AT = 4;
+	public static inline final KEY_REC_VALUE_AT = 8;
 	public static inline final KEPT_REC_SIZE = 8;
+	public static inline final KEPT_REC_KIND_AT = 0;
+	public static inline final KEPT_REC_ID_AT = 4;
 	public static inline final PARENT_REC_SIZE = 8;
+	public static inline final PARENT_REC_ID_LO_AT = 0;
+	public static inline final PARENT_REC_ID_HI_AT = 4;
 
 	/** Write one `Header` at byte `at`. */
 	public static inline function writeHeader(out:Bytes, at:Int, magic:Int, version:Int, schemaHashLo:Int, schemaHashHi:Int, haxeVersion:Int, layerIdLo:Int, layerIdHi:Int, flags:Int, entry:Int, sectionCount:Int):Void {
@@ -349,6 +428,32 @@ class FieldFlag {
 class LocalFlag {
 	public static inline final CAPTURED = 1;
 	public static inline final ARGUMENT = 2;
+}
+
+/** `KeyRec.kind`. */
+class KeyKind {
+	public static inline final INST_TYPE = 0;
+	public static inline final ABSTRACT_TYPE = 1;
+	public static inline final ENUM_TYPE = 2;
+	public static inline final TYPEDEF_TYPE = 3;
+	public static inline final TEXT_TYPE = 4;
+	public static inline final CLASS = 5;
+	public static inline final ENUM = 6;
+	public static inline final ABSTRACT = 7;
+	public static inline final FIELD = 8;
+	public static inline final ENUM_CTOR = 9;
+	public static inline final ROOT = 10;
+	public static inline final DIGEST = 11;
+	public static inline final DEFINE = 12;
+	public static inline final USED_DEFINE = 13;
+}
+
+/** `KeptRec.kind`. */
+class KeptKind {
+	public static inline final CLASS = 0;
+	public static inline final FIELD = 1;
+	public static inline final ENUM = 2;
+	public static inline final ABSTRACT = 3;
 }
 
 /** `haxe.macro.Expr.Binop` constructors, by the index `BINOP` nodes carry. */

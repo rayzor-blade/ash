@@ -547,8 +547,7 @@ impl<'a> Tast<'a> {
                 | key_kind::ABSTRACT_TYPE
                 | key_kind::ENUM_TYPE
                 | key_kind::TYPEDEF_TYPE
-                | key_kind::TEXT_TYPE
-                | key_kind::STRUCT_TYPE => reference("Keys", i, "value", k.value, types, false)?,
+                | key_kind::TEXT_TYPE => reference("Keys", i, "value", k.value, types, false)?,
                 key_kind::CLASS => reference("Keys", i, "value", k.value, classes, false)?,
                 key_kind::ENUM => reference("Keys", i, "value", k.value, self.enums.len(), false)?,
                 key_kind::ABSTRACT => {
@@ -558,7 +557,7 @@ impl<'a> Tast<'a> {
                 key_kind::ENUM_CTOR => {
                     reference("Keys", i, "value", k.value, self.enum_ctors.len(), false)?
                 }
-                key_kind::ROOT | key_kind::DIGEST => {}
+                key_kind::ROOT | key_kind::DIGEST | key_kind::DEFINE | key_kind::USED_DEFINE => {}
                 other => {
                     return Err(TastError::BadReference {
                         table: "Keys",

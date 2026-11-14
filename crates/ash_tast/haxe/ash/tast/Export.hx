@@ -17,11 +17,23 @@ import ash.tast.Format;
 	writes the file. With `--no-output` the target's own generator does not run.
 	`-D ash_tast_positions` adds a source position to every node, and
 	`-D ash_tast_verbose` prints what was written and what could not be.
+
+	A file can sit on layers: files built once for the standard library or a
+	library, which the program then names by tagged id instead of exporting again.
+
+	- `init("program.tast", ["std.tast", "lib.tast"])` builds a program on those
+	  layers, bottom first. A class a layer holds is not exported again; the file
+	  lists what dead-code removal kept from it. A layer whose sources or defines
+	  have changed since it was built, or that does not hold the classes the program
+	  names, is ignored with a warning and the program is exported whole.
+	- `init("std.tast", [], ["<std>"])` builds a layer from the compiler's standard
+	  library; the roots are the directories it covers. Build it with every class
+	  typed, which is `-dce no` and `--macro include(...)` for what the layer is to hold.
 **/
 class Export {
-	public static function init(path:String = "program.tast"):Void {
+	public static function init(path:String = "program.tast", ?parents:Array<String>, ?layerRoots:Array<String>):Void {
 		Format.checkCompiler();
-		Context.onGenerate(function(types) new Export(path).run(types));
+		Context.onGenerate(function(types) new Export(path, parents == null ? [] : parents, layerRoots).run(types));
 	}
 
 	// Strings: one blob, each string once.
@@ -80,14 +92,25 @@ class Export {
 	var typedefDepth = 0;
 	var walking = false;
 
+	// Layers below this file, bottom first.
+	var parentLayers = 0;
+	var parentRoots:Array<Array<String>> = [];
+	var parentIdPairs:Array<Int> = []; // lo, hi per layer
+	var superCache:Map<String, Null<Ref<ClassType>>> = new Map();
+	static inline final TAG = 0x80000000;
+
 	// What could not be written exactly.
 	var dynamicFields = 0;
 	var unsupported:Map<String, Int> = new Map();
 
 	final path:String;
+	final parentPaths:Array<String>;
+	final layerRoots:Null<Array<String>>;
 
-	function new(path:String) {
+	function new(path:String, parentPaths:Array<String>, layerRoots:Null<Array<String>>) {
 		this.path = path;
+		this.parentPaths = parentPaths;
+		this.layerRoots = layerRoots;
 		withPositions = Context.defined("ash_tast_positions");
 		verbose = Context.defined("ash_tast_verbose");
 	}
@@ -426,7 +449,7 @@ class Export {
 		// Reserve the records, so a field type that reaches this class again finds its fields in place.
 		for (x in all) {
 			var fid = rec(fields, [str(x.f.name), 0, id, fieldFlags(x.f, x.isStatic), Format.NONE, Format.NONE]);
-			fieldIds.set(id + (x.isStatic ? "s:" : "i:") + x.f.name, fid);
+			fieldIds.set(path + (x.isStatic ? "#s:" : "#i:") + x.f.name, fid);
 		}
 		classes[base + 3] = first;
 		classes[base + 4] = all.length;
@@ -454,19 +477,30 @@ class Export {
 	/** The id of the field `name` of `c` or of the nearest superclass that declares it. */
 	function findField(c:Ref<ClassType>, name:String, isStatic:Bool):Int {
 		var cur:Null<Ref<ClassType>> = c;
+		var marker = isStatic ? "#s:" : "#i:";
 		while (cur != null) {
+			var path = cur.toString();
+			var fid = fieldIds.get(path + marker + name);
+			if (fid != null) return fid;
 			var cid = classId(cur);
-			if (!classFilled[cid]) {
+			if (cid >= 0 && !classFilled[cid]) {
 				// Filling queues the class's bodies, which cannot happen between a node's children.
 				if (walking) return Format.NONE;
 				fillClass(cid);
+				fid = fieldIds.get(path + marker + name);
+				if (fid != null) return fid;
 			}
-			var fid = fieldIds.get(cid + (isStatic ? "s:" : "i:") + name);
-			if (fid != null) return fid;
-			var sup = cur.get().superClass;
-			cur = sup == null ? null : sup.t;
+			cur = superOf(path, cur);
 		}
 		return Format.NONE;
+	}
+
+	function superOf(path:String, c:Ref<ClassType>):Null<Ref<ClassType>> {
+		if (superCache.exists(path)) return superCache.get(path);
+		var sup = c.get().superClass;
+		var result = sup == null ? null : sup.t;
+		superCache.set(path, result);
+		return result;
 	}
 
 	// ---- functions and the node queue
@@ -757,16 +791,364 @@ class Export {
 		return rec(funcs, [typeId(m.t), 0, 0, enqueueRoot(m), 0, Format.NONE]);
 	}
 
+	// ---- layers
+
+	function warn(message:String):Void {
+		Sys.println('[ash_tast] warning: $message');
+	}
+
+	function tagged(layer:Int, index:Int):Int {
+		return TAG | (layer << 24) | index;
+	}
+
+	function stdRoot():String {
+		return haxe.io.Path.removeTrailingSlashes(haxe.io.Path.directory(Context.resolvePath("StdTypes.hx")));
+	}
+
+	function resolveRoots(roots:Array<String>):Array<String> {
+		var out = [for (r in roots) r == "<std>" ? stdRoot() : haxe.io.Path.removeTrailingSlashes(sys.FileSystem.fullPath(r))];
+		out.sort(Reflect.compare);
+		return out;
+	}
+
+	function scan(dir:String, lines:Array<String>):Void {
+		for (name in sys.FileSystem.readDirectory(dir)) {
+			var p = dir + "/" + name;
+			if (sys.FileSystem.isDirectory(p))
+				scan(p, lines);
+			else if (StringTools.endsWith(name, ".hx")) {
+				var st = sys.FileSystem.stat(p);
+				lines.push("F " + p + ":" + st.size + ":" + Std.int(st.mtime.getTime() / 1000));
+			}
+		}
+	}
+
+	/** The defines in effect, less the ones that cannot change how a class types. */
+	function currentDefines():Map<String, String> {
+		var out:Map<String, String> = new Map();
+		var defs = Context.getDefines();
+		for (k in defs.keys())
+			if (k != "dce" && !StringTools.startsWith(k, "ash_tast")) out.set(k, defs.get(k));
+		return out;
+	}
+
+	/** What a layer was built from: every source file under its roots, by size and time. */
+	function digestOf(roots:Array<String>):String {
+		var lines:Array<String> = [];
+		for (r in roots) scan(r, lines);
+		lines.sort(Reflect.compare);
+		return haxe.crypto.Md5.encode(lines.join("\n"));
+	}
+
+	/** Defines that change how the compiler types code without appearing in an `#if`. */
+	function shapesTyping(name:String):Bool {
+		return StringTools.startsWith(name, "analyzer") || name == "no-inline" || name == "no-opt" || name == "real-position"
+			|| name == "haxe-next" || name == "display" || name == "no-debug";
+	}
+
+	/** The names the sources of the classes in `all` test in `#if` and `#elseif`. */
+	function usedDefines(all:Array<Type>):Array<String> {
+		var seen:Map<String, Bool> = new Map();
+		var files:Map<String, Bool> = new Map();
+		var condition = ~/^\s*#(?:if|elseif)\b(.*)$/;
+		var word = ~/[A-Za-z_][A-Za-z0-9_]*/;
+		for (t in all) {
+			var pos:Null<Position> = switch (t) {
+				case TInst(c, _): c.get().pos;
+				case TEnum(e, _): e.get().pos;
+				case TAbstract(a, _): a.get().pos;
+				default: null;
+			}
+			if (pos == null) continue;
+			var file = Context.getPosInfos(pos).file;
+			if (files.exists(file)) continue;
+			files.set(file, true);
+			var text = try sys.io.File.getContent(file) catch (e:Dynamic) "";
+			if (text.indexOf("#if") < 0 && text.indexOf("#elseif") < 0) continue;
+			for (line in text.split("\n")) {
+				if (!condition.match(line)) continue;
+				var rest = condition.matched(1);
+				while (word.match(rest)) {
+					seen.set(word.matched(0), true);
+					rest = word.matchedRight();
+				}
+			}
+		}
+		var names = [for (k in seen.keys()) k];
+		names.sort(Reflect.compare);
+		return names;
+	}
+
+	/**
+		Whether code typed under `layer`'s defines types the same under this build's: every
+		define the layer was built with is set the same, and any other define set now is one
+		that neither the layer's sources test nor the compiler is known to type by.
+	**/
+	function definesAllow(file:String, layer:Map<String, String>, used:Map<String, Bool>):Bool {
+		var now = currentDefines();
+		for (k => v in layer)
+			if (now.get(k) != v) {
+				warn('layer $file is out of date: it was built with -D $k=$v and this build has ${now.exists(k) ? "-D " + k + "=" + now.get(k) : "no " + k}');
+				return false;
+			}
+		for (k => v in now) {
+			if (layer.exists(k)) continue;
+			if (used.exists(StringTools.replace(k, "-", "_")) || used.exists(k) || shapesTyping(k)) {
+				warn('layer $file is out of date: this build sets -D $k, which the layer was not built with and its sources depend on');
+				return false;
+			}
+		}
+		return true;
+	}
+
+	function loadParents():Void {
+		for (p in 0...parentPaths.length)
+			if (!readParent(p, parentPaths[p])) {
+				resetParents();
+				return;
+			}
+	}
+
+	function resetParents():Void {
+		parentLayers = 0;
+		parentRoots = [];
+		parentIdPairs = [];
+		instIds = new Map();
+		abstractTypeIds = new Map();
+		enumTypeIds = new Map();
+		typedefIds = new Map();
+		textIds = new Map();
+		typeIds = new Map();
+		classIds = new Map();
+		enumIds = new Map();
+		abstractIds = new Map();
+		fieldIds = new Map();
+		enumCtorIds = new Map();
+	}
+
+	/** Read layer `p`'s key index into the maps, every id tagged; false when it cannot be used. */
+	function readParent(p:Int, file:String):Bool {
+		var bytes:Bytes;
+		try
+			bytes = sys.io.File.getBytes(file)
+		catch (e:Dynamic) {
+			warn('layer $file cannot be read');
+			return false;
+		}
+		if (bytes.length < Format.HEADER_SIZE
+			|| bytes.getInt32(Format.HEADER_MAGIC_AT) != Format.MAGIC
+			|| bytes.getInt32(Format.HEADER_VERSION_AT) != Format.VERSION
+			|| bytes.getInt32(Format.HEADER_SCHEMA_HASH_LO_AT) != Format.SCHEMA_HASH_LO
+			|| bytes.getInt32(Format.HEADER_SCHEMA_HASH_HI_AT) != Format.SCHEMA_HASH_HI
+			|| bytes.getInt32(Format.HEADER_SECTION_COUNT_AT) < Format.SECTION_COUNT) {
+			warn('layer $file was written for another layout; export it again');
+			return false;
+		}
+		function offsetOf(section:Int):Int {
+			return bytes.getInt32(Format.HEADER_SIZE + section * Format.SECTION_REC_SIZE + Format.SECTION_REC_OFFSET_AT);
+		}
+		function countOf(section:Int):Int {
+			return bytes.getInt32(Format.HEADER_SIZE + section * Format.SECTION_REC_SIZE + Format.SECTION_REC_COUNT_AT);
+		}
+		// Its own parents must be exactly the layers loaded before it.
+		var named = countOf(Format.SECTION_PARENTS);
+		var at = offsetOf(Format.SECTION_PARENTS);
+		var same = named == p;
+		for (i in 0...(same ? named : 0)) {
+			var r = at + i * Format.PARENT_REC_SIZE;
+			if (bytes.getInt32(r + Format.PARENT_REC_ID_LO_AT) != parentIdPairs[i * 2]
+				|| bytes.getInt32(r + Format.PARENT_REC_ID_HI_AT) != parentIdPairs[i * 2 + 1]) same = false;
+		}
+		if (!same) {
+			warn('layer $file was not built on the layers given before it');
+			return false;
+		}
+
+		var blobAt = offsetOf(Format.SECTION_STRINGS);
+		var indexAt = offsetOf(Format.SECTION_STRING_INDEX);
+		function text(id:Int):String {
+			var r = indexAt + id * Format.STR_REC_SIZE;
+			return bytes.getString(blobAt + bytes.getInt32(r + Format.STR_REC_OFFSET_AT), bytes.getInt32(r + Format.STR_REC_LEN_AT));
+		}
+		var roots:Array<String> = [];
+		var digest:Null<String> = null;
+		var layerDefines:Map<String, String> = new Map();
+		var usedNames:Map<String, Bool> = new Map();
+		var keysAt = offsetOf(Format.SECTION_KEYS);
+		for (i in 0...countOf(Format.SECTION_KEYS)) {
+			var r = keysAt + i * Format.KEY_REC_SIZE;
+			var kind = bytes.getInt32(r + Format.KEY_REC_KIND_AT);
+			var key = text(bytes.getInt32(r + Format.KEY_REC_KEY_AT));
+			var id = tagged(p, bytes.getInt32(r + Format.KEY_REC_VALUE_AT));
+			switch (kind) {
+				case KeyKind.INST_TYPE: instIds.set(key, id);
+				case KeyKind.ABSTRACT_TYPE: abstractTypeIds.set(key, id);
+				case KeyKind.ENUM_TYPE: enumTypeIds.set(key, id);
+				case KeyKind.TYPEDEF_TYPE: typedefIds.set(key, id);
+				case KeyKind.TEXT_TYPE: textIds.set(key, id);
+				case KeyKind.CLASS: classIds.set(key, id);
+				case KeyKind.ENUM: enumIds.set(key, id);
+				case KeyKind.ABSTRACT: abstractIds.set(key, id);
+				case KeyKind.FIELD: fieldIds.set(key, id);
+				case KeyKind.ENUM_CTOR: enumCtorIds.set(key, id);
+				case KeyKind.ROOT: roots.push(key);
+				case KeyKind.DIGEST: digest = key;
+				case KeyKind.DEFINE:
+					var eq = key.indexOf("=");
+					layerDefines.set(key.substr(0, eq), key.substr(eq + 1));
+				case KeyKind.USED_DEFINE: usedNames.set(key, true);
+				default:
+			}
+		}
+		if (digest == null) {
+			warn('$file is not a layer: it has no record of what it was built from');
+			return false;
+		}
+		if (digestOf(roots) != digest) {
+			warn('layer $file is out of date: its source files changed since it was built; build it again');
+			return false;
+		}
+		if (!definesAllow(file, layerDefines, usedNames)) return false;
+		parentRoots.push(roots);
+		parentIdPairs.push(bytes.getInt32(Format.HEADER_LAYER_ID_LO_AT));
+		parentIdPairs.push(bytes.getInt32(Format.HEADER_LAYER_ID_HI_AT));
+		parentLayers++;
+		return true;
+	}
+
+	/** Every class a layer holds must come from the sources that layer was built from. */
+	function layersCoverClasses(all:Array<Type>):Bool {
+		for (t in all) switch (t) {
+			case TInst(c, _):
+				var id = classIds.get(c.toString());
+				if (id != null && id < 0) {
+					var layer = (id >> 24) & 0x7f;
+					var file = try sys.FileSystem.fullPath(Context.getPosInfos(c.get().pos).file) catch (e:Dynamic) "";
+					var inside = false;
+					for (root in parentRoots[layer])
+						if (StringTools.startsWith(file, root + "/")) {
+							inside = true;
+							break;
+						}
+					if (!inside) {
+						warn('class ${c.toString()} comes from $file, not from the sources of the layer that holds a class of that name');
+						return false;
+					}
+				}
+			default:
+		}
+		return true;
+	}
+
+	/** Note what dead-code removal kept from the layers: whole classes, enums, abstracts and fields. */
+	function recordKept(all:Array<Type>):Void {
+		for (t in all) switch (t) {
+			case TInst(c, _):
+				var path = c.toString();
+				var id = classIds.get(path);
+				if (id == null || id >= 0) continue;
+				keptRecs.push(KeptKind.CLASS);
+				keptRecs.push(id);
+				var ct = c.get();
+				function keep(name:String, isStatic:Bool) {
+					var fid = fieldIds.get(path + (isStatic ? "#s:" : "#i:") + name);
+					if (fid != null && fid < 0) {
+						keptRecs.push(KeptKind.FIELD);
+						keptRecs.push(fid);
+					} else
+						unsupportedCase("a kept field the layer does not index");
+				}
+				if (ct.constructor != null) keep("new", false);
+				for (f in ct.fields.get()) keep(f.name, false);
+				for (f in ct.statics.get()) keep(f.name, true);
+			case TEnum(e, _):
+				var id = enumIds.get(e.toString());
+				if (id != null && id < 0) {
+					keptRecs.push(KeptKind.ENUM);
+					keptRecs.push(id);
+				}
+			case TAbstract(a, _):
+				var id = abstractIds.get(a.toString());
+				if (id != null && id < 0) {
+					keptRecs.push(KeptKind.ABSTRACT);
+					keptRecs.push(id);
+				}
+			default:
+		}
+	}
+
+	/** Index what this file holds, by name, for the files built on it. */
+	function writeKeys(roots:Array<String>, digest:String, used:Array<String>):Void {
+		function emit(kind:Int, map:Map<String, Int>) {
+			var names = [for (k in map.keys()) k];
+			names.sort(Reflect.compare);
+			for (k in names) {
+				var v = map.get(k);
+				// Entries seeded from a layer below are tagged, and belong to that layer's index.
+				if (v < 0) continue;
+				keyRecs.push(kind);
+				keyRecs.push(str(k));
+				keyRecs.push(v);
+			}
+		}
+		emit(KeyKind.INST_TYPE, instIds);
+		emit(KeyKind.ABSTRACT_TYPE, abstractTypeIds);
+		emit(KeyKind.ENUM_TYPE, enumTypeIds);
+		emit(KeyKind.TYPEDEF_TYPE, typedefIds);
+		emit(KeyKind.TEXT_TYPE, textIds);
+		emit(KeyKind.CLASS, classIds);
+		emit(KeyKind.ENUM, enumIds);
+		emit(KeyKind.ABSTRACT, abstractIds);
+		emit(KeyKind.FIELD, fieldIds);
+		emit(KeyKind.ENUM_CTOR, enumCtorIds);
+		for (r in roots) {
+			keyRecs.push(KeyKind.ROOT);
+			keyRecs.push(str(r));
+			keyRecs.push(0);
+		}
+		keyRecs.push(KeyKind.DIGEST);
+		keyRecs.push(str(digest));
+		keyRecs.push(0);
+		var defs = currentDefines();
+		var names = [for (k in defs.keys()) k];
+		names.sort(Reflect.compare);
+		for (k in names) {
+			keyRecs.push(KeyKind.DEFINE);
+			keyRecs.push(str(k + "=" + defs.get(k)));
+			keyRecs.push(0);
+		}
+		for (u in used) {
+			keyRecs.push(KeyKind.USED_DEFINE);
+			keyRecs.push(str(u));
+			keyRecs.push(0);
+		}
+	}
+
+	/** The first 32 hex digits of an MD5 as two 32-bit words, for a layer's identity. */
+	function identityOf(hex:String):Array<Int> {
+		function word(h:String):Int {
+			return (Std.parseInt("0x" + h.substr(0, 4)) << 16) | Std.parseInt("0x" + h.substr(4, 4));
+		}
+		return [word(hex.substr(0, 8)), word(hex.substr(8, 8))];
+	}
+
 	// ---- writing
 
 	function run(all:Array<Type>):Void {
 		var t0 = Sys.time();
+		loadParents();
+		if (parentLayers > 0 && !layersCoverClasses(all)) resetParents();
+		var tLayers = Sys.time();
 		for (t in all) switch (t) {
-			case TInst(c, _): fillClass(classId(c));
+			case TInst(c, _):
+				// A class a layer holds is named, not exported again.
+				var id = classId(c);
+				if (id >= 0) fillClass(id);
 			case TEnum(e, _): enumId(e);
 			case TAbstract(a, _): abstractId(a);
 			default:
 		}
+		if (parentLayers > 0) recordKept(all);
 		// Referenced classes the list did not carry (type parameters, externs) are filled too.
 		var done = 0;
 		while (done < classTypes.length) {
@@ -795,6 +1177,13 @@ class Export {
 		}
 		var tBuilt = Sys.time();
 
+		parentRecs = parentIdPairs.copy();
+		if (layerRoots != null) {
+			var roots = resolveRoots(layerRoots);
+			var digest = digestOf(roots);
+			writeKeys(roots, digest, usedDefines(all));
+			layerId = identityOf(haxe.crypto.Md5.encode(digest + ":" + parentIdPairs.join(",")));
+		}
 		var bytes = assemble(entry);
 		sys.io.File.saveBytes(path, bytes);
 		if (verbose) {
@@ -802,7 +1191,9 @@ class Export {
 			Sys.println('[ash_tast] ${path}: ${bytes.length} bytes, ${nodeCount} nodes, ${Std.int(types.length / 5)} types, '
 				+ '${classTypes.length} classes, ${Std.int(fields.length / 6)} fields, ${Std.int(funcs.length / 6)} functions, '
 				+ '${Std.int(locals.length / 3)} locals, ${strOffsets.length} strings');
-			Sys.println('[ash_tast] build ${ms(t0, tBuilt)} ms, assemble and write ${ms(tBuilt, Sys.time())} ms');
+			Sys.println('[ash_tast] build ${ms(t0, tBuilt)} ms (layers ${ms(t0, tLayers)} ms), assemble and write ${ms(tBuilt, Sys.time())} ms');
+			if (parentLayers > 0 || parentPaths.length > 0)
+				Sys.println('[ash_tast] layers used: $parentLayers of ${parentPaths.length}, kept from them: ${Std.int(keptRecs.length / 2)} entries');
 			if (dynamicFields > 0) Sys.println('[ash_tast] fields written by name only: $dynamicFields');
 			for (k => n in unsupported) Sys.println('[ash_tast] unsupported $k: $n');
 		}

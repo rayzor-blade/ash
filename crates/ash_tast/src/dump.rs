@@ -6,7 +6,7 @@
 //! the order they are first met. Two functions are the same function when their
 //! text is the same, which is what the tests and the layer tool compare.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 use zerocopy::little_endian::U32;
@@ -152,6 +152,58 @@ impl<'s, 'a> Dumper<'s, 'a> {
         } else {
             let _ = write!(out, "v{ordinal}");
         }
+    }
+
+    /// The text of every function of the fields of `layer`, keyed `Class#i:name` or
+    /// `Class#s:name`.
+    pub fn own_functions(&self, layer: usize) -> BTreeMap<String, String> {
+        let tast = &self.stack.layers()[layer];
+        let mut out = BTreeMap::new();
+        for class in tast.classes() {
+            let first = class.fields_first.get() as usize;
+            for field in &tast.fields()[first..first + class.fields_count.get() as usize] {
+                if field.func.get() == NONE {
+                    continue;
+                }
+                let key = self.field_key(layer, class, field);
+                out.insert(key, self.function_text(layer, field.func.get() as usize));
+            }
+        }
+        out
+    }
+
+    /// The text of the functions of what `layer` kept from the layers below it, keyed
+    /// the same way.
+    pub fn kept_functions(&self, layer: usize) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for kept in self.stack.layers()[layer].kept() {
+            if kept.kind.get() != kept_kind::FIELD {
+                continue;
+            }
+            let (l, field) = self.stack.field_rec(layer, kept.id);
+            if field.func.get() == NONE {
+                continue;
+            }
+            let (_, class) = self.stack.class_rec(l, field.owner);
+            out.insert(
+                self.field_key(l, class, field),
+                self.function_text(l, field.func.get() as usize),
+            );
+        }
+        out
+    }
+
+    fn field_key(&self, layer: usize, class: &ClassRec, field: &FieldRec) -> String {
+        let marker = if field.flags.get() & field_flag::STATIC != 0 {
+            "#s:"
+        } else {
+            "#i:"
+        };
+        format!(
+            "{}{marker}{}",
+            self.string(layer, class.name),
+            self.string(layer, field.name)
+        )
     }
 
     /// The text of function `func` of layer `layer`: its parameters, its result and its body.

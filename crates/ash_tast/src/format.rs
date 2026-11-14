@@ -694,22 +694,25 @@ constants! {
         TYPEDEF_TYPE = 3,
         /// Any other type, by the compiler's text for it, to a type id.
         TEXT_TYPE = 4,
-        /// A type by its structure, to a type id.
-        STRUCT_TYPE = 5,
         /// A class path to a class id.
-        CLASS = 6,
+        CLASS = 5,
         /// An enum path to an enum id.
-        ENUM = 7,
+        ENUM = 6,
         /// An abstract path to an abstract id.
-        ABSTRACT = 8,
+        ABSTRACT = 7,
         /// A class path, `#i:` or `#s:`, and a field name, to a field id.
-        FIELD = 9,
+        FIELD = 8,
         /// An enum path, a dot and a constructor name, to an enum constructor id.
-        ENUM_CTOR = 10,
+        ENUM_CTOR = 9,
         /// A source root the layer was built from; `value` is unused.
-        ROOT = 11,
-        /// What the layer was built from: its defines and its source files.
-        DIGEST = 12,
+        ROOT = 10,
+        /// What the layer was built from: a digest of its source files.
+        DIGEST = 11,
+        /// A define the layer was built with, as `name=value`.
+        DEFINE = 12,
+        /// A name the layer's sources test in an `#if`, so a program that sets it
+        /// may type them differently.
+        USED_DEFINE = 13,
     }
 }
 

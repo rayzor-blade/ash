@@ -245,6 +245,16 @@ pub fn generate() -> String {
             record.size
         )
         .unwrap();
+        for field in record.fields.iter().filter(|f| !f.name.starts_with('_')) {
+            writeln!(
+                out,
+                "\tpublic static inline final {}_{}_AT = {};",
+                screaming(record.name),
+                field.name.to_uppercase(),
+                field.offset
+            )
+            .unwrap();
+        }
     }
     writeln!(out).unwrap();
 
@@ -326,6 +336,8 @@ pub fn generate() -> String {
     group(&mut out, "ClassFlag", "`ClassRec.flags`.", CLASS_FLAGS);
     group(&mut out, "FieldFlag", "`FieldRec.flags`.", FIELD_FLAGS);
     group(&mut out, "LocalFlag", "`LocalRec.flags`.", LOCAL_FLAGS);
+    group(&mut out, "KeyKind", "`KeyRec.kind`.", KEY_KINDS);
+    group(&mut out, "KeptKind", "`KeptRec.kind`.", KEPT_KINDS);
     names(
         &mut out,
         "Binops",

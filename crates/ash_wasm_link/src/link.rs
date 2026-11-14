@@ -1412,7 +1412,7 @@ fn report_unresolved(
             ) {
                 continue;
             }
-            if !missing.contains(&name.to_string()) {
+            if !missing.iter().any(|seen| seen == name) {
                 missing.push(name.to_string());
             }
         }

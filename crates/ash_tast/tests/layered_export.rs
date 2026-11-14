@@ -83,7 +83,7 @@ fn build_std_layer(flags: &[&str]) -> Option<PathBuf> {
     let haxe = haxe()?;
     let out = scratch("std.tast");
     // Every class the HL target can type, with nothing removed.
-    let include = "include('', true, ['cpp','cs','flash','java','jvm','js','lua','neko','php','python','eval','hl._std','haxe.macro'])";
+    let include = "include('', true, ['cpp','cs','flash','java','jvm','js','lua','neko','php','python','eval','hl._std','haxe.macro.ExampleJSGenerator','ash.tast'])";
     let root = root();
     // `include('')` takes every module under the working directory too, so run it in an empty one.
     let here = scratch("std_cwd");

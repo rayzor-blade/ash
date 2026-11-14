@@ -1,6 +1,6 @@
 //! Checks TAST files and prints what is in them.
 //!
-//!     cargo run -p ash_tast --bin tast_dump -- [--tree] [--keys] [layer.tast ...] program.tast
+//!     cargo run -p ash_tast --bin tast_dump -- [--tree] [--keys] [--against=whole.tast [--allow=Class#s:name]] [layer.tast ...] program.tast
 //!
 //! The files are a stack, bottom first. The last one is the program; with `--tree`
 //! its entry function is printed with names in place of ids.
@@ -13,12 +13,15 @@ fn main() {
     let mut tree = false;
     let mut keys = false;
     let mut against: Option<String> = None;
+    let mut allowed: Vec<String> = Vec::new();
     let mut paths = Vec::new();
     for arg in std::env::args().skip(1) {
         if arg == "--tree" {
             tree = true;
         } else if arg == "--keys" {
             keys = true;
+        } else if let Some(key) = arg.strip_prefix("--allow=") {
+            allowed.push(key.to_owned());
         } else if let Some(path) = arg.strip_prefix("--against=") {
             against = Some(path.to_owned());
         } else {
@@ -95,7 +98,7 @@ fn main() {
         }
     }
     if let Some(path) = &against {
-        compare(&stack, path);
+        compare(&stack, path, &allowed);
     }
     let top = stack.top();
     let at = stack.layers().len() - 1;
@@ -127,7 +130,7 @@ fn main() {
 
 /// Check that `stack` is the program in `whole` (the same program exported without
 /// layers): the same functions with the same text, the stack's own plus what it kept.
-fn compare(stack: &Stack, whole: &str) {
+fn compare(stack: &Stack, whole: &str, allowed: &[String]) {
     let bytes = std::fs::read(whole).unwrap_or_else(|e| {
         eprintln!("{whole}: {e}");
         std::process::exit(1);
@@ -149,7 +152,7 @@ fn compare(stack: &Stack, whole: &str) {
     let extra = actual.keys().filter(|k| !expected.contains_key(*k)).count();
     let differing: Vec<&String> = expected
         .iter()
-        .filter(|(k, v)| actual.get(*k).is_some_and(|a| a != *v))
+        .filter(|(k, v)| actual.get(*k).is_some_and(|a| a != *v) && !allowed.contains(*k))
         .map(|(k, _)| k)
         .collect();
     println!(
@@ -158,8 +161,20 @@ fn compare(stack: &Stack, whole: &str) {
         actual.len(),
         differing.len()
     );
-    for key in differing.iter().take(5) {
+    for key in differing.iter().take(8) {
         println!("  differs: {key}");
+        let (a, b) = (&expected[*key], &actual[*key]);
+        let line = a.lines().zip(b.lines()).position(|(x, y)| x != y);
+        if let Some(at) = line {
+            println!("    whole:   {}", a.lines().nth(at).unwrap_or(""));
+            println!("    layered: {}", b.lines().nth(at).unwrap_or(""));
+        } else {
+            println!(
+                "    one is a prefix of the other ({} and {} lines)",
+                a.lines().count(),
+                b.lines().count()
+            );
+        }
     }
     if missing + extra + differing.len() > 0 {
         std::process::exit(1);

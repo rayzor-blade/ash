@@ -337,7 +337,9 @@ impl<'s, 'a> Dumper<'s, 'a> {
             }
             _ => {}
         }
-        if n.ty.get() != NONE {
+        // The type of a reference to a class is the structure of its static fields, which
+        // dead-code removal prunes; it says nothing the node's own class does not.
+        if n.ty.get() != NONE && n.kind != k::TYPE_EXPR {
             let _ = write!(out, " : {}", self.type_text(layer, n.ty));
         }
         out.push('\n');

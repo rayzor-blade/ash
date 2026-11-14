@@ -1077,6 +1077,29 @@ class Export {
 		}
 	}
 
+	/**
+		A layer should hold only what its sources define. A class from elsewhere in it
+		(typed because something here refers to it) means the layer needs a layer below
+		it that holds that class, and a program built on it will not be able to use it.
+	**/
+	function warnAboutForeignClasses(roots:Array<String>):Void {
+		var foreign:Array<String> = [];
+		for (id in 0...classTypes.length) {
+			var c = classTypes[id];
+			var file = try sys.FileSystem.fullPath(Context.getPosInfos(c.get().pos).file) catch (e:Dynamic) "";
+			var inside = false;
+			for (root in roots)
+				if (StringTools.startsWith(file, root + "/")) {
+					inside = true;
+					break;
+				}
+			if (!inside) foreign.push(c.toString());
+		}
+		if (foreign.length > 0)
+			warn('this layer holds ${foreign.length} classes from outside its sources, such as ${foreign.slice(0, 3).join(", ")}; '
+				+ 'build it on a layer that holds them, or a program cannot use it');
+	}
+
 	/** Index what this file holds, by name, for the files built on it. */
 	function writeKeys(roots:Array<String>, digest:String, used:Array<String>):Void {
 		function emit(kind:Int, map:Map<String, Int>) {
@@ -1180,6 +1203,7 @@ class Export {
 		parentRecs = parentIdPairs.copy();
 		if (layerRoots != null) {
 			var roots = resolveRoots(layerRoots);
+			warnAboutForeignClasses(roots);
 			var digest = digestOf(roots);
 			writeKeys(roots, digest, usedDefines(all));
 			layerId = identityOf(haxe.crypto.Md5.encode(digest + ":" + parentIdPairs.join(",")));

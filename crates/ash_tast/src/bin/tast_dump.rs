@@ -39,7 +39,10 @@ fn main() {
         eprintln!("{path}: {e}");
         std::process::exit(1);
     });
-    let tast = match Tast::parse(&bytes) {
+    let started = std::time::Instant::now();
+    let parsed = Tast::parse(&bytes);
+    let elapsed = started.elapsed();
+    let tast = match parsed {
         Ok(tast) => tast,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -47,7 +50,7 @@ fn main() {
         }
     };
     println!(
-        "{path}: valid, {} bytes, Haxe {}",
+        "{path}: valid, {} bytes, Haxe {}, opened and checked in {elapsed:?}",
         bytes.len(),
         tast.haxe_version()
     );
@@ -62,7 +65,27 @@ fn main() {
         tast.funcs().len(),
         tast.nodes().len()
     );
-    println!("entry {:?}", tast.entry());
+    match tast.entry() {
+        Some(entry) => {
+            let owner = tast
+                .fields()
+                .iter()
+                .find(|f| f.func.get() == entry)
+                .map(|f| {
+                    let class = &tast.classes()[f.owner.get() as usize];
+                    format!(
+                        "{}.{}",
+                        tast.opt_string(class.name).unwrap_or("?"),
+                        tast.opt_string(f.name).unwrap_or("?")
+                    )
+                });
+            println!(
+                "entry function {entry}: {}",
+                owner.as_deref().unwrap_or("the main expression")
+            );
+        }
+        None => println!("entry none"),
+    }
     if tree && let Some(entry) = tast.entry() {
         let root = tast.funcs()[entry as usize].root.get();
         if root != NONE {

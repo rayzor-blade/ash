@@ -6,6 +6,7 @@ import haxe.io.BytesBuffer;
 import haxe.macro.Context;
 import haxe.macro.Expr;
 import haxe.macro.Type;
+import haxe.macro.TypeTools;
 import ash.tast.Format;
 
 /**
@@ -39,29 +40,27 @@ class Export {
 	var enums:Array<Int> = []; // name, ctors_first, ctors_count, flags
 	var enumCtors:Array<Int> = []; // name, enum_id, index, ty, args_first, args_count
 	var anonFields:Array<Int> = []; // name, ty, flags
-	var locals:Array<Int> = []; // name, ty, flags, haxe_id
+	var locals:Array<Int> = []; // name, ty, flags
 	var params:Array<Int> = []; // local, default_value
 	var funcs:Array<Int> = []; // ret, params_first, params_count, root, flags, pos
 	var positions:Array<Int> = []; // file, start, end
 
-	// Expression nodes, one entry per node, in id order.
-	var nKind:Array<Int> = [];
-	var nFlags:Array<Int> = [];
-	var nTy:Array<Int> = [];
-	var nPos:Array<Int> = [];
-	var nA:Array<Int> = [];
-	var nB:Array<Int> = [];
-	var nFirst:Array<Int> = [];
-	var nCount:Array<Int> = [];
+	// Expression nodes, written as records straight into a buffer that doubles when full.
+	var nodeBytes:Bytes = Bytes.alloc(1 << 20);
+	var nodeCount = 0;
 	// The queue: a node id is its index. Each entry is an expression or a pseudo node.
 	var qExpr:Array<TypedExpr> = [];
 	var qPseudo:Array<Pseudo> = [];
-	// The children of the node being visited, queued together once it is described.
-	var pendingExpr:Array<TypedExpr> = [];
-	var pendingPseudo:Array<Pseudo> = [];
-	var pending = 0;
-
-	// Interning.
+	// Interning. Types are found by the cheapest key their shape allows: a class or
+	// abstract without arguments by its path, anything else by the compiler's own text
+	// for the type, and only a miss pays for reading the structure.
+	var instIds:Map<String, Int> = new Map();
+	var abstractTypeIds:Map<String, Int> = new Map();
+	var enumTypeIds:Map<String, Int> = new Map();
+	var typedefIds:Map<String, Int> = new Map();
+	var textIds:Map<String, Int> = new Map();
+	var dynId = -1;
+	var monoId = -1;
 	var typeIds:Map<String, Int> = new Map();
 	var classIds:Map<String, Int> = new Map();
 	var classTypes:Array<Ref<ClassType>> = [];
@@ -75,6 +74,7 @@ class Export {
 	var withPositions:Bool;
 	var verbose:Bool;
 	var typedefDepth = 0;
+	var walking = false;
 
 	// What could not be written exactly.
 	var dynamicFields = 0;
@@ -139,27 +139,49 @@ class Export {
 	function typeId(t:Type):Int {
 		switch (t) {
 			case TInst(c, []):
-				var key = "I" + c.toString();
-				var id = typeIds.get(key);
+				var key = c.toString();
+				var id = instIds.get(key);
 				if (id != null) return id;
 				id = rec(types, [TypeKind.CLASS, Format.NONE, classId(c), 0, 0]);
-				typeIds.set(key, id);
+				instIds.set(key, id);
 				return id;
 			case TAbstract(a, []):
-				var key = "B" + a.toString();
-				var id = typeIds.get(key);
+				var key = a.toString();
+				var id = abstractTypeIds.get(key);
 				if (id != null) return id;
 				id = rec(types, [TypeKind.ABSTRACT, Format.NONE, abstractId(a), 0, 0]);
-				typeIds.set(key, id);
+				abstractTypeIds.set(key, id);
 				return id;
+			case TEnum(e, []):
+				var key = e.toString();
+				var id = enumTypeIds.get(key);
+				if (id != null) return id;
+				id = rec(types, [TypeKind.ENUM, Format.NONE, enumId(e), 0, 0]);
+				enumTypeIds.set(key, id);
+				return id;
+			case TDynamic(_):
+				return dynamicType();
 			case TType(d, ps):
 				return typedefId(t, d, ps);
-			case TAbstract(_, _):
+			case TMono(r):
+				var inner = r.get();
+				return inner == null ? monoType() : typeId(inner);
+			case TLazy(f):
+				return typeId(f());
+			case TInst(_, _) | TEnum(_, _) | TAbstract(_, _) | TFun(_, _) | TAnonymous(_):
 				// Not followed: following strips `Null<T>`, and the program keeps that.
-				return slowTypeId(t);
-			default:
+				return textType(t);
 		}
-		return slowTypeId(Context.follow(t));
+	}
+
+	/** A type found by the compiler's text for it; the structure is read only on a miss. */
+	function textType(t:Type):Int {
+		var key = TypeTools.toString(t);
+		var id = textIds.get(key);
+		if (id != null) return id;
+		id = slowTypeId(t);
+		textIds.set(key, id);
+		return id;
 	}
 
 	/**
@@ -168,6 +190,10 @@ class Export {
 		finds that id instead of recursing.
 	**/
 	function typedefId(t:Type, d:Ref<DefType>, ps:Array<Type>):Int {
+		if (ps.length == 0) {
+			var cached = typedefIds.get(d.toString());
+			if (cached != null) return cached;
+		}
 		// A typedef that instantiates itself at ever larger types has no finite table; cut it.
 		if (typedefDepth > 8) {
 			unsupportedCase("infinitely expanding typedef " + d.toString());
@@ -189,12 +215,14 @@ class Export {
 			case TAnonymous(an):
 				id = rec(types, [TypeKind.ANON, Format.NONE, 0, 0, 0]);
 				typeIds.set(key, id);
+				if (ps.length == 0) typedefIds.set(d.toString(), id);
 				var first = fillAnon(an, id);
 				types[id * 5 + 2] = first;
 				return id;
 			default:
 				id = typeId(next);
 				typeIds.set(key, id);
+				if (ps.length == 0) typedefIds.set(d.toString(), id);
 				return id;
 		}
 	}
@@ -222,6 +250,7 @@ class Export {
 		return [for (p in ps) typeId(p)];
 	}
 
+	/** The structure of a type the text cache has not seen. */
 	function slowTypeId(t:Type):Int {
 		switch (t) {
 			case TInst(c, ps):
@@ -276,27 +305,20 @@ class Export {
 				id = rec(types, [TypeKind.ANON, Format.NONE, first, 0, fs.length]);
 				typeIds.set(key, id);
 				return id;
-			case TDynamic(_):
-				return dynamicType();
-			case TMono(_):
-				var key = "M";
-				var id = typeIds.get(key);
-				if (id != null) return id;
-				id = rec(types, [TypeKind.MONO, Format.NONE, Format.NONE, 0, 0]);
-				typeIds.set(key, id);
-				return id;
-			case TType(_, _) | TLazy(_):
+			default:
 				unsupportedCase("type " + Type.enumConstructor(t));
 				return dynamicType();
 		}
 	}
 
 	function dynamicType():Int {
-		var id = typeIds.get("D");
-		if (id != null) return id;
-		id = rec(types, [TypeKind.DYNAMIC, Format.NONE, Format.NONE, 0, 0]);
-		typeIds.set("D", id);
-		return id;
+		if (dynId < 0) dynId = rec(types, [TypeKind.DYNAMIC, Format.NONE, Format.NONE, 0, 0]);
+		return dynId;
+	}
+
+	function monoType():Int {
+		if (monoId < 0) monoId = rec(types, [TypeKind.MONO, Format.NONE, Format.NONE, 0, 0]);
+		return monoId;
 	}
 
 	// ---- type definitions
@@ -361,9 +383,9 @@ class Export {
 	function localId(v:TVar):Int {
 		var id = localIds.get(v.id);
 		if (id != null) return id;
-		id = rec(locals, [str(v.name), 0, v.capture ? LocalFlag.CAPTURED : 0, v.id]);
+		id = rec(locals, [str(v.name), 0, v.capture ? LocalFlag.CAPTURED : 0]);
 		localIds.set(v.id, id);
-		locals[id * 4 + 1] = typeId(v.t);
+		locals[id * 3 + 1] = typeId(v.t);
 		return id;
 	}
 
@@ -430,7 +452,11 @@ class Export {
 		var cur:Null<Ref<ClassType>> = c;
 		while (cur != null) {
 			var cid = classId(cur);
-			fillClass(cid);
+			if (!classFilled[cid]) {
+				// Filling queues the class's bodies, which cannot happen between a node's children.
+				if (walking) return Format.NONE;
+				fillClass(cid);
+			}
 			var fid = fieldIds.get(cid + (isStatic ? "s:" : "i:") + name);
 			if (fid != null) return fid;
 			var sup = cur.get().superClass;
@@ -477,25 +503,13 @@ class Export {
 	}
 
 	function pushKid(e:TypedExpr):Void {
-		pendingExpr[pending] = e;
-		pendingPseudo[pending] = null;
-		pending++;
+		qExpr.push(e);
+		qPseudo.push(null);
 	}
 
 	function pushPseudo(kind:Int, a:Int, kids:Array<TypedExpr>):Void {
-		pendingExpr[pending] = null;
-		pendingPseudo[pending] = new Pseudo(kind, a, kids);
-		pending++;
-	}
-
-	/** Queue the pending children as one consecutive group and answer where it starts. */
-	function flushKids():Int {
-		var first = qExpr.length;
-		for (i in 0...pending) {
-			qExpr.push(pendingExpr[i]);
-			qPseudo.push(pendingPseudo[i]);
-		}
-		return first;
+		qExpr.push(null);
+		qPseudo.push(new Pseudo(kind, a, kids));
 	}
 
 	function moduleIndex(m:ModuleType):Array<Int> {
@@ -529,7 +543,9 @@ class Export {
 	/** Write node `id` of the queue and enqueue its children. */
 	function visit(e:TypedExpr):Void {
 		var kind = 0, flags = 0, a = 0, b = 0;
-		pending = 0;
+		// Children are queued as they are met, as one group, so this is where it starts.
+		// Nothing below queues anything else in between except `TFunction`, which has no children.
+		var first = qExpr.length;
 		switch (e.expr) {
 			case TConst(c):
 				kind = NodeKind.CONST;
@@ -624,6 +640,7 @@ class Export {
 			case TFunction(tf):
 				kind = NodeKind.FUNCTION;
 				a = funcId(tf);
+				first = qExpr.length;
 			case TVar(v, init):
 				kind = NodeKind.VAR;
 				a = localId(v);
@@ -701,29 +718,26 @@ class Export {
 				kind = NodeKind.IDENT;
 				a = str(s);
 		}
-		nKind.push(kind);
-		nFlags.push(flags);
-		nTy.push(typeId(e.t));
-		nPos.push(withPositions ? posId(e.pos) : Format.NONE);
-		nA.push(a);
-		nB.push(b);
-		var count = pending;
-		nFirst.push(flushKids());
-		nCount.push(count);
+		var ty = typeId(e.t);
+		var pos = withPositions ? posId(e.pos) : Format.NONE;
+		writeNode(kind, flags, ty, pos, a, b, first, qExpr.length - first);
+	}
+
+	function writeNode(kind:Int, flags:Int, ty:Int, pos:Int, a:Int, b:Int, first:Int, count:Int):Void {
+		var at = nodeCount * Format.NODE_REC_SIZE;
+		if (at + Format.NODE_REC_SIZE > nodeBytes.length) {
+			var bigger = Bytes.alloc(nodeBytes.length * 2);
+			bigger.blit(0, nodeBytes, 0, at);
+			nodeBytes = bigger;
+		}
+		Format.writeNodeRec(nodeBytes, at, kind, flags, ty, pos, a, b, first, count);
+		nodeCount++;
 	}
 
 	function visitPseudo(p:Pseudo):Void {
-		pending = 0;
+		var first = qExpr.length;
 		for (k in p.kids) pushKid(k);
-		nKind.push(p.kind);
-		nFlags.push(0);
-		nTy.push(Format.NONE);
-		nPos.push(Format.NONE);
-		nA.push(p.a);
-		nB.push(0);
-		var count = pending;
-		nFirst.push(flushKids());
-		nCount.push(count);
+		writeNode(p.kind, 0, Format.NONE, Format.NONE, p.a, 0, first, p.kids.length);
 	}
 
 	// ---- the entry point
@@ -759,11 +773,13 @@ class Export {
 		var entry = entryFunc();
 		var i = 0;
 		while (true) {
+			walking = true;
 			while (i < qExpr.length) {
 				var e = qExpr[i];
 				if (e != null) visit(e) else visitPseudo(qPseudo[i]);
 				i++;
 			}
+			walking = false;
 			// A class reached from an expression is filled too, which can queue its bodies.
 			var k = done;
 			while (k < classTypes.length) {
@@ -779,9 +795,9 @@ class Export {
 		sys.io.File.saveBytes(path, bytes);
 		if (verbose) {
 			var ms = function(a:Float, b:Float) return Std.int((b - a) * 1000);
-			Sys.println('[ash_tast] ${path}: ${bytes.length} bytes, ${nKind.length} nodes, ${Std.int(types.length / 5)} types, '
+			Sys.println('[ash_tast] ${path}: ${bytes.length} bytes, ${nodeCount} nodes, ${Std.int(types.length / 5)} types, '
 				+ '${classTypes.length} classes, ${Std.int(fields.length / 6)} fields, ${Std.int(funcs.length / 6)} functions, '
-				+ '${Std.int(locals.length / 4)} locals, ${strOffsets.length} strings');
+				+ '${Std.int(locals.length / 3)} locals, ${strOffsets.length} strings');
 			Sys.println('[ash_tast] build ${ms(t0, tBuilt)} ms, assemble and write ${ms(tBuilt, Sys.time())} ms');
 			if (dynamicFields > 0) Sys.println('[ash_tast] fields written by name only: $dynamicFields');
 			for (k => n in unsupported) Sys.println('[ash_tast] unsupported $k: $n');
@@ -793,7 +809,7 @@ class Export {
 			blobLen, strOffsets.length, Std.int(positions.length / 3), Std.int(types.length / 5), typeArgs.length,
 			Std.int(classes.length / 7), Std.int(fields.length / 6), Std.int(abstracts.length / 4),
 			Std.int(enums.length / 4), Std.int(enumCtors.length / 6), Std.int(anonFields.length / 3),
-			Std.int(locals.length / 4), Std.int(params.length / 2), Std.int(funcs.length / 6), nKind.length
+			Std.int(locals.length / 3), Std.int(params.length / 2), Std.int(funcs.length / 6), nodeCount
 		];
 		var elems = [
 			Format.STRINGS_ELEM, Format.STRING_INDEX_ELEM, Format.POSITIONS_ELEM, Format.TYPES_ELEM,
@@ -857,9 +873,9 @@ class Export {
 				anonFields[r], anonFields[r + 1], anonFields[r + 2]);
 		}
 		for (i in 0...counts[Format.SECTION_LOCALS]) {
-			var r = i * 4;
+			var r = i * 3;
 			Format.writeLocalRec(out, offsets[Format.SECTION_LOCALS] + i * Format.LOCAL_REC_SIZE, locals[r], locals[r + 1],
-				locals[r + 2], locals[r + 3]);
+				locals[r + 2]);
 		}
 		for (i in 0...counts[Format.SECTION_PARAMS])
 			Format.writeParamRec(out, offsets[Format.SECTION_PARAMS] + i * Format.PARAM_REC_SIZE, params[i * 2], params[i * 2 + 1]);
@@ -868,10 +884,7 @@ class Export {
 			Format.writeFuncRec(out, offsets[Format.SECTION_FUNCS] + i * Format.FUNC_REC_SIZE, funcs[r], funcs[r + 1],
 				funcs[r + 2], funcs[r + 3], funcs[r + 4], funcs[r + 5]);
 		}
-		var n = offsets[Format.SECTION_NODES];
-		for (i in 0...nKind.length)
-			Format.writeNodeRec(out, n + i * Format.NODE_REC_SIZE, nKind[i], nFlags[i], nTy[i], nPos[i], nA[i], nB[i],
-				nFirst[i], nCount[i]);
+		out.blit(offsets[Format.SECTION_NODES], nodeBytes, 0, nodeCount * Format.NODE_REC_SIZE);
 		return out;
 	}
 

@@ -138,7 +138,6 @@ impl Builder {
             name: U32::new(name),
             ty: U32::new(ty),
             flags: U32::new(flags),
-            haxe_id: U32::new(self.locals.len() as u32),
         });
         (self.locals.len() - 1) as u32
     }

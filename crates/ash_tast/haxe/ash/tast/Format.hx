@@ -12,8 +12,8 @@ class Format {
 	public static inline final VERSION = 1;
 	/** A reference to nothing (`u32::MAX`, which is -1 as an Int). */
 	public static inline final NONE = -1;
-	public static inline final SCHEMA_HASH_LO = 0x4b7e150a;
-	public static inline final SCHEMA_HASH_HI = 0x0ec13713;
+	public static inline final SCHEMA_HASH_LO = 0xd725f01b;
+	public static inline final SCHEMA_HASH_HI = 0xb2c0332f;
 	public static inline final SECTION_COUNT = 15;
 	public static inline final SECTION_STRINGS = 0;
 	public static inline final SECTION_STRING_INDEX = 1;
@@ -41,7 +41,7 @@ class Format {
 	public static inline final ENUMS_ELEM = 16;
 	public static inline final ENUM_CTORS_ELEM = 24;
 	public static inline final ANON_FIELDS_ELEM = 12;
-	public static inline final LOCALS_ELEM = 16;
+	public static inline final LOCALS_ELEM = 12;
 	public static inline final PARAMS_ELEM = 8;
 	public static inline final FUNCS_ELEM = 24;
 	public static inline final NODES_ELEM = 28;
@@ -56,7 +56,7 @@ class Format {
 	public static inline final ENUM_REC_SIZE = 16;
 	public static inline final ENUM_CTOR_REC_SIZE = 24;
 	public static inline final ANON_FIELD_REC_SIZE = 12;
-	public static inline final LOCAL_REC_SIZE = 16;
+	public static inline final LOCAL_REC_SIZE = 12;
 	public static inline final PARAM_REC_SIZE = 8;
 	public static inline final FUNC_REC_SIZE = 24;
 	public static inline final NODE_REC_SIZE = 28;
@@ -94,9 +94,7 @@ class Format {
 
 	/** Write one `TypeRec` at byte `at`. */
 	public static inline function writeTypeRec(out:Bytes, at:Int, kind:Int, flags:Int, name:Int, def:Int, argsFirst:Int, argsCount:Int):Void {
-		out.set(at + 0, kind);
-		out.set(at + 1, flags);
-		out.setUInt16(at + 2, 0);
+		out.setInt32(at + 0, (kind & 0xff) | ((flags & 0xff) << 8));
 		out.setInt32(at + 4, name);
 		out.setInt32(at + 8, def);
 		out.setInt32(at + 12, argsFirst);
@@ -158,11 +156,10 @@ class Format {
 	}
 
 	/** Write one `LocalRec` at byte `at`. */
-	public static inline function writeLocalRec(out:Bytes, at:Int, name:Int, ty:Int, flags:Int, haxeId:Int):Void {
+	public static inline function writeLocalRec(out:Bytes, at:Int, name:Int, ty:Int, flags:Int):Void {
 		out.setInt32(at + 0, name);
 		out.setInt32(at + 4, ty);
 		out.setInt32(at + 8, flags);
-		out.setInt32(at + 12, haxeId);
 	}
 
 	/** Write one `ParamRec` at byte `at`. */
@@ -183,9 +180,7 @@ class Format {
 
 	/** Write one `NodeRec` at byte `at`. */
 	public static inline function writeNodeRec(out:Bytes, at:Int, kind:Int, flags:Int, ty:Int, pos:Int, a:Int, b:Int, firstKid:Int, kidCount:Int):Void {
-		out.set(at + 0, kind);
-		out.set(at + 1, flags);
-		out.setUInt16(at + 2, 0);
+		out.setInt32(at + 0, (kind & 0xff) | ((flags & 0xff) << 8));
 		out.setInt32(at + 4, ty);
 		out.setInt32(at + 8, pos);
 		out.setInt32(at + 12, a);

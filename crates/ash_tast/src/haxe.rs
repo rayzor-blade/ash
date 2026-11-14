@@ -113,6 +113,75 @@ fn names(out: &mut String, class: &str, doc: &str, list: &[&str]) {
     writeln!(out, "}}\n").unwrap();
 }
 
+fn width(ty: &str) -> usize {
+    match ty {
+        "u8" => 1,
+        "u16" => 2,
+        "u32" => 4,
+        other => panic!("no Haxe writer for wire type {other}"),
+    }
+}
+
+/// The writes for one record. A run of sub-word fields that exactly fills a 4-byte
+/// word is packed into one `setInt32`, since each call is a cost the interpreter
+/// running the writer pays per node; every other field is its own write.
+fn write_fields(out: &mut String, fields: &[FieldDesc]) {
+    let mut i = 0;
+    while i < fields.len() {
+        let field = &fields[i];
+        if field.offset.is_multiple_of(4) && field.ty != "u32" {
+            let (mut j, mut bytes) = (i, 0);
+            while j < fields.len()
+                && fields[j].ty != "u32"
+                && fields[j].offset == field.offset + bytes
+            {
+                bytes += width(fields[j].ty);
+                j += 1;
+                if bytes == 4 {
+                    break;
+                }
+            }
+            if bytes == 4 && j - i > 1 {
+                let mut terms = Vec::new();
+                let mut shift = 0;
+                for part in &fields[i..j] {
+                    let w = width(part.ty);
+                    if !part.name.starts_with('_') {
+                        let mask = (1u32 << (8 * w)) - 1;
+                        let value = camel(part.name);
+                        terms.push(if shift == 0 {
+                            format!("({value} & {mask:#x})")
+                        } else {
+                            format!("(({value} & {mask:#x}) << {shift})")
+                        });
+                    }
+                    shift += 8 * w;
+                }
+                let expr = if terms.is_empty() {
+                    "0".to_owned()
+                } else {
+                    terms.join(" | ")
+                };
+                writeln!(out, "\t\tout.setInt32(at + {}, {expr});", field.offset).unwrap();
+                i = j;
+                continue;
+            }
+        }
+        let value = if field.name.starts_with('_') {
+            "0".to_owned()
+        } else {
+            camel(field.name)
+        };
+        let call = match field.ty {
+            "u8" => format!("out.set(at + {}, {value});", field.offset),
+            "u16" => format!("out.setUInt16(at + {}, {value});", field.offset),
+            _ => format!("out.setInt32(at + {}, {value});", field.offset),
+        };
+        writeln!(out, "\t\t{call}").unwrap();
+        i += 1;
+    }
+}
+
 /// The text of `ash/tast/Format.hx`.
 pub fn generate() -> String {
     let mut out = String::new();
@@ -194,21 +263,7 @@ pub fn generate() -> String {
             params.join(", ")
         )
         .unwrap();
-        for field in record.fields {
-            let offset = field.offset;
-            let value = if field.name.starts_with('_') {
-                "0".to_owned()
-            } else {
-                camel(field.name)
-            };
-            let call = match field.ty {
-                "u8" => format!("out.set(at + {offset}, {value});"),
-                "u16" => format!("out.setUInt16(at + {offset}, {value});"),
-                "u32" => format!("out.setInt32(at + {offset}, {value});"),
-                other => panic!("no Haxe writer for wire type {other}"),
-            };
-            writeln!(out, "\t\t{call}").unwrap();
-        }
+        write_fields(&mut out, record.fields);
         writeln!(out, "\t}}\n").unwrap();
     }
 

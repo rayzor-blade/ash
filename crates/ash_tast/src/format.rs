@@ -280,8 +280,6 @@ record! {
         ty: U32,
         /// [`local_flag`] bits.
         flags: U32,
-        /// Haxe's `TVar.id`, for tracing a local back to the compiler.
-        haxe_id: U32,
     }
 }
 

@@ -287,3 +287,16 @@ fn the_committed_haxe_writer_is_current() {
         "Format.hx is stale; run `cargo run -p ash_tast --bin gen_haxe -- crates/ash_tast/haxe/ash/tast/Format.hx`"
     );
 }
+
+#[test]
+fn the_committed_ocaml_writer_is_current() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/ocaml/ash_tast/ml/tast_format.ml"
+    );
+    let committed = std::fs::read_to_string(path).expect("ocaml/ash_tast/ml/tast_format.ml");
+    assert!(
+        committed == ash_tast::ocaml::generate(),
+        "tast_format.ml is stale; run `cargo run -p ash_tast --bin gen_ocaml -- crates/ash_tast/ocaml/ash_tast/ml/tast_format.ml`"
+    );
+}

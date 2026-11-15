@@ -43,10 +43,18 @@ class plugin =
 					classes funcs inits nodes ((Unix.gettimeofday () -. t0) *. 1000.)
 			) false;
 			vnull
+
+		(* Writes the typed program to `path` once the filters have run, as Export.init does. *)
+		method export_on_generate (path : value) : value =
+			let path = EvalDecode.decode_string path in
+			let compiler = (EvalContext.get_ctx()).curapi in
+			compiler.on_generate (fun _ -> Tast_export.run (compiler.get_com ()) path) true;
+			vnull
 	end
 ;;
 
 let api = new plugin in
 EvalStdLib.StdContext.register [
 	("countOnGenerate", EvalEncode.vfun0 api#count_on_generate);
+	("exportOnGenerate", EvalEncode.vfun1 api#export_on_generate);
 ]

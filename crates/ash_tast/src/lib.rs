@@ -3,8 +3,8 @@
 //! The Haxe side (a macro) writes the file once. This crate defines its
 //! layout ([`format`]), reads and validates it in place ([`reader`]), builds
 //! files for tests and other producers ([`builder`]), and generates the Haxe
-//! writer from the same record descriptions ([`haxe`]), so the two sides
-//! cannot drift apart.
+//! writer and the OCaml plugin's from the same record descriptions ([`haxe`],
+//! [`ocaml`]), so the sides cannot drift apart.
 //!
 //! Every record is a run of little-endian words with no alignment
 //! requirement, so a memory-mapped file is read as `&[Record]` directly. One
@@ -14,6 +14,7 @@ pub mod builder;
 pub mod dump;
 pub mod format;
 pub mod haxe;
+pub mod ocaml;
 pub mod reader;
 pub mod stack;
 

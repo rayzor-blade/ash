@@ -1,5 +1,6 @@
 typedef AshTastNativeApi = {
 	function countOnGenerate():Void;
+	function exportOnGenerate(path:String):Void;
 }
 
 class AshTastNative {
@@ -13,6 +14,10 @@ class AshTastNative {
 
 	static public function init():Void
 		plugin().countOnGenerate();
+
+	/** The native counterpart of `ash.tast.Export.init`: writes the TAST file at `path`. */
+	static public function export(path:String):Void
+		plugin().exportOnGenerate(path);
 
 	static function pluginPath():String {
 		var file = (function(?p:haxe.PosInfos) return p.fileName)();

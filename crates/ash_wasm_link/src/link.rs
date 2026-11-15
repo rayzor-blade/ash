@@ -124,6 +124,15 @@ pub struct LinkOptions {
     /// returns exactly what `emit` produced and nothing in
     /// [`crate::fiber`] runs. See `docs/internals/wasm-fibers.md`.
     pub fibers: bool,
+    /// Import only what kept code and data reach.
+    ///
+    /// By default every function an object names and nothing defines becomes an import, reachable
+    /// or not. A static library holds functions the program never calls, and they name things no
+    /// host supplies (`std`'s `chdir`), which would refuse the whole build. With this on, tree
+    /// shaking decides which imports exist, as it does for a native linker. Off by default, so a
+    /// link without a library emits exactly what it always did. Has no effect without
+    /// `tree_shake`.
+    pub prune_imports: bool,
 }
 
 impl Default for LinkOptions {
@@ -139,6 +148,7 @@ impl Default for LinkOptions {
                 .map(|s| s.to_string())
                 .collect(),
             fibers: false,
+            prune_imports: false,
             shared_memory: false,
             hdll_imports: Vec::new(),
             hdll_data: Vec::new(),
@@ -281,7 +291,7 @@ struct ImportKey {
 /// `ash_wasm_runtime`'s `validate::is_host_supplied`: a module this accepts
 /// and that one refuses fails at instantiate instead of at link, which is the
 /// whole failure this check exists to move earlier.
-fn host_can_supply(module: &str, name: &str) -> bool {
+pub(crate) fn host_can_supply(module: &str, name: &str) -> bool {
     module.starts_with("wasi_")
         || (module == "env" && name.starts_with("ash_host_"))
         || module == "GOT.mem"
@@ -602,6 +612,19 @@ fn plan(
     defs: &HashMap<(Kind, String), (usize, usize)>,
     opts: &LinkOptions,
 ) -> Result<Layout> {
+    // Which functions survive, and which imports they reach, is known before the imports are
+    // assigned, because the imports take the lowest indices.
+    let (kept, needed) = if opts.tree_shake {
+        let (kept, needed) = mark_reachable(objects, defs, opts)?;
+        (kept, opts.prune_imports.then_some(needed))
+    } else {
+        let kept: Vec<Vec<bool>> = objects
+            .iter()
+            .map(|o| vec![true; o.functions.len()])
+            .collect();
+        (kept, None)
+    };
+
     // --- imports that nothing defines ---
     let mut imports: Vec<(ImportKey, u32)> = Vec::new();
     let mut import_index: HashMap<ImportKey, u32> = HashMap::new();
@@ -659,6 +682,9 @@ fn plan(
                 module: import.module.clone(),
                 name: import.name.clone(),
             };
+            if needed.as_ref().is_some_and(|n| !n.contains(&key)) {
+                continue;
+            }
             if import_index.contains_key(&key) {
                 continue;
             }
@@ -696,14 +722,6 @@ fn plan(
     }
 
     // --- function index space: imports, then whatever survives ---
-    let kept = if opts.tree_shake {
-        mark_reachable(objects, defs, opts)?
-    } else {
-        objects
-            .iter()
-            .map(|o| vec![true; o.functions.len()])
-            .collect()
-    };
     let mut func_out: Vec<Vec<Option<u32>>> = Vec::with_capacity(objects.len());
     let mut next = imports.len() as u32;
     for keep in &kept {
@@ -850,12 +868,20 @@ fn plan(
             .filter(|(i, _)| func_out[oi][*i].is_some())
             .flat_map(|(_, body)| relocations_in(&obj.code_relocs, body));
         for entry in live_code.chain(obj.data_relocs.iter()) {
-            if !matches!(
+            // A global relocation that names a function is the GOT form of taking its address
+            // (`GOT.func.<name>`), and the global it reads holds the same table slot.
+            let got_function = matches!(
                 entry.ty,
-                RelocationType::TableIndexSleb
-                    | RelocationType::TableIndexI32
-                    | RelocationType::TableIndexRelSleb
-            ) {
+                RelocationType::GlobalIndexLeb | RelocationType::GlobalIndexI32
+            ) && names_function(objects, defs, oi, entry.index);
+            if !got_function
+                && !matches!(
+                    entry.ty,
+                    RelocationType::TableIndexSleb
+                        | RelocationType::TableIndexI32
+                        | RelocationType::TableIndexRelSleb
+                )
+            {
                 continue;
             }
             // The address of a weak reference nothing defines is zero, which
@@ -941,6 +967,52 @@ fn plan(
             if got.contains_key(&key) {
                 continue;
             }
+            got.insert(key, first_got + got_init.len() as u32);
+            got_init.push(value);
+        }
+    }
+
+    // The same table for functions: `GOT.func.<name>` is a global holding the function's table
+    // slot, which a position-independent object reads to take an address. Only code that
+    // survived asks, and these come after the data entries so a link without any numbers its
+    // globals as it always did.
+    for (oi, obj) in objects.iter().enumerate() {
+        let live_code = obj
+            .code_bodies
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| func_out[oi][*i].is_some())
+            .flat_map(|(_, body)| relocations_in(&obj.code_relocs, body));
+        for entry in live_code.chain(obj.data_relocs.iter()) {
+            if !matches!(
+                entry.ty,
+                RelocationType::GlobalIndexLeb | RelocationType::GlobalIndexI32
+            ) || !names_function(objects, defs, oi, entry.index)
+            {
+                continue;
+            }
+            let Some(sym) = obj.symbols.get(entry.index as usize) else {
+                continue;
+            };
+            let (doi, def) = definition_of(objects, defs, oi, sym);
+            let key = (Kind::Function, objects[doi].symbol_name(def).to_string());
+            if got.contains_key(&key) {
+                continue;
+            }
+            // A weak reference nothing defines has address zero, as it does through a table.
+            let value = if weak_undefined_at(objects, defs, oi, entry.index).is_some() {
+                0
+            } else {
+                let out =
+                    function_symbol(objects, defs, &func_out, &import_index, oi, entry.index)?;
+                let slot = table_slot.get(&out).copied().ok_or_else(|| {
+                    anyhow!(
+                        "{} is reached through the GOT and was given no table slot",
+                        key.1
+                    )
+                })?;
+                slot as i32
+            };
             got.insert(key, first_got + got_init.len() as u32);
             got_init.push(value);
         }
@@ -1072,12 +1144,14 @@ fn mark_reachable(
     objects: &[Object],
     defs: &HashMap<(Kind, String), (usize, usize)>,
     opts: &LinkOptions,
-) -> Result<Vec<Vec<bool>>> {
+) -> Result<(Vec<Vec<bool>>, HashSet<ImportKey>)> {
     let mut kept: Vec<Vec<bool>> = objects
         .iter()
         .map(|o| vec![false; o.functions.len()])
         .collect();
     let mut work: Vec<(usize, u32)> = Vec::new();
+    // The imports something kept refers to, which is all `prune_imports` keeps.
+    let mut needed: HashSet<ImportKey> = HashSet::new();
 
     let root =
         |oi: usize, defined: u32, kept: &mut Vec<Vec<bool>>, work: &mut Vec<(usize, u32)>| {
@@ -1121,6 +1195,8 @@ fn mark_reachable(
                     let imported = objects[doi].imported_functions();
                     if index >= imported {
                         root(doi, index - imported, &mut kept, &mut work);
+                    } else {
+                        needed.extend(import_key(&objects[doi], index));
                     }
                 }
             }
@@ -1133,6 +1209,8 @@ fn mark_reachable(
                     | RelocationType::TableIndexI32
                     | RelocationType::TableIndexRelSleb
                     | RelocationType::FunctionIndexLeb
+                    | RelocationType::GlobalIndexLeb
+                    | RelocationType::GlobalIndexI32
             ) {
                 continue;
             }
@@ -1144,6 +1222,8 @@ fn mark_reachable(
                 let imported = objects[doi].imported_functions();
                 if index >= imported {
                     root(doi, index - imported, &mut kept, &mut work);
+                } else {
+                    needed.extend(import_key(&objects[doi], index));
                 }
             }
         }
@@ -1162,6 +1242,8 @@ fn mark_reachable(
                     | RelocationType::TableIndexSleb
                     | RelocationType::TableIndexI32
                     | RelocationType::TableIndexRelSleb
+                    | RelocationType::GlobalIndexLeb
+                    | RelocationType::GlobalIndexI32
             ) {
                 continue;
             }
@@ -1173,12 +1255,23 @@ fn mark_reachable(
                 let imported = objects[doi].imported_functions();
                 if index >= imported {
                     root(doi, index - imported, &mut kept, &mut work);
+                } else {
+                    needed.extend(import_key(&objects[doi], index));
                 }
             }
         }
     }
 
-    Ok(kept)
+    Ok((kept, needed))
+}
+
+/// The import an object's function index below its import count names.
+fn import_key(obj: &Object, index: u32) -> Option<ImportKey> {
+    let import = function_imports(obj).get(index as usize).copied()?;
+    Some(ImportKey {
+        module: import.module.clone(),
+        name: import.name.clone(),
+    })
 }
 
 /// The relocations that fall inside one function body.
@@ -1205,7 +1298,7 @@ fn relocations_in<'a>(
 /// the two kinds been compatible instead of obviously wrong, it would have
 /// resolved to the wrong thing quietly.
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     Function,
     Data,
     Global,
@@ -1214,7 +1307,7 @@ enum Kind {
     Section,
 }
 
-fn kind_of(target: &SymbolTarget) -> Option<Kind> {
+pub(crate) fn kind_of(target: &SymbolTarget) -> Option<Kind> {
     Some(match target {
         SymbolTarget::Function { .. } => Kind::Function,
         SymbolTarget::Data { .. } => Kind::Data,
@@ -1258,6 +1351,21 @@ fn definition_of<'a>(
         Some(&(doi, dsi)) => (doi, &objects[doi].symbols[dsi]),
         None => (oi, sym),
     }
+}
+
+/// Whether a symbol resolves to a function, which is what makes a global relocation against it
+/// the GOT form of taking the function's address.
+fn names_function(
+    objects: &[Object],
+    defs: &HashMap<(Kind, String), (usize, usize)>,
+    oi: usize,
+    sym_index: u32,
+) -> bool {
+    let Some(sym) = objects[oi].symbols.get(sym_index as usize) else {
+        return false;
+    };
+    let (_, def) = definition_of(objects, defs, oi, sym);
+    matches!(def.target, SymbolTarget::Function { .. })
 }
 
 /// The output function index a symbol names, using only the parts of the
@@ -1784,7 +1892,7 @@ fn patch(
                 let resolved = resolve_symbol(objects, defs, layout, oi, entry.index)?;
                 let g = match resolved {
                     Resolved::Global(g) => g,
-                    // Naming data means the GOT entry that holds its address.
+                    // Naming data or a function means the GOT entry that holds its address.
                     _ => {
                         let sym = objects[oi].symbols.get(entry.index as usize);
                         let name = sym
@@ -1793,7 +1901,12 @@ fn patch(
                                 objects[doi].symbol_name(def).to_string()
                             })
                             .unwrap_or_default();
-                        *layout.got.get(&(Kind::Data, name.clone())).ok_or_else(|| {
+                        let kind = if matches!(resolved, Resolved::Function(_)) {
+                            Kind::Function
+                        } else {
+                            Kind::Data
+                        };
+                        *layout.got.get(&(kind, name.clone())).ok_or_else(|| {
                             anyhow!(
                                 "a global relocation names {name:?}, which resolved to \
                                  {resolved:?} and has no global offset table entry"

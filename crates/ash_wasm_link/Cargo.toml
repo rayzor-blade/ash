@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
+# Reads the `ar` container of a static library; the members are parsed here.
+object = { version = "0.38", default-features = false, features = ["read_core", "archive"] }
 wasmparser = "0.258"
 # The `wasmparser` feature is what brings in `reencode`, the bridge that turns
 # a decoded operator back into an encodable one. Named explicitly rather than

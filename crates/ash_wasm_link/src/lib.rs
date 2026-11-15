@@ -9,12 +9,14 @@
 //!
 //! # What it links, and what it therefore does not implement
 //!
-//! Exactly two relocatable objects: the program ash emitted, and one
-//! prelinked runtime object carrying `ash_std`, a wasi libc and `libsetjmp`,
-//! joined once when ash itself is built. That single decision removes the
-//! largest part of a general linker -- `ar` reading, lazy archive pull, and
-//! the symbol-resolution passes that go with it -- because the 1,132 archive
-//! members are resolved before a user ever runs ash.
+//! The program ash emitted, and one prelinked runtime object carrying
+//! `ash_std`, a wasi libc and `libsetjmp`, joined once when ash itself is
+//! built. That removes the largest part of a general linker for the runtime,
+//! because its 1,132 archive members are resolved before a user ever runs ash.
+//!
+//! A program's own native libraries can arrive as `ar` archives, and
+//! [`archive`] handles those: it reads the members and pulls only the ones the
+//! link names, ahead of the linker proper, which still sees plain objects.
 //!
 //! Measured across every object ash actually links, the following are absent
 //! and are refused rather than half-handled: COMDAT groups, the six 64-bit
@@ -50,6 +52,7 @@
 
 use anyhow::Result;
 
+pub mod archive;
 pub mod body;
 pub mod cursor;
 pub mod dylink;
@@ -59,6 +62,7 @@ pub mod object;
 pub mod suspend;
 pub mod waits;
 
+pub use archive::{Archive, Pulled, Shadowed, is_archive, pull, read_archive};
 pub use dylink::{SIDE_MODULE_PREFIX, SideModule, looks_like_side_module, read_side_module};
 pub use link::{LinkOptions, LinkTimings, link, link_with_timings};
 pub use object::{Object, Symbol, SymbolTarget, read};

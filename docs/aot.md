@@ -317,6 +317,28 @@ function whose address is written anywhere survives, because compiled code
 reaches most of the runtime through tables built in data. Debug sections are
 dropped.
 
+**A static library is linked the way a native linker links one.** `--native-lib`
+takes wasm objects and `ar` archives of them, such as a Rust `staticlib` built for
+`wasm32-wasip1` or `wasm32-wasip1-threads`. From an archive ash links only the
+members the program reaches: a member joins when it defines a symbol that something
+already linked refers to and nothing defines, and the members it brings are searched
+for what they refer to in turn. The build output says how many members each archive
+contributed.
+
+A Rust library carries its own `std`, so a member can define a name the runtime
+already defines, such as `rust_eh_personality` or `errno`. The earlier definition
+wins, and the member's code uses it: the runtime's, or failing that the first
+archive's. The build output lists the names dropped this way. Two plain objects that
+define one name are still an error; only an archive's definitions give way.
+
+A function a member names that nothing defines and no host supplies, such as `chdir`
+from `std`, links as a call that traps. A program that never reaches it is
+unaffected. When an archive is linked, the module imports only what reachable code
+uses, so a member's unused functions add no imports. A library built
+position-independent links too: a function whose address it reads through the global
+offset table gets a table slot. Imports the host does supply, the `ash_host_*`
+functions, stay imports.
+
 Building the runtime object for the target, when working from source:
 
 ```sh

@@ -375,6 +375,7 @@ name = "ash_wasm_link"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "object",
  "wasm-encoder 0.258.0",
  "wasmparser 0.258.0",
  "wasmtime",

@@ -156,6 +156,7 @@ pub struct ObjData {
 }
 
 /// One parsed object.
+#[derive(Clone)]
 pub struct Object {
     pub name: String,
     pub types: Vec<FuncType>,

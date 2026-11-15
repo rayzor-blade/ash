@@ -765,13 +765,56 @@ fn link_wasm_module(
 
     crate::progress::begin("linking", 0);
     let mut inputs = Vec::with_capacity(objects.len() + 1);
+    let mut archives = Vec::new();
     for path in objects.iter().chain(std::iter::once(&runtime)) {
         let bytes = std::fs::read(path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        inputs.push(ash_wasm_link::read(&name, &bytes)?);
+        if ash_wasm_link::is_archive(&bytes) {
+            archives.push(ash_wasm_link::read_archive(&name, &bytes)?);
+        } else {
+            inputs.push(ash_wasm_link::read(&name, &bytes)?);
+        }
+    }
+    let has_archives = !archives.is_empty();
+    if has_archives {
+        let sizes: Vec<(String, usize)> = archives.iter().map(|a| (a.name.clone(), a.len())).collect();
+        let pulled = ash_wasm_link::pull(&inputs, archives)?;
+        if !quiet {
+            for ((name, total), taken) in sizes.iter().zip(&pulled.taken) {
+                crate::progress::note(&format!("[ash] {name}: {taken} of {total} members linked"));
+            }
+            if !pulled.shadowed.is_empty() {
+                let mut names: Vec<&str> = pulled.shadowed.iter().map(|s| s.symbol.as_str()).collect();
+                names.sort_unstable();
+                names.dedup();
+                let more = names.len().saturating_sub(8);
+                names.truncate(8);
+                crate::progress::note(&format!(
+                    "[ash] {} definitions in those members were dropped for ones already in the link: {}{}",
+                    pulled.shadowed.len(),
+                    names.join(", "),
+                    if more > 0 { format!(" and {more} more") } else { String::new() },
+                ));
+            }
+        }
+        if !quiet && !pulled.stubbed.is_empty() {
+            let mut names: Vec<&str> = pulled.stubbed.iter().map(String::as_str).collect();
+            let more = names.len().saturating_sub(8);
+            names.truncate(8);
+            crate::progress::note(&format!(
+                "[ash] {} functions those members name are defined nowhere; calling one traps: {}{}",
+                pulled.stubbed.len(),
+                names.join(", "),
+                if more > 0 { format!(" and {more} more") } else { String::new() },
+            ));
+        }
+        // The runtime stays last, as it is without archives.
+        let runtime_object = inputs.pop().expect("the runtime is an input");
+        inputs.extend(pulled.objects);
+        inputs.push(runtime_object);
     }
     crate::air_disk_cache::stage("wasm_inputs", began.elapsed());
     // Fibers are opt-in and off by default, so a normal build gets a module
@@ -830,6 +873,9 @@ fn link_wasm_module(
         // share, and the data has to be written into it once rather than once
         // per instance.
         shared_memory: triple.ends_with("-threads"),
+        // A library holds functions the program never calls, and they name things no host
+        // supplies; only what is reached is imported.
+        prune_imports: has_archives,
         hdll_imports,
         hdll_data,
         hdll_host_imports,

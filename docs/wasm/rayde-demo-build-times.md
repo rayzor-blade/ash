@@ -154,4 +154,4 @@ For attribution, repeat a warm build with `ASH_PROFILE=phases`. On the baseline,
 `ASH_PROMOTE_MODULE_CAP=off` isolates the AOT/JIT policy error. Profiling runs
 are excluded from the comparison medians.
 
-Tracked in git-bug `ada9c02`; related follow-ups are `8b12bc8` and `3b7fa54`.
+Tracked in git-bug `ada9c023e6a9de6992a8a32cced2deb4e254dfe6ae157e20306f0905420864a5`; related follow-ups are `8b12bc802e9f6ef1a7cd2c2d6ca3bb35cff3471752b7d8a12df815b823e58edf` and `3b7fa546c5212c82e9904c08695a73c298c2743777f7cfb2a39f36b2f32c3bb1`.

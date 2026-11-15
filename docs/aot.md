@@ -190,14 +190,14 @@ frames than unoptimised ones; inlining removed them.
 | build killed, machine swapping | too many shards for the memory | lower `ASH_AOT_SHARDS` |
 | a wrong answer only in the AOT binary | an optimiser or lowering bug | bisect: `ASH_AOT_SHARDS=1`, then `ASH_AIR_NO_WIDEN=1`, then `ASH_LLVM_PASSES=off`, then `ASH_AOT_NO_OPT=1` |
 
+`cargo test -p ash --test aot_smoke` compiles a corpus with `--build` and
+compares each binary's output with the JIT's, byte for byte.
+
 ### Limits of an AOT binary
 
 An AOT binary has no tiers, no on-stack replacement and no hot reload. The
 call-site profile is advisory. There is no bytecode in the binary, so nothing
 can be reloaded into it.
-
-`cargo test -p ash --test aot_smoke` compiles a corpus with `--build` and
-compares each binary's output with the JIT's, byte for byte.
 
 ### Cross-compiling
 

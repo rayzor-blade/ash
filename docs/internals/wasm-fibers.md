@@ -92,8 +92,10 @@ Three rules for `try_table`:
 
 - Suspending inside a body needs no special work; skip-forward rewind
   re-executes the structured instruction and reinstalls the handler.
-- The transform recognises landing pads and does not construct them. LLVM's
-  SjLj lowering emits one form, always directly under a `local.set`.
+- The transform recognises landing pads and does not construct them. They come
+  from the runtime's `setjmp` calls: LLVM's SjLj lowering emits one form,
+  always directly under a `local.set`. The direct backend's `try_table`
+  handlers use `catch`, which leaves the payload on the stack and no `exnref`.
 - No suspend point may occur while an `exnref` is live. The transform checks
   this: it refuses the link and names the function.
 
@@ -131,8 +133,9 @@ too.
 Both conformance arms ran 1,195 cases under per-case isolation and produced
 identical not-OK sets (`scripts/compare_conformance_arms.py` compares the sets
 per program, since two arms can both report 100% while failing different
-cases). Module size +26%. This proves the instrumentation has no effect when
-nothing suspends.
+cases). Module size grew 26% on the conformance suite when this was measured,
+and grows 32.5% on `examples/browser/demo/demo.hl` with the current backend.
+This proves the instrumentation has no effect when nothing suspends.
 
 The threads suite does suspend: `wasm` times out at 120 s with 0 of 8 tests,
 `wasm-fibers` passes 22 of 22 in 11 s. The smallest case is a `sys.thread`
@@ -147,11 +150,12 @@ with a summary and every top-level number derives from it.
 - **`ash_fiber_enter` must not be inlined.** It is the edge an unwind stops
   at; its body is one call, so LLVM inlines it into `Fiber::resume` given the
   chance. It needs `#[inline(never)]`.
-- **Refusal is about liveness, not presence.** LLVM's setjmp lowering leaves
-  an `exnref` local in almost every compiled closure. Refusing only where one
-  could be held across a resume point (first write to last read, a superset
-  of real liveness) took the threads suite from 21 refusals and 445 traps to
-  none.
+- **Refusal is about liveness, not presence.** When LLVM built wasm programs,
+  its setjmp lowering left an `exnref` local in almost every compiled closure.
+  Refusing only where one could be held across a resume point (first write to
+  last read, a superset of real liveness) took the threads suite from 21
+  refusals and 445 traps to none. The direct backend's handlers keep no
+  `exnref`; the ones that remain are in the runtime.
 - **Each fiber needs its own shadow stack.** The linker exports
   `__stack_pointer` when fibers are on so the runtime can swap it. Otherwise
   the frames between the suspend and the scheduler restore the pointer above

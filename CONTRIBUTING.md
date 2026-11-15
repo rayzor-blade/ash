@@ -207,7 +207,7 @@ issues with `git-bug push`, since `git push` does not carry them.
 |---|---|
 | [docs/internals/air-vectorization.md](docs/internals/air-vectorization.md) | the loop widener: rules, blockers, next steps |
 | [docs/internals/wasm-abi.md](docs/internals/wasm-abi.md) | the 32-bit target ABI, dynamic calls on wasm |
-| [docs/internals/wasm-exceptions.md](docs/internals/wasm-exceptions.md) | setjmp exceptions on wasm and the LLVM exception-model patch |
+| [docs/internals/wasm-exceptions.md](docs/internals/wasm-exceptions.md) | how `try` and `setjmp` work on wasm |
 | [docs/internals/wasm-fibers.md](docs/internals/wasm-fibers.md) | the link-time transform that suspends a fiber inside a module |
 | [docs/internals/wasm-threads.md](docs/internals/wasm-threads.md) | shared memory, Workers, threads on wasm |
 | [docs/internals/windows-port.md](docs/internals/windows-port.md) | Windows: runtime loading, deliberate differences, open items |

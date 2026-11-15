@@ -122,5 +122,5 @@ implements the socket imports.
 ## Internals
 
 Contributor material on the pieces that make this work is under
-[docs/internals/](../internals/): the 32-bit ABI, the setjmp lowering and the
-LLVM patch it needs, the fiber transform, and shared memory.
+[docs/internals/](../internals/): the 32-bit ABI, exceptions and `setjmp`, the
+fiber transform, and shared memory.

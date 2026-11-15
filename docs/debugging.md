@@ -438,8 +438,8 @@ default path; clean timings omit fusion reports.
 
 Cheapest first:
 
-1. `ASH_AIR_NO_WIDEN=1` — the widener is the only O3 pass that rewrites
-   arithmetic; an unchanged result rules it out.
+1. `ASH_AIR_NO_WIDEN=1` — the widener rewrites scalar loop arithmetic into
+   vector operations; an unchanged result rules it out.
 2. `--jit-tier cranelift`, `--jit-tier llvm`, `--jit-tier off` — compare the
    engines without a cross-tier hand-off. If all of them are correct, the fault
    is in the ladder.

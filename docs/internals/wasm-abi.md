@@ -36,7 +36,8 @@ signatures using `i64` where the runtime takes `usize`, AOT data reading
 The tiered runtime names a not-yet-compiled body with a `findex + 1` sentinel
 and distinguishes it from real code by magnitude: below `0x100000` is a
 sentinel, because no native code address is. On wasm a function pointer is a
-table index in the low hundreds, so the check classified every real function
+table index, below a couple of thousand in a program of this size, so the check
+classified every real function
 as a sentinel: `hlp_call_method` handed one to the closure runner, which
 called back into `hlp_call_method`, until the shadow stack wrapped.
 
@@ -52,16 +53,18 @@ creates sentinels without one).
 registers and type-checks every indirect call, so a call whose signature is
 known only at run time cannot be assembled.
 
-The compiler sees every function type in the program, so it emits one
-trampoline per distinct signature — `(fun, args, out) -> ptr`, unpacking
-arguments, making one statically typed call, storing the result — registered
-under a key computed from the `hl_type`
-(`crates/ash/src/llvm/aot_trampoline.rs`). A miss reports its key and
-argument count.
+The compiler sees every function type in the program, so `trampolines` in
+`crates/ash/src/wasm_program.rs` emits one trampoline per distinct signature:
+`(fun, args, out) -> ptr`, which unpacks the arguments, makes one statically
+typed call and stores the result. Each is registered under a key, an FNV-1a
+hash of the return kind, the argument count and each argument kind.
+`signature_key` in that file and `std/src/fun.rs` compute it from the type,
+and the two must agree. A call whose signature has no trampoline reports its
+key and argument count.
 
-Three constraints: a method's closure form is not in the type table, so the
-emitter registers the `hlp_get_closure_type` shape as well; registration
-belongs in `ash_late_init`, not `emit_module_init`, which runs during `build`
-before trampolines exist; and the count is a `usize` — declaring it `i64`
-gives `rust-lld: warning: function signature mismatch`: the linker only
-warns, and the call is corrupt.
+Three constraints: a bound method's closure form drops its receiver and is
+not in the type table, so the emitter registers each function type as
+declared, as its closure type if it has one, and without its first argument;
+registration belongs in `ash_late_init`, which runs once the bodies exist, not
+in `ash_module_init`; and the count is a `usize`, so the import declares it
+`i32`.

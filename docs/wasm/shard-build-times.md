@@ -124,6 +124,10 @@ logs and writes results after each successful build. The retained experiment
 uses the body cost at both codegen settings; the final implementation
 keeps the baseline at codegen 0.
 
-Issues: `1cf21d8` (this checkpoint), `3b7fa54` (selective body loading),
-`8b12bc8` (LLVM artifact reuse), `94d819f` (early elimination),
-`81d0887` (linker/fiber overhead).
+Issues:
+
+- `1cf21d8fd792a9b764224c9e000f23dd7e22344e3b23cc66ae22fe7315c6abfa` (this checkpoint)
+- `3b7fa546c5212c82e9904c08695a73c298c2743777f7cfb2a39f36b2f32c3bb1` (selective body loading)
+- `8b12bc802e9f6ef1a7cd2c2d6ca3bb35cff3471752b7d8a12df815b823e58edf` (LLVM artifact reuse)
+- `94d819fad0c8dc9a908493bff58808151e5acf189646bacd95e8eccf14cd4059` (early elimination)
+- `81d08870fb7a164aa3d730f7e7c334baffbc632d28891a237c5a7fa2bb595a03` (linker/fiber overhead)

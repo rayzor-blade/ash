@@ -626,6 +626,17 @@ impl<'m, 'a> FnLower<'m, 'a> {
         let fun = self.m.types.fun_id(&class, &name) as usize;
         let sig = self.m.types.to_type(rec.ty.get())?;
         if let Some((lib, symbol)) = self.m.types.native_of(field) {
+            if let HlType::Fun(args, ret) = self.m.types.table.types[sig].clone() {
+                let args = args.iter().map(|a| TypeRef(*a as u32)).collect();
+                let import = air::v2::module::NativeImport::new(
+                    fun,
+                    lib.clone(),
+                    symbol.clone(),
+                    args,
+                    TypeRef(ret as u32),
+                );
+                let _ = self.f.natives.declare(import);
+            }
             self.m.add_native(lib, symbol, sig, fun as u32);
         } else if rec.func.get() != NONE {
             self.m.request(field);

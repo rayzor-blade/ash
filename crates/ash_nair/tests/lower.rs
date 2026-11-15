@@ -4,8 +4,10 @@ mod common;
 
 use std::collections::HashMap;
 
+use air::v2::passes::OptLevel;
 use air::v2::verify::verify;
 use ash_nair::eval::{Program, Val, run};
+use ash_nair::info::{NairModule, describe_mix, instruction_count, optimize};
 use ash_nair::lower::{Lowered, Module};
 use ash_tast::Tast;
 
@@ -112,6 +114,47 @@ fn numeric_kernels_lower_verify_and_compute_what_the_source_means() {
     let call = |name: &str, args: &[Val]| {
         run(&program, find(name), args).unwrap_or_else(|e| panic!("{name}{args:?}: {e}"))
     };
+    check_kernels(&call);
+
+    // the same kernels after the AIR passes: nothing but nAIR and the air crate is involved
+    let info = NairModule::new(&module, &done);
+    let mut optimized = Vec::new();
+    for l in &done {
+        let mut f = l.function.clone().with_findex(l.findex as usize);
+        let before = instruction_count(&f);
+        optimize(&info, &mut f, OptLevel::O3, false)
+            .unwrap_or_else(|e| panic!("{}: the passes failed: {e}", l.name));
+        verify(&f).unwrap_or_else(|e| {
+            panic!(
+                "{} does not verify after the passes: {e}\n{}",
+                l.name,
+                f.dump()
+            )
+        });
+        if std::env::var("ASH_NAIR_DUMP").is_ok() {
+            eprintln!(
+                "== {} after O3 ({before} -> {} instructions): {}\n{}",
+                l.name,
+                instruction_count(&f),
+                describe_mix(&f),
+                f.dump()
+            );
+        }
+        optimized.push((l.findex as usize, f));
+    }
+    let program = Program {
+        functions: optimized.iter().map(|(i, f)| (*i, f)).collect(),
+        ints: &module.ints,
+        floats: &module.floats,
+    };
+    let call = |name: &str, args: &[Val]| {
+        run(&program, find(name), args).unwrap_or_else(|e| panic!("optimized {name}{args:?}: {e}"))
+    };
+    check_kernels(&call);
+}
+
+/// What every kernel must compute, through `call`.
+fn check_kernels(call: &dyn Fn(&str, &[Val]) -> Val) {
     let i = Val::I;
     let f = Val::F;
 

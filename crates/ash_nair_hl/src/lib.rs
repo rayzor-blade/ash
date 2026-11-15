@@ -1,10 +1,10 @@
-//! Runs nAIR's output on the existing engines, through the file they already read.
+//! Runs the AIR that `ash_nair` lowers on the existing engines, through the file they already read.
 //!
 //! The engines take a module of types, pools and functions whose bodies are HashLink opcodes.
 //! This serializes each lowered AIR function to opcodes and assembles the module, then writes
-//! it as a `.hl` file. It is a bridge: the facts nAIR knows beyond the bytecode do not survive
-//! it, so what runs is nAIR's lowering and nothing yet of what the TAST adds. It exists to run
-//! and time the lowering on the real tiers and to compare its output with genhl's.
+//! it as a `.hl` file. It is a bridge: what the TAST knows beyond the bytecode does not survive
+//! it, so what runs is the lowering's plain AIR and nothing of what the TAST adds. It exists to
+//! run and time the lowering on the real tiers and to compare its output with genhl's.
 
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::hl_bindings as hl;

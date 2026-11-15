@@ -1,8 +1,8 @@
 //! What the AIR passes ask a module: natives, constants, types, callee bodies.
 //!
-//! The passes live in the `air` crate and take any [`ModuleInfo`], so nAIR optimizes its own
-//! output with them: the inliner copies the lowered callees directly (`CalleeBody::Air`), and no
-//! bytecode is involved.
+//! The passes live in the `air` crate and take any [`ModuleInfo`], so the lowered functions are
+//! optimized with them directly: the inliner copies the lowered callees (`CalleeBody::Air`), and
+//! no bytecode is involved.
 
 use std::collections::HashMap;
 

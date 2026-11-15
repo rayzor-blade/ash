@@ -101,6 +101,11 @@ impl TypeTable {
         ix
     }
 
+    /// The index `t` was added under, if it was.
+    pub fn lookup(&self, t: &HlType) -> Option<TypeIx> {
+        self.intern.get(t).copied()
+    }
+
     /// Adds `t` as its own entry, as a file lists its types: no sharing.
     pub fn push_raw(&mut self, t: HlType) -> TypeIx {
         self.types.push(t);

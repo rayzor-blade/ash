@@ -297,6 +297,7 @@ dependencies = [
 name = "ash_nair"
 version = "0.1.0"
 dependencies = [
+ "air",
  "ash_tast",
  "zerocopy",
 ]

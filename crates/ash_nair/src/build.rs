@@ -151,7 +151,7 @@ impl<'a> TypeBuilder<'a> {
         self.tast.fields()[f as usize].flags.get()
     }
 
-    fn field_name(&self, f: u32) -> &'a str {
+    pub fn field_name(&self, f: u32) -> &'a str {
         self.tast
             .opt_string(self.tast.fields()[f as usize].name)
             .unwrap_or("")
@@ -991,5 +991,19 @@ impl<'a> TypeBuilder<'a> {
     /// The class named `name`, if the program has one.
     pub fn class_id(&self, name: &str) -> Option<u32> {
         self.by_name.get(name).copied()
+    }
+
+    pub fn tast(&self) -> Tast<'a> {
+        self.tast
+    }
+
+    pub fn class_name(&self, c: u32) -> &str {
+        &self.classes[c as usize].name
+    }
+
+    /// The function index a call to `class.name` names, allocated on first use. The definition
+    /// of the function and every call to it ask the same way, so they agree.
+    pub fn fun_id(&mut self, class: &str, name: &str) -> u32 {
+        self.alloc_fun_path(class, name)
     }
 }

@@ -460,9 +460,9 @@ impl<P: Program> Fx<'_, P> {
             return unsupported("a native whose signature is not known");
         };
         self.check_arguments(&sig, args)?;
-        for a in args {
-            self.push_arg(*a);
-        }
+        // The slot is checked before the arguments are pushed. The report is a call inside an
+        // `if`, and the fiber transform cannot spill operands that were pushed before the frame
+        // it is in, so with the arguments already on the stack it refused the whole function.
         let target = self.scratch_word(0);
         self.data_address(&native.slot, 0)?;
         self.emit(&I::I32Load(mem(0, 2)));
@@ -475,6 +475,9 @@ impl<P: Program> Fx<'_, P> {
         self.call(missing);
         self.emit(&I::Unreachable);
         self.emit(&I::End);
+        for a in args {
+            self.push_arg(*a);
+        }
         self.emit(&I::LocalGet(target));
         let (p, r) = wasm_signature(&sig);
         self.out.call_indirect(p, r);

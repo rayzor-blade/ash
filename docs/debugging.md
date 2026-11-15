@@ -70,7 +70,7 @@ taken as separate events:
 | `ASH_AIR_NO_WIDEN` | `1` disables loop widening |
 | `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |
 | `ASH_STRIP_MINE` | `0` makes compiled loops poll on every iteration instead of once per strip of 256. A loop that calls a native polls on every iteration either way |
-| `ASH_AIR` | the interpreter walks AIR by default. `v2-serialize` optimizes AIR and serializes it back to flat opcodes, as a differential check on the walker; `off` (also `0`, `none`) interprets the opcodes directly |
+| `ASH_AIR` | the interpreter walks AIR by default. `v2-serialize` optimizes AIR and serializes it back to flat opcodes, as a differential check on the walker; a release build refuses it and exits. `off` (also `0`, `none`) interprets the opcodes directly |
 | `ASH_GC_STATS` | print collections, reclaimed blocks, live bytes, pause times and finalizer registrations / queued / completed / pending counts at exit |
 | `ASH_GC_HEAP_MB` | heap reservation; committed on demand, so a ceiling |
 | `ASH_GC_TRIGGER_MB` | floor for the adaptive collection threshold |

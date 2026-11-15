@@ -35,7 +35,8 @@
 #   CONFIRM=5 crates/ash/test/air_diff.sh        # re-runs before calling it real
 #
 # Expects `cargo build -p ash_cli` to have run; see the build-order note in
-# CLAUDE.md, because ash_std is embedded with no cargo dependency edge.
+# CLAUDE.md, because ash_std is embedded with no cargo dependency edge. It must
+# be a debug build: a release build refuses `ASH_AIR=v2-serialize`.
 
 set -u
 root=${0:A:h:h:h:h}

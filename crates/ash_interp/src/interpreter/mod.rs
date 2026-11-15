@@ -532,7 +532,7 @@ pub struct HLInterpreter {
     /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
     reloaded_bytecode: Option<&'static ash_core::bytecode::DecodedBytecode>,
     /// AIR v2 optimized bodies, filled on first execution of each function.
-    /// Inert unless `ASH_AIR=v2-serialize`; see `crate::air`.
+    /// Inert unless `ASH_AIR=v2-serialize` (debug builds only); see `crate::air`.
     air: AirCache,
     /// AIR v2 SSA bodies executed directly, filled on first execution of each
     /// function. This is the default path; see `crate::ssa`.

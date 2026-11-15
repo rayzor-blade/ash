@@ -55,9 +55,9 @@
 //!
 //! # Gating and fallback
 //!
-//! This is the interpreter an unset `ASH_AIR` selects; `ASH_AIR=v2-serialize`
-//! picks the older serialize-to-opcodes path instead, and `off` turns the
-//! pipeline off entirely. A function whose IR the
+//! This is the interpreter an unset `ASH_AIR` selects; in a debug build
+//! `ASH_AIR=v2-serialize` picks the serialize-to-opcodes check instead, and
+//! `off` turns the pipeline off entirely. A function whose IR the
 //! pipeline refuses — or which uses an instruction this dispatcher does not
 //! implement yet (see [`unsupported`]) — runs its raw opcodes, decided once and
 //! recorded. That is per function, so an incomplete dispatcher costs coverage,
@@ -81,32 +81,10 @@ use ash_core::bytecode::DecodedBytecode;
 use ash_core::hl_bindings as hl;
 use ash_core::types::{HLFunction, TypeRef};
 
-/// Whether the interpreter executes AIR v2 SSA directly.
-///
-/// Read once: this gates the function-entry path, and on macOS `getenv` takes a
-/// process-wide lock.
+/// Whether the interpreter executes AIR v2 SSA directly. On unless `ASH_AIR`
+/// selects the serialize check or turns AIR off; see `ash_core::air_setting`.
 pub fn enabled() -> bool {
-    *mode()
-}
-
-fn mode() -> &'static bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    // Default ON, unset included -- unset is how every normal run arrives.
-    //
-    // The alternative is not "no AIR": it is optimizing AIR and then
-    // serializing it back to flat opcodes to interpret those, which discards
-    // the types and the SSA form the pipeline just established and leaves the
-    // interpreter the only consumer in the VM that does not read the IR the
-    // other tiers read. It also makes a vector instruction something that
-    // must be scalarized on the way out rather than executed. Keeping two
-    // interpreters honest against each other is worth an escape hatch
-    // (`ASH_AIR=v2-serialize`), not a default.
-    CELL.get_or_init(|| {
-        !matches!(
-            std::env::var("ASH_AIR").as_deref(),
-            Ok("v2-serialize") | Ok("0") | Ok("off") | Ok("none")
-        )
-    })
+    ash_core::air_setting::setting() == ash_core::air_setting::AirSetting::Walk
 }
 
 /// Whether to report each function's trip through the pipeline (`ASH_AIR_LOG`).

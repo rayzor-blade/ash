@@ -15,10 +15,8 @@
 //!
 //! # Gating
 //!
-//! Off unless `ASH_AIR=v2-serialize`. Every backend is meant to end up consuming the
-//! same serialized array, but the interpreter is the *reference* the other two
-//! are checked against, so switching it over by default would move the
-//! measuring stick at the same time as the thing being measured.
+//! Off unless `ASH_AIR=v2-serialize`, which only a debug build accepts: this
+//! path is a check on the walker, not a way to run a program.
 //! `ASH_AIR_LEVEL` picks the opt level, spelled the same way the
 //! `ASH_VERIFY_AIR` sweep spells it, so the level that reports clean over a
 //! whole module is the level that runs.
@@ -37,34 +35,11 @@ use ash_core::air_pipeline::{AshModule, optimized_with_config};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::types::{HLFunction, TypeRef};
 
-/// Whether the interpreter runs AIR-v2-optimized bodies.
-///
-/// Read once: this gates the function-entry path, and on macOS `getenv` takes
-/// a process-wide lock (the same reason `env_flag!` exists in `interpreter`).
+/// Whether the interpreter runs serialized AIR-v2-optimized bodies. True only
+/// under `ASH_AIR=v2-serialize`, which a debug build alone accepts; the walker
+/// in `crate::ssa` is what every other run uses.
 pub fn enabled() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    // Off by default: `crate::ssa` walks the IR directly and is what an
-    // unset ASH_AIR now selects. This path optimizes AIR and then serializes
-    // it back to flat opcodes to interpret those, which throws away the types
-    // and the SSA form the pipeline just built. It stays reachable as
-    // `ASH_AIR=v2-serialize` because two interpreters that must agree is how
-    // three real bugs in the walker were found, and a differential oracle you
-    // deleted is one you cannot run.
-    //
-    // The arms have to name UNSET explicitly. An earlier attempt to change
-    // this default touched only the empty-string arm, a value the environment
-    // never actually produces, and the gate reported itself as on while the
-    // interpreter went on executing raw bytecode.
-    *CELL.get_or_init(|| match std::env::var("ASH_AIR").as_deref() {
-        Ok("v2-serialize") => true,
-        Err(_) | Ok("") | Ok("v2") | Ok("0") | Ok("off") => false,
-        Ok(other) => {
-            eprintln!(
-                "[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off"
-            );
-            false
-        }
-    })
+    ash_core::air_setting::setting() == ash_core::air_setting::AirSetting::Serialize
 }
 
 /// Whether to report each function's trip through the pipeline (`ASH_AIR_LOG`).

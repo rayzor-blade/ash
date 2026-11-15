@@ -10,6 +10,8 @@
 //! the table. What nAIR adds is information the bytecode never had, which later passes use.
 
 pub mod build;
+pub mod collect;
 pub mod compare;
 pub mod hl;
 pub mod hlfile;
+pub mod ty;

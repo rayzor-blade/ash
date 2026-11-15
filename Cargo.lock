@@ -298,6 +298,7 @@ name = "ash_nair"
 version = "0.1.0"
 dependencies = [
  "ash_tast",
+ "zerocopy",
 ]
 
 [[package]]

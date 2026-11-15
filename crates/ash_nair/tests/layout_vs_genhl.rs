@@ -5,75 +5,27 @@
 //! Needs the Haxe built from source with the `ash_tast` plugin; set `ASH_HAXE_NATIVE` to that
 //! `haxe`. Skipped without it.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
 use ash_nair::build::TypeBuilder;
 use ash_nair::compare::{differences, program_names};
 use ash_nair::hlfile::read_types;
 use ash_tast::Tast;
 
-fn tast_crate() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../ash_tast")
-}
-
-fn native_haxe() -> Option<String> {
-    let name = std::env::var("ASH_HAXE_NATIVE").ok()?;
-    let system = match std::env::consts::OS {
-        "macos" => "Mac",
-        "linux" => "Linux",
-        other => other,
-    };
-    tast_crate()
-        .join(format!("ocaml/ash_tast/cmxs/{system}/plugin.cmxs"))
-        .exists()
-        .then_some(name)
-}
-
-fn haxe(haxe: &str, fixture: &str, args: &[&str]) {
-    let root = tast_crate();
-    let output = Command::new(haxe)
-        .arg("-cp")
-        .arg(root.join("ocaml/ash_tast/hx"))
-        .arg("-cp")
-        .arg(root.join(fixture))
-        .args(["-D", "retain-untyped-meta", "-main", "Main"])
-        .args(args)
-        .output()
-        .expect("run haxe");
-    assert!(
-        output.status.success(),
-        "haxe failed:\n{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn check(fixture: &str) {
-    let Some(compiler) = native_haxe() else {
+    let Some(compiler) = common::native_haxe() else {
         eprintln!("skipped: set ASH_HAXE_NATIVE to a haxe with the ash_tast plugin built");
         return;
     };
-    let dir = std::env::temp_dir();
-    let id = std::process::id();
-    let name = fixture.replace('/', "_");
-    let hl = dir.join(format!("ash_nair_{id}_{name}.hl"));
-    let tast = dir.join(format!("ash_nair_{id}_{name}.tast"));
-    haxe(&compiler, fixture, &["--hl", &hl.display().to_string()]);
-    haxe(
-        &compiler,
-        fixture,
-        &[
-            "--macro",
-            &format!("AshTastNative.exportFinal(\"{}\")", tast.display()),
-            "--hl",
-            "unused.hl",
-            "--no-output",
-        ],
-    );
-    let (hl_bytes, tast_bytes) = (std::fs::read(&hl).unwrap(), std::fs::read(&tast).unwrap());
+    let hl = std::env::temp_dir().join(format!(
+        "ash_nair_{}_{}.hl",
+        std::process::id(),
+        fixture.replace('/', "_")
+    ));
+    common::haxe(&compiler, fixture, &["--hl", &hl.display().to_string()]);
+    let hl_bytes = std::fs::read(&hl).unwrap();
     let _ = std::fs::remove_file(&hl);
-    let _ = std::fs::remove_file(&tast);
+    let tast_bytes = common::export(&compiler, fixture, "layout");
 
     let theirs = read_types(&hl_bytes).expect("a readable .hl");
     let file = Tast::parse(&tast_bytes).expect("a valid TAST file");

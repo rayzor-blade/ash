@@ -8,3 +8,4 @@ description = "nAIR: lowers the typed Haxe program (a TAST file) to AIR, with Ha
 
 [dependencies]
 ash_tast = { path = "../ash_tast" }
+zerocopy = { version = "0.8" }

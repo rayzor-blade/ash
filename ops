@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1794764022,"nonce":"bLyiX4E6U4Aw9RULRE3A6PU1H9A=","added":["debt","area:wasm","area:aot"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1794764035,"nonce":"N2v3nCyc2ikT0zsn6Q+3mLy5nQw=","message":"Landed in 3882aa7c (linker, tests, docs/aot.md). Left open for the unchecked items above.","files":null}]}

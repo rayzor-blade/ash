@@ -204,9 +204,15 @@ class Export {
 		}
 	}
 
-	/** A type found by the compiler's text for it; the structure is read only on a miss. */
+	/**
+		A type found by the compiler's text for it; the structure is read only on a miss.
+		A class's statics structure prints as `Class<T>` (an enum's as `Enum<T>`, an
+		abstract's as `Abstract<T>`), as the class type of that name does, so the text of a
+		type that mentions one does not say which it is; those are read every time.
+	**/
 	function textType(t:Type):Int {
 		var key = TypeTools.toString(t);
+		if (key.indexOf("Class<") >= 0 || key.indexOf("Enum<") >= 0 || key.indexOf("Abstract<") >= 0) return slowTypeId(t);
 		var id = textIds.get(key);
 		if (id != null) return id;
 		id = slowTypeId(t);

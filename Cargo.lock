@@ -294,6 +294,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_nair"
+version = "0.1.0"
+dependencies = [
+ "ash_tast",
+]
+
+[[package]]
 name = "ash_native_call"
 version = "0.1.0"
 

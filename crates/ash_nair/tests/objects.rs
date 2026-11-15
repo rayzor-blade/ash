@@ -10,7 +10,7 @@ use air::v2::analysis::{AliasClass, CfgInfo, LoopForest};
 use air::v2::ir::{Function, Instr};
 use air::v2::passes::{OptLevel, PassManager, PassOptions};
 use air::v2::verify::verify;
-use ash_nair::eval::{Program, Val, layouts, run};
+use ash_nair::eval::{Program, Val, run};
 use ash_nair::hl::HlType;
 use ash_nair::info::{NairModule, optimize};
 use ash_nair::lower::{Lowered, Module};
@@ -79,12 +79,7 @@ fn objects_lower_run_and_let_a_summarized_call_keep_a_load_out_of_the_loop() {
     }
 
     let check = |functions: HashMap<usize, &Function>| {
-        let program = Program {
-            functions,
-            ints: &module.ints,
-            floats: &module.floats,
-            layouts: layouts(&module.types.table),
-        };
+        let program = Program::new(functions, &module.ints, &module.floats, &module.types.table);
         let call = |name: &str, args: &[Val]| {
             run(&program, by_name(&done, name).findex as usize, args)
                 .unwrap_or_else(|e| panic!("{name}{args:?}: {e}"))

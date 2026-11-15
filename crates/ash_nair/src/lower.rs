@@ -20,6 +20,9 @@ use ash_tast::format::*;
 use crate::build::TypeBuilder;
 use crate::hl::{HlType, TypeIx};
 
+mod methods;
+mod objects;
+
 pub type Result<T> = std::result::Result<T, String>;
 
 /// A lowered function and where it belongs in the module.
@@ -162,7 +165,7 @@ impl<'a> Module<'a> {
                 all.extend(params);
                 sig = self.types.table.add(HlType::Fun(all, ret));
             }
-            Some(t)
+            Some((t, owner))
         } else {
             None
         };
@@ -202,10 +205,14 @@ struct FnLower<'m, 'a> {
     ret_ty: TypeIx,
     func: u32,
     this_ty: Option<TypeIx>,
+    /// The class whose method this is.
+    this_class: Option<u32>,
 }
 
 impl<'m, 'a> FnLower<'m, 'a> {
-    fn new(m: &'m mut Module<'a>, func: u32, this_ty: Option<TypeIx>) -> Result<Self> {
+    fn new(m: &'m mut Module<'a>, func: u32, this: Option<(TypeIx, u32)>) -> Result<Self> {
+        let this_ty = this.map(|(t, _)| t);
+        let this_class = this.map(|(_, c)| c);
         let tast = m.tast;
         let rec = tast.funcs()[func as usize];
         let ret_ty = m.types.to_type(rec.ret.get())?;
@@ -234,6 +241,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             ret_ty,
             func,
             this_ty,
+            this_class,
         };
         // block 0 holds the parameters and falls into the body
         let entry = s.new_block();
@@ -513,6 +521,15 @@ impl<'m, 'a> FnLower<'m, 'a> {
         if from == to {
             return Ok(v);
         }
+        if self.m.types.is_subclass_type(from, to) {
+            let dst = self.value(to);
+            self.emit(Instr::Cast {
+                kind: CastKind::UnsafeCast,
+                dst,
+                src: v,
+            });
+            return Ok(dst);
+        }
         let (a, b) = (
             self.m.types.table.types[from].clone(),
             self.m.types.table.types[to].clone(),
@@ -670,6 +687,9 @@ impl<'m, 'a> FnLower<'m, 'a> {
     fn call(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
         let ids = self.kids(n);
         let callee = *self.tast.node(ids[0]);
+        if callee.kind == node_kind::CONST && callee.flags == const_kind::SUPER {
+            return self.super_constructor(&ids[1..]);
+        }
         if callee.kind == node_kind::FIELD && callee.a.get() == field_access::INSTANCE {
             return self.method_call(&ids, &callee);
         }
@@ -724,199 +744,6 @@ impl<'m, 'a> FnLower<'m, 'a> {
         let dst = self.value(ret);
         self.emit(Instr::Call { dst, fun, args });
         Ok((!self.is_void(ret)).then_some(dst))
-    }
-
-    // ---- objects
-
-    /// An instance variable access: the object, evaluated, and where the variable lives.
-    fn field_target(&mut self, n: &NodeRec) -> Result<Option<(ValueId, crate::build::FieldSlot)>> {
-        if n.a.get() != field_access::INSTANCE {
-            return Err("only instance variables are lowered yet".into());
-        }
-        let field = n.b.get();
-        if field == NONE {
-            return Err("a field the file does not name".into());
-        }
-        let flags = self.tast.fields()[field as usize].flags.get();
-        if flags & field_flag::METHOD != 0 {
-            return Err("a method used as a value is not lowered yet".into());
-        }
-        if flags & (field_flag::NOT_PHYSICAL | field_flag::EXTERN | field_flag::DYNAMIC) != 0 {
-            let name = self.m.types.field_name(field);
-            return Err(format!("{name} has no storage of its own to read or write"));
-        }
-        let Some(obj) = self.expr(self.kid(n, 0))? else {
-            return Ok(None);
-        };
-        let held = self.val_ty(obj);
-        if !matches!(
-            self.m.types.table.types[held],
-            HlType::Obj(_) | HlType::Struct(_)
-        ) {
-            return Err(format!(
-                "a field of {:?} is not lowered yet",
-                self.m.types.table.types[held]
-            ));
-        }
-        let slot = self.m.types.field_slot(field)?;
-        Ok(Some((obj, slot)))
-    }
-
-    fn field_get(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
-        let Some((obj, slot)) = self.field_target(n)? else {
-            return Ok(None);
-        };
-        Ok(Some(self.load_field(obj, slot)))
-    }
-
-    fn load_field(&mut self, obj: ValueId, slot: crate::build::FieldSlot) -> ValueId {
-        let dst = self.value(slot.ty);
-        self.emit(Instr::FieldGet {
-            dst,
-            obj,
-            obj_ty: TypeRef(slot.owner as u32),
-            field: slot.index as usize,
-        });
-        dst
-    }
-
-    fn assign_field(
-        &mut self,
-        target: &NodeRec,
-        value: u32,
-        op: Option<&str>,
-    ) -> Result<Option<ValueId>> {
-        let Some((obj, slot)) = self.field_target(target)? else {
-            return Ok(None);
-        };
-        let Some(rhs) = self.expr(value)? else {
-            return Ok(None);
-        };
-        let new = match op {
-            None => self.coerce(rhs, slot.ty)?,
-            Some(op) => {
-                let old = self.load_field(obj, slot);
-                self.arith(op, old, rhs, slot.ty)?
-            }
-        };
-        self.emit(Instr::FieldSet {
-            obj,
-            obj_ty: TypeRef(slot.owner as u32),
-            field: slot.index as usize,
-            src: new,
-        });
-        Ok(Some(new))
-    }
-
-    /// The arguments of a call of `field`, converted to its parameters, behind `lead`.
-    fn call_args(
-        &mut self,
-        field: u32,
-        lead: Option<ValueId>,
-        ids: &[u32],
-    ) -> Result<Option<(Vec<ValueId>, TypeIx)>> {
-        let rec = self.tast.fields()[field as usize];
-        let name = self.m.types.field_name(field).to_owned();
-        let sig = self.m.types.to_type(rec.ty.get())?;
-        let HlType::Fun(params, ret) = self.m.types.table.types[sig].clone() else {
-            return Err(format!("{name} is not a function"));
-        };
-        if params.len() != ids.len() {
-            return Err(format!(
-                "{name}: {} arguments for {} parameters",
-                ids.len(),
-                params.len()
-            ));
-        }
-        let mut args: Vec<ValueId> = lead.into_iter().collect();
-        for (k, p) in ids.iter().zip(&params) {
-            let Some(v) = self.expr(*k)? else {
-                return Ok(None);
-            };
-            args.push(self.coerce(v, *p)?);
-        }
-        Ok(Some((args, ret)))
-    }
-
-    /// `object.method(arguments)` for a method that no subclass overrides, which is one function
-    /// whatever the object's class below the one that declares it.
-    fn method_call(&mut self, ids: &[u32], callee: &NodeRec) -> Result<Option<ValueId>> {
-        let field = callee.b.get();
-        if field == NONE {
-            return Err("a call of a field the file does not name".into());
-        }
-        let rec = self.tast.fields()[field as usize];
-        let class = self.m.types.class_name(rec.owner.get()).to_owned();
-        let name = self.m.types.field_name(field).to_owned();
-        let flags = rec.flags.get();
-        if flags & field_flag::METHOD == 0
-            || flags & (field_flag::DYNAMIC | field_flag::EXTERN) != 0
-        {
-            return Err(format!("{class}.{name} is not a method with a body"));
-        }
-        if rec.func.get() == NONE {
-            return Err(format!("{class}.{name} has no body to lower"));
-        }
-        if self.m.types.is_virtual_method(field) {
-            return Err(format!(
-                "{class}.{name} goes through the method table, which is not lowered yet"
-            ));
-        }
-        let Some(obj) = self.expr(self.kid(callee, 0))? else {
-            return Ok(None);
-        };
-        let fun = self.m.types.fun_id(&class, &name) as usize;
-        self.m.called.insert(fun as u32);
-        self.m.request(field);
-        let Some((args, ret)) = self.call_args(field, Some(obj), &ids[1..])? else {
-            return Ok(None);
-        };
-        let dst = self.value(ret);
-        self.emit(Instr::Call { dst, fun, args });
-        Ok((!self.is_void(ret)).then_some(dst))
-    }
-
-    /// `new Class(arguments)`: allocate, then run the constructor on the object.
-    fn new_object(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
-        let class = n.a.get();
-        let cname = self.m.types.class_name(class).to_owned();
-        if self.m.types.is_extern_class(class) {
-            return Err(format!(
-                "new {cname}: the class is declared outside the program"
-            ));
-        }
-        if !self.tast.generics_of(meta_owner::CLASS, class).is_empty() {
-            return Err(format!("new {cname}: generic classes are not lowered yet"));
-        }
-        let ty = self.m.types.class_type(class, &[], false, None)?;
-        if !matches!(self.m.types.table.types[ty], HlType::Obj(_)) {
-            return Err(format!("new {cname}: only objects are lowered yet"));
-        }
-        let ids = self.kids(n);
-        let obj = self.value(ty);
-        self.emit(Instr::New { dst: obj });
-        match self.m.types.constructor(class) {
-            Some(ctor) => {
-                if self.tast.fields()[ctor as usize].func.get() == NONE {
-                    return Err(format!("new {cname}: the constructor has no body to lower"));
-                }
-                let fun = self.m.types.fun_id(&cname, "new") as usize;
-                self.m.called.insert(fun as u32);
-                self.m.request(ctor);
-                let Some((args, ret)) = self.call_args(ctor, Some(obj), &ids)? else {
-                    return Ok(None);
-                };
-                let dst = self.value(ret);
-                self.emit(Instr::Call { dst, fun, args });
-            }
-            None if ids.is_empty() => {}
-            None => {
-                return Err(format!(
-                    "new {cname}: arguments for a class with no constructor"
-                ));
-            }
-        }
-        Ok(Some(obj))
     }
 
     // ---- operators

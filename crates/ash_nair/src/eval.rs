@@ -1,7 +1,7 @@
 //! A reference interpreter for the AIR that [`crate::lower`] produces.
 //!
 //! It runs integers, floats and bools, branches, phis, direct calls, and objects with their
-//! fields, and nothing else. Its job
+//! fields and method tables, and nothing else. Its job
 //! is to say what a lowered function computes, so a test can compare that with what the Haxe
 //! source means without going through an engine.
 
@@ -29,6 +29,34 @@ pub struct Program<'a> {
     pub floats: &'a [f64],
     /// The fields a new object of each type starts with, by type index: see [`layouts`].
     pub layouts: HashMap<usize, Vec<Val>>,
+    /// The function each virtual slot of each object type runs, by type index.
+    pub vtables: HashMap<usize, Vec<u32>>,
+}
+
+impl<'a> Program<'a> {
+    pub fn new(
+        functions: HashMap<usize, &'a Function>,
+        ints: &'a [i32],
+        floats: &'a [f64],
+        table: &TypeTable,
+    ) -> Program<'a> {
+        let vtables = table
+            .types
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, t)| match t {
+                HlType::Obj(o) => Some((ix, table.objs[*o].virtuals.clone())),
+                _ => None,
+            })
+            .collect();
+        Program {
+            functions,
+            ints,
+            floats,
+            layouts: layouts(table),
+            vtables,
+        }
+    }
 }
 
 /// The fields a new object of each object type holds, the superclass's first, as the runtime
@@ -61,11 +89,14 @@ pub fn layouts(table: &TypeTable) -> HashMap<usize, Vec<Val>> {
     out
 }
 
+/// The objects made so far: each with the type it was made as, and its fields.
+type Heap = Vec<(usize, Vec<Val>)>;
+
 const STEP_LIMIT: usize = 50_000_000;
 
 pub fn run(p: &Program, findex: usize, args: &[Val]) -> Result<Val, String> {
     let mut steps = 0;
-    let mut heap = Vec::new();
+    let mut heap = Heap::new();
     call(p, findex, args, &mut steps, &mut heap, 0)
 }
 
@@ -74,7 +105,7 @@ fn call(
     findex: usize,
     args: &[Val],
     steps: &mut usize,
-    heap: &mut Vec<Vec<Val>>,
+    heap: &mut Heap,
     depth: usize,
 ) -> Result<Val, String> {
     if depth > 2000 {
@@ -149,6 +180,7 @@ fn call(
                     vals[dst.idx()] = Some(match (kind, v) {
                         (CastKind::ToSFloat, Val::I(x)) => Val::F(f64::from(x)),
                         (CastKind::ToInt, Val::F(x)) => Val::I(x as i32),
+                        (CastKind::UnsafeCast, v) => v,
                         (k, v) => return Err(format!("{k:?} of {v:?}")),
                     });
                 }
@@ -159,6 +191,27 @@ fn call(
                         .collect::<Result<Vec<_>, _>>()?;
                     vals[dst.idx()] = Some(call(p, *fun, &argv, steps, heap, depth + 1)?);
                 }
+                Instr::CallMethod {
+                    dst,
+                    field,
+                    args: a,
+                } => {
+                    let argv = a
+                        .iter()
+                        .map(|v| get(&vals, *v))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let Some(Val::Obj(h)) = argv.first().copied() else {
+                        return Err("a method call on null".into());
+                    };
+                    let ty = heap[h].0;
+                    let target = *p
+                        .vtables
+                        .get(&ty)
+                        .and_then(|v| v.get(*field))
+                        .ok_or_else(|| format!("type {ty} has no virtual slot {field}"))?;
+                    vals[dst.idx()] =
+                        Some(call(p, target as usize, &argv, steps, heap, depth + 1)?);
+                }
                 Instr::New { dst } => {
                     let ty = f.values[dst.idx()].ty.0 as usize;
                     let fields = p
@@ -166,7 +219,7 @@ fn call(
                         .get(&ty)
                         .ok_or_else(|| format!("no layout for type {ty}"))?
                         .clone();
-                    heap.push(fields);
+                    heap.push((ty, fields));
                     vals[dst.idx()] = Some(Val::Obj(heap.len() - 1));
                 }
                 Instr::FieldGet {
@@ -175,7 +228,7 @@ fn call(
                     let Val::Obj(h) = get(&vals, *obj)? else {
                         return Err("a field of null".into());
                     };
-                    let v = *heap[h].get(*field).ok_or("a field outside the object")?;
+                    let v = *heap[h].1.get(*field).ok_or("a field outside the object")?;
                     vals[dst.idx()] = Some(v);
                 }
                 Instr::FieldSet {
@@ -186,6 +239,7 @@ fn call(
                         return Err("a field of null".into());
                     };
                     *heap[h]
+                        .1
                         .get_mut(*field)
                         .ok_or("a field outside the object")? = v;
                 }

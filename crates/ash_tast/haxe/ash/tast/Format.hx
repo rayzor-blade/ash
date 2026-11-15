@@ -9,11 +9,11 @@ import haxe.io.Bytes;
 **/
 class Format {
 	public static inline final MAGIC = 0x54534154;
-	public static inline final VERSION = 2;
+	public static inline final VERSION = 3;
 	/** A reference to nothing (`u32::MAX`, which is -1 as an Int). */
 	public static inline final NONE = -1;
-	public static inline final SCHEMA_HASH_LO = 0x5751e97d;
-	public static inline final SCHEMA_HASH_HI = 0x0671a7c5;
+	public static inline final SCHEMA_HASH_LO = 0x956a98aa;
+	public static inline final SCHEMA_HASH_HI = 0xdf64499b;
 	public static inline final SECTION_COUNT = 23;
 	public static inline final SECTION_STRINGS = 0;
 	public static inline final SECTION_STRING_INDEX = 1;
@@ -41,7 +41,7 @@ class Format {
 	public static inline final STRINGS_ELEM = 1;
 	public static inline final STRING_INDEX_ELEM = 8;
 	public static inline final POSITIONS_ELEM = 12;
-	public static inline final TYPES_ELEM = 24;
+	public static inline final TYPES_ELEM = 28;
 	public static inline final TYPE_ARGS_ELEM = 4;
 	public static inline final CLASSES_ELEM = 36;
 	public static inline final FIELDS_ELEM = 24;
@@ -82,7 +82,7 @@ class Format {
 	public static inline final POS_REC_FILE_AT = 0;
 	public static inline final POS_REC_START_AT = 4;
 	public static inline final POS_REC_END_AT = 8;
-	public static inline final TYPE_REC_SIZE = 24;
+	public static inline final TYPE_REC_SIZE = 28;
 	public static inline final TYPE_REC_KIND_AT = 0;
 	public static inline final TYPE_REC_FLAGS_AT = 1;
 	public static inline final TYPE_REC_NAME_AT = 4;
@@ -90,6 +90,7 @@ class Format {
 	public static inline final TYPE_REC_ARGS_FIRST_AT = 12;
 	public static inline final TYPE_REC_ARGS_COUNT_AT = 16;
 	public static inline final TYPE_REC_OPT_MASK_AT = 20;
+	public static inline final TYPE_REC_VIA_AT = 24;
 	public static inline final CLASS_REC_SIZE = 36;
 	public static inline final CLASS_REC_NAME_AT = 0;
 	public static inline final CLASS_REC_SUPER_TYPE_AT = 4;
@@ -213,13 +214,14 @@ class Format {
 	}
 
 	/** Write one `TypeRec` at byte `at`. */
-	public static inline function writeTypeRec(out:Bytes, at:Int, kind:Int, flags:Int, name:Int, def:Int, argsFirst:Int, argsCount:Int, optMask:Int):Void {
+	public static inline function writeTypeRec(out:Bytes, at:Int, kind:Int, flags:Int, name:Int, def:Int, argsFirst:Int, argsCount:Int, optMask:Int, via:Int):Void {
 		out.setInt32(at + 0, (kind & 0xff) | ((flags & 0xff) << 8));
 		out.setInt32(at + 4, name);
 		out.setInt32(at + 8, def);
 		out.setInt32(at + 12, argsFirst);
 		out.setInt32(at + 16, argsCount);
 		out.setInt32(at + 20, optMask);
+		out.setInt32(at + 24, via);
 	}
 
 	/** Write one `ClassRec` at byte `at`. */
@@ -456,6 +458,13 @@ class ModuleKind {
 	public static inline final ABSTRACT = 2;
 }
 
+/** `TypeRec.flags` of an `ANON` type: what the structure is the statics of. */
+class AnonStatus {
+	public static inline final STATICS = 1;
+	public static inline final ENUM_STATICS = 2;
+	public static inline final ABSTRACT_STATICS = 3;
+}
+
 /** `TypeRec.kind`. */
 class TypeKind {
 	public static inline final MONO = 0;
@@ -474,6 +483,7 @@ class ClassFlag {
 	public static inline final EXTERN = 4;
 	public static inline final ABSTRACT = 8;
 	public static inline final TYPE_PARAM = 16;
+	public static inline final CONST_ARG = 32;
 }
 
 /** `FieldRec.flags`. */

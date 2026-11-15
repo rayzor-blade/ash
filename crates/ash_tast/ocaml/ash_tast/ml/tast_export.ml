@@ -32,7 +32,7 @@ type tkey =
 	| KEnum of path * int list
 	| KAbstract of path * int list
 	| KFun of int list * int * int
-	| KAnon of (string * int) list
+	| KAnon of (string * int) list * int * int
 	| KTypedef of path * int list
 
 type st = {
@@ -42,7 +42,7 @@ type st = {
 	str_off : int Dyn.t;
 	str_len : int Dyn.t;
 	str_ids : (string, int) Hashtbl.t;
-	types : int Dyn.t; (* kind, name, def, args_first, args_count, opt_mask *)
+	types : int Dyn.t; (* kind, name, def, args_first, args_count, opt_mask, flags, via *)
 	type_args : int Dyn.t;
 	classes : int Dyn.t; (* name, super_type, flags, fields_first, fields_count, ifaces_first, ifaces_count, init_func, meta_root *)
 	fields : int Dyn.t; (* name, ty, owner, flags, func, pos *)
@@ -225,7 +225,7 @@ let class_id st c =
 		id
 
 let dynamic_type st =
-	if st.dyn_id < 0 then st.dyn_id <- new_rec st.types 6 [F.Type_kind.dynamic; none; none; 0; 0; 0];
+	if st.dyn_id < 0 then st.dyn_id <- new_rec st.types 8 [F.Type_kind.dynamic; none; none; 0; 0; 0; 0; none];
 	st.dyn_id
 
 let rec type_id st t =
@@ -235,7 +235,7 @@ let rec type_id st t =
 		| Some id -> id
 		| None ->
 			let cid = class_id st c in
-			let id = new_rec st.types 6 [F.Type_kind.class_; none; cid; 0; 0; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.class_; none; cid; 0; 0; 0; 0; none] in
 			Hashtbl.replace st.inst_ids c.cl_path id;
 			id)
 	| TAbstract (a, []) ->
@@ -243,15 +243,16 @@ let rec type_id st t =
 		| Some id -> id
 		| None ->
 			let aid = abstract_id st a in
-			let id = new_rec st.types 6 [F.Type_kind.abstract; none; aid; 0; 0; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.abstract; none; aid; 0; 0; 0; 0; none] in
 			Hashtbl.replace st.abstract_type_ids a.a_path id;
+			abstract_via st id a [];
 			id)
 	| TEnum (e, []) ->
 		(match Hashtbl.find_opt st.enum_type_ids e.e_path with
 		| Some id -> id
 		| None ->
 			let eid = enum_id st e in
-			let id = new_rec st.types 6 [F.Type_kind.enum; none; eid; 0; 0; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.enum; none; eid; 0; 0; 0; 0; none] in
 			Hashtbl.replace st.enum_type_ids e.e_path id;
 			id)
 	| TDynamic _ -> dynamic_type st
@@ -264,6 +265,21 @@ let rec type_id st t =
 
 and param_ids st ps = List.map (type_id st) ps
 
+(* What the compiler unwraps an abstract to, with the type arguments applied; a core abstract has no
+   such type, and a back end knows it by path. The record is already interned, so an abstract that
+   names itself finds it. *)
+and abstract_via st id a ps =
+	if not (Meta.has Meta.CoreType a.a_meta) then
+		Dyn.set st.types (id * 8 + 7) (type_id st (Abstract.get_underlying_type a ps))
+
+(* A structure that is the statics of a class, an enum or an abstract is that type's object. *)
+and anon_owner st an =
+	match !(an.a_status) with
+	| Statics c -> (F.Anon_status.statics, class_id st c)
+	| EnumStatics e -> (F.Anon_status.enum_statics, enum_id st e)
+	| AbstractStatics a -> (F.Anon_status.abstract_statics, abstract_id st a)
+	| _ -> (0, 0)
+
 (* The structure of a type with arguments, a function or a structure. *)
 and slow_type_id st t =
 	match t with
@@ -275,7 +291,7 @@ and slow_type_id st t =
 		| None ->
 			let first, count = arg_list st args in
 			let cid = class_id st c in
-			let id = new_rec st.types 6 [F.Type_kind.class_; none; cid; first; count; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.class_; none; cid; first; count; 0; 0; none] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TEnum (e, ps) ->
@@ -286,7 +302,7 @@ and slow_type_id st t =
 		| None ->
 			let first, count = arg_list st args in
 			let eid = enum_id st e in
-			let id = new_rec st.types 6 [F.Type_kind.enum; none; eid; first; count; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.enum; none; eid; first; count; 0; 0; none] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TAbstract (a, ps) ->
@@ -297,8 +313,9 @@ and slow_type_id st t =
 		| None ->
 			let first, count = arg_list st args in
 			let aid = abstract_id st a in
-			let id = new_rec st.types 6 [F.Type_kind.abstract; none; aid; first; count; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.abstract; none; aid; first; count; 0; 0; none] in
 			Hashtbl.replace st.type_ids key id;
+			abstract_via st id a ps;
 			id)
 	| TFun (args, ret) ->
 		let ids = List.map (fun (_, _, t) -> type_id st t) args in
@@ -309,13 +326,14 @@ and slow_type_id st t =
 		| Some id -> id
 		| None ->
 			let first, count = arg_list st ids in
-			let id = new_rec st.types 6 [F.Type_kind.fun_; none; r; first; count; mask] in
+			let id = new_rec st.types 8 [F.Type_kind.fun_; none; r; first; count; mask; 0; none] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TAnon an ->
 		let fs = anon_field_list an in
 		let ids = List.map (fun cf -> type_id st cf.cf_type) fs in
-		let key = KAnon (List.map2 (fun cf id -> (cf.cf_name, id)) fs ids) in
+		let status, owner = anon_owner st an in
+		let key = KAnon (List.map2 (fun cf id -> (cf.cf_name, id)) fs ids, status, owner) in
 		(match Hashtbl.find_opt st.type_ids key with
 		| Some id -> id
 		| None ->
@@ -325,7 +343,7 @@ and slow_type_id st t =
 				Dyn.push st.anon_fields id;
 				Dyn.push st.anon_fields 0
 			) fs ids;
-			let id = new_rec st.types 6 [F.Type_kind.anon; none; first; 0; List.length fs; 0] in
+			let id = new_rec st.types 8 [F.Type_kind.anon; none; first; owner; List.length fs; 0; status; none] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| _ ->
@@ -359,11 +377,12 @@ and typedef_id_at st t d ps =
 		(match next with
 		| TAnon an ->
 			(* Given its id before its fields are read, so a structure that names itself finds it. *)
-			let id = new_rec st.types 6 [F.Type_kind.anon; none; 0; 0; 0; 0] in
+			let status, owner = anon_owner st an in
+			let id = new_rec st.types 8 [F.Type_kind.anon; none; 0; owner; 0; 0; status; none] in
 			Hashtbl.replace st.type_ids key id;
 			if ps = [] then Hashtbl.replace st.typedef_ids d.t_path id;
 			let first = fill_anon st an id in
-			Dyn.set st.types (id * 6 + 2) first;
+			Dyn.set st.types (id * 8 + 2) first;
 			id
 		| TInst (_, _ :: _) | TEnum (_, _ :: _) | TAbstract (_, _ :: _) | TFun _ ->
 			(* Reserved before the arguments are read: a typedef whose expansion names the
@@ -374,7 +393,7 @@ and typedef_id_at st t d ps =
 				| TAbstract _ -> F.Type_kind.abstract
 				| _ -> F.Type_kind.fun_
 			in
-			let id = new_rec st.types 6 [kind; none; none; 0; 0; 0] in
+			let id = new_rec st.types 8 [kind; none; none; 0; 0; 0; 0; none] in
 			Hashtbl.replace st.type_ids key id;
 			if ps = [] then Hashtbl.replace st.typedef_ids d.t_path id;
 			let def, arg_types, mask = match next with
@@ -385,10 +404,11 @@ and typedef_id_at st t d ps =
 				| _ -> (none, [], 0)
 			in
 			let first, count = arg_list st (param_ids st arg_types) in
-			Dyn.set st.types (id * 6 + 2) def;
-			Dyn.set st.types (id * 6 + 3) first;
-			Dyn.set st.types (id * 6 + 4) count;
-			Dyn.set st.types (id * 6 + 5) mask;
+			Dyn.set st.types (id * 8 + 2) def;
+			Dyn.set st.types (id * 8 + 3) first;
+			Dyn.set st.types (id * 8 + 4) count;
+			Dyn.set st.types (id * 8 + 5) mask;
+			(match next with TAbstract (a, ps2) -> abstract_via st id a ps2 | _ -> ());
 			id
 		| _ ->
 			let id = type_id st next in
@@ -405,7 +425,7 @@ and fill_anon st an id =
 		Dyn.push st.anon_fields 0;
 		Dyn.push st.anon_fields 0
 	) fs;
-	Dyn.set st.types (id * 6 + 4) (List.length fs);
+	Dyn.set st.types (id * 8 + 4) (List.length fs);
 	List.iteri (fun i cf -> Dyn.set st.anon_fields ((first + i) * 3 + 1) (type_id st cf.cf_type)) fs;
 	first
 
@@ -520,7 +540,10 @@ let fill_class st id =
 		if has_class_flag c CFinal then flags := !flags lor F.Class_flag.final;
 		if has_class_flag c CExtern then flags := !flags lor F.Class_flag.extern;
 		if has_class_flag c CAbstract then flags := !flags lor F.Class_flag.abstract;
-		(match c.cl_kind with KTypeParameter _ -> flags := !flags lor F.Class_flag.type_param | _ -> ());
+		(match c.cl_kind with
+		| KTypeParameter _ -> flags := !flags lor F.Class_flag.type_param
+		| KExpr _ -> flags := !flags lor F.Class_flag.const_arg
+		| _ -> ());
 		let base = id * 9 in
 		queue_metas st F.Meta_owner.class_ id c.cl_meta;
 		Dyn.set st.classes base (str st (Globals.s_type_path path));
@@ -853,7 +876,7 @@ let haxe_version () =
 let assemble st entry =
 	let len d = Dyn.length d in
 	let counts = [|
-		Buffer.length st.blob; len st.str_off; len st.positions / 3; len st.types / 6; len st.type_args;
+		Buffer.length st.blob; len st.str_off; len st.positions / 3; len st.types / 8; len st.type_args;
 		len st.classes / 9; len st.fields / 6; len st.abstracts / 4; len st.enums / 5;
 		len st.enum_ctors / 6; len st.anon_fields / 3; len st.locals / 3; len st.params / 2;
 		len st.funcs / 6; len st.nodes / 8; 0; 0; 0;
@@ -892,10 +915,11 @@ let assemble st entry =
 			~file:(g st.positions r) ~start:(g st.positions (r + 1)) ~end_:(g st.positions (r + 2))
 	done;
 	for i = 0 to counts.(F.section_types) - 1 do
-		let r = i * 6 in
+		let r = i * 8 in
 		F.write_type_rec out (offsets.(F.section_types) + i * F.type_rec_size)
-			~kind:(g st.types r) ~flags:0 ~name:(g st.types (r + 1)) ~def:(g st.types (r + 2))
+			~kind:(g st.types r) ~flags:(g st.types (r + 6)) ~name:(g st.types (r + 1)) ~def:(g st.types (r + 2))
 			~args_first:(g st.types (r + 3)) ~args_count:(g st.types (r + 4)) ~opt_mask:(g st.types (r + 5))
+			~via:(g st.types (r + 7))
 	done;
 	for i = 0 to Dyn.length st.type_args - 1 do
 		Bytes.set_int32_le out (offsets.(F.section_type_args) + i * 4) (Int32.of_int (g st.type_args i))
@@ -1064,7 +1088,7 @@ let run com path =
 	if verbose then begin
 		let ms a b = int_of_float ((b -. a) *. 1000.) in
 		Printf.printf "[ash_tast] %s: %d bytes, %d nodes, %d types, %d classes, %d fields, %d functions, %d locals, %d strings\n"
-			path (Bytes.length bytes) (Dyn.length st.nodes / 8) (Dyn.length st.types / 6)
+			path (Bytes.length bytes) (Dyn.length st.nodes / 8) (Dyn.length st.types / 8)
 			(Dyn.length st.classes / 9) (Dyn.length st.fields / 6) (Dyn.length st.funcs / 6)
 			(Dyn.length st.locals / 3) (Dyn.length st.str_off);
 		Printf.printf "[ash_tast] native: build %d ms, assemble and write %d ms\n"

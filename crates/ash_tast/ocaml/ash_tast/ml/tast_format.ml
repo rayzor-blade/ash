@@ -2,10 +2,10 @@
 (* The TAST layout: constants, and one writer per record. Words are little-endian. *)
 
 let magic = 0x54534154
-let version = 2
+let version = 3
 let none = -1
-let schema_hash_lo = 0x5751e97d
-let schema_hash_hi = 0x0671a7c5
+let schema_hash_lo = 0x956a98aa
+let schema_hash_hi = 0xdf64499b
 let section_count = 23
 let section_strings = 0
 let section_string_index = 1
@@ -33,7 +33,7 @@ let section_resource_data = 22
 let strings_elem = 1
 let string_index_elem = 8
 let positions_elem = 12
-let types_elem = 24
+let types_elem = 28
 let type_args_elem = 4
 let classes_elem = 36
 let fields_elem = 24
@@ -57,7 +57,7 @@ let header_size = 40
 let section_rec_size = 8
 let str_rec_size = 8
 let pos_rec_size = 12
-let type_rec_size = 24
+let type_rec_size = 28
 let class_rec_size = 36
 let field_rec_size = 24
 let abstract_rec_size = 16
@@ -105,13 +105,14 @@ let write_pos_rec out at ~file ~start ~end_ =
 	Bytes.set_int32_le out (at + 8) (Int32.of_int end_);
 	()
 
-let write_type_rec out at ~kind ~flags ~name ~def ~args_first ~args_count ~opt_mask =
+let write_type_rec out at ~kind ~flags ~name ~def ~args_first ~args_count ~opt_mask ~via =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int ((kind land 0xff) lor ((flags land 0xff) lsl 8)));
 	Bytes.set_int32_le out (at + 4) (Int32.of_int name);
 	Bytes.set_int32_le out (at + 8) (Int32.of_int def);
 	Bytes.set_int32_le out (at + 12) (Int32.of_int args_first);
 	Bytes.set_int32_le out (at + 16) (Int32.of_int args_count);
 	Bytes.set_int32_le out (at + 20) (Int32.of_int opt_mask);
+	Bytes.set_int32_le out (at + 24) (Int32.of_int via);
 	()
 
 let write_class_rec out at ~name ~super_type ~flags ~fields_first ~fields_count ~interfaces_first ~interfaces_count ~init_func ~meta_root =
@@ -316,12 +317,19 @@ module Type_kind = struct
 	let abstract = 6
 end
 
+module Anon_status = struct
+	let statics = 1
+	let enum_statics = 2
+	let abstract_statics = 3
+end
+
 module Class_flag = struct
 	let interface = 1
 	let final = 2
 	let extern = 4
 	let abstract = 8
 	let type_param = 16
+	let const_arg = 32
 end
 
 module Field_flag = struct

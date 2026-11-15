@@ -140,6 +140,7 @@ impl Builder {
             args_first: U32::new(first),
             args_count: U32::new(count),
             opt_mask: U32::new(0),
+            via: U32::new(NONE),
         });
         (self.types.len() - 1) as u32
     }

@@ -21,11 +21,21 @@ class Point implements Shape {
 		return x + y;
 }
 
+// A native handle type, and a generic abstract: the compiler unwraps both with their arguments.
+abstract Handle(hl.Abstract<"fixture_handle">) {}
+
+abstract Box<T>(Array<T>) {
+	public function new(items:Array<T>)
+		this = items;
+}
+
 @:ash.pure("a", -1, 2.5, true, null, foo.bar)
 @author("native")
 class Main {
 	@:ash.hot static var counter = 0;
 	static var started = false;
+	static var handle:Handle;
+	static var boxed:Box<Int> = new Box([1]);
 
 	static function __init__() {
 		started = true;

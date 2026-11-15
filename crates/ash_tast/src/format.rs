@@ -73,7 +73,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 /// The first word of every file: the bytes `TAST`.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"TAST");
 /// The layout version. Any change to a record or a section bumps it.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// A reference to nothing.
 pub const NONE: u32 = u32::MAX;
 
@@ -197,6 +197,13 @@ record! {
     /// | `ANON` | first anonymous field id | `args_count` is the field count |
     /// | `MONO`, `DYNAMIC` | [`NONE`] | none |
     ///
+    /// An `ABSTRACT` type's `via` is the type the compiler unwraps it to, with the type
+    /// arguments applied (`Abstract.get_underlying_type`), or [`NONE`] for a core type, which
+    /// a back end recognises by path. An `ANON` type's `flags` is an [`anon_status`]: a
+    /// structure that is really the statics of a class, enum or abstract has the owner's id in
+    /// `args_first`. A back end maps the statics of a class to the class object, not to a
+    /// structure of fields.
+    ///
     /// A `FUN` type's `opt_mask` has bit `i` set when argument `i` is optional, for
     /// `i < 31`; bit 31 set means every argument from the 31st on is optional.
     /// Two function types that differ only here are different types: a back end
@@ -211,6 +218,7 @@ record! {
         args_first: U32,
         args_count: U32,
         opt_mask: U32,
+        via: U32,
     }
 }
 
@@ -735,6 +743,18 @@ constants! {
 }
 
 constants! {
+    /// `TypeRec::flags` of an `ANON` type: what the structure is the statics of.
+    anon_status, ANON_STATUSES, u8 {
+        /// The statics of a class: `args_first` is the class id.
+        STATICS = 1,
+        /// The statics of an enum: `args_first` is the enum id.
+        ENUM_STATICS = 2,
+        /// The statics of an abstract: `args_first` is the abstract id.
+        ABSTRACT_STATICS = 3,
+    }
+}
+
+constants! {
     /// `TypeRec::kind`, the constructors of Haxe's `Type` that survive typing.
     type_kind, TYPE_KINDS, u8 {
         MONO = 0,
@@ -755,6 +775,9 @@ constants! {
         EXTERN = 4,
         ABSTRACT = 8,
         TYPE_PARAM = 16,
+        /// Stands for a constant used as a type argument, as in `hl.Abstract<"name">`. The
+        /// class's name is `S`, `I` or `F` followed by the text of a string, integer or float.
+        CONST_ARG = 32,
     }
 }
 
@@ -958,6 +981,10 @@ pub fn schema_hash() -> u64 {
     group(
         "type_kind",
         TYPE_KINDS.iter().map(|(n, v)| (*n, *v as u64)).collect(),
+    );
+    group(
+        "anon_status",
+        ANON_STATUSES.iter().map(|(n, v)| (*n, *v as u64)).collect(),
     );
     group(
         "class_flag",

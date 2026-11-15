@@ -1328,7 +1328,7 @@ class Export {
 		for (i in 0...counts[Format.SECTION_TYPES]) {
 			var r = i * 5;
 			Format.writeTypeRec(out, offsets[Format.SECTION_TYPES] + i * Format.TYPE_REC_SIZE, types[r], 0, types[r + 1],
-				types[r + 2], types[r + 3], types[r + 4], 0);
+				types[r + 2], types[r + 3], types[r + 4], 0, Format.NONE);
 		}
 		for (i in 0...typeArgs.length)
 			out.setInt32(offsets[Format.SECTION_TYPE_ARGS] + i * 4, typeArgs[i]);

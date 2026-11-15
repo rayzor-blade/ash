@@ -373,6 +373,62 @@ fn the_plugin_writes_what_the_lowering_reads() {
     assert_eq!(root.kind, node_kind::OBJECT_DECL);
     assert_eq!(show(&t, root), "{obj: {author: [\"native\"]}}");
 
+    // An abstract unwraps to its underlying type with the arguments applied; a core abstract has none.
+    let abstract_id = |name: &str| {
+        t.abstracts()
+            .iter()
+            .position(|a| t.opt_string(a.name) == Some(name))
+            .unwrap_or_else(|| panic!("abstract {name}")) as u32
+    };
+    let via_of = |name: &str| {
+        let id = abstract_id(name);
+        let ty = t
+            .types()
+            .iter()
+            .find(|ty| ty.kind == type_kind::ABSTRACT && ty.def.get() == id)
+            .unwrap_or_else(|| panic!("a type of {name}"));
+        assert_ne!(ty.via.get(), NONE, "{name} unwraps");
+        (ty, &t.types()[ty.via.get() as usize])
+    };
+    let class_of = |ty: &TypeRec| t.classes()[ty.def.get() as usize];
+    let (_, box_via) = via_of("Box");
+    assert_eq!(box_via.kind, type_kind::CLASS);
+    assert_eq!(t.opt_string(class_of(box_via).name), Some("Array"));
+    let [element] = t.type_args(box_via.args_first, box_via.args_count) else {
+        panic!("Array<Int> has one argument")
+    };
+    assert_eq!(t.types()[element.get() as usize].kind, type_kind::ABSTRACT);
+    let (_, handle_via) = via_of("Handle");
+    assert_eq!(t.opt_string(class_of(handle_via).name), Some("hl.Abstract"));
+    let [constant] = t.type_args(handle_via.args_first, handle_via.args_count) else {
+        panic!("hl.Abstract has one argument")
+    };
+    let constant = class_of(&t.types()[constant.get() as usize]);
+    assert_ne!(constant.flags.get() & class_flag::CONST_ARG, 0);
+    assert_eq!(t.opt_string(constant.name), Some("Sfixture_handle"));
+    let int = t
+        .types()
+        .iter()
+        .find(|ty| {
+            ty.kind == type_kind::ABSTRACT
+                && t.opt_string(t.abstracts()[ty.def.get() as usize].name) == Some("Int")
+        })
+        .expect("Int");
+    assert_eq!(
+        int.via.get(),
+        NONE,
+        "a core abstract has no underlying type"
+    );
+
+    // The type of `haxe.Log` as a value is the statics of that class, not a structure of fields.
+    let log = class_id("haxe.Log");
+    assert!(
+        t.types().iter().any(|ty| ty.kind == type_kind::ANON
+            && ty.flags == anon_status::STATICS
+            && ty.args_first.get() == log),
+        "the statics of haxe.Log"
+    );
+
     // Defines and resources.
     assert_eq!(t.define("my_flag"), Some("value"));
     assert!(t.define("hl").is_some());

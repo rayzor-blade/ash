@@ -424,14 +424,46 @@ impl<'a> Tast<'a> {
                 type_kind::CLASS => id(("Types", i, "def"), t.def, Table::Classes, false)?,
                 type_kind::ABSTRACT => id(("Types", i, "def"), t.def, Table::Abstracts, false)?,
                 type_kind::FUN => id(("Types", i, "def"), t.def, Table::Types, false)?,
-                type_kind::ANON => range(
-                    "Types",
-                    i,
-                    "def",
-                    t.def,
-                    t.args_count,
-                    self.anon_fields.len(),
-                )?,
+                type_kind::ANON => {
+                    range(
+                        "Types",
+                        i,
+                        "def",
+                        t.def,
+                        t.args_count,
+                        self.anon_fields.len(),
+                    )?;
+                    match t.flags {
+                        0 => {}
+                        anon_status::STATICS => id(
+                            ("Types", i, "args_first"),
+                            t.args_first,
+                            Table::Classes,
+                            false,
+                        )?,
+                        anon_status::ENUM_STATICS => id(
+                            ("Types", i, "args_first"),
+                            t.args_first,
+                            Table::Enums,
+                            false,
+                        )?,
+                        anon_status::ABSTRACT_STATICS => id(
+                            ("Types", i, "args_first"),
+                            t.args_first,
+                            Table::Abstracts,
+                            false,
+                        )?,
+                        other => {
+                            return Err(TastError::BadReference {
+                                table: "Types",
+                                index: i,
+                                field: "flags",
+                                value: u32::from(other),
+                                limit: ANON_STATUSES.len() + 1,
+                            });
+                        }
+                    }
+                }
                 type_kind::MONO | type_kind::DYNAMIC => {}
                 _ => {
                     return Err(TastError::BadReference {
@@ -443,6 +475,7 @@ impl<'a> Tast<'a> {
                     });
                 }
             }
+            id(("Types", i, "via"), t.via, Table::Types, true)?;
             if t.kind != type_kind::ANON {
                 range(
                     "Types",

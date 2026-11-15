@@ -332,6 +332,12 @@ pub fn generate() -> String {
         "Which table a module-type index names.",
         MODULE_KINDS,
     );
+    group(
+        &mut out,
+        "AnonStatus",
+        "`TypeRec.flags` of an `ANON` type: what the structure is the statics of.",
+        ANON_STATUSES,
+    );
     group(&mut out, "TypeKind", "`TypeRec.kind`.", TYPE_KINDS);
     group(&mut out, "ClassFlag", "`ClassRec.flags`.", CLASS_FLAGS);
     group(&mut out, "FieldFlag", "`FieldRec.flags`.", FIELD_FLAGS);

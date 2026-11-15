@@ -222,6 +222,7 @@ pub fn generate() -> String {
     group(&mut out, "Field_access", FIELD_ACCESSES);
     group(&mut out, "Module_kind", MODULE_KINDS);
     group(&mut out, "Type_kind", TYPE_KINDS);
+    group(&mut out, "Anon_status", ANON_STATUSES);
     group(&mut out, "Class_flag", CLASS_FLAGS);
     group(&mut out, "Field_flag", FIELD_FLAGS);
     group(&mut out, "Local_flag", LOCAL_FLAGS);

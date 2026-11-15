@@ -322,10 +322,11 @@ ASH_GC_STATS=1 ASH_GC_TLAB=0 target/debug/ash --tree-fusion-log --quiet \
 Use `--no-tree-fusion` to diagnose a regression. Reports are emitted only with
 `--tree-fusion-log`, `--jit-log`, or the legacy `--dev-tree-fusion` option.
 Before creating runtime tables, preparation surveys raw AIR, reserves a helper for each proven producer/fold pair, then
-rechecks and rewrites the callers. Unsupported sites retain their original
-calls. If helper construction, serialization or verification fails, or a growth
-limit is exceeded, preparation abandons the entire transaction and keeps the
-original module.
+rechecks and rewrites the callers. Unsupported sites keep their original
+calls. If helper construction, serialization or verification fails,
+preparation returns an error and the program does not start. When a growth
+limit is reached, the callers already taken are fused and later ones keep
+their original calls.
 
 The helper is derived from the two proven depth cases. It keeps the signed
 positive-depth guard and producer scalar calculations, replaces each recursive
@@ -356,9 +357,10 @@ frames can change which frames appear in a diagnostic stack within the elided
 computation.
 
 Default execution skips fusion for `--hot-reload`, `--dev-generated-helper`,
-`--emit-optimized`, `--build` and `--emit-aot`; an unsupported runtime contract
-also falls back to original bytecode. The legacy `--dev-tree-fusion` flag still
-requires the contract and rejects incompatible options. The bytecode encoder
+`--emit-optimized`, `--build` and `--emit-aot`. A program outside the runtime
+contract is not fused, and `--tree-fusion-log` names the clause that failed. The
+legacy `--dev-tree-fusion` flag makes that an error and rejects incompatible
+options. The bytecode encoder
 also refuses a fused module: ordinary `.hl` cannot carry this runtime contract. Native AOT
 and wasm activation need explicit policy plumbing in a later checkpoint.
 

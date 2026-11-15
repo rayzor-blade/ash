@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use air::v2::tree_fusion::{self, Limits, TreeModule};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 
 use crate::air_pipeline::AshModule;
 use crate::bytecode::DecodedBytecode;
@@ -32,15 +32,13 @@ pub fn enabled() -> bool {
     !DISABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the standalone runtime contract holds for `input`; the error names
+/// the clause that does not. Fusion is not run on a program for which it fails.
+///
 /// Only the standalone CLI before guest execution may establish this contract.
 /// The linked Ash runtime has no replaceable allocator/plugin loader; native
 /// host code, registration hooks, and reload would void that assumption.
-/// Hosts must not call this while another program/runtime is active.
-/// No-candidate and refused transactions borrow the original module; callers
-/// can retain it without cloning metadata. Contract failures return an error.
-pub fn prepare_standalone(
-    input: &DecodedBytecode,
-) -> Result<(Cow<'_, DecodedBytecode>, Vec<String>)> {
+pub fn applicable(input: &DecodedBytecode) -> Result<()> {
     ensure!(
         crate::native_lib::std_is_static(),
         "tree fusion requires the linked standalone Ash runtime"
@@ -82,6 +80,20 @@ pub fn prepare_standalone(
         )),
         "tree fusion refuses runtime registration hooks"
     );
+    Ok(())
+}
+
+/// Fuses the sites of `input` it can prove, after checking [`applicable`].
+///
+/// Hosts must not call this while another program/runtime is active. A module
+/// with nothing to fuse is borrowed unchanged, so callers can keep it without
+/// cloning metadata. A transformation that cannot be completed is an error:
+/// the result is never a partly transformed module, nor a silent return of the
+/// original.
+pub fn prepare_standalone(
+    input: &DecodedBytecode,
+) -> Result<(Cow<'_, DecodedBytecode>, Vec<String>)> {
+    applicable(input)?;
     prepare(input)
 }
 
@@ -145,7 +157,7 @@ fn prepare_bounded(
             continue;
         };
         let survey = tree_fusion::survey(&module, &body, limits);
-        let mut candidate = false;
+        let mut fresh = BTreeMap::new();
         if survey.truncated {
             report.push(format!(
                 "caller={} refused: survey budget exceeded",
@@ -158,7 +170,7 @@ fn prepare_bounded(
                 let consumer = site.consumer.expect("proved fold");
                 let (args, _) = module.signature(site.producer).expect("proved signature");
                 let (_, ret) = module.signature(consumer).expect("proved signature");
-                declarations
+                fresh
                     .entry((site.producer, consumer))
                     .or_insert_with(|| Declaration {
                         key: Key {
@@ -170,7 +182,6 @@ fn prepare_bounded(
                         args: args.iter().map(|t| t.0 as usize).collect(),
                         ret: ret.0 as usize,
                     });
-                candidate = true;
             } else {
                 report.push(format!(
                     "caller={} producer={} consumer={:?} refused: {}",
@@ -181,15 +192,22 @@ fn prepare_bounded(
                 ));
             }
         }
-        if candidate {
-            caller_air += body.allocated_bytes();
-            if caller_air > max_caller_air
-                || declarations.len() > generated::Limits::default().helpers
+        if !fresh.is_empty() {
+            // A caller joins only if its AIR and helpers fit. The callers
+            // already taken are fused; later ones keep their original calls.
+            let new_helpers = fresh.keys().filter(|k| !declarations.contains_key(*k)).count();
+            if caller_air + body.allocated_bytes() > max_caller_air
+                || declarations.len() + new_helpers > generated::Limits::default().helpers
             {
-                report
-                    .push("module proof/helper budget exceeded; original program retained".into());
-                return Ok((Cow::Borrowed(input), report));
+                report.push(format!(
+                    "module proof/helper budget exceeded at caller={}; later callers keep their original calls",
+                    f.findex
+                ));
+                module_truncated = true;
+                break;
             }
+            caller_air += body.allocated_bytes();
+            declarations.extend(fresh);
             callers.push((fi, body));
         }
     }
@@ -256,41 +274,32 @@ fn prepare_bounded(
         output.tree_fusion_runtime = count > 0;
         Ok((output, count))
     })();
-    match transaction {
-        Ok((output, count)) => {
-            for h in &output.generated_helpers {
-                let f = output
-                    .functions
-                    .iter()
-                    .find(|f| f.findex as usize == h.findex)
-                    .unwrap();
-                report.push(format!(
-                    "helper={} producer={} consumer={} ops={} regs={} node_allocations={}",
-                    h.findex,
-                    h.declaration.key.sources[0],
-                    h.declaration.key.sources[1],
-                    f.op_count(),
-                    f.regs.len(),
-                    f.ops()
-                        .iter()
-                        .filter(|op| matches!(op, crate::opcodes::Opcode::New { .. }))
-                        .count()
-                ));
-            }
-            report.push(format!(
-                "transformed_sites={count} helpers={} skipped_bodies={skipped} module_truncated={}",
-                output.generated_helpers.len(),
-                module_truncated
-            ));
-            Ok((Cow::Owned(output), report))
-        }
-        Err(e) => {
-            report.push(format!(
-                "transaction refused: {e:#}; original program retained"
-            ));
-            Ok((Cow::Borrowed(input), report))
-        }
+    let (output, count) = transaction.context("tree fusion could not complete")?;
+    for h in &output.generated_helpers {
+        let f = output
+            .functions
+            .iter()
+            .find(|f| f.findex as usize == h.findex)
+            .unwrap();
+        report.push(format!(
+            "helper={} producer={} consumer={} ops={} regs={} node_allocations={}",
+            h.findex,
+            h.declaration.key.sources[0],
+            h.declaration.key.sources[1],
+            f.op_count(),
+            f.regs.len(),
+            f.ops()
+                .iter()
+                .filter(|op| matches!(op, crate::opcodes::Opcode::New { .. }))
+                .count()
+        ));
     }
+    report.push(format!(
+        "transformed_sites={count} helpers={} skipped_bodies={skipped} module_truncated={}",
+        output.generated_helpers.len(),
+        module_truncated
+    ));
+    Ok((Cow::Owned(output), report))
 }
 
 #[cfg(test)]
@@ -446,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn module_budgets_retain_original_program() {
+    fn module_budgets_stop_fusion_and_leave_the_program_unchanged() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("test/tests/bench_binary_trees.hl");
         crate::native_lib::choose_std_linkage(&path);
@@ -457,15 +466,15 @@ mod tests {
             (0, MAX_CALLER_AIR, "module_truncated=true"),
             (MAX_SURVEYS, 0, "module proof/helper budget exceeded"),
         ] {
-            let (fallback, report) = prepare_bounded(&bc, surveys, bytes).unwrap();
+            let (unchanged, report) = prepare_bounded(&bc, surveys, bytes).unwrap();
             assert!(
                 report.iter().any(|line| line.contains(reason)),
                 "{report:?}"
             );
-            assert!(matches!(fallback, Cow::Borrowed(_)));
-            assert!(fallback.generated_helpers.is_empty());
-            assert!(!fallback.tree_fusion_runtime);
-            assert_eq!(old, crate::bytecode_encode::encode(&fallback, 5).unwrap());
+            assert!(matches!(unchanged, Cow::Borrowed(_)));
+            assert!(unchanged.generated_helpers.is_empty());
+            assert!(!unchanged.tree_fusion_runtime);
+            assert_eq!(old, crate::bytecode_encode::encode(&unchanged, 5).unwrap());
         }
     }
 
@@ -514,9 +523,14 @@ mod tests {
             .unwrap()
             .findex = -1;
         let before = malformed.compute_function_hashes();
-        let (fallback, report) = prepare(&malformed).unwrap();
-        assert!(report.last().unwrap().contains("original program retained"));
-        assert!(fallback.generated_helpers.is_empty());
-        assert_eq!(before, fallback.compute_function_hashes());
+        let error = prepare(&malformed)
+            .err()
+            .expect("a transformation that cannot complete is an error");
+        assert!(
+            format!("{error:#}").contains("tree fusion could not complete"),
+            "{error:#}"
+        );
+        assert!(malformed.generated_helpers.is_empty());
+        assert_eq!(before, malformed.compute_function_hashes());
     }
 }

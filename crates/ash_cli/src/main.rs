@@ -1226,27 +1226,30 @@ fn run() -> Result<()> {
             && cli.dev_generated_helper.is_none();
         let fusion_log = cli.tree_fusion_log || cli.jit_log || cli.dev_tree_fusion;
         let decoded = if fusion {
-            match ash_core::tree_fusion::prepare_standalone(&decoded) {
-                Ok((prepared, report)) => {
+            // A program outside the contract is not fused, and `--dev-tree-fusion`
+            // makes that an error. Past this check a failure is an error too.
+            match ash_core::tree_fusion::applicable(&decoded) {
+                Err(e) if cli.dev_tree_fusion => return Err(e),
+                Err(e) => {
+                    if fusion_log {
+                        eprintln!("[tree-fusion] not applicable: {e:#}");
+                    }
+                    decoded
+                }
+                Ok(()) => {
+                    let (prepared, report) = ash_core::tree_fusion::prepare_standalone(&decoded)?;
                     if fusion_log {
                         for line in report {
                             eprintln!("[tree-fusion] {line}");
                         }
                     }
-                    // A refused/no-candidate preparation borrows the input;
-                    // keep it directly instead of cloning module metadata.
+                    // Nothing to fuse borrows the input; keep it directly
+                    // instead of cloning module metadata.
                     match prepared {
                         std::borrow::Cow::Owned(prepared) => prepared,
                         std::borrow::Cow::Borrowed(_) => decoded,
                     }
                 }
-                Err(e) if !cli.dev_tree_fusion => {
-                    if fusion_log {
-                        eprintln!("[tree-fusion] refused: {e:#}; original program retained");
-                    }
-                    decoded
-                }
-                Err(e) => return Err(e),
             }
         } else if let Some(source) = cli.dev_generated_helper {
             ash_core::generated::probe(&decoded, source)?

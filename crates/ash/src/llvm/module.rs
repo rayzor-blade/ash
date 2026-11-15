@@ -466,11 +466,12 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut bytecode =
             BytecodeDecoder::decode_for_abi(path, &target_abi).expect("Failed to decode bytecode");
-        if fuse {
-            // Refused (external natives, hosted modules, a runtime that is not
-            // linked in) leaves the program as decoded.
-            let fused = match crate::tree_fusion::prepare_standalone(&bytecode) {
-                Ok((std::borrow::Cow::Owned(prepared), _)) => Some(prepared),
+        // A program outside the contract (external natives, hosted modules, a
+        // runtime that is not linked in) is not fused. Past that check a
+        // failure is an error.
+        if fuse && crate::tree_fusion::applicable(&bytecode).is_ok() {
+            let fused = match crate::tree_fusion::prepare_standalone(&bytecode)? {
+                (std::borrow::Cow::Owned(prepared), _) => Some(prepared),
                 _ => None,
             };
             if let Some(prepared) = fused {

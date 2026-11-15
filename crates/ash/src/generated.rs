@@ -67,8 +67,8 @@ impl Default for Limits {
 /// Prepare a fresh module atomically. All IDs are reserved in key order before
 /// calling `build`, permitting self/mutual references. Identical declarations
 /// invoke `build` once; conflicting signatures refuse the entire transaction.
-/// Failure leaves `input` untouched, so the optimizer can retain its original
-/// callers. Reprepare from original input after any code/type/host change.
+/// Failure returns an error and leaves `input` untouched. Reprepare from
+/// original input after any code/type/host change.
 ///
 /// Callers must prepare before creating an Arc or runtime tables, and must not
 /// mutate public module fields afterwards. Host registration and hot reload

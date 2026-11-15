@@ -53,6 +53,8 @@ pub struct Module<'a> {
     pending: Vec<u32>,
     /// The functions some lowered body calls.
     called: HashSet<u32>,
+    /// The functions a call through a method table may run, by the receiver's type and the slot.
+    pub table_calls: HashMap<(TypeRef, usize), Vec<usize>>,
     pub ints: Vec<i32>,
     int_at: HashMap<i32, usize>,
     pub floats: Vec<f64>,
@@ -68,6 +70,7 @@ impl<'a> Module<'a> {
             requested: HashSet::new(),
             pending: Vec::new(),
             called: HashSet::new(),
+            table_calls: HashMap::new(),
             ints: Vec::new(),
             int_at: HashMap::new(),
             floats: Vec::new(),

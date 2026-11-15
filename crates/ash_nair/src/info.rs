@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use air::v2::facts::{self, CallSummary};
+use air::v2::facts::{self, CallSummary, Summaries};
 use air::v2::ir::{Function, Instr, TypeRef};
 use air::v2::module::{CalleeBody, ModuleInfo, NativeImport};
 use air::v2::passes::{OptLevel, PassManager, PassOptions, PassReport};
@@ -19,7 +19,7 @@ pub struct NairModule {
     types: Vec<HlType>,
     natives: HashMap<usize, NativeImport>,
     callees: HashMap<usize, Function>,
-    summaries: HashMap<usize, CallSummary>,
+    summaries: Summaries,
 }
 
 impl NairModule {
@@ -51,9 +51,10 @@ impl NairModule {
                 )
             })
             .collect();
-        let summaries = facts::summarize(callees.iter().map(|(i, f)| (*i, f)));
+        let summaries =
+            facts::summarize_with(callees.iter().map(|(i, f)| (*i, f)), &module.table_calls);
         for f in callees.values_mut() {
-            facts::attach(f, &summaries);
+            facts::attach_all(f, &summaries);
         }
         NairModule {
             ints: module.ints.clone(),
@@ -66,7 +67,7 @@ impl NairModule {
 
     /// What a call to the function may write, from the bodies lowered so far.
     pub fn summary(&self, findex: usize) -> Option<&CallSummary> {
-        self.summaries.get(&findex)
+        self.summaries.calls.get(&findex)
     }
 
     fn ty(&self, t: TypeRef) -> Option<&HlType> {
@@ -135,7 +136,7 @@ pub fn optimize(
     level: OptLevel,
     fma: bool,
 ) -> Result<PassReport, String> {
-    facts::attach(f, &module.summaries);
+    facts::attach_all(f, &module.summaries);
     let opts = PassOptions {
         fma,
         verify_each: true,

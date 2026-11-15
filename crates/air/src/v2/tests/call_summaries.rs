@@ -316,3 +316,103 @@ fn inlining_keeps_the_summaries_of_the_calls_it_copies_in() {
     assert_eq!(stats.inlined, 1, "{}", f.dump());
     assert_eq!(f.facts.calls[&9], summary(&[AliasClass::Global(4)]));
 }
+
+// ---------------------------------------------------------------------------
+// method-table calls
+// ---------------------------------------------------------------------------
+
+use crate::v2::facts::{attach_all, summarize_with};
+
+fn field(n: usize) -> AliasClass {
+    AliasClass::ObjField {
+        ty: t(5),
+        field: n,
+    }
+}
+
+/// `main(o)` calls slot 0 of `o`, whose type is `t(5)`.
+fn table_caller() -> Function {
+    let ops = vec![
+        Opcode::CallMethod {
+            dst: Reg(1),
+            field: RefField(0),
+            args: vec![Reg(0)],
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    body(0, &ops, &[t(5), t(0)])
+}
+
+#[test]
+fn a_method_table_call_writes_what_every_function_its_slot_may_run_writes() {
+    let tys = [t(5), t(0)];
+    let one = body(1, &writes_field(1), &tys);
+    let two = body(2, &writes_field(2), &tys);
+    let caller = table_caller();
+    let targets = [((t(5), 0), vec![1, 2])].into_iter().collect();
+    let all = summarize_with([(0, &caller), (1, &one), (2, &two)], &targets);
+    let both = summary(&[field(1), field(2)]);
+    assert_eq!(all.methods[&(t(5), 0)], both);
+    // the caller of the table call writes the same
+    assert_eq!(all.calls[&0], both);
+
+    // without the targets the call may write anything
+    let unknown = summarize_with([(0, &caller)], &HashMap::new());
+    assert!(unknown.calls[&0].writes.is_any());
+    // a target outside the set may write anything
+    let outside = [((t(5), 0), vec![1, 9])].into_iter().collect();
+    let all = summarize_with([(0, &caller), (1, &one)], &outside);
+    assert!(all.methods[&(t(5), 0)].writes.is_any());
+}
+
+#[test]
+fn attach_all_gives_a_function_the_table_summaries_of_its_calls() {
+    let mut caller = table_caller();
+    let mut s = crate::v2::facts::Summaries::default();
+    s.methods.insert((t(5), 0), summary(&[field(1)]));
+    s.methods.insert((t(5), 3), summary(&[field(2)]));
+    assert_eq!(attach_all(&mut caller, &s), 1, "only the slot it calls");
+    assert_eq!(caller.facts.method(t(5), 0), Some(&summary(&[field(1)])));
+    assert_eq!(caller.facts.method(t(5), 3), None);
+}
+
+/// `do { x = o.f0; o.slot0() } while (i < n)`, where `o` has type `t(5)`.
+fn loop_with_load_and_table_call() -> Function {
+    let ops = vec![
+        Opcode::Label,
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        },
+        Opcode::CallMethod {
+            dst: Reg(4),
+            field: RefField(0),
+            args: vec![Reg(1)],
+        },
+        Opcode::JSLt {
+            a: Reg(3),
+            b: Reg(0),
+            offset: -4,
+        },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    lower(&ops, &[t(0), t(5), t(0), t(0), t(0)]).unwrap()
+}
+
+fn hoisted_across_a_table_call(writes: Option<&[AliasClass]>) -> usize {
+    let mut f = loop_with_load_and_table_call();
+    if let Some(w) = writes {
+        f.facts.methods.insert((t(5), 0), summary(w));
+    }
+    run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default()).hoisted
+}
+
+#[test]
+fn a_summary_of_a_method_table_call_lets_a_load_leave_the_loop() {
+    let class = load_class(&loop_with_load_and_table_call());
+    assert_eq!(hoisted_across_a_table_call(None), 0, "the table may run anything");
+    assert_eq!(hoisted_across_a_table_call(Some(&[next_field(class)])), 1);
+    assert_eq!(hoisted_across_a_table_call(Some(&[class])), 0);
+    assert_eq!(hoisted_across_a_table_call(Some(&[AliasClass::Any])), 0);
+}

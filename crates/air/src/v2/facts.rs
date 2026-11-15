@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::analysis::{AliasClass, write_class};
-use super::ir::{Function, Instr};
+use super::ir::{Function, Instr, TypeRef};
 
 /// Most distinct classes a footprint names before it means "anything".
 const MAX_CLASSES: usize = 32;
@@ -117,22 +117,30 @@ pub struct CallSummary {
 pub struct Facts {
     /// What a direct call to each function may do, by callee findex.
     pub calls: HashMap<usize, CallSummary>,
+    /// What a call through an object's method table may do, by the type of the receiver value
+    /// and the table slot: the join of what each function the slot may run does.
+    pub methods: HashMap<(TypeRef, usize), CallSummary>,
 }
 
 impl Facts {
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty()
+        self.calls.is_empty() && self.methods.is_empty()
     }
 
     /// Storage retained beyond the struct itself, rounded up.
     pub fn allocated_bytes(&self) -> usize {
         let per = std::mem::size_of::<(usize, CallSummary)>() + 8 + MAX_CLASSES / 2 * 16;
-        self.calls.capacity() * per
+        (self.calls.capacity() + self.methods.capacity()) * per
     }
 
     /// The summary of a direct call, when the front end gave one.
     pub fn call(&self, findex: usize) -> Option<&CallSummary> {
         self.calls.get(&findex)
+    }
+
+    /// The summary of a call through the method table at `slot` of a receiver of type `ty`.
+    pub fn method(&self, ty: TypeRef, slot: usize) -> Option<&CallSummary> {
+        self.methods.get(&(ty, slot))
     }
 
     /// Takes in the facts of a body copied into this function. A callee both sides know is
@@ -146,7 +154,23 @@ impl Facts {
                 })
                 .or_insert_with(|| s.clone());
         }
+        for (key, s) in &other.methods {
+            self.methods
+                .entry(*key)
+                .and_modify(|mine| {
+                    mine.writes.join(&s.writes);
+                })
+                .or_insert_with(|| s.clone());
+        }
     }
+}
+
+/// What the calls in a set of functions may write: direct calls by callee, and method-table
+/// calls by receiver type and slot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summaries {
+    pub calls: HashMap<usize, CallSummary>,
+    pub methods: HashMap<(TypeRef, usize), CallSummary>,
 }
 
 /// What each of `fns` may write, following direct calls between them to a fixed point.
@@ -157,6 +181,15 @@ impl Facts {
 pub fn summarize<'a>(
     fns: impl IntoIterator<Item = (usize, &'a Function)>,
 ) -> HashMap<usize, CallSummary> {
+    summarize_with(fns, &HashMap::new()).calls
+}
+
+/// As [`summarize`], and a method-table call whose receiver type and slot are in `targets` runs
+/// one of the functions listed there, so it writes what they write.
+pub fn summarize_with<'a>(
+    fns: impl IntoIterator<Item = (usize, &'a Function)>,
+    targets: &HashMap<(TypeRef, usize), Vec<usize>>,
+) -> Summaries {
     let fns: Vec<(usize, &Function)> = fns.into_iter().collect();
     let index: HashMap<usize, usize> = fns.iter().enumerate().map(|(i, (f, _))| (*f, i)).collect();
 
@@ -165,18 +198,34 @@ pub fn summarize<'a>(
     for (_, f) in &fns {
         let mut fp = Footprint::none();
         let mut calls = Vec::new();
+        let reach = |findex: usize, fp: &mut Footprint, calls: &mut Vec<usize>| {
+            if let Some(&i) = index.get(&findex) {
+                calls.push(i);
+            } else if let Some(s) = f.facts.call(findex) {
+                fp.join(&s.writes);
+            } else {
+                fp.add(AliasClass::Any);
+            }
+        };
         for ins in f.blocks.iter().flat_map(|b| b.instrs.iter()) {
             match ins {
-                Instr::Call { fun, .. } => {
-                    if let Some(&i) = index.get(fun) {
-                        calls.push(i);
-                    } else if let Some(s) = f.facts.call(*fun) {
-                        fp.join(&s.writes);
-                    } else {
-                        fp.add(AliasClass::Any);
+                Instr::Call { fun, .. } => reach(*fun, &mut fp, &mut calls),
+                Instr::CallMethod { field, args, .. } => {
+                    let known = args
+                        .first()
+                        .and_then(|r| targets.get(&(f.values[r.idx()].ty, *field)));
+                    match known {
+                        Some(list) => {
+                            for t in list {
+                                reach(*t, &mut fp, &mut calls);
+                            }
+                        }
+                        None => {
+                            fp.add(AliasClass::Any);
+                        }
                     }
                 }
-                Instr::CallMethod { .. } | Instr::CallClosure { .. } => {
+                Instr::CallClosure { .. } => {
                     fp.add(AliasClass::Any);
                 }
                 _ => match write_class(ins) {
@@ -219,10 +268,29 @@ pub fn summarize<'a>(
         }
     }
 
-    fns.iter()
-        .zip(writes)
-        .map(|((findex, _), writes)| (*findex, CallSummary { writes }))
-        .collect()
+    let calls: HashMap<usize, CallSummary> = fns
+        .iter()
+        .zip(&writes)
+        .map(|((findex, _), w)| (*findex, CallSummary { writes: w.clone() }))
+        .collect();
+    let methods = targets
+        .iter()
+        .map(|(key, list)| {
+            let mut w = Footprint::none();
+            for t in list {
+                match index.get(t) {
+                    Some(&i) => {
+                        w.join(&writes[i]);
+                    }
+                    None => {
+                        w.add(AliasClass::Any);
+                    }
+                }
+            }
+            (*key, CallSummary { writes: w })
+        })
+        .collect();
+    Summaries { calls, methods }
 }
 
 /// Gives `f` the summary of every function it calls directly that `summaries` has.
@@ -238,6 +306,33 @@ pub fn attach(f: &mut Function, summaries: &HashMap<usize, CallSummary>) -> usiz
                 f.facts.calls.insert(*fun, s.clone());
                 taken += 1;
             }
+        }
+    }
+    taken
+}
+
+/// Gives `f` the summary of every call it makes that `summaries` covers, direct or through a
+/// method table. Returns how many it took.
+pub fn attach_all(f: &mut Function, summaries: &Summaries) -> usize {
+    let mut taken = attach(f, &summaries.calls);
+    let mut methods = Vec::new();
+    for b in &f.blocks {
+        for ins in &b.instrs {
+            if let Instr::CallMethod { field, args, .. } = ins
+                && let Some(r) = args.first()
+            {
+                let key = (f.values[r.idx()].ty, *field);
+                if let Some(s) = summaries.methods.get(&key)
+                    && !f.facts.methods.contains_key(&key)
+                {
+                    methods.push((key, s.clone()));
+                }
+            }
+        }
+    }
+    for (key, s) in methods {
+        if f.facts.methods.insert(key, s).is_none() {
+            taken += 1;
         }
     }
     taken

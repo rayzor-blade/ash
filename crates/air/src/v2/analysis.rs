@@ -1,7 +1,7 @@
 //! Analyses the optimization passes run on: natural loops with a nesting
 //! forest, and the HL alias-class model derived from the typed values.
 
-use super::facts::{CallSummary, Facts};
+use super::facts::CallSummary;
 use super::ir::*;
 use super::lower::build_domtree_from_succs;
 use crate::dominance::DominatorTree;
@@ -403,18 +403,23 @@ pub fn write_class(ins: &Instr) -> Option<AliasClass> {
     }
 }
 
-/// What a direct call may write, when the function carries a summary for it.
-fn summarized_call<'a>(ins: &Instr, facts: &'a Facts) -> Option<&'a CallSummary> {
+/// What a call may write, when the function carries a summary for it: a direct call by its
+/// callee, a method-table call by its receiver's type and slot.
+fn summarized_call<'a>(ins: &Instr, f: &'a Function) -> Option<&'a CallSummary> {
     match ins {
-        Instr::Call { fun, .. } => facts.call(*fun),
+        Instr::Call { fun, .. } => f.facts.call(*fun),
+        Instr::CallMethod { field, args, .. } => {
+            let receiver = args.first()?;
+            f.facts.method(f.values[receiver.idx()].ty, *field)
+        }
         _ => None,
     }
 }
 
 /// True when the instruction is a barrier for every load: it may write any
 /// storage at all.
-pub fn clobbers_all(ins: &Instr, facts: &Facts) -> bool {
-    match summarized_call(ins, facts) {
+pub fn clobbers_all(ins: &Instr, f: &Function) -> bool {
+    match summarized_call(ins, f) {
         Some(s) => s.writes.is_any(),
         None => ins.effect() == Effect::ClobberAll || write_class(ins) == Some(AliasClass::Any),
     }
@@ -424,8 +429,8 @@ pub fn clobbers_all(ins: &Instr, facts: &Facts) -> bool {
 ///
 /// A summarized call is taken to leave cells alone only in the summary, never here: a cell's
 /// address can be passed to the callee, and a store through it is not named by any class.
-pub fn writes_may_alias(ins: &Instr, class: AliasClass, facts: &Facts) -> bool {
-    if let Some(s) = summarized_call(ins, facts) {
+pub fn writes_may_alias(ins: &Instr, class: AliasClass, f: &Function) -> bool {
+    if let Some(s) = summarized_call(ins, f) {
         return matches!(class, AliasClass::Cell(_)) || s.writes.may_alias(class);
     }
     match write_class(ins) {

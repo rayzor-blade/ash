@@ -103,6 +103,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
         match self.m.types.resolve_method(receiver_class, field)? {
             Resolution::One(target) => self.direct_call(target, obj, &ids[1..]),
             Resolution::Many { slot, targets } => {
+                let mut funs = Vec::new();
                 for target in targets {
                     let t = self.tast.fields()[target as usize];
                     if t.func.get() == NONE {
@@ -112,7 +113,11 @@ impl<'m, 'a> FnLower<'m, 'a> {
                     let fun = self.m.types.fun_id(&owner, &name);
                     self.m.called.insert(fun);
                     self.m.request(target);
+                    funs.push(fun as usize);
                 }
+                self.m
+                    .table_calls
+                    .insert((TypeRef(held as u32), slot as usize), funs);
                 let Some((args, ret)) = self.call_args(field, Some(obj), &ids[1..])? else {
                     return Ok(None);
                 };

@@ -13,9 +13,10 @@
 //!   and with it a predecessor of the handler.
 //! * **`ClobberAll` is a hard barrier.** No load is reused, and nothing is
 //!   hoisted, across a call, `Asm`, or region marker. The one exception is a
-//!   direct call the function holds a [`CallSummary`](super::facts::CallSummary)
-//!   for: it blocks only the classes the summary says it may write, and never a
-//!   cell, whose address the callee may have been handed.
+//!   direct or method-table call the function holds a
+//!   [`CallSummary`](super::facts::CallSummary) for: it blocks only the classes
+//!   the summary says it may write, and never a cell, whose address the callee
+//!   may have been handed.
 //! * **Cells are memory.** `CellGet`/`CellSet`/`CellIncr`/`CellDecr` carry
 //!   [`AliasClass::Cell`](super::analysis::AliasClass::Cell) and take part in
 //!   the same aliasing rules as heap accesses.
@@ -865,7 +866,7 @@ pub fn clobber_free(
             continue;
         }
         for ins in &blk.instrs[start..end] {
-            if clobbers_all(ins, &f.facts) || writes_may_alias(ins, class, &f.facts) {
+            if clobbers_all(ins, f) || writes_may_alias(ins, class, f) {
                 return false;
             }
         }

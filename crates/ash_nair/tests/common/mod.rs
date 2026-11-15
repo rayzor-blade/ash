@@ -63,3 +63,20 @@ pub fn export(compiler: &str, fixture: &str, tag: &str) -> Vec<u8> {
     let _ = std::fs::remove_file(&path);
     bytes
 }
+
+/// The loads that sit in a loop of `f`.
+pub fn loads_in_loops(f: &air::v2::ir::Function) -> usize {
+    use air::v2::analysis::{CfgInfo, LoopForest};
+    use air::v2::ir::Instr;
+    let cfg = CfgInfo::build(f);
+    let forest = LoopForest::analyze(f, &cfg);
+    let mut in_loop = std::collections::HashSet::new();
+    for l in forest.innermost_first() {
+        in_loop.extend(forest.get(l).blocks.iter().copied());
+    }
+    in_loop
+        .iter()
+        .flat_map(|b| f.blocks[b.idx()].instrs.iter())
+        .filter(|i| matches!(i, Instr::FieldGet { .. }))
+        .count()
+}

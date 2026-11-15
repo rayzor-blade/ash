@@ -106,7 +106,7 @@ fn movable(
             // No aliasing write and no full clobber anywhere in the loop.
             for &lb in &lp.blocks {
                 for other in &f.blocks[lb.idx()].instrs {
-                    if clobbers_all(other, &f.facts) || writes_may_alias(other, class, &f.facts) {
+                    if clobbers_all(other, f) || writes_may_alias(other, class, f) {
                         return false;
                     }
                 }

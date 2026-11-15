@@ -6,7 +6,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use air::v2::analysis::{AliasClass, CfgInfo, LoopForest};
+use air::v2::analysis::AliasClass;
 use air::v2::ir::{Function, Instr};
 use air::v2::passes::{OptLevel, PassManager, PassOptions};
 use air::v2::verify::verify;
@@ -32,21 +32,6 @@ fn by_name<'l>(done: &'l [Lowered], name: &str) -> &'l Lowered {
     done.iter()
         .find(|l| l.name == name)
         .unwrap_or_else(|| panic!("{name} was lowered"))
-}
-
-/// The loads that sit in a loop of `f`.
-fn loads_in_loops(f: &Function) -> usize {
-    let cfg = CfgInfo::build(f);
-    let forest = LoopForest::analyze(f, &cfg);
-    let mut in_loop = std::collections::HashSet::new();
-    for l in forest.innermost_first() {
-        in_loop.extend(forest.get(l).blocks.iter().copied());
-    }
-    in_loop
-        .iter()
-        .flat_map(|b| f.blocks[b.idx()].instrs.iter())
-        .filter(|i| matches!(i, Instr::FieldGet { .. }))
-        .count()
 }
 
 #[test]
@@ -131,7 +116,11 @@ fn objects_lower_run_and_let_a_summarized_call_keep_a_load_out_of_the_loop() {
 
     // the loop in `run` reads `limit` through a call that writes only `total`
     let run_fn = by_name(&done, "Acc.run");
-    assert_eq!(loads_in_loops(&run_fn.function), 1, "before the passes");
+    assert_eq!(
+        common::loads_in_loops(&run_fn.function),
+        1,
+        "before the passes"
+    );
     let mut with = run_fn.function.clone().with_findex(run_fn.findex as usize);
     optimize(&info, &mut with, OptLevel::O2, false).expect("the passes run");
     verify(&with).expect("it verifies after the passes");
@@ -144,11 +133,15 @@ fn objects_lower_run_and_let_a_summarized_call_keep_a_load_out_of_the_loop() {
         .run(&mut without)
         .expect("the passes run");
     assert_eq!(
-        loads_in_loops(&without),
+        common::loads_in_loops(&without),
         1,
         "without the summary the call blocks the load"
     );
-    assert_eq!(loads_in_loops(&with), 0, "with it the load leaves the loop");
+    assert_eq!(
+        common::loads_in_loops(&with),
+        0,
+        "with it the load leaves the loop"
+    );
 
     // and the optimized functions still compute the same
     let mut optimized: Vec<(usize, Function)> = Vec::new();

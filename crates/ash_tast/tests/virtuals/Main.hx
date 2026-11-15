@@ -40,6 +40,36 @@ class Plain extends Shape {
 	}
 }
 
+class Counter {
+	public var hits:Int;
+	public var limit:Int;
+
+	public function new(limit:Int) {
+		this.hits = 0;
+		this.limit = limit;
+	}
+
+	public function note(k:Int):Void {}
+}
+
+class Loud extends Counter {
+	public function new(limit:Int) {
+		super(limit);
+	}
+
+	override public function note(k:Int):Void {
+		hits += k;
+	}
+}
+
+class Quiet extends Counter {
+	public function new(limit:Int) {
+		super(limit);
+	}
+
+	override public function note(k:Int):Void {}
+}
+
 class Main {
 	// the receiver is a Square and no class below it overrides area
 	static function square(k:Int):Int {
@@ -65,6 +95,25 @@ class Main {
 	// twice is declared in Shape and no class overrides it; inside it, `this` may be any Shape
 	static function twiceSquare(k:Int):Int {
 		return new Square(k).twice();
+	}
+
+	// reads `limit` through a call that runs Counter.note, Loud.note or Quiet.note: of those
+	// only Loud.note writes anything, and it writes `hits`
+	static function drive(c:Counter):Int {
+		var i = 0;
+		while (i < c.limit) {
+			c.note(i);
+			i++;
+		}
+		return c.hits;
+	}
+
+	static function loud(n:Int):Int {
+		return drive(new Loud(n));
+	}
+
+	static function quiet(n:Int):Int {
+		return drive(new Quiet(n));
 	}
 
 	static function main() {}

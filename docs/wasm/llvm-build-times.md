@@ -12,7 +12,7 @@ The default remains level 3. Lower codegen effort trades artifact size and
 potential runtime performance for compilation speed. The browser checks below
 establish correctness, rather than equal CPU throughput.
 
-## What the LLVM sources explain
+## Why codegen level 0 compiles faster
 
 LLVM's IR optimizer and machine code generator have separate optimization
 settings. Ash previously selected aggressive machine codegen even when
@@ -31,8 +31,8 @@ a demonstrated alternative for this backend. [LLVM 21 WASM pipeline](https://git
 
 Emscripten also recommends lower optimization levels during development.
 Its link-time guidance includes Binaryen and JavaScript processing. Ash uses
-its own linker, measured around one second here; the useful change for Ash
-is in LLVM codegen. [Emscripten optimization guidance](https://emscripten.org/docs/optimizing/Optimizing-Code.html).
+its own linker, measured around one second here, so the gain comes from LLVM
+codegen. [Emscripten optimization guidance](https://emscripten.org/docs/optimizing/Optimizing-Code.html).
 
 ## Isolated codegen experiment
 
@@ -81,9 +81,9 @@ After an excluded warm-up, the order was codegen 3, 0, 0, 3.
 
 The final module grows 21.8%. Unrelated compiler and system activity was
 observed on this machine; these two-sample wall-time medians are indicative.
-The excluded cold warm-up was 22.415 seconds, illustrating the variability.
+The excluded cold warm-up took 22.415 seconds, an example of the variability.
 The isolated CPU comparison is stronger evidence of the codegen improvement.
-[Raw measurements](llvm-build-time-results.json) retain every sample.
+Every sample is in the [raw measurements](llvm-build-time-results.json).
 
 Both final modules passed Ashui's headless Chrome smoke: codegen 3 rendered
 232 frames, codegen 0 rendered 228, and both exited 0. That application is

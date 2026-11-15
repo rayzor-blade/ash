@@ -49,10 +49,10 @@ isolating the interpreter from a problem, not for ordinary use.
 
 `--jit-tier cranelift` and `--jit-tier llvm` pin one compiler; `off` keeps
 the tiering machinery and disables promotion. Explicit thresholds override
-the preset. `ASH_TIER` supplies `--jit-tier` when the flag is absent.
+the preset. `ASH_TIER` sets the tier when `--jit-tier` is absent.
 
 The default `application` preset compiles warm functions in Cranelift at
-100 calls and reserves LLVM for sustained work at 10,000 interpreted calls
+10 calls and reserves LLVM for sustained work at 10,000 interpreted calls
 or loop back-edges. This keeps ordinary GUI interactions in the middle tier
 and avoids LLVM compilation and retained metadata for short bursts of work.
 A compiled caller dispatches directly without increasing its callees' counters,
@@ -105,8 +105,8 @@ runtime installed beside `ash` (`wasm32-wasip1/ash_runtime.o`; the threads
 target has its own directory) and writes a page beside the module:
 `index.html`, `worker.js`, `thread.js`, `display.js` and the browser host
 (`ash_browser.js`, `ash_browser_bg.wasm`), all built into `ash` by
-`crates/ash_page`, which other tools can use as a library. An `index.html`
-without ash's first-line comment is left alone.
+`crates/ash_page`, which other tools can use as a library. ash leaves an
+`index.html` without its first-line comment alone.
 
 | Command | |
 |--------|---|
@@ -158,6 +158,6 @@ are reported explicitly; `--emit-aot` needs neither a runtime nor a linker.
 Shared-runtime builds stage the target library under its platform's HashLink
 names beside the output. A Windows HDLL program must link an import library
 for `libhl.dll`; the corresponding DLL must be beside that import library.
-Native executable linking covers Linux, macOS and Windows targets with an
-installed toolchain; object emission covers the additional architectures in
+Ash links native executables for Linux, macOS and Windows targets when a
+toolchain is installed, and emits objects for the additional architectures in
 the cross-target gate. Apple targets from a non-Apple host need an Apple SDK.

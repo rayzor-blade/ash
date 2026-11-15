@@ -46,7 +46,7 @@ The emitter shards the program across threads. Each shard keeps a slice of
 the functions, reduces the rest to declarations, and runs LLVM's optimiser
 and code generator on its slice; the emitter writes the object holding the
 program's data itself. `--build` hands every object to the linker at once;
-`--emit-aot` joins them into the single object it promised.
+`--emit-aot` joins them into the one object file it writes.
 
 An 8,577-function game on a ten-core Apple M-series machine:
 
@@ -57,15 +57,15 @@ An 8,577-function game on a ten-core Apple M-series machine:
 | 4 | 42 s | 4.3 GB |
 | 8 | 45 s | 4.9 GB |
 
-Two effects decide the setting. One shard is the single-module path, where
+One shard is the single-module path, where
 the optimiser sees all 9,021 bodies at once and its cost grows faster than
 linearly in module size; splitting in two cuts the work by six, not two.
 Beyond two shards the gain is ordinary parallelism, and it flattens because
 every shard reads the whole program before discarding what it does not own.
 Memory scales with shard count for the same reason.
 
-The default is half the machine's cores, clamped to [2, 6]. `ASH_AOT_SHARDS=2`
-on a memory-constrained machine; `1` for the smallest footprint.
+The default is half the machine's cores, clamped to [2, 6]. Set `ASH_AOT_SHARDS=2`
+on a memory-constrained machine, or `1` for the smallest footprint.
 
 ### Persistent AIR reuse
 
@@ -73,8 +73,8 @@ Native and WASM builds cache lowered and optimized AIR per function on disk,
 under a 512 MiB budget. `--air-cache-stats` reports reuse and stage timings;
 `--air-cache-dir PATH` selects a directory, `--air-cache-mb N` changes the
 budget, and `--no-air-cache` disables persistence. `ash air-cache` inspects the
-cache; `ash air-cache --clear` clears it. Compiler, target, ABI, profile,
-options and dependencies participate in invalidation.
+cache; `ash air-cache --clear` clears it. A change to the compiler, target, ABI,
+profile, options or dependencies invalidates the cached entry.
 
 LLVM IR emission, optimization, code generation and linking still run on each
 build. The [Ashui measurements](wasm/air-cache-build-times.md) show their cost
@@ -83,14 +83,14 @@ for invalidation details and environment equivalents.
 
 ### Optimization options
 
-The [LLVM WASM research](wasm/llvm-build-times.md) records source findings,
-codegen CPU measurements, module sizes and browser validation.
+The [LLVM WASM research](wasm/llvm-build-times.md) covers source findings,
+CPU measurements of codegen, module sizes and browser validation.
 
 `-O0`, `-O1`, `-O2`, `-O3`, `-Os` and `-Oz` select LLVM IR optimization
 and its matching codegen level. The long form is `--opt-level`.
 `-Os` and `-Oz` set size attributes and use codegen level 2.
 AIR keeps its own level, normally 3, so its inlining and allocation removal
-remain available independently of LLVM’s settings.
+remain available independently of LLVM's settings.
 
 | Option | Controls |
 |---|---|
@@ -116,7 +116,7 @@ ash -O0 --air-opt-level 0 --build app.wasm --target wasm32-wasip1-threads app.hl
 Explicit options override the corresponding environment settings. With no
 options, the existing defaults and environment variables apply. A selected
 `-O` also overrides `ASH_AOT_CODEGEN_LEVEL` unless `--codegen-opt-level` is
-specified. Options apply to `--build` and `--emit-aot`, including native AOT.
+specified. Options apply to `--build` and `--emit-aot` for native AOT too.
 The settings belong to one build and are inherited by shard workers. Library
 callers can use `emit_aot_with_options` without changing existing `AotRequest`
 values or `emit_aot` calls.
@@ -177,8 +177,8 @@ pointer, the object registers a table of body addresses and Haxe names at
 startup, and the runtime walks the frame chain through that table.
 
 Do not strip the binary. The table is the primary source, so stacks survive
-stripping, but `dladdr` is consulted to keep runtime frames out of the trace
-and without symbols that filter goes blind. Optimised builds show fewer
+stripping, but the runtime consults `dladdr` to keep runtime frames out of the
+trace, and without symbols that filter stops working. Optimised builds show fewer
 frames than unoptimised ones; inlining removed them.
 
 ### Troubleshooting
@@ -193,11 +193,11 @@ frames than unoptimised ones; inlining removed them.
 | build killed, machine swapping | too many shards for the memory | lower `ASH_AOT_SHARDS` |
 | a wrong answer only in the AOT binary | an optimiser or lowering bug | bisect: `ASH_AOT_SHARDS=1`, then `ASH_AIR_NO_WIDEN=1`, then `ASH_LLVM_PASSES=off`, then `ASH_AOT_NO_OPT=1` |
 
-### What an AOT binary does not do
+### Limits of an AOT binary
 
-No tiers, no on-stack replacement, no hot reload. The call-site profile is
-advisory. There is no bytecode in the binary, so nothing can be reloaded
-into it.
+An AOT binary has no tiers, no on-stack replacement and no hot reload. The
+call-site profile is advisory. There is no bytecode in the binary, so nothing
+can be reloaded into it.
 
 `cargo test -p ash --test aot_smoke` compiles a corpus with `--build` and
 compares each binary's output with the JIT's, byte for byte.
@@ -212,7 +212,7 @@ The release binary registers the LLVM backends for the targets ash claims:
 x86 (64- and 32-bit), AArch64, ARM, RISC-V 32 and 64, PowerPC64LE, s390x,
 and wasm32. `cargo test -p ash --test cross_targets` emits an object for
 each and checks its ELF header, so those triples are gated. A triple
-outside the set is refused with `no target for <triple>`.
+outside the set fails with `no target for <triple>`.
 
 The `-dev` tarballs (`ash-linux-x86_64-dev`, `ash-macos-aarch64-dev`;
 `ASH_DEV=1` on the install line) are the same ash built with
@@ -298,55 +298,59 @@ build one (below) and put it there or name it with `--runtime`.
 ash --build game.wasm --target wasm32-wasip1 game.hl
 ```
 
-No external toolchain. The linker is `crates/ash_wasm_link`, and the libc it
-links against was joined into the runtime object when ash was built; the
+ash needs no external toolchain. The linker is `crates/ash_wasm_link`, and the
+libc it links against was joined into the runtime object when ash was built; the
 command above works with `PATH` unset. The one thing it looks for is that
 runtime object, `ash_runtime.o`, in a directory named for the target beside
 `ash`, then the usual library directories; `--runtime` or `ASH_RUNTIME` names
 it.
 
 **The result is a library, not a command.** It exports `main` and
-`ash_module_init` and imports what only a host can answer: WASI, fiber
+`ash_module_init` and imports what only a host can provide: WASI, fiber
 suspension, sockets. A wasm module cannot switch its own stacks, so an ash
 program is suspended by whoever embeds it. [wasm/README.md](wasm/README.md)
 has the hosts and the import contract.
 
 **Only reachable code is emitted.** Functions nothing calls are dropped —
 about a third of a module. Reachability is generous: all data is kept, so any
-function whose address is written anywhere survives, because compiled code
-reaches most of the runtime through tables built in data. Debug sections are
+function survives if its address is written anywhere, because compiled code
+calls most of the runtime through tables built in data. Debug sections are
 dropped.
 
 **A static library is linked the way a native linker links one.** `--native-lib`
 takes wasm objects and `ar` archives of them, such as a Rust `staticlib` built for
 `wasm32-wasip1` or `wasm32-wasip1-threads`. From an archive ash links only the
-members the program reaches: a member joins when it defines a symbol that something
-already linked refers to and nothing defines, and the members it brings are searched
-for what they refer to in turn. The build output says how many members each archive
+members the program needs: a member joins when something already linked refers to a
+symbol that nothing linked defines, and the members it brings are searched in turn
+for the symbols they refer to. The build output says how many members each archive
 contributed.
 
 A Rust library carries its own `std`, so a member can define a name the runtime
 already defines, such as `rust_eh_personality` or `errno`. The earlier definition
-wins, and the member's code uses it: the runtime's, or failing that the first
-archive's. The build output lists the names dropped this way. Two plain objects that
-define one name are still an error; only an archive's definitions give way.
+wins, and the member's code uses it: the runtime's definition if it has one,
+otherwise the first archive's. The build output lists the names dropped this way.
+Two plain objects that define one name are an error; only an archive's definitions
+give way.
 
-A function a member names that nothing defines and no host supplies, such as `chdir`
-from `std`, links as a call that traps. A program that never reaches it is
-unaffected. When a member joins the link, the module imports only what reachable code
-uses, so a member's unused functions add no imports; an archive that contributes no
-member leaves the link as it was. A library built
-position-independent links too: a function whose address it reads through the global
-offset table gets a table slot. Imports the host does supply, the `ash_host_*`
-functions, stay imports.
+If a member refers to a function that nothing defines and no host supplies, such as
+`chdir` from `std`, the link turns the reference into a call that traps. A program
+that never calls it is unaffected. The imports a host supplies are listed in
+[wasm/host-abi.md](wasm/host-abi.md), and they stay imports. When a member joins the
+link, the module imports only what reachable code uses, so a member's unused
+functions add no imports. An archive that contributes no member changes nothing in
+the output. A position-independent library also works: it reads a function's address
+from a wasm global, and the linker gives that function a table slot and sets the
+global to it.
 
-A program reaches a library's primitives the way it reaches an HDLL's. Each
-primitive a library defines has an entry `hlp_<name>`, which takes the address of a
-signature string and returns the function. When an archive defines the entry for a
-primitive the program calls, the program calls that entry once at start-up and keeps
-the result in the primitive's slot, so no `.wasm` side module has to sit beside the
-output and the build does not note one. A primitive no library defines is looked for
-in the libraries the host opens, as before.
+A program finds a library's primitives the way it finds an HDLL's. Each primitive a
+library defines has an entry `hlp_<name>`. The entry takes a pointer to a string
+pointer, stores the primitive's signature through it, and returns the function. When
+an archive defines that entry for a primitive the program calls, the program calls
+the entry once at start-up and stores the function in a data word, the primitive's
+slot, that every call goes through. No `.wasm` side module has to sit beside the
+output, and the build prints no warning about a missing one. If no archive defines a
+primitive, the program looks for it in the side modules the host loads at run time
+([wasm/hdlls.md](wasm/hdlls.md)).
 
 Building the runtime object for the target, when working from source:
 

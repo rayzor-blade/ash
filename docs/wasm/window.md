@@ -1,8 +1,8 @@
 # The window in a page
 
-A program in a page reaches its window through one block of shared memory and
+A program in a page accesses its window through one block of shared memory and
 the page's `window.mjs` shim. The page writes what happens to the canvas into
-the block; the program writes what it wants done. No import beyond
+the block; the program writes commands for the page. No import beyond
 `ash_host_agent` is involved, and the Rust side of the format is the
 `ash_window` crate. The events and commands cover every window member and
 event that has a browser counterpart; the ones that have none are listed at
@@ -21,7 +21,7 @@ the end.
    `resized`, a `focused` and a `theme` event describing the window as it is.
 
 The memory must be shared (a `wasm32-wasip1-threads` program), or the page
-cannot see it and `ash_host_agent` answers `0`. A host with no page answers
+cannot see it and `ash_host_agent` returns `0`. A host with no page returns
 `0` too.
 
 ## The header
@@ -66,8 +66,8 @@ A record is a `u32` header, `kind | (length << 16)`, where `length` is the
 whole record in bytes, a multiple of 4, then its payload. A record never
 wraps: when it does not fit before the end of the ring, the writer fills the
 rest with a pad record (kind `0`) and starts at the ring's beginning. A record
-that does not fit at all is dropped, and for events the page counts it in the
-header.
+that does not fit at all is dropped by the writer, and for events the page
+counts it in the header.
 
 Payload fields are little-endian and packed in the order listed, with no
 alignment beyond 4 bytes: an `f64` may sit at an offset that is a multiple of
@@ -115,15 +115,15 @@ its force is the pressure. `modifiers` is a bit set: shift 1, control 2, alt
 | 27 | fullscreen | `u32` on | `fullscreenchange` |
 | 28 | pointer lock | `u32` on | `pointerlockchange` |
 
-Keyboard events are taken while the canvas (or, for text input without
-`EditContext`, its hidden textarea) has focus; the shim makes the canvas
+The shim takes keyboard events while the canvas (or, for text input without
+`EditContext`, its hidden textarea) has focus; it makes the canvas
 focusable (`tabIndex`) and focuses it on a pointer press, and focus moving
 between the canvas and its textarea is not a focus change. Every key arrives
 as a key event. While text input is allowed (set ime allowed), keys also keep
-their default action, so typed text, from a physical keyboard, an input
-method or a phone's on-screen keyboard, arrives as ime commit events; while
-it is not, the shim suppresses keys' default actions so they do not scroll or
-navigate the page.
+their default action, so typed text arrives as ime commit events, whether it
+comes from a physical keyboard, an input method or a phone's on-screen
+keyboard; while it is not allowed, the shim suppresses keys' default actions
+so they do not scroll or navigate the page.
 
 ## Commands: program to page
 
@@ -154,8 +154,13 @@ arrive; exiting runs at once.
 ## What a page cannot do
 
 These window members and events have no browser API, so a page never
-produces or honours them: the window's position (moved, set position),
-decorations, resizability, maximizing, blur, content protection and window
-level; pan, rotation and double-tap gestures; axis motion and raw device
-added, removed, button and key events; activation tokens; memory warnings;
-and closing the window from the program.
+produces or honours them:
+
+- the window's position (moved, set position)
+- decorations, resizability, maximizing, blur, content protection and window
+  level
+- pan, rotation and double-tap gestures
+- axis motion and raw device added, removed, button and key events
+- activation tokens
+- memory warnings
+- closing the window from the program

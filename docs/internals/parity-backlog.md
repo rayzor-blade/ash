@@ -1,8 +1,8 @@
 # Parity backlog
 
 Open output differences between ash and the HashLink oracle. Nothing is
-open. Add an entry when a case diverges; delete it when the fix lands —
-fixed entries are history, and git holds that.
+open. Add an entry when a case diverges; delete it when the fix lands, because
+git holds the history of fixed entries.
 
 ```
 - Case:       <case-name>

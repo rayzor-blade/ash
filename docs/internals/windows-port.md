@@ -6,7 +6,7 @@ real Windows headers on every push. `examples/heaps_base2d` loads HashLink's
 `fmt`/`ui`/`uv`/`sdl` hdlls and runs its update loop in both `interp` and
 `hybrid`.
 
-## Kind values are the alias, never a bare integer
+## `hl_type_kind` width
 
 bindgen types the C `hl_type_kind` enum as `u32` under clang and `i32`
 under MSVC. A kind is therefore always `hl::hl_type_kind` — in struct
@@ -21,7 +21,7 @@ grep -rnE "(kind|_kind)s?\s*:\s*(Vec<)?u32|u32.*=.*\.kind" crates/ash/src --incl
 
 (`jit/tbaa.rs`'s `kind_id: u32` is an LLVM metadata kind id, not this enum.)
 
-## How an HDLL reaches the runtime
+## HDLL linkage to the runtime
 
 **One runtime, named `libhl.dll`.** A PE import table names the DLL a symbol
 comes from and the loader binds to that module, never to the executable, so
@@ -31,20 +31,20 @@ selects the dynamic runtime and `init_std_library` loads
 `<exe_dir>\libhl.dll`, the module the hdlls name, so both sides get one
 `HMODULE` and one `hlp_gc_init`. `crates/ash_cli/build.rs` stages
 `ash_std.dll` under that name, and as `libhl.1.dll` for HashLink 1.x CMake
-builds — copies, since a symlink needs Developer Mode.
+builds. It stages copies, since a symlink needs Developer Mode.
 
 **Every import must resolve before a module maps.** No lazy binding: one
 missing export fails the whole library with `ERROR_PROC_NOT_FOUND` (127),
-naming nothing. When an hdll will not load, diff its import table against
-`libhl.dll`'s exports.
+without saying which export is missing. When an hdll will not load, diff its
+import table against `libhl.dll`'s exports.
 
 **An HDLL's dependencies do not resolve from its own directory** by default;
 the search starts at the executable's directory. ash loads hdlls with
 `LOAD_WITH_ALTERED_SEARCH_PATH`, which puts the hdll's own directory first;
 `PATH` is still consulted after.
 
-**`SDL3.dll` and `OpenAL32.dll` are not staged.** Beside `ash.exe`, in the
-game directory, or on `PATH`.
+**`SDL3.dll` and `OpenAL32.dll` are not staged.** They must be beside
+`ash.exe`, in the game directory, or on `PATH`.
 
 ## Deliberate differences
 
@@ -56,7 +56,7 @@ game directory, or on `PATH`.
   Haxe threads are fibers; `sentinel_loop` cannot be one either, since it
   sleeps without yielding and rewrites another thread's pc with
   `SuspendThread`/`SetThreadContext`.
-- `thread_stack_base` asks `GetCurrentThreadStackLimits`. The former
+- `thread_stack_base` calls `GetCurrentThreadStackLimits`. The former
   `current_stack_addr() + 8MB` fallback read unmapped memory on every
   collection, because a default Windows stack is 1 MB.
 - `hlp_throw` calls `longjmp`, not `_longjmp`: MSVC's setjmp.h declares only
@@ -68,31 +68,31 @@ game directory, or on `PATH`.
 ## Open
 
 - **Win64 longjmp/SEH is untested.** Win64 `longjmp` performs a real SEH
-  unwind, which wants `.pdata`/`.xdata` for every frame between throw and
+  unwind, which needs `.pdata`/`.xdata` for every frame between throw and
   trap. JIT frames carry it (nothing under `crates/ash/src/llvm/` sets
-  `nounwind`, `frame-pointer=all` is on every function), so the question is
-  whether that data is correct and reachable. HashLink zeroes the jmp_buf's
-  frame slot so longjmp degrades to a register restore; ash does not. The
-  first program that throws across a JIT frame on Windows is the test.
+  `nounwind`, `frame-pointer=all` is on every function); whether that data is
+  correct and reachable is untested. HashLink zeroes the jmp_buf's frame slot
+  so longjmp degrades to a register restore; ash does not zero it. The first
+  program that throws across a JIT frame on Windows is the test.
 - **No crash handler.** `main.rs`'s handler complex is `#[cfg(unix)]`. The
-  shape: `SetUnhandledExceptionFilter`, fault address from
+  plan: `SetUnhandledExceptionFilter`, fault address from
   `ExceptionRecord->ExceptionInformation[1]`, pc/fp/sp from `CONTEXT`,
   `WriteFile(GetStdHandle(STD_ERROR_HANDLE))`, `EXCEPTION_CONTINUE_SEARCH`.
-  No CRT locks inside the filter. `signal(SIGABRT, …)` works as-is; SIGBUS
+  The filter must take no CRT locks. `signal(SIGABRT, …)` works as-is; SIGBUS
   has no analogue.
 - **krio-fiber's `cfg(not(unix))` stacks lack a guard page** (upstream fix).
 - **`pump_events_and_swap` is `#[cfg(unix)]`**: it probes SDL through
-  `dlsym(RTLD_DEFAULT)`. The Windows shape is `GetModuleHandleW("SDL2.dll")`
-  + `GetProcAddress`.
-- **`lower_own_priority` is a no-op.** Wants
+  `dlsym(RTLD_DEFAULT)`. The Windows equivalent is
+  `GetModuleHandleW("SDL2.dll")` + `GetProcAddress`.
+- **`lower_own_priority` is a no-op.** It needs
   `SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST)`.
 
 ## Building locally
 
-The same pieces the release job installs: rustup nightly (msvc host), VS
-Build Tools with the C++ workload and a Windows SDK, LLVM 21 development
-files from conda-forge (`llvmdev=21.1.8 zlib libxml2-devel`, plus `clangdev`
-for bindgen).
+Install the same pieces the release job installs: rustup nightly (msvc host),
+VS Build Tools with the C++ workload and a Windows SDK, and LLVM 21
+development files from conda-forge (`llvmdev=21.1.8 zlib libxml2-devel`, plus
+`clangdev` for bindgen).
 
 ```powershell
 $env:LLVM_SYS_211_PREFIX = "<prefix>\Library"

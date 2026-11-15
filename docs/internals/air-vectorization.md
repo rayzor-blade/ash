@@ -1,7 +1,7 @@
 # AIR loop vectorization
 
 `air::v2::passes::widen` widens loops to one machine vector per trip, with
-a scalar epilogue. O3 only. All tiers and the SSA walker execute the vector instructions;
+a scalar epilogue. It runs at O3 only. All tiers and the SSA walker execute the vector instructions;
 `serialize` scalarizes them back, so the opcode interpreter never sees a
 vector.
 
@@ -11,15 +11,16 @@ unchanged result rules it out and points at the inliner or SROA.
 
 ## Instructions
 
-`VecLoad`, `VecStore`, `VecSplat`, `VecBinOp`, `VecReduce`. Only the widener
-produces them, only at O3, and only after `serialize` has taken its scalar
-snapshot. Vector values never reach de-SSA and never need an HL register.
+The vector instructions are `VecLoad`, `VecStore`, `VecSplat`, `VecBinOp` and
+`VecReduce`. Only the widener produces them, only at O3, and only after
+`serialize` has taken its scalar snapshot. Vector values never reach de-SSA
+and never need an HL register.
 (`VecOp`, `VecExtract` and `VecInsert` are the ash-simd forms and come from
 lowering and SROA, not from here.)
 
-Supported: runtime trip counts through the epilogue, guard hoisting, affine
-addressing (`i << 2`, `i + k`, `i * c`), contiguity from the element's byte
-width, and integer reductions closed by a `VecReduce` on a block spliced
+The widener supports runtime trip counts through the epilogue, guard hoisting,
+affine addressing (`i << 2`, `i + k`, `i * c`), contiguity from the element's
+byte width, and integer reductions closed by a `VecReduce` on a block spliced
 onto the exit edge.
 
 The lane count is one per loop, from the element width: as many lanes as
@@ -28,8 +29,7 @@ elements by 2. `Lanes` in `widen.rs` fixes it from the first element and
 refuses a loop whose elements differ in width (`MixedLaneWidth`) or whose
 width does not divide the vector (`LaneTooWide`). A byte or short access
 into a wider register is refused too (`AccessNarrowerThanValue`): the lane
-is the register, and the load that extends as it goes is not an instruction
-the IR has.
+is the register, and the IR has no load that extends the value as it loads.
 
 ## Soundness rules
 
@@ -46,8 +46,8 @@ Each of these produced IR that verified and a wrong answer at run time.
 4. **The IR must not hold a vector the machine cannot.** A widened `i64x4`,
    from the days of a fixed four lanes, made both backends refuse the
    function, and because a tier-0 refusal was not remembered the function
-   was re-lowered on every call. Totality of lowering covers types, not only
-   instructions; the per-width lane count is what keeps every vector at 128
+   was re-lowered on every call. Lowering has to handle every type, not only
+   every instruction, and the per-width lane count keeps every vector at 128
    bits.
 
 Two more that outlive this pass: a pass that deletes a definition calls
@@ -55,10 +55,10 @@ Two more that outlive this pass: a pass that deletes a definition calls
 consumers reading AIR rather than the serialized form (`pending_ints` covers
 the serialized form now).
 
-## What the corpus widens
+## Corpus survey
 
-One loop per program, and it is the stdlib's array fill every time. The
-blockers, from the survey:
+The corpus widens one loop per program, and it is the stdlib's array fill
+every time. The survey found these blockers:
 
 | blocker | count | |
 |---|---|---|
@@ -82,19 +82,19 @@ is keyed by findex alone.
 | mandelbrot pixel loop | in principle | trip counts diverge per lane: needs masking and per-lane exit |
 | call benches | no | loop-carried multiply chain, chosen to survive optimization |
 
-nbody's blocker is layout. LLVM reaches the same wall from the other side:
-asked to vectorize it, it SLP-packs two of the three components, collapses
-them with a horizontal add, and leaves `fsqrt` and `fdiv` scalar; one
-iteration still computes one body pair. The unlock is struct-of-arrays or a
-gather, not a better transform.
+nbody's blocker is layout. LLVM is stopped by the same layout: asked to
+vectorize it, it SLP-packs two of the three components, collapses them with a
+horizontal add, and leaves `fsqrt` and `fdiv` scalar; one iteration still
+computes one body pair. Vectorizing it needs struct-of-arrays or a gather; a
+better transform would not help.
 
 Cranelift emits SIMD only for the vector forms AIR hands it; it has no loop
 vectorizer of its own. On a program where the widener refuses every loop its
-CLIF holds no vector type.
+CLIF has no vector type.
 
-## Next, in order
+## Next steps
 
-1. If-conversion under a lane mask — retires the bounds-check diamond and
+1. If-conversion under a lane mask removes the bounds-check diamond and
    lets reductions over array reads widen.
 2. Hoist grow-on-demand out of an array write's slow path, which needs
    something to vouch that the callee is "ensure capacity".
@@ -108,8 +108,8 @@ CLIF holds no vector type.
 unoptimized version; `TestVectorize` in the parity matrix covers lengths zero
 through twelve at four lanes, and `TestVecLanes` runs fills, in-place
 arithmetic and a reduction over bytes, shorts, 64-bit ints and doubles on
-every engine. Float reduction reassociation changes results and needs the
-same explicit policy decision FMA contraction has. Test the wide element
+every engine. Reassociating a float reduction changes results and needs the
+same explicit policy decision that FMA contraction has. Test the wide element
 types: a widened stdlib loop is instantiated per element type, so
 `Array<Int>` and `Array<haxe.Int64>` are different code, and rule 4 was
 found in the second.

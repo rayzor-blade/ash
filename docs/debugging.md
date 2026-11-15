@@ -24,14 +24,14 @@ ash --mode hybrid --jit-tier llvm --jit-threshold 1 program.hl
 ```
 
 `--jit-threshold 1` promotes everything at the first call, so a small program
-reaches compiled code without a warm-up loop. If both pinned tiers agree with
+runs compiled code without a warm-up loop. If both pinned tiers agree with
 the interpreter and `--jit-tier auto` does not, the fault is in the transfer
-between tiers, not in either compiler; `ASH_OSR=0` then separates mid-loop
+between tiers, not in either compiler; `ASH_OSR=0` then lets you tell mid-loop
 transfers from promotion at the next call, and `ASH_CL_RETIER=0` refuses the
 Cranelift → LLVM hand-off specifically.
 
-`ASH_OSR_LOG=1` distinguishes a compiled entry being published from a transfer
-being taken:
+`ASH_OSR_LOG=1` logs a compiled entry being published and a transfer being
+taken as separate events:
 
 ```text
 [retier] published layout=2 findex=257 pc=11 inputs=11
@@ -70,7 +70,7 @@ being taken:
 | `ASH_AIR_NO_WIDEN` | `1` disables loop widening |
 | `ASH_CL_CODE_DUMP` | a directory: the Cranelift tier writes each body's machine code there, one file per address, for `objdump -D -b binary -mi386:x86-64` |
 | `ASH_STRIP_MINE` | `0` makes compiled loops poll on every iteration instead of once per strip of 256. A loop that calls a native polls on every iteration either way |
-| `ASH_AIR` | `v2` runs the interpreter over AIR instead of opcodes |
+| `ASH_AIR` | the interpreter walks AIR by default. `v2-serialize` optimizes AIR and serializes it back to flat opcodes, as a differential check on the walker; `off` (also `0`, `none`) interprets the opcodes directly |
 | `ASH_GC_STATS` | print collections, reclaimed blocks, live bytes, pause times and finalizer registrations / queued / completed / pending counts at exit |
 | `ASH_GC_HEAP_MB` | heap reservation; committed on demand, so a ceiling |
 | `ASH_GC_TRIGGER_MB` | floor for the adaptive collection threshold |
@@ -110,11 +110,11 @@ completed callbacks cumulatively. `pending` counts callbacks waiting for a
 mutator to run them; callbacks currently executing are outside that queue.
 These counters describe GC-owned handles, not Rust compiler caches or GPU
 textures. The external allocation total includes a 4 KiB pressure charge per
-finalizable handle, so it is not a census of the native bytes those handles own.
+finalizable handle, so it does not measure the native bytes those handles own.
 
 During allocation bursts, sweep keeps freed blocks resident to avoid repeated
-page faults. It remembers those blocks across collections and returns their
-pages once the mutators are idle, keeping 512 KiB warm. Reusing a block cancels
+page faults. It remembers those blocks across collections, returns their
+pages once the mutators are idle, and keeps 512 KiB warm. Reusing a block cancels
 its pending return; on macOS, reusable pages are reclaimed before writing live
 data. `hl.Gc.dumpMemory()` reports `blocks-pending-handback` and
 `blocks-reusable` separately from live blocks. Reserved heap capacity is not
@@ -124,17 +124,17 @@ resident memory.
 
 AIR caches belong to Rust, outside the GC. Optimized bodies share an 8 MiB
 strong reuse budget; lowered callees share a 2 MiB budget per module across
-its views. An oversized body is served without retaining a strong cache
-reference. Eviction releases unused bodies, while weak entries find the same
-canonical body if an interpreter or compiler still owns it. Flat opcodes are
+its views. The cache hands out an oversized body without keeping a strong
+reference to it. Eviction releases unused bodies; a weak entry still resolves
+to the same canonical body if an interpreter or compiler still owns it. Flat opcodes are
 materialized only for flat consumers; canonical bodies keep only the register
 and PC layout alongside SSA. The SSA walker
 shares that body and its pc maps, skips source markers through a compact
 instruction index, and builds OSR liveness only when a transfer needs it.
 Invalidation releases retired walker bodies after their last active call.
 
-`ASH_AIR_CACHE_STATS=1` separates live body storage from cache residency. Live
-storage can exceed the reuse budget because executable interpreter bodies
+`ASH_AIR_CACHE_STATS=1` reports live body storage and cache residency
+separately. Live storage can exceed the reuse budget because executable interpreter bodies
 must remain available while the program uses them. Counts include vector
 capacity and nested operands with conservative allocation overhead; they
 exclude executable code, GC pages, GPU resources and allocator fragmentation.
@@ -143,15 +143,15 @@ Use an allocation profiler or physical-footprint measurement for those.
 `ASH_AIR_CACHE_MB` sets the reuse budget. An application with thousands of
 functions that wants a lower resident floor can reduce it, at the price of
 running the pipeline again for bodies the tiers or an OSR entry ask for after
-they were evicted; the bodies an active call holds are kept whatever it is.
+they were evicted; the bodies an active call holds are kept at any budget.
 
 LLVM reads an immutable view of the same decoded type table. Reverse native
 type conversion detaches that view only when it needs to fill missing metadata.
 Both interpreter walkers execute loop-free functions directly from decoded
 bytecode until the JIT handles hot entries. A body with a backward jump or
-switch target still prepares SSA, allowing a single long call to transfer by
-OSR. `ASH_AIR_ALL=1` opts into preparation of every interpreted body for
-comparison. This avoids retaining prepared IR for startup-only helpers.
+switch target still gets prepared SSA, so a single long call can transfer by
+OSR. `ASH_AIR_ALL=1` prepares every interpreted body, for comparison. The
+default avoids retaining prepared IR for startup-only helpers.
 
 An entry-only function's prepared interpreter body is retired after compiled
 code lands; active calls keep their own owner and loop bodies retain their OSR
@@ -197,11 +197,11 @@ and the phase tree still works.
 ### A hybrid run much slower than `--mode jit`
 
 Run the program under `--mode jit` first. If it is several times faster, hybrid
-is leaving a hot loop in the interpreter: `ASH_PROFILE=sample` names the
-function ("by interpreted function"), `ASH_OSR_LOG=1` says for each of its
-loop headers whether the interpreter could hand the running frame to compiled
-code and, if not, what refused it or declined the entry, and
-`ASH_VERIFY_OSR=only` surveys a whole program's loops the same way without
+is leaving a hot loop in the interpreter. `ASH_PROFILE=sample` names the
+function ("by interpreted function"). `ASH_OSR_LOG=1` reports, for each of its
+loop headers, whether the interpreter could hand the running frame to compiled
+code and, if not, what refused it or declined the entry.
+`ASH_VERIFY_OSR=only` reports the same for every loop in a program without
 running it.
 
 ### Recursive tree allocation candidates
@@ -218,23 +218,28 @@ binary-trees fixture reports three structural candidates in function 25
 (stretch tree and both inner-loop trees), producer 24 / consumer 23. The
 long-lived tree is refused because its use is delayed.
 
-The first supported pattern has a signed i32 depth guard, self recursion with
-`depth - 1` only when depth is positive, a fresh root initialized exactly once,
-unique recursive children, and a scalar fold visiting every child once.
+The first supported pattern has:
+
+- a signed i32 depth guard;
+- self recursion with `depth - 1` only when depth is positive;
+- a fresh root initialized exactly once;
+- unique recursive children;
+- a scalar fold visiting every child once.
+
 Integer add/subtract/multiply and bitwise operations retain wrapping semantics;
 division, shifts, casts, floats, unknown calls, mutation, identity observations,
 traps, and mutual recursion are conservatively refused. Constructors must be
-straight-line initialization helpers. Unused loop phi cycles do not escape;
-observed phis, additional receiver uses, and intervening effects do.
+straight-line initialization helpers. Observed phis, additional receiver uses
+and intervening effects count as escapes; unused loop phi cycles do not count.
 
-These restrictions address evaluation order: construction originally finishes
-before the fold, while a fused helper would interleave them. The accepted
+These restrictions exist because of evaluation order: construction originally
+finishes before the fold, while a fused helper would interleave them. The accepted
 scalar operations cannot throw, the depth proof establishes termination, and
 the field/child proof rules out null reads. A future rewrite must preserve the
 scalar computations and their wrapping semantics; allocation, stack exhaustion
 and GC observability still require an explicit runtime contract.
 
-`structural-candidate` is conditional evidence, not rewrite authorization.
+`structural-candidate` is conditional evidence; it does not authorize a rewrite.
 Ash deliberately reports two unresolved contracts: allocation elision and
 code/layout lifetime. A bytecode class declaration cannot certify the absence
 of host tails/drop hooks or custom allocator effects for the lifetime of
@@ -277,7 +282,7 @@ shared AIR pipeline. The interpreter and native tiers optimize the same
 registered body under their existing configurations; OSR continues to use the
 interpreter configuration and its canonical PC/register mapping. There is no
 per-tier helper generation. A fresh preparation has a unique generation in
-the AIR cache key, including when a module's memory address is reused.
+the AIR cache key, even when a module's memory address is reused.
 Deduplication never crosses module snapshots. After any code, type or host
 metadata change, rebuild from original input. Host registration on a prepared
 module and in-place hot reload are refused; dependency-aware invalidation is
@@ -286,8 +291,8 @@ as they must after runtime tables are created.
 
 For development, `--dev-generated-helper INDEX` clones one scalar function
 into a registered helper, redirects its self calls, and leaves a forwarding
-body at its original ID. It tests registration and dispatch; it changes debug
-stack shape and is not an optimization. It is hidden from normal CLI help and
+body at its original ID. It tests registration and dispatch; it changes the
+frames in a debug stack and is not an optimization. It is hidden from normal CLI help and
 conflicts with `--hot-reload`, `--build` and `--emit-aot`. To test serialization
 and AOT, first emit the prepared module:
 
@@ -303,8 +308,7 @@ helper IDs, signatures, calls and bodies survive. Registration metadata and
 generation numbers are process-local, and do not enter the file. These helpers
 carry no runtime-dependent specialization assumptions. Future allocation
 elision must establish its policy separately and refuse serialization if that
-policy cannot travel with the program. A structural tree candidate alone is
-still insufficient authorization.
+policy cannot travel with the program.
 
 ### Recursive tree fusion
 
@@ -319,8 +323,9 @@ Use `--no-tree-fusion` to diagnose a regression. Reports are emitted only with
 `--tree-fusion-log`, `--jit-log`, or the legacy `--dev-tree-fusion` option.
 Before creating runtime tables, preparation surveys raw AIR, reserves a helper for each proven producer/fold pair, then
 rechecks and rewrites the callers. Unsupported sites retain their original
-calls. Failed helper construction, serialization, verification or growth
-limits abandon the entire transaction and retain the original module.
+calls. If helper construction, serialization or verification fails, or a growth
+limit is exceeded, preparation abandons the entire transaction and keeps the
+original module.
 
 The helper is derived from the two proven depth cases. It keeps the signed
 positive-depth guard and producer scalar calculations, replaces each recursive
@@ -337,7 +342,7 @@ host native overrides, active object tails/drop hooks/layout room, and native
 registration hooks are refused. In-place hot reload is refused. As with
 allocation elimination elsewhere in the compiler, allocation counts, GC and
 unrelated finalizer scheduling, resource exhaustion (including stack/OOM), and
-profiling timing are not barriers under this allocation-elision contract.
+profiling timing do not prevent fusion under this allocation-elision contract.
 Observable value results, memory effects and ordinary exceptions must be preserved. The proof
 excludes object identity, escaping references, weak observations, effectful
 constructors and unknown calls. Total wrapping integer operations and the
@@ -347,7 +352,8 @@ Helpers use normal calls and the backend's normal safepoint policy. Retained
 objects continue through ordinary liveness/rooting; the optimization introduces
 no arena, hidden allocation counter or alternate collector. The long-lived
 benchmark tree still materializes. Source positions are retained, but helper
-frames can change diagnostic stack shape within the elided computation.
+frames can change which frames appear in a diagnostic stack within the elided
+computation.
 
 Default execution skips fusion for `--hot-reload`, `--dev-generated-helper`,
 `--emit-optimized`, `--build` and `--emit-aot`; an unsupported runtime contract
@@ -372,7 +378,7 @@ a 16,384-step proof budget and 64 sites. Retained caller AIR is capped at
 8 MiB; lowered-body reuse has a separate 2 MiB cache. Helper registration caps
 32 helpers, 2,048 ops per helper, 16,384 total helper ops and 16 MiB helper AIR.
 Over-budget callers stay original; retained-AIR/helper overflow abandons the
-transaction. Reports expose truncation and retained caller bytes. Proofs and
+transaction. Reports include truncation and retained caller bytes. Proofs and
 helpers are local to the immutable module snapshot; code, layout or host policy
 changes require reconstruction from the original bytecode. There is no cache
 reuse across reloads or serialized programs.
@@ -399,8 +405,9 @@ Cranelift, LLVM (when enabled), and hybrid. GC stress runs also verify the heap
 and require more collections than the fixture explicitly requests. The hot
 matrix case retains a local reference and scalar accumulator through an
 asserted Cranelift OSR entry. Another run pins promotion to the generated
-unary helper and asserts each enabled tier's installation. Merely selecting
-hybrid mode or getting the right checksum does not satisfy those assertions.
+unary helper and asserts each enabled tier's installation. Selecting
+hybrid mode or getting the right checksum is not enough to satisfy those
+assertions.
 
 Fusion now requests unoptimized proof bodies independently of inliner policy.
 Previously `ASH_AIR_NO_INLINE=1` silently prevented fusion by withholding its
@@ -434,7 +441,8 @@ Cheapest first:
 1. `ASH_AIR_NO_WIDEN=1` — the widener is the only O3 pass that rewrites
    arithmetic; an unchanged result rules it out.
 2. `--jit-tier cranelift`, `--jit-tier llvm`, `--jit-tier off` — compare the
-   engines without a cross-tier hand-off. All correct means the ladder.
+   engines without a cross-tier hand-off. If all of them are correct, the fault
+   is in the ladder.
 3. `ASH_AOT_SHARDS=1` for an AOT binary.
 4. `ASH_LLVM_PASSES=off`, then `ASH_AOT_NO_OPT=1`.
 
@@ -470,8 +478,8 @@ adds it back finds the class that was running, with the values of its statics.
 A method keeps the vtable slot it has, and one that gains a slot (the first
 override of a method gives it one) or is new and virtual takes a slot above the
 class's and its subclasses'. A call that began before the reload therefore
-reaches the same method, and an override the reload adds or removes is seen by
-every call that goes through the vtable. A call the compiler made direct,
+dispatches to the same method, and every call that goes through the vtable sees
+an override the reload adds or removes. A call the compiler made direct,
 because nothing overrode the method, stays direct in a frame that began before
 the reload, so such a frame does not see an override the reload adds. A removed
 override leaves its slot to the method it overrode; a removed method that
@@ -498,14 +506,15 @@ A constructor that sets the new field to a constant or null is accepted. One tha
 sets it to anything else is refused, naming the field, because the object made
 before the reload would never get that value. A field that comes back after a
 reload dropped it is held to the same rule, since the objects built while it was
-gone hold null in it. Only the constructor's own body is read: a field that a
-method it calls sets is not seen. The exception is the backing
+gone hold null in it. Only the constructor's own body is read: a field set by
+a method it calls is not seen. The exception is the backing
 field of an ashui `@:state`, named `<field>__state`, in a program built with
 `-D ashui_hot_reload`: its accessors make the signal when the field is null,
-and the program says so by having `ashui.ui.HotReload.stateOnFirstUse`.
+and the program declares this by having `ashui.ui.HotReload.stateOnFirstUse`.
 
-What live objects and compiled code are laid out by cannot change. The reload
-is refused, on stderr, and the program goes on as it was:
+A reload cannot change anything the layout of live objects and compiled code
+depends on. Such a reload is refused, on stderr, and the program goes on as it
+was:
 
 | Message | Why |
 |---------|-----|
@@ -544,9 +553,9 @@ AIR pass is checked against another VM.
 ## Re-tier tests
 
 The Cranelift → LLVM hand-off of a running loop carries typed SSA snapshots
-of the live values; a snapshot that cannot be built declines the exit.
+of the live values; if a snapshot cannot be built, the exit is declined.
 `ASH_TEST_RETIER_AFTER=N` is a test hook that holds the transfer until the Nth
-poll and then waits up to 30 seconds for publication, aborting on timeout.
+poll and then waits up to 30 seconds for publication, and aborts on timeout.
 
 ```sh
 cargo test -p ash_core --lib retier::tests
@@ -564,7 +573,7 @@ disk budget; `--no-air-cache` disables disk reads and writes for a build.
 `ash air-cache --clear` removes entries while coordinating with writers.
 These options leave the separate 8 MiB in-process AIR budget unchanged.
 AOT functions share lookup tables, frameless answers and the bounded 2 MiB
-lowered-body workspace within a build, including when disk reuse is disabled.
+lowered-body workspace within a build, even when disk reuse is disabled.
 
 `--air-cache-stats` reports lowered/optimized hits, misses, invalid entries,
 writes, evictions and time spent computing identity, reading, writing,
@@ -583,18 +592,18 @@ its eligibility checks, including rejected candidates and recursive frameless
 checks. A changed dependency invalidates its callers. Unrelated function-body
 edits can reuse entries. Integer values consulted by AIR passes are recorded
 and validated separately. Code generation resolves string, float and byte
-literals from the current bytecode, allowing text and asset edits to reuse AIR.
-Integer-pool size, type, signature, native, global-declaration and debug-table changes
-conservatively invalidate the module. Keys include the compiler source
-fingerprint, wire schema, target, ABI/runtime convention, profile contents and
-AIR options. Builds with custom host registrations, layouts, linked objects or
-an explicit runtime bypass disk reuse. No backend code, process addresses or
-host pointers are persisted.
+literals from the current bytecode, so text and asset edits can reuse AIR.
+Changes to the integer-pool size, types, signatures, natives, global
+declarations or debug tables conservatively invalidate the module. Keys include
+the compiler source fingerprint, wire schema, target, ABI/runtime convention,
+profile contents and AIR options. Builds with custom host registrations,
+layouts, linked objects or an explicit runtime skip disk reuse. No backend
+code, process addresses or host pointers are persisted.
 
 Entries are checksummed, schema checked and structurally verified before use.
 Corrupt, incomplete or incompatible entries are misses. Writers publish by
-atomic rename under a cross-process file lock and evict the least recently
-used entries to the disk budget, coalescing access-time updates to one per
+atomic rename under a cross-process file lock, evict the least recently
+used entries to the disk budget, and coalesce access-time updates to one per
 minute so rapid rebuilds do not rewrite every cache inode. An interrupted
 writer leaves an invalid accounting record, which the next writer reconstructs. Cache failures never
 make compilation fail. Only a function being loaded or written is held for

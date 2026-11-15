@@ -1,11 +1,11 @@
 # Contributing
 
-For changing ASH. Users of ASH need the [README](README.md) and
-[docs/](docs/README.md), not this.
+This file is for changing ASH. Users of ASH need the [README](README.md) and
+[docs/](docs/README.md).
 
 ## Layout
 
-A Rust workspace. In the order a program meets them:
+A Rust workspace, with the crates listed in the order a program meets them:
 
 | Crate | Directory | Role |
 |-------|-----------|------|
@@ -21,13 +21,13 @@ A Rust workspace. In the order a program meets them:
 **AIR** is a typed phi-SSA IR built from HL bytecode. It carries trap regions,
 an effect classification per instruction (pure / reads memory / writes memory
 / may throw / clobbers all) and an alias model over fields, array data,
-globals, raw bytes and cells. GVN, LICM, SROA, inlining, the FMA peephole,
-bounds-check elimination (`redundant-guard-elim`: a loop counter proven
-non-negative makes the unsigned array guard the loop's own exit test, which
-GVN has already unified) and the loop widener run over it, and last
-`stripmine`, which names the
-induction variable of each innermost loop so a backend can test its low
-bits and poll once per strip of iterations instead of on every one. Both
+globals, raw bytes and cells. The passes that run over it are GVN, LICM, SROA,
+inlining, the FMA peephole, bounds-check elimination (`redundant-guard-elim`: a
+loop counter proven non-negative makes the unsigned array guard the loop's own
+exit test, which GVN has already unified) and the loop widener, with
+`stripmine` last: it names the induction variable of each innermost loop, so a
+backend can test its low bits and poll once per strip of iterations instead of
+on every one. Both
 backends lower it directly; the interpreter can walk it (`ASH_AIR=v2`);
 `serialize` turns it back into HL opcodes, which is what `--emit-optimized`
 writes and what the opcode interpreter executes.
@@ -72,9 +72,9 @@ cargo build -p ash_std
 cargo build -p ash
 ```
 
-`ash_std` first, always, after any change under `std/`. The runtime is
-embedded into the binary as bytes by `crates/ash/build.rs`, which cargo does
-not model as a dependency. The build script warns when the embedded library
+`ash_std` first, always, after any change under `std/`. `crates/ash/build.rs`
+embeds the runtime into the binary as bytes. Cargo does not model that as a
+dependency. The build script warns when the embedded library
 is older than the sources. Release builds follow the same order; if no
 release `ash_std` exists the script falls back to the debug one and warns,
 and that binary must not be measured.
@@ -83,7 +83,7 @@ The `llvm` feature (default on) gates the LLVM tier and the AOT compiler.
 `--no-default-features` links no LLVM and refuses `--build`, `--emit-aot`,
 `--hot-reload` and `--jit-tier=llvm`.
 
-`ash_core`'s `embedded-runtime` feature is what reads that library in; the
+`ash_core`'s `embedded-runtime` feature reads that library in, and the
 `ash` binary turns it on. A host that depends on `ash_core` and links
 `ash_std` itself leaves it off (`default-features = false`), and then builds
 from a git checkout, which has no target directory to read from.
@@ -132,9 +132,9 @@ cargo run -p ash -- --mode interp crates/ash/test/tests/test_basic.hl
 cargo run -p ash -- --mode hybrid --jit-threshold 1 crates/ash/test/tests/test_basic.hl
 ```
 
-The Mandelbrot checksums say which float policy a run used. Every engine
-fuses multiply-add pairs by default and prints the same number; `--no-fma`
-rounds every operation, which is HashLink's number.
+You can tell which float policy a run used from its Mandelbrot checksum.
+Every engine fuses multiply-add pairs by default and prints the same number;
+`--no-fma` rounds every operation, which is HashLink's number.
 
 | | 298² | 875×500 |
 |---|---|---|
@@ -163,8 +163,8 @@ A red check is fixed in the same change.
 - Comments state what the code does and the constraint that shaped it. No
   measurements, no history of attempts — those belong in the issue.
 - Commits: short subject, body only when the change is not self-evident,
-  `git-bug: <64-character id>` trailer. Not the short id; a forge autolinks it
-  as a commit.
+  `git-bug: <64-character id>` trailer. Use the full id, because a forge
+  autolinks the short one as a commit.
 - No planning or status documents in the tree. File an issue.
 - `cargo fmt --all`; clippy clean with `-D warnings`.
 
@@ -197,8 +197,8 @@ ignored when `-F` is present. Labels: a kind (`bug`, `perf`, `debt`), an area
 `area:runtime`, `area:interp`, `area:tooling`, `area:ci`, `area:conformance`,
 `area:portability`), `priority:high` when it blocks other work. Filter with
 `--label`; the query parser does not accept the colon in `label:area:gc`.
-Close the issue when the work lands and cite it in the commit. `git-bug push`
-publishes; `git push` does not.
+Close the issue when the work lands and cite it in the commit. Publish
+issues with `git-bug push`, since `git push` does not carry them.
 
 ## Internals
 

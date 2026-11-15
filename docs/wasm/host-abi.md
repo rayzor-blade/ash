@@ -14,20 +14,21 @@ boundary each sits on:
   do by itself lives there: WASI already supplies a clock, randomness, stdout
   and a filesystem.
 - **`native`** is a wasmtime host: `ash run` in the `ash` binary, and the
-  `ash-wasm-run` binary the conformance suite runs on. No browser, no
-  JavaScript, no wasm-bindgen.
+  `ash-wasm-run` binary that the conformance suite runs on. It needs no
+  browser, JavaScript or wasm-bindgen.
 - **`browser`** is the same contract behind a WASI preview-1 shim.
 
 A host in another language implements the same imports.
 
 ## The one required import
 
-`env.ash_host_fiber_yield`. A wasm module has no addressable call stack and
-no instruction that switches between two, so suspending a fiber is the one
-operation it cannot perform for itself. wasmtime answers it with its own
-fibers; the browser host needs the module built with `ASH_WASM_FIBERS=1`,
-which suspends without engine support. Each thread's instance drives its own
-fiber globals, so fibers on different agents suspend independently.
+Every host must supply `env.ash_host_fiber_yield`. A wasm module has no
+addressable call stack and no instruction that switches between two, so
+suspending a fiber is the one operation it cannot perform for itself.
+wasmtime implements it with its own fibers; the browser host needs the module
+built with `ASH_WASM_FIBERS=1`, which suspends without engine support. Each
+thread's instance drives its own fiber globals, so fibers on different agents
+suspend independently.
 
 Two companions when fibers are on: `ash_host_fiber_state` and
 `ash_host_fiber_arm`, through which the host reads and writes the transform's
@@ -37,8 +38,8 @@ the pointer it replaced.
 ## Sockets
 
 WASI preview 1 has no usable sockets, so the guest asks the host for all of
-it. Every argument and result is an `i32`; pointers are guest addresses the
-host reads through the exported memory.
+it. Every argument and result is an `i32`; pointers are guest addresses that
+the host reads through the exported memory.
 
 ```
 env.ash_host_socket_open(udp)                -> fd >= 0            | -errno
@@ -55,10 +56,11 @@ env.ash_host_socket_set(fd, opt, value)      -> 0                  | errno   opt
 env.ash_host_socket_poll(fds, nfds, timeout) -> ready >= 0         | -errno  timeout ms, negative waits
 ```
 
-Descriptors are the host's own namespace from 0; they never meet a WASI fd.
+Descriptors are the host's own namespace from 0; they are never mixed with a
+WASI fd.
 `ip` is an `s_addr` in wire order, `port` in host order. Errors are WASI
 preview-1 errno numbers, the one numbering both sides share; the guest maps
-`AGAIN`/`ALREADY`/`INPROGRESS` to the -1 `sys.net.Socket` reads as
+`AGAIN`/`ALREADY`/`INPROGRESS` to the -1 that `sys.net.Socket` reads as
 `Blocked` and everything else to -2.
 
 `poll` takes 8-byte records `{ fd: i32, events: u16, revents: u16 }` with
@@ -69,20 +71,22 @@ because `POLLIN` differs between Darwin and Linux.
 `select(2)` rather than `poll(2)` so a peer-closed stream reads as
 "readable, writable, not exceptional" on Darwin as well as Linux. On Windows
 all twelve return `NOTSUP`. The browser host implements the client half over
-WebSocket and refuses `bind`, `listen`, `accept` and `name`; WebSocket
-delivers whole messages, so they are queued and drained by byte count.
+WebSocket and returns `NOTSUP` for `bind`, `listen`, `accept` and `name`;
+WebSocket delivers whole messages, so they are queued and drained by byte
+count.
 
-Not implemented: datagram addressing, name resolution.
+Datagram addressing and name resolution are not implemented.
 
 ## Everything else in `env`
 
 Names beginning `ash_host_` are host imports; `env` resolves against the
-program's own exports first and the host second, so a library's imports
-under that prefix are never demanded of the program. `ash wasm module.wasm`
-prints the exact set a module needs. The native and browser hosts each
-answer what they can and refuse the rest by name at instantiation.
+program's own exports first and the host second, so the program never has to
+export a library's imports under that prefix. `ash wasm module.wasm` prints
+the exact set a module needs. The native and browser hosts each implement
+what they can and fail at instantiation on the rest, with the import's name in
+the error.
 
-Two of them exist for a page, and a host with no page answers 0 to both:
+Two of them exist for a page, and a host with no page returns 0 for both:
 
 - `ash_host_canvas_present(data, width, height) -> i32`: RGBA pixels at
   `data` in the program's memory. A page that installed an `ashPresent` hook
@@ -91,15 +95,15 @@ Two of them exist for a page, and a host with no page answers 0 to both:
   the program, such as a WebGPU device serving a mailbox in shared memory.
   The name is UTF-8 and must be a plain identifier (letters, digits, `_`,
   `-`), and the memory must be shared. A page that installed an `ashAgent`
-  hook gets `{ name, memory, address }`. The page ash writes then imports the
-  library's shim, `./<name>.mjs` beside it, on the page's own thread and calls
-  its `start({ memory, address, canvas })`, where `canvas` is the page's
-  `<canvas>` element. What the shim starts is its own: a Worker it creates,
-  the canvas transferred to that Worker, listeners on the element. The page
-  knows no library by name. `display.js` takes the canvas only for a program
-  that presents a framebuffer, and only if no shim transferred it first.
-  The program's own agent cannot do this itself: it is inside a call into
-  the program and never returns to the event loop a new Worker needs.
+  hook gets `{ name, memory, address }`. The page that ash writes then imports
+  the library's shim, `./<name>.mjs` beside it, on the page's own thread and
+  calls its `start({ memory, address, canvas })`, where `canvas` is the page's
+  `<canvas>` element. The shim decides for itself what to start: a Worker it
+  creates, the canvas transferred to that Worker, listeners on the element.
+  The page knows no library by name. `display.js` takes the canvas only for a
+  program that presents a framebuffer, and only if no shim transferred it
+  first. The program's own agent cannot do this itself: it is inside a call
+  into the program and never returns to the event loop that a new Worker needs.
 
 ## Threads
 
@@ -114,7 +118,7 @@ libraries. Details and measurements: [internals/wasm-threads.md](../internals/wa
 ## Why not web-sys
 
 `web-sys` is generated from WebIDL and supplies the DOM, WebGL and `Worker`;
-the runtime wants operating-system services, which is WASI. It also rides on
-wasm-bindgen and `wasm32-unknown-unknown`: no libc, no clock, no files, no
-`setjmp`, which is the trap model. A browser host written in Rust may use
-`web-sys` freely on its own side of the imports.
+the runtime needs operating-system services, which WASI provides. It also
+depends on wasm-bindgen and `wasm32-unknown-unknown`: no libc, no clock, no
+files, no `setjmp`, which is the trap model. A browser host written in Rust
+may use `web-sys` freely on its own side of the imports.

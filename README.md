@@ -77,9 +77,10 @@ ash --mode jit main.hl          # compile every function at its first call
 
 Arguments after the `.hl` file go to the program, as with `hl`.
 
-The default is `hybrid`. Functions start interpreted; call counts decide
-promotion; Cranelift compiles at 100 calls and LLVM recompiles at 1000
-(`--preset` picks thresholds for a script, a game or a server). Compilation
+The default is `hybrid`. Functions start interpreted and are promoted by
+call count. With the default `application` preset, Cranelift compiles at 10
+calls and LLVM recompiles at 10,000 interpreted calls (`--preset` picks
+thresholds for a script, a game or a server). Compilation
 runs on background threads and the new code is installed atomically at the
 next call, or mid-loop for a function that never returns. `interp` is the
 reference every other mode is checked against, and the right choice for a

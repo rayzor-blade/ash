@@ -4,8 +4,9 @@
 ash --build game.wasm --target wasm32-wasip1 game.hl
 ```
 
-ash compiles HL bytecode to a WebAssembly module through the same AIR and
-AOT pipeline as the native target: AIR → LLVM IR → wasm32 object → link.
+ash compiles HL bytecode to a WebAssembly module. The AIR passes are the ones
+the native target uses, and a direct emitter with no LLVM turns AIR into a
+wasm32 object: AIR → wasm32 object → link.
 The linker is built into `ash`, and the libc was joined into the runtime
 object at build time, so the command above needs no other toolchain. The
 target is `wasm32-wasip1`; a browser runs the same core module through a
@@ -21,8 +22,8 @@ code that needs a native library guards it with `#if wasm`.
 ## Running the result
 
 The module is a library, not a command. It exports `main` and
-`ash_module_init` and imports what a sandbox cannot do for itself. Something
-has to instantiate it and answer those imports — a **host**.
+`ash_module_init` and imports what a sandbox cannot do for itself. A **host**
+instantiates it and supplies those imports.
 
 Two hosts ship with ash, both in `crates/ash_wasm_runtime`:
 
@@ -35,7 +36,7 @@ Two hosts ship with ash, both in `crates/ash_wasm_runtime`:
   `ash serve <dir>` serves that directory with the headers a threaded module
   needs. `examples/browser/README.md` explains the page.
 
-Writing your own host: [host-abi.md](host-abi.md) is the contract — the
+[host-abi.md](host-abi.md) is the contract for writing your own host: the
 imports, the socket API, and the one import every host must supply.
 
 ## Inspecting a module
@@ -45,26 +46,27 @@ ash wasm game.wasm             # functions, indirect call sites, tables, exports
 ash wasm --validate game.wasm  # exit non-zero and name what a host would still have to supply
 ```
 
-Imports are grouped by who answers them: the program itself, WASI, or the
+Imports are grouped by who provides them: the program itself, WASI, or the
 host. `ash wasm` uses ash's own parser, so a build machine needs nothing
 installed.
 
 ## Size
 
-Only reachable code is emitted — about a third of a module is dropped.
+Only reachable code is emitted, which drops about a third of a module.
 Reachability is generous on purpose: all data is kept, so any function whose
-address appears in data survives, because compiled code reaches most of the
+address appears in data survives, because compiled code calls most of the
 runtime through tables built in data. Debug sections are dropped.
 
 A hello world is a few megabytes, nearly all of it runtime. A library
 compiled into the runtime is in every module whether used or not, which is
-why SQLite became a side module (1.9 MB out of a 3.96 MB hello world).
+why SQLite became a side module, which took a hello world from 3.96 MB to
+2.29 MB.
 
 ## SIMD
 
-Modules are built with the SIMD128 proposal on, so vector code -- the
-`ash-simd` value types, and loops the optimiser widens -- runs as v128
-instructions. Every current engine supports it (wasmtime, V8, SpiderMonkey,
+Modules are built with the SIMD128 proposal on, so vector code runs as v128
+instructions: the `ash-simd` value types, and loops that the optimiser widens.
+Every current engine supports it (wasmtime, V8, SpiderMonkey,
 JavaScriptCore). `ASH_WASM_SIMD=0` at build time leaves it off for an engine
 that does not; the same code then runs lane by lane.
 
@@ -105,20 +107,20 @@ Design and measurements: [internals/wasm-fibers.md](../internals/wasm-fibers.md)
 
 ## Conformance
 
-1,186 of the 1,195 Haxe suite cases are in scope for wasm and all pass. The
-nine out of scope: eight need the `fmt` HDLL's compression and hashing
+1,186 of the 1,195 Haxe suite cases are in scope for wasm and all pass. Nine
+cases are out of scope: eight need the `fmt` HDLL's compression and hashing
 primitives, and `unit.spec.sys.net.TestSocket` passes only on a host that
 implements the socket imports.
 
-## Not this
+## Non-goals
 
-- Not a wasm interpreter for HL bytecode. It emits compiled wasm.
-- Not a way to load native `.hdll` files in a sandbox.
-- Not a replacement for the native tiers; the same program runs natively
+- The target does not interpret HL bytecode; it emits compiled wasm.
+- It does not load native `.hdll` files in a sandbox.
+- It does not replace the native tiers; the same program runs natively
   through the interpreter, the JIT or an AOT binary.
 
 ## Internals
 
-The pieces that make this work — the 32-bit ABI, the setjmp lowering and the
-LLVM patch it needs, the fiber transform, shared memory — are contributor
-material under [docs/internals/](../internals/).
+Contributor material on the pieces that make this work is under
+[docs/internals/](../internals/): the 32-bit ABI, the setjmp lowering and the
+LLVM patch it needs, the fiber transform, and shared memory.

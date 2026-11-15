@@ -2,8 +2,8 @@
 
 Only four of the upstream test suites execute on the HL VM, so only four can
 be conformance rows. The rest test the compiler. Ground truth is upstream's
-CI: `tests/runci/targets/Hl.hx` says what runs on HashLink, `Macro.hx` and
-`Js.hx` what runs elsewhere. Swept against the Haxe 4.3.6 checkout the
+CI: `tests/runci/targets/Hl.hx` lists what runs on HashLink, `Macro.hx` and
+`Js.hx` what runs elsewhere. The sweep used the Haxe 4.3.6 checkout that the
 conformance script maintains under `~/.cache/ash-haxe-conformance/`.
 
 ## Runs on the VM
@@ -37,6 +37,6 @@ and the compile-hlc steps are the HL/C path, Linux CI only.
 conformance failure, but real HashLink resolves them and a `-dce no` program
 using `haxe.io.Bytes` address operations would fail on ash.
 
-No case in these suites gates its `main` behind a target `#if`; target
-specificity is expressed with hxml flags and per-target directories. The
+No case in these suites gates its `main` behind a target `#if`; the suites
+use hxml flags and per-target directories for target specificity. The
 pipeline's EMPTY bucket therefore has no members. Keep it.

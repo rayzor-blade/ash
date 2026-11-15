@@ -35,15 +35,16 @@ publication are outside the measured Ash invocation.
 Each compiler is warmed first, then three measurements run serially in reversed
 order on alternate repetitions. No Rust builds run on the NUC during them.
 All measured builds hit all 2,699 optimized AIR bodies, with zero AIR lowering,
-passes, misses or writes. Separate phase-profile runs provide attribution.
+passes, misses or writes. The per-phase breakdown comes from separate
+phase-profile runs.
 
-## The cause
+## JIT module cap applied to AOT
 
 `promote_function_strict` was applying the JIT's shared-module cap to AOT.
 The default cap is 256 bodies. Each promotion counted the growing module's
 function bodies, then limited pending compilation and replaced pending
 declarations with private `$via_table` trampolines. AOT later compiled the real
-bodies anyway. This combines repeated whole-module scans with unnecessary
+bodies anyway. That meant repeated whole-module scans, unnecessary
 indirection and extra definitions.
 
 The baseline phase profile attributes **13.98 s** to `llvm promote`, of which
@@ -52,9 +53,9 @@ It records **2,747 table trampolines** and **7,160 LLVM bodies**.
 
 As a diagnostic, `ASH_PROMOTE_MODULE_CAP=off` reduces IR time to 0.95 s and
 the whole build to 6.68 s. The fix makes AOT use an uncapped pending queue while
-preserving the JIT's existing budget. Its module has **4,413 bodies**, exactly
-2,747 fewer, with no table-trampoline counter. Its output matches the cap-off
-diagnostic byte-for-byte. All bytecode bodies are still compiled.
+preserving the JIT's existing budget. The fixed module has **4,413 bodies**,
+exactly 2,747 fewer, with no table-trampoline counter. Its output matches the
+cap-off diagnostic byte-for-byte. All bytecode bodies are still compiled.
 
 ## Repeated comparison
 
@@ -88,9 +89,9 @@ These are individual samples, separate from the repeated comparison:
 
 Disabled/cold/warm outputs agree within each compiler. The edited build writes
 three cache entries: one lowered body and two optimized bodies. Persistent AIR
-reuse works; the original delay was outside the work that cache skips.
+reuse works, but the original delay came from work that the cache does not skip.
 
-## What remains
+## Remaining build time
 
 The fixed build now spends about **70% in the LLVM backend**, **13% constructing
 IR**, and **13% linking**. On the representative middle measurement, the slowest
@@ -121,8 +122,9 @@ The fixed original module is SHA-256
 `ed67b601aa40208952a41dd39a236a1cd79d99cb36110f295477a3a37daa3ef4`;
 the edited module is
 `365de14f658196f5c991b54de3b4bbb0b3a7b4278cd4644d163c89f1ae3f4f7b`.
-[Raw measurements](rayde-demo-build-time-results.json) retain the input/build
-configuration, compiler identities, individual samples and phase profiles.
+The [raw measurements](rayde-demo-build-time-results.json) contain the
+input/build configuration, compiler identities, individual samples and phase
+profiles.
 
 ## Reproduce
 

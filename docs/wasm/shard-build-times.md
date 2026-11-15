@@ -19,8 +19,8 @@ did not support changing its default partition.
   profile. Compare the paired builds; their absolute wall times are not stock
   release or CI results.
 - WASM target `wasm32-wasip1-threads`, fibers on, **five shards** in both builds,
-  AIR O3 and LLVM IR O3. Five is fixed for this comparison, rather than the
-  NUC's automatic shard count of six.
+  AIR O3 and LLVM IR O3. The shard count is fixed at five for this comparison;
+  the NUC's automatic count is six.
 - The same runtime object and blinc_abi, xgpu and xwindow side modules were used
   throughout. The input has 3,552 bytecode functions and emits 8,922 LLVM bodies.
 - Both compilers and both codegen settings were warmed first. Then three
@@ -57,7 +57,7 @@ The backend ranges are narrower: 8.361–8.530 seconds for the baseline and
 7.657–7.679 seconds for the candidate.
 
 At codegen 0, the body-cost model increases median backend time 2.2%, with
-overlapping sample ranges. It offers no reliable improvement, so the final
+overlapping sample ranges. It gives no reliable improvement, so the final
 implementation keeps the original partition there.
 
 | Shard | Baseline bodies | Weighted bodies |
@@ -70,7 +70,7 @@ implementation keeps the original partition there.
 
 Peak RSS medians at codegen 3 are 2.108 and 2.090 GiB. System-wide swap counters
 show small amounts of activity in some runs; they do not identify which process
-caused it. The raw data retains the counters, load averages and individual
+caused it. The raw data includes the counters, load averages and individual
 worker timings.
 
 ## Validation
@@ -99,9 +99,9 @@ optimization overrides, including exception catches and worker-option
 precedence. Local partition/exception/attribute unit tests, WASM object boundary
 validation and CLI clippy checks pass.
 
-[Raw measurements and validation](shard-build-time-results.json) retain the
-initial experiment patch, compiler hashes, final artifact comparisons and
-individual execution samples.
+The initial experiment patch, compiler hashes, final artifact comparisons and
+individual execution samples are in the
+[raw measurements and validation](shard-build-time-results.json).
 
 ## Reproduce
 
@@ -117,8 +117,8 @@ python3 scripts/bench_wasm_compile.py window-original.hl \
 
 The script records warm-ups separately, uses independent AIR caches, preserves
 logs and writes results after each successful build. The retained experiment
-uses the body cost at both codegen settings; the final implementation deliberately
-retains the baseline at codegen 0.
+uses the body cost at both codegen settings; the final implementation
+keeps the baseline at codegen 0.
 
 Issues: `1cf21d8` (this checkpoint), `3b7fa54` (selective body loading),
 `8b12bc8` (LLVM artifact reuse), `94d819f` (early elimination),

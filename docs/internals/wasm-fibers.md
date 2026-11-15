@@ -3,9 +3,10 @@
 With `ASH_WASM_FIBERS=1` at build time a Haxe thread can stop part-way
 through a call inside a wasm module and resume later, with no engine feature
 and no host driver. The flag sets `LinkOptions::fibers`, as does
-`AotRequest::wasm_fibers` for a host that calls `emit_aot` itself;
-with it off, `link` returns exactly what `emit` produced and nothing in
-`fiber.rs` runs, so the byte-identical guarantee holds structurally.
+`AotRequest::wasm_fibers` for a host that calls `emit_aot` itself.
+With it off, `link` returns exactly what `emit` produced and nothing in
+`fiber.rs` runs, so the output is byte-identical to a build without the
+transform, and the guarantee holds structurally.
 
 `std/src/fiber.rs` routes every fiber operation through four calls that
 `ash_wasm_runtime::guest` implements. Without the transform, `resume` runs
@@ -19,27 +20,27 @@ The transform works per instance: its globals are defined by the module, not
 shared, so in a threaded module (`wasm32-wasip1-threads`) every agent has its
 own fiber state and its own scheduler. Fibers on different agents suspend
 independently while the agents run in parallel; parallelism itself comes from
-the agents ([wasm-threads.md](wasm-threads.md)), and this is what lets a
-thread on any of them block.
+the agents ([wasm-threads.md](wasm-threads.md)), and the transform is what
+lets a thread on any of them block.
 
-Not provided: suspension from inside a host callback, reentrancy
-(`Fiber::resume` may not be called from a suspendable frame), moving a
-suspended fiber to another agent.
+The transform does not provide suspension from inside a host callback,
+reentrancy (`Fiber::resume` may not be called from a suspendable frame), or
+moving a suspended fiber to another agent.
 
 ## Borrowed from Asyncify
 
-The three-state machine (`Normal=0`, `Unwinding=1`, `Rewinding=2`) in one
-mutable i32 global; the side-stack layout of a `{ current_pos, end }` header
-and a stack growing up holding per frame a call index then the live locals
-padded to four bytes; and the five-function API under Binaryen's names, so a
-`wasm-opt --asyncify` module and an ash-instrumented one are interchangeable
-under one driver.
+ash takes three things from Asyncify: the three-state machine (`Normal=0`,
+`Unwinding=1`, `Rewinding=2`) in one mutable i32 global; the side-stack layout,
+a `{ current_pos, end }` header followed by a stack that grows up and holds,
+per frame, a call index and then the live locals padded to four bytes; and the
+five-function API under Binaryen's names, so a `wasm-opt --asyncify` module and
+an ash-instrumented one are interchangeable under one driver.
 
-The fake-global trick for call results is load-bearing: a
+The fake-global trick for call results is needed because a
 `local.set $x (call f)` must not write `$x` on the unwinding path, or `$x` is
 spilled holding a forged zero.
 
-## Where it diverges
+## Differences from Asyncify
 
 Binaryen is handed an arbitrary module; ash emitted this one and knows what
 it put there.
@@ -62,28 +63,27 @@ per site to entries whose type matches.
 **Rewind is skip-forward.** A recorded resume label would need a `br_table`
 ladder per nesting level threaded through every enclosing block, loop and
 `try_table` — a relooper — and would lose the property that re-entering a
-`try_table` reinstalls its handler for free. Rewind is O(the bodies of
-frames on the suspended stack), not O(module).
+`try_table` reinstalls its handler for free. Rewind costs O(the bodies of
+frames on the suspended stack) rather than O(module).
 
 **Each fiber owns its shadow stack and side stack.** Asyncify never touches
 `__stack_pointer`, so a suspending frame's shadow allocation is left in
-place — fine for one coroutine, catastrophic for N on the single 64 KB stack
-the linker provides.
+place — fine for one coroutine, broken for N on the single 64 KB stack the
+linker provides.
 
 ## No flatten
 
 Binaryen cannot process ash's modules: `Flatten` has no `try_table` case;
 Asyncify rejects any live local without a byte size, so an `exnref` local is
-fatal; `AsyncifyFlow::process` has no `TryTable` case. Legacy `try`/`catch`
-is what every current engine refuses. Excluding EH-bearing functions
-excludes the feature — in the threads suite those 21 are `dispatch`,
-`execute`, `runCases`, `runTest` and two hot loops, exactly the frames a
-fiber suspends inside.
+fatal; `AsyncifyFlow::process` has no `TryTable` case. Every current engine
+refuses legacy `try`/`catch`. Excluding EH-bearing functions excludes the
+feature: in the threads suite those 21 are `dispatch`, `execute`, `runCases`,
+`runTest` and two hot loops, exactly the frames a fiber suspends inside.
 
 Flatten exists to empty the operand stack everywhere; it needs to be empty
-only at suspend points, and ash's emitter already delivers that: every poll
-site in both suites is a bare statement with an empty operand stack. What
-replaces Flatten is narrow: for each call in operand position in an
+only at suspend points, and ash's emitter already provides that: every poll
+site in both suites is a bare statement with an empty operand stack. A
+narrow rewrite replaces Flatten: for each call in operand position in an
 instrumented function, spill its result to a fresh local before the
 enclosing statement. Hoisting a pure operand past a call is safe because
 wasm locals are frame-private.
@@ -92,10 +92,10 @@ Three rules for `try_table`:
 
 - Suspending inside a body needs no special work; skip-forward rewind
   re-executes the structured instruction and reinstalls the handler.
-- Landing pads are recognised, not constructed. LLVM's SjLj lowering emits
-  one shape, always directly under a `local.set`.
-- No suspend point may occur while an `exnref` is live. Checked, not
-  assumed: the transform refuses the link and names the function.
+- The transform recognises landing pads and does not construct them. LLVM's
+  SjLj lowering emits one form, always directly under a `local.set`.
+- No suspend point may occur while an `exnref` is live. The transform checks
+  this: it refuses the link and names the function.
 
 ## Relocations
 
@@ -123,18 +123,20 @@ The cost moves to index space, all handled in `plan`:
 
 A module that does not import `env.ash_host_fiber_yield` has no suspend
 point and is not instrumented. A module already exporting one of the three
-global names would be invalid at instantiation, so that refuses too.
+global names would be invalid at instantiation, so the transform refuses it
+too.
 
 ## Results
 
-Both conformance arms, per-case isolation, 1,195 cases: identical not-OK
-sets (`scripts/compare_conformance_arms.py` compares the sets per program,
-since two arms can both report 100% while failing different cases). Module
-size +26%. This proves instrumentation is inert when nothing suspends.
+Both conformance arms ran 1,195 cases under per-case isolation and produced
+identical not-OK sets (`scripts/compare_conformance_arms.py` compares the sets
+per program, since two arms can both report 100% while failing different
+cases). Module size +26%. This proves the instrumentation has no effect when
+nothing suspends.
 
 The threads suite does suspend: `wasm` times out at 120 s with 0 of 8 tests,
-`wasm-fibers` passes 22 of 22 in 11 s. The smallest case: a `sys.thread`
-worker blocks in `Deque.pop(true)`, main sends it a value, and the worker
+`wasm-fibers` passes 22 of 22 in 11 s. The smallest case is a `sys.thread`
+worker that blocks in `Deque.pop(true)`; main sends it a value, and the worker
 resumes at the point it stopped.
 
 The `wasm-fibers` arm goes last in `--modes`: the headline is the first mode
@@ -144,7 +146,7 @@ with a summary and every top-level number derives from it.
 
 - **`ash_fiber_enter` must not be inlined.** It is the edge an unwind stops
   at; its body is one call, so LLVM inlines it into `Fiber::resume` given the
-  chance. `#[inline(never)]` is load-bearing.
+  chance. It needs `#[inline(never)]`.
 - **Refusal is about liveness, not presence.** LLVM's setjmp lowering leaves
   an `exnref` local in almost every compiled closure. Refusing only where one
   could be held across a resume point (first write to last read, a superset
@@ -157,7 +159,7 @@ with a summary and every top-level number derives from it.
 - **The state must be reachable from the guest.** A global the linker adds
   after the guest is compiled has no name the guest can refer to, so
   `ash_host_fiber_state` and `ash_host_fiber_arm` are imports the host
-  answers on the guest's behalf; `arm` also swaps the shadow stack.
+  provides on the guest's behalf; `arm` also swaps the shadow stack.
 
 The side stack and shadow stack share one allocation, so the collector scans
 one range and a side stack running into the shadow stack hits the bounds
@@ -166,8 +168,9 @@ be an object's only reference.
 
 ## Open
 
-Whether ash's wasm setjmp lowering keeps module-global state of its own; if
-so it is per call stack and must be saved and restored per fiber with
-`__stack_pointer`. `return_call` would close this door: a tail call cannot
-be wrapped in an unwind check because the frame is gone. No module has any
-today; enabling tail calls for wasm codegen must revisit this.
+It is not known whether ash's wasm setjmp lowering keeps module-global state
+of its own; if it does, that state is per call stack and must be saved and
+restored per fiber with `__stack_pointer`. `return_call` would close this
+door: a tail call cannot be wrapped in an unwind check because the frame is
+gone. No module has any today; enabling tail calls for wasm codegen must
+revisit this.

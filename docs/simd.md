@@ -49,7 +49,7 @@ It is also the mask type every four-lane comparison returns.
 **On stock HashLink** every operator allocates its 16-byte result; a hot loop
 should use the slot form below. **On ash's compiled tiers at the default O3
 level** the optimiser can inline these helpers and keep local vector chains
-in registers, including across loop iterations. A value stored into a field
+in registers. This works across loop iterations too. A value stored into a field
 or array, passed to a non-inlined function, or returned is written to memory
 at that point. Use the slot form to update shared vectors without allocating.
 `ASH_SROA_WHY=1` prints the reason for any vector that stayed in memory after
@@ -65,8 +65,8 @@ allocator cost, so leave it unset for timing runs.
 
 ## Slot form: `ash.simd.Vec`
 
-One static per primitive, memory to memory. This is the HDLL surface and
-the intrinsic surface; the value types are written on top of it.
+One static per primitive, memory to memory. This is both the HDLL's
+interface and the set of intrinsics; the value types are written on top of it.
 
 ```haxe
 import ash.simd.Vec;

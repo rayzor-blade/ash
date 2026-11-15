@@ -40,9 +40,9 @@ the staged binaries the same way: dyld reports an architecture mismatch as
 
 ## Other HDLLs
 
-`--native-dir` supplies `fmt`, `ui`, `uv`, `openal` and `datachannel`. The
-pinned build registers `hlsdl`, `datachannel` and `hlopenal`; missing ones
-are named before anything is staged.
+The script takes `fmt`, `ui`, `uv`, `openal` and `datachannel` from
+`--native-dir`. The pinned build registers `hlsdl`, `datachannel` and
+`hlopenal`; the script names any that are missing before it stages anything.
 
 Take the directory from a shipped macOS build, not from the component
 repositories — `RandomityGuy/hashlink`'s darwin release is a 2022 x86_64

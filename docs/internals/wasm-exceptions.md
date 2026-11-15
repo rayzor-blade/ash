@@ -2,12 +2,12 @@
 
 ash's trap model is `setjmp`/`longjmp`. On wasm a throw is still a
 `longjmp`, which the exception-handling proposal carries as a throw of the
-`__c_longjmp` tag. A Haxe `try` in compiled code is not a `setjmp` there: it
-is an exception handler (next section). The `setjmp`s left are the runtime's
-own and the outermost boundary around `main`, and those go through LLVM's
-SJLJ lowering, where two halves have to agree.
+`__c_longjmp` tag. A Haxe `try` in compiled code is an exception handler
+rather than a `setjmp` there (next section). The `setjmp`s left are the
+runtime's own and the outermost boundary around `main`, and those go through
+LLVM's SJLJ lowering, where two halves have to agree.
 
-## A Haxe try is a handler
+## Haxe try lowering
 
 `crates/ash/src/llvm/function/wasm_traps.rs`. Entering a `try` arms the trap
 in the runtime's chain as everywhere else (`hlp_setup_trap_jit`), writes the
@@ -20,10 +20,11 @@ enclosing trap's catch block or the caller. An export's boundary
 (`AotRequest::exports`) is the same handler.
 
 - **The first word, not the address.** The runtime's throw jumps with a copy
-  of the buffer, so the address never matches; the word inside it does.
+  of the buffer, so the copy's address never matches the slot, but the word
+  stored inside it does.
 - **One catch block per trap.** With one per function, a handler's own calls
   unwind into the catch block that just caught, and the backend emits code
-  that does not validate for that shape.
+  that does not validate.
 - **Thrown anew, not rethrown.** A rethrow keeps the caught exception in an
   `exnref` local, and the fiber transform refuses to resume a call while one
   might be live: the threads suite trapped. The jump goes on through
@@ -39,11 +40,11 @@ enclosing trap's catch block or the caller. An export's boundary
 
 ## The setjmp lowering
 
-WASI's `libsetjmp.a` does not define `_setjmp`/`longjmp`. It defines
-`__wasm_setjmp`, `__wasm_setjmp_test` and `__wasm_longjmp`, the forms LLVM's
-WebAssembly SJLJ pass rewrites a `setjmp` call into. So both halves need
-`-wasm-enable-sjlj` and `+exception-handling`; the backend refuses one
-without the other.
+WASI's `libsetjmp.a` defines `__wasm_setjmp`, `__wasm_setjmp_test` and
+`__wasm_longjmp` instead of `_setjmp`/`longjmp`; these are the forms LLVM's
+WebAssembly SJLJ pass rewrites a `setjmp` call into. So both halves of the
+rewrite need `-wasm-enable-sjlj` and `+exception-handling`; the backend
+refuses one without the other.
 
 **An object with only half the rewrite links and runs.** One that referenced
 `__wasm_setjmp` and not `__wasm_setjmp_test` was correct until it threw, then
@@ -64,5 +65,5 @@ construction. Without it a wasm build is refused rather than emitted wrong.
 ash also passes `-wasm-use-legacy-eh=false`: LLVM still defaults to the
 withdrawn `try`/`catch`, which no current engine accepts.
 
-The regression test asserts on both halves of the lowering, because the
-broken form is the one that looks fine.
+The regression test asserts on both halves of the lowering, because an object
+with only one half links and runs.

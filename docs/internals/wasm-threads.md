@@ -1,10 +1,10 @@
 # wasm: shared memory, Workers, threads
 
 What krio built under the worker-per-fiber row, what it measured, and what
-it costs to use. [wasm-fibers.md](wasm-fibers.md) is how a thread on any
-agent blocks; ash builds threaded modules with both.
+it costs to use. [wasm-fibers.md](wasm-fibers.md) describes how a thread on
+any agent blocks; ash builds threaded modules with both.
 
-## Suspension is not parallelism
+## Suspension and parallelism
 
 | | suspend a fiber | run two Haxe threads at once |
 |---|---|---|
@@ -13,18 +13,18 @@ agent blocks; ash builds threaded modules with both.
 | Workers over shared memory | yes | yes |
 | Workers + ash's transform | yes | yes |
 
-The first two rows give fiber semantics: a producer/consumer pair works
-because one runs while the other is suspended. A program that expects a
-worker to keep computing while the main thread blocks on `lock.wait()` needs
-Workers, because with one agent the blocked one is the only one. ash ships
-the last row: `wasm32-wasip1-threads` with `ASH_WASM_FIBERS=1` puts each Haxe
-thread on an agent of its own, and each agent's instance suspends its own
-fibers.
+JSPI, wasmtime async, Asyncify and ash's transform give fiber semantics: a
+producer/consumer pair works because one runs while the other is suspended. A
+program that expects a worker to keep computing while the main thread blocks
+on `lock.wait()` needs Workers, because a single agent that blocks leaves
+nothing else to run. ash ships Workers plus its own transform:
+`wasm32-wasip1-threads` with `ASH_WASM_FIBERS=1` puts each Haxe thread on an
+agent of its own, and each agent's instance suspends its own fibers.
 
-## What krio built
+## krio-parallel and krio-wasm
 
 `krio-parallel` (target-neutral) and `krio-wasm` (the only crate that knows
-about browsers):
+about browsers) provide:
 
 - Work stealing over `Box<dyn Task + Send>`: bounded Chase–Lev deques per
   agent, injector overflow, placement via `spawn_on`.
@@ -53,23 +53,24 @@ spawn_on(agent 0) — one agent owns everything; the rest steal
 ```
 
 `max concurrent` counts agents inside `Task::step` at one instant, from an
-atomic. Only the second table exercises the deque. Runnable:
-`examples/browser-demo/` in krio.
+atomic. Only the `spawn_on(agent 0)` table exercises the deque. You can run it
+from `examples/browser-demo/` in krio.
 
-## What it does not give
+## Limits: fibers and M:N
 
 **Fibers.** `Fiber::new` panics on wasm. Exporting a mutable
 `__stack_pointer` does not help: it names the shadow stack in linear memory,
 while call frames and the operand stack live in the engine, so swapping it
-moves the data half and leaves the control half behind. ash's transform is
-the answer. krio's `krio_fiber::set_suspender(fn())` routes `yield_now()` to
-a host suspender on targets with no native switch; ash installs its
-suspender at the first yield.
+moves the data half and leaves the control half behind. ash's transform
+provides fibers on wasm. krio's `krio_fiber::set_suspender(fn())` routes
+`yield_now()` to a host suspender on targets with no native switch; ash
+installs its suspender at the first yield.
 
 **M:N.** A cluster agent is an OS thread, so mapping a fiber to a Worker
-prices a fiber at a thread. `Fiber` being `!Send` makes that a compile error.
+makes a fiber cost as much as a thread. `Fiber` being `!Send` makes that a
+compile error.
 
-## Three traps, measured in Chrome 152
+## Three traps in Chrome 152
 
 **The spawner must never block.** A dedicated Worker's children are started
 through its parent's event loop, so an agent that calls `new Worker()` and
@@ -91,13 +92,13 @@ an agent processes no messages, so nothing may be routed through it. Use
 
 **`--import-memory`, or every Worker gets its own memory.** Without it the
 module defines its own memory and each Worker instantiates a separate one.
-Nothing errors; the agents run in separate address spaces. Check
+Nothing errors; the agents run in separate address spaces. Check that
 `WebAssembly.Module.imports(module).filter(i => i.kind === 'memory')` is
 non-empty. `krio_wasm::cluster_support()` returns `None` when the build
 lacks atomics, and the demo page refuses to start unless
 `crossOriginIsolated` and `memory.buffer instanceof SharedArrayBuffer` both
 hold. Refusing beats degrading: a program that silently ran single-agent
-reads as a performance mystery months later.
+looks like an unexplained slowdown months later.
 
 ## The mutator rendezvous
 
@@ -125,8 +126,9 @@ A host that never polls corrupts nothing; it cannot be collected until the
 loop ends, and `stop_the_world` waits. Two bugs found by running it: the
 arrived-agent count did not reset between rounds, and both barrier loops
 spun without yielding, which with more runnable threads than cores held a
-core against the agents being waited for. Both fixed; the barrier waits
-through the backend's `Park`. Rendezvous cost at forty agents is unmeasured.
+core against the agents being waited for. Both are fixed; the barrier waits
+through the backend's `Park`. Rendezvous cost at forty agents has not been
+measured.
 
 ## The clock
 
@@ -143,7 +145,7 @@ setInterval(() => wasm.publish_epoch_ms(performance.now()), 4);
 ```
 
 A deadline check is one relaxed load. Importing `performance.now()` works
-and is the wrong shape: the call site is `should_yield_early()`, polled at
+but is the wrong approach: the call site is `should_yield_early()`, polled at
 every checkpoint. wasm32 has `target_has_atomic = "64"` and
 `align_of::<AtomicU64>()` is 8, which matters because wasm atomics trap on a
 misaligned address.
@@ -166,8 +168,8 @@ RUSTFLAGS='-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals \
 ```
 
 Of those link arguments only `--export=__wasm_init_tls` fails loudly;
-`--import-memory` is the silent one. Plus cross-origin isolation on every
-response the app serves:
+`--import-memory` is the silent one. The app also needs cross-origin
+isolation on every response it serves:
 
 ```
 Cross-Origin-Opener-Policy: same-origin
@@ -177,7 +179,7 @@ Cross-Origin-Embedder-Policy: require-corp
 Each Worker instantiates the same module against the same memory and must
 not re-run data-segment initialisation.
 
-## How ash's threads work here
+## ash threads on wasm
 
 Thread identity is `__tls_base`: it differs per thread, is stable for the
 thread's life, and costs one add to fetch. Before that, every thread
@@ -187,8 +189,8 @@ collector held one mutator record, the reentrant GC lock had one owner, and
 two threads bump-allocated the same TLAB.
 
 Parallelism on 8 performance cores, 400M iterations per thread: 1 thread
-0.50x, 2 threads 0.97x, 4 threads 1.90x, 8 threads 3.65x. The ~250 ms floor
-is module instantiation per thread, paid about once because the
+0.50x, 2 threads 0.97x, 4 threads 1.90x, 8 threads 3.65x. A ~250 ms floor
+comes from module instantiation per thread, paid about once because the
 instantiations overlap.
 
 Nothing configures the pool. A page has no environment to read a worker
@@ -199,7 +201,7 @@ with it. A thread does not share
 its WASI context, socket table or loaded libraries; each instance builds its
 own, as wasmtime's wasi-threads does.
 
-**What the linker had to learn.** A thread is another instance of the same
+**Linker changes for threads.** A thread is another instance of the same
 module over the same memory, so memory becomes `env.memory` — imported,
 shared, with the 1 GiB maximum the Rust target declares. The data image
 cannot be an active segment, or the second instance writes the initial data
@@ -221,11 +223,12 @@ how many threads a page can run.
 
 ## Order of work if threads ship
 
-1. `wasm32-wasip1-threads` under wasmtime first: same shape, no COOP, no
+1. `wasm32-wasip1-threads` under wasmtime first: same structure, no COOP, no
    worker bootstrap. Threads were removed from WASI preview 2, so it is a
    probe, not a target — which is why agent creation is a hook rather than a
    WASI import.
-2. Single-mutator GC root correctness before the rendezvous means anything.
+2. GC roots must be correct with a single mutator before the rendezvous means
+   anything.
 3. The browser, with the three traps checked explicitly.
 
 Related, in krio: `crates/krio-wasm/src/agent.rs`,

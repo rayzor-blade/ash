@@ -32,8 +32,9 @@ not add to wall time. RSS covers the whole compiler, including LLVM.
 
 The warm build reuses every optimized body and runs no AIR lowering or passes.
 The edit reuses 3,551 bodies and writes the edited lowered/optimized pair.
-Disk persistence has a cold write cost. The small per-function AIR cost in
-WindowPage also makes cache I/O a material part of warm preparation.
+Writing the cache to disk costs time on a cold build. Because the AIR cost per
+function in WindowPage is small, cache I/O is also a material part of warm
+preparation.
 These samples show no consistent overall wall-time speedup from disk reuse;
 LLVM backend variance and work dominate the result. Reuse counts and skipped
 AIR work are deterministic; an end-to-end speedup needs workload-specific
@@ -62,7 +63,7 @@ its current live set cannot safely be used as a deletion list.
 
 Before sharing AOT lookup tables, frameless answers and bounded lowered
 bodies, measured LLVM IR time was 6.429 s with disk reuse disabled, 8.827 s
-cold and 6.691 s warm. Sharing this state retains a 2 MiB lowered-body budget
+cold and 6.691 s warm. The shared state retains a 2 MiB lowered-body budget
 and releases it at build exit. The separate optimized-body budget is 8 MiB.
 
 ## Validation

@@ -303,6 +303,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_nair_hl"
+version = "0.1.0"
+dependencies = [
+ "air",
+ "ash_core",
+ "ash_nair",
+ "ash_tast",
+]
+
+[[package]]
 name = "ash_native_call"
 version = "0.1.0"
 

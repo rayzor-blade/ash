@@ -1,0 +1,13 @@
+[package]
+name = "ash_nair_hl"
+version = "0.1.0"
+edition = "2024"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "Writes what nAIR lowers as a .hl file, so the runtime and its tiers can run it before they take AIR directly"
+
+[dependencies]
+ash_nair = { path = "../ash_nair" }
+ash_tast = { path = "../ash_tast" }
+air = { path = "../air" }
+ash_core = { path = "../ash", default-features = false }

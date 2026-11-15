@@ -25,13 +25,28 @@ pub type Result<T> = std::result::Result<T, String>;
 pub struct Lowered {
     pub name: String,
     pub findex: u32,
+    /// The function's type.
+    pub sig: TypeIx,
     pub function: Function,
+}
+
+/// A function the runtime provides, which the module calls.
+#[derive(Clone, Debug)]
+pub struct Native {
+    pub lib: String,
+    pub name: String,
+    /// The function type.
+    pub ty: TypeIx,
+    pub findex: u32,
 }
 
 /// The module being built: its types, and the constant pools the instructions index.
 pub struct Module<'a> {
     pub types: TypeBuilder<'a>,
     tast: Tast<'a>,
+    pub natives: Vec<Native>,
+    requested: HashSet<u32>,
+    pending: Vec<u32>,
     pub ints: Vec<i32>,
     int_at: HashMap<i32, usize>,
     pub floats: Vec<f64>,
@@ -43,6 +58,9 @@ impl<'a> Module<'a> {
         Module {
             types: TypeBuilder::new(tast),
             tast,
+            natives: Vec::new(),
+            requested: HashSet::new(),
+            pending: Vec::new(),
             ints: Vec::new(),
             int_at: HashMap::new(),
             floats: Vec::new(),
@@ -68,6 +86,45 @@ impl<'a> Module<'a> {
         self.floats.len() - 1
     }
 
+    /// Asks for the function a field holds to be lowered, if it has not been asked for.
+    fn request(&mut self, field: u32) {
+        if self.requested.insert(field) {
+            self.pending.push(field);
+        }
+    }
+
+    fn add_native(&mut self, lib: String, name: String, ty: TypeIx, findex: u32) {
+        if !self.natives.iter().any(|n| n.findex == findex) {
+            self.natives.push(Native {
+                lib,
+                name,
+                ty,
+                findex,
+            });
+        }
+    }
+
+    /// Lowers `entry` and every function it calls that has a body, and notes the natives.
+    pub fn lower_program(&mut self, entry: u32) -> Result<Vec<Lowered>> {
+        self.request(entry);
+        let mut out = Vec::new();
+        while let Some(f) = self.pending.pop() {
+            out.push(self.lower_field(f)?);
+        }
+        // every function index handed out must be defined, by a body or a native
+        let defined: HashSet<u32> = out
+            .iter()
+            .map(|l| l.findex)
+            .chain(self.natives.iter().map(|n| n.findex))
+            .collect();
+        for (i, (class, name)) in self.types.fun_names.iter().enumerate() {
+            if !defined.contains(&(i as u32)) {
+                return Err(format!("{class}.{name} is called but not lowered"));
+            }
+        }
+        Ok(out)
+    }
+
     /// Lowers the function a field holds, naming it as calls to it do.
     pub fn lower_field(&mut self, field: u32) -> Result<Lowered> {
         let rec = self.tast.fields()[field as usize];
@@ -78,10 +135,12 @@ impl<'a> Module<'a> {
         let class = self.types.class_name(rec.owner.get()).to_owned();
         let name = self.types.field_name(field).to_owned();
         let findex = self.types.fun_id(&class, &name);
+        let sig = self.types.to_type(rec.ty.get())?;
         let function = FnLower::new(self, func)?.run()?;
         Ok(Lowered {
             name: format!("{class}.{name}"),
             findex,
+            sig,
             function,
         })
     }
@@ -566,6 +625,13 @@ impl<'m, 'a> FnLower<'m, 'a> {
         let name = self.m.types.field_name(field).to_owned();
         let fun = self.m.types.fun_id(&class, &name) as usize;
         let sig = self.m.types.to_type(rec.ty.get())?;
+        if let Some((lib, symbol)) = self.m.types.native_of(field) {
+            self.m.add_native(lib, symbol, sig, fun as u32);
+        } else if rec.func.get() != NONE {
+            self.m.request(field);
+        } else {
+            return Err(format!("{class}.{name} has no body to lower"));
+        }
         let HlType::Fun(params, ret) = self.m.types.table.types[sig].clone() else {
             return Err(format!("{class}.{name} is not a function"));
         };

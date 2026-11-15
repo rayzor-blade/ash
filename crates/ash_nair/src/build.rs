@@ -206,6 +206,59 @@ impl<'a> TypeBuilder<'a> {
         self.has_meta(meta_owner::CLASS, owner, ":hlNative") && self.has_empty_body(rec.func.get())
     }
 
+    /// The library and symbol of a native function, from `@:hlNative("lib", "name")` on the field
+    /// or `@:hlNative("lib", "prefix")` on its class.
+    pub fn native_of(&self, f: u32) -> Option<(String, String)> {
+        if !self.is_native(f) {
+            return None;
+        }
+        let strings = |kind: u32, owner: u32| -> Option<Vec<String>> {
+            let m = self
+                .tast
+                .metas_of(kind, owner)
+                .find(|m| self.tast.string(m.name.get()) == ":hlNative")?;
+            Some(
+                self.tast
+                    .meta_args(m)
+                    .iter()
+                    .filter(|a| a.kind == node_kind::CONST && a.flags == const_kind::STRING)
+                    .map(|a| self.tast.string(a.a.get()).to_owned())
+                    .collect(),
+            )
+        };
+        let name = self.field_name(f);
+        if let Some(args) = strings(meta_owner::FIELD, f) {
+            return match args.as_slice() {
+                [lib, symbol] => Some((lib.clone(), symbol.clone())),
+                [lib] => Some((lib.clone(), name.to_owned())),
+                _ => None,
+            };
+        }
+        // a class-level binding: the prefix, then the name with each capital run put behind an `_`
+        let owner = self.tast.fields()[f as usize].owner.get();
+        let args = strings(meta_owner::CLASS, owner)?;
+        let (lib, prefix) = match args.as_slice() {
+            [lib] => (lib.clone(), String::new()),
+            [lib, prefix] => (lib.clone(), prefix.clone()),
+            _ => return None,
+        };
+        let mut snake = String::new();
+        let mut in_caps = false;
+        for ch in name.chars() {
+            if ch.is_ascii_uppercase() {
+                if !in_caps {
+                    snake.push('_');
+                }
+                in_caps = true;
+                snake.push(ch.to_ascii_lowercase());
+            } else {
+                in_caps = false;
+                snake.push(ch);
+            }
+        }
+        Some((lib, format!("{prefix}{snake}")))
+    }
+
     /// No body, `{}`, or `{ return <constant>; }`: what a native binding is declared with.
     fn has_empty_body(&self, func: u32) -> bool {
         if func == NONE {

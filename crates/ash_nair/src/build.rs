@@ -1059,4 +1059,58 @@ impl<'a> TypeBuilder<'a> {
     pub fn fun_id(&mut self, class: &str, name: &str) -> u32 {
         self.alloc_fun_path(class, name)
     }
+
+    /// Where the instance variable `field` lives: the class that declares it, its index in the
+    /// object layout (a subclass's layout continues after its superclass's, so the index is the
+    /// same through every subclass) and its type.
+    ///
+    /// The declaring class names the slot, whatever type the object has where it is used, so
+    /// that a write through a subclass and a read through the base are seen to be one location.
+    pub fn field_slot(&mut self, field: u32) -> Result<FieldSlot> {
+        let owner = self.tast.fields()[field as usize].owner.get();
+        let name = self.field_name(field).to_owned();
+        let class = self.class_name(owner).to_owned();
+        let t = self.class_type(owner, &[], false, None)?;
+        let (HlType::Obj(o) | HlType::Struct(o)) = self.table.types[t].clone() else {
+            return Err(format!("{class} is not an object type"));
+        };
+        let &(index, ty) = self.table.objs[o]
+            .index
+            .get(&name)
+            .ok_or_else(|| format!("{class}.{name} has no slot in the layout"))?;
+        if index < 0 {
+            return Err(format!("{class}.{name} is a method, not a variable"));
+        }
+        Ok(FieldSlot {
+            owner: t,
+            index: index as u32,
+            ty,
+        })
+    }
+
+    /// Whether a call of the method `field` goes through the object's method table, because a
+    /// class below the declaring one overrides it or because it overrides one itself.
+    pub fn is_virtual_method(&self, field: u32) -> bool {
+        let owner = self.tast.fields()[field as usize].owner.get();
+        self.field_flags(field) & field_flag::OVERRIDE != 0
+            || self.is_overridden(owner, self.field_name(field))
+    }
+
+    /// The constructor of `class`, if it has one.
+    pub fn constructor(&self, class: u32) -> Option<u32> {
+        self.classes[class as usize].ctor
+    }
+
+    /// Whether the class is declared outside the program, so that it has no body to lower.
+    pub fn is_extern_class(&self, class: u32) -> bool {
+        self.is_extern(class)
+    }
+}
+
+/// The place of an instance variable in an object: see [`TypeBuilder::field_slot`].
+#[derive(Clone, Copy, Debug)]
+pub struct FieldSlot {
+    pub owner: TypeIx,
+    pub index: u32,
+    pub ty: TypeIx,
 }

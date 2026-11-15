@@ -1,6 +1,7 @@
 //! A reference interpreter for the AIR that [`crate::lower`] produces.
 //!
-//! It runs integers, floats and bools, branches, phis, direct calls, and nothing else. Its job
+//! It runs integers, floats and bools, branches, phis, direct calls, and objects with their
+//! fields, and nothing else. Its job
 //! is to say what a lowered function computes, so a test can compare that with what the Haxe
 //! source means without going through an engine.
 
@@ -8,11 +9,16 @@ use std::collections::HashMap;
 
 use air::v2::ir::*;
 
+use crate::hl::{HlType, ObjIx, TypeTable};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Val {
     I(i32),
     F(f64),
     B(bool),
+    /// An object, by its place in the heap.
+    Obj(usize),
+    /// What a void call returns, and null.
     Void,
 }
 
@@ -21,13 +27,46 @@ pub struct Program<'a> {
     pub functions: HashMap<usize, &'a Function>,
     pub ints: &'a [i32],
     pub floats: &'a [f64],
+    /// The fields a new object of each type starts with, by type index: see [`layouts`].
+    pub layouts: HashMap<usize, Vec<Val>>,
+}
+
+/// The fields a new object of each object type holds, the superclass's first, as the runtime
+/// zeroes them.
+pub fn layouts(table: &TypeTable) -> HashMap<usize, Vec<Val>> {
+    fn fill(table: &TypeTable, o: ObjIx, out: &mut Vec<Val>) {
+        let obj = &table.objs[o];
+        if let Some(sup) = obj.super_
+            && let HlType::Obj(s) | HlType::Struct(s) = table.types[sup]
+        {
+            fill(table, s, out);
+        }
+        for (_, ty) in &obj.fields {
+            out.push(match table.types[*ty] {
+                HlType::I32 => Val::I(0),
+                HlType::F64 => Val::F(0.0),
+                HlType::Bool => Val::B(false),
+                _ => Val::Void,
+            });
+        }
+    }
+    let mut out = HashMap::new();
+    for (ix, t) in table.types.iter().enumerate() {
+        if let HlType::Obj(o) = t {
+            let mut fields = Vec::new();
+            fill(table, *o, &mut fields);
+            out.insert(ix, fields);
+        }
+    }
+    out
 }
 
 const STEP_LIMIT: usize = 50_000_000;
 
 pub fn run(p: &Program, findex: usize, args: &[Val]) -> Result<Val, String> {
     let mut steps = 0;
-    call(p, findex, args, &mut steps, 0)
+    let mut heap = Vec::new();
+    call(p, findex, args, &mut steps, &mut heap, 0)
 }
 
 fn call(
@@ -35,6 +74,7 @@ fn call(
     findex: usize,
     args: &[Val],
     steps: &mut usize,
+    heap: &mut Vec<Vec<Val>>,
     depth: usize,
 ) -> Result<Val, String> {
     if depth > 2000 {
@@ -117,7 +157,37 @@ fn call(
                         .iter()
                         .map(|v| get(&vals, *v))
                         .collect::<Result<Vec<_>, _>>()?;
-                    vals[dst.idx()] = Some(call(p, *fun, &argv, steps, depth + 1)?);
+                    vals[dst.idx()] = Some(call(p, *fun, &argv, steps, heap, depth + 1)?);
+                }
+                Instr::New { dst } => {
+                    let ty = f.values[dst.idx()].ty.0 as usize;
+                    let fields = p
+                        .layouts
+                        .get(&ty)
+                        .ok_or_else(|| format!("no layout for type {ty}"))?
+                        .clone();
+                    heap.push(fields);
+                    vals[dst.idx()] = Some(Val::Obj(heap.len() - 1));
+                }
+                Instr::FieldGet {
+                    dst, obj, field, ..
+                } => {
+                    let Val::Obj(h) = get(&vals, *obj)? else {
+                        return Err("a field of null".into());
+                    };
+                    let v = *heap[h].get(*field).ok_or("a field outside the object")?;
+                    vals[dst.idx()] = Some(v);
+                }
+                Instr::FieldSet {
+                    obj, field, src, ..
+                } => {
+                    let v = get(&vals, *src)?;
+                    let Val::Obj(h) = get(&vals, *obj)? else {
+                        return Err("a field of null".into());
+                    };
+                    *heap[h]
+                        .get_mut(*field)
+                        .ok_or("a field outside the object")? = v;
                 }
                 other => return Err(format!("the interpreter has no {other:?}")),
             }

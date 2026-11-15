@@ -104,6 +104,7 @@ fn numeric_kernels_lower_verify_and_compute_what_the_source_means() {
         functions,
         ints: &module.ints,
         floats: &module.floats,
+        layouts: ash_nair::eval::layouts(&module.types.table),
     };
     let find = |name: &str| {
         done.iter()
@@ -153,6 +154,7 @@ fn numeric_kernels_lower_verify_and_compute_what_the_source_means() {
         functions: optimized.iter().map(|(i, f)| (*i, f)).collect(),
         ints: &module.ints,
         floats: &module.floats,
+        layouts: ash_nair::eval::layouts(&module.types.table),
     };
     let call = |name: &str, args: &[Val]| {
         run(&program, find(name), args).unwrap_or_else(|e| panic!("optimized {name}{args:?}: {e}"))

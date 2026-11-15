@@ -316,6 +316,24 @@ pub trait ModuleInfo {
         0
     }
 
+    /// The value of f64 constant-pool entry `idx`.
+    fn float_value(&self, idx: usize) -> Option<f64> {
+        let _ = idx;
+        None
+    }
+
+    /// How many entries the f64 pool holds.
+    fn float_pool_len(&self) -> usize {
+        0
+    }
+
+    /// The type that a `Ref`, `Null` or `Packed` type wraps; `None` for any
+    /// other type, and for a type the embedder does not know.
+    fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
+        let _ = ty;
+        None
+    }
+
     /// What `ty` is. `None` -- the default -- means the embedder does not know
     /// the type, and every question below that is answered from the kind
     /// answers "no".
@@ -491,6 +509,15 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     }
     fn int_pool_len(&self) -> usize {
         (**self).int_pool_len()
+    }
+    fn float_value(&self, idx: usize) -> Option<f64> {
+        (**self).float_value(idx)
+    }
+    fn float_pool_len(&self) -> usize {
+        (**self).float_pool_len()
+    }
+    fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
+        (**self).type_param(ty)
     }
     fn type_kind(&self, ty: TypeRef) -> Option<TypeKind> {
         (**self).type_kind(ty)

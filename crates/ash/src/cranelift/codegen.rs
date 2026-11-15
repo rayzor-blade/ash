@@ -41,6 +41,7 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, Variable};
 
+use air::v2::ModuleInfo;
 use air::v2::ir::{
     BinOp, BlockId, CastKind, CellId, CondKind, Function as AirFunction, Instr, MemAccess,
     Terminator, TypeRef as AirTypeRef, UnOp, ValueId,
@@ -1786,20 +1787,19 @@ impl AirCodegen<'_, '_> {
             Instr::Int { dst, idx } => {
                 // Past the pool means a pass minted it; `int_at` answers for
                 // both so a minted constant is indistinguishable here.
-                let bc = self.ctx.bytecode();
+                let module = self.ctx.air_module();
                 let val = self
                     .f
-                    .int_at(*idx, |i| bc.ints.get(i).copied())
+                    .int_at(*idx, |i| module.int_value(i))
                     .ok_or_else(|| anyhow!("int constant {idx} out of range"))?;
                 let v = self.b.ins().iconst(types::I32, val as i64);
                 self.def(*dst, v)?;
             }
             Instr::Float { dst, idx } => {
-                let val = *self
+                let val = self
                     .ctx
-                    .bytecode()
-                    .floats
-                    .get(*idx)
+                    .air_module()
+                    .float_value(*idx)
                     .ok_or_else(|| anyhow!("float constant {idx} out of range"))?;
                 let v = self.b.ins().f64const(val);
                 self.def(*dst, v)?;
@@ -2261,20 +2261,20 @@ impl AirCodegen<'_, '_> {
                 let raw = self.get(*base)?;
                 let p = self.coerce(raw, types::I64, Widen::Signed)?;
                 let index = self.index_as_addr(*offset)?;
-                let dst_ty = self.f.value_ty(*dst).0 as usize;
-                let href =
-                    self.ctx.bytecode().types.get(dst_ty).ok_or_else(|| {
-                        anyhow!("RefOffset destination type {dst_ty} out of range")
-                    })?;
-                if href.kind != hl::hl_type_kind_HREF {
-                    bail!("RefOffset destination type kind {} is not HREF", href.kind);
+                let dst_ty = self.f.value_ty(*dst);
+                let module = self.ctx.air_module();
+                match module.type_kind(dst_ty) {
+                    Some(air::v2::TypeKind::Ref) => {}
+                    Some(other) => bail!("RefOffset destination type kind {other:?} is not Ref"),
+                    None => bail!("RefOffset destination type {} out of range", dst_ty.0),
                 }
-                let inner = href
-                    .tparam
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("RefOffset HREF type {dst_ty} has no parameter"))?;
-                let inner_kind = self.ctx.type_kind(inner.0)?;
-                let stride = crate::layout::array_elem_size(inner_kind) as i64;
+                let inner = module.type_param(dst_ty).ok_or_else(|| {
+                    anyhow!("RefOffset Ref type {} has no parameter", dst_ty.0)
+                })?;
+                let stride = module
+                    .type_size(inner)
+                    .ok_or_else(|| anyhow!("RefOffset Ref type {} has no element size", dst_ty.0))?
+                    as i64;
                 let off = if stride == 1 {
                     index
                 } else {
@@ -3517,19 +3517,18 @@ impl AirCodegen<'_, '_> {
         }
         Ok(match found {
             Some(Instr::Int { idx, .. }) => {
-                let bc = self.ctx.bytecode();
+                let module = self.ctx.air_module();
                 let val = self
                     .f
-                    .int_at(idx, |i| bc.ints.get(i).copied())
+                    .int_at(idx, |i| module.int_value(i))
                     .ok_or_else(|| anyhow!("int constant {idx} out of range"))?;
                 Some(self.b.ins().iconst(types::I32, val as i64))
             }
             Some(Instr::Float { idx, .. }) => {
-                let val = *self
+                let val = self
                     .ctx
-                    .bytecode()
-                    .floats
-                    .get(idx)
+                    .air_module()
+                    .float_value(idx)
                     .ok_or_else(|| anyhow!("float constant {idx} out of range"))?;
                 Some(self.b.ins().f64const(val))
             }
@@ -3560,7 +3559,7 @@ impl AirCodegen<'_, '_> {
                         // for it, silently skipping the peephole.
                         return self
                             .f
-                            .int_at(*idx, |i| self.ctx.bytecode().ints.get(i).copied())
+                            .int_at(*idx, |i| self.ctx.air_module().int_value(i))
                             .map(|i| i as i64);
                     }
                 }

@@ -290,6 +290,19 @@ impl<'b> ModuleInfo for AshModule<'b> {
         self.bc.ints.len()
     }
 
+    fn float_value(&self, idx: usize) -> Option<f64> {
+        self.bc.floats.get(idx).copied()
+    }
+
+    fn float_pool_len(&self) -> usize {
+        self.bc.floats.len()
+    }
+
+    fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
+        let t = self.bc.types.get(ty.0 as usize)?;
+        Some(TypeRef(t.tparam.as_ref()?.0 as u32))
+    }
+
     fn type_size(&self, ty: TypeRef) -> Option<u32> {
         // The array stride, not `layout::type_size`: the two differ exactly
         // where a size is meaningless (HVOID, HPACKED, both zero there), and

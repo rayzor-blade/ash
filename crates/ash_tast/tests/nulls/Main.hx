@@ -62,6 +62,11 @@ class Main {
 		return leaves(t.left) + leaves(t.right);
 	}
 
+	// a parameter of type Null<Int>, which the body does not use
+	static function ignore(x:Null<Int>):Int {
+		return 0;
+	}
+
 	static function sumOf(n:Int):Int {
 		return sum(build(n));
 	}

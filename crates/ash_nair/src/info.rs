@@ -16,6 +16,7 @@ use crate::lower::{Lowered, Module};
 
 pub struct NairModule {
     ints: Vec<i32>,
+    floats: Vec<f64>,
     types: Vec<HlType>,
     natives: HashMap<usize, NativeImport>,
     callees: HashMap<usize, Function>,
@@ -71,6 +72,7 @@ impl NairModule {
         }
         NairModule {
             ints: module.ints.clone(),
+            floats: module.floats.clone(),
             types,
             natives,
             callees,
@@ -100,6 +102,21 @@ impl ModuleInfo for NairModule {
 
     fn int_pool_len(&self) -> usize {
         self.ints.len()
+    }
+
+    fn float_value(&self, idx: usize) -> Option<f64> {
+        self.floats.get(idx).copied()
+    }
+
+    fn float_pool_len(&self) -> usize {
+        self.floats.len()
+    }
+
+    fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
+        match self.ty(ty)? {
+            HlType::Ref(t) | HlType::Null(t) | HlType::Packed(t) => Some(TypeRef(*t as u32)),
+            _ => None,
+        }
     }
 
     fn type_kind(&self, ty: TypeRef) -> Option<TypeKind> {

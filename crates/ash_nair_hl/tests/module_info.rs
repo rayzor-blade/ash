@@ -8,7 +8,8 @@ mod common;
 
 use std::collections::HashMap;
 
-use air::v2::{FunSig, ModuleInfo, TypeKind};
+use air::v2::ir::Instr;
+use air::v2::{CalleeBody, FunSig, ModuleInfo, TypeKind};
 use ash_core::air_pipeline::AshModule;
 use ash_core::bytecode::BytecodeDecoder;
 use ash_nair::info::NairModule;
@@ -17,6 +18,33 @@ use ash_tast::Tast;
 use ash_tast::format::NONE;
 
 type Kinds = (Vec<Option<TypeKind>>, Option<TypeKind>);
+
+/// The distinct values of the float constants a function's body uses, in order.
+fn floats(m: &dyn ModuleInfo, findex: usize) -> Vec<u64> {
+    let Some(CalleeBody::Air(body)) = m.callee(findex) else {
+        return Vec::new();
+    };
+    let mut out: Vec<u64> = body
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::Float { idx, .. } => m.float_value(*idx).map(f64::to_bits),
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// What each argument of a signature wraps, by kind; an argument that wraps nothing gives `None`.
+fn wrapped(m: &dyn ModuleInfo, sig: &FunSig) -> Vec<Option<TypeKind>> {
+    sig.args
+        .iter()
+        .map(|t| m.type_param(*t).and_then(|p| m.type_kind(p)))
+        .collect()
+}
 
 fn kinds(m: &dyn ModuleInfo, sig: &FunSig) -> Kinds {
     (
@@ -33,10 +61,10 @@ fn genhl_name(name: &str) -> String {
     }
 }
 
-fn agree(fixture: &str, classes: &[&str], at_least: usize) {
+fn agree(fixture: &str, classes: &[&str], at_least: usize) -> (usize, usize, usize) {
     let Some(compiler) = common::native_haxe() else {
         eprintln!("skipped: set ASH_HAXE_NATIVE to a haxe with the ash_tast plugin built");
-        return;
+        return (0, 0, 0);
     };
     let tag = fixture.replace('/', "_");
 
@@ -72,6 +100,7 @@ fn agree(fixture: &str, classes: &[&str], at_least: usize) {
     let nair = NairModule::new(&module, &done);
 
     let mut matched = 0;
+    let (mut wrapped_seen, mut floats_seen) = (0, 0);
     let mut differ = Vec::new();
     for l in &done {
         let Some(&other) = by_name.get(&genhl_name(&l.name)) else {
@@ -87,6 +116,20 @@ fn agree(fixture: &str, classes: &[&str], at_least: usize) {
         if ka != kb {
             differ.push(format!("{}: nAIR {ka:?}, genhl {kb:?}", l.name));
         }
+        let (wa, wb) = (wrapped(&nair, sa), wrapped(&genhl, sb));
+        if wa != wb {
+            differ.push(format!("{}: wrapped types nAIR {wa:?}, genhl {wb:?}", l.name));
+        }
+        let (fa, fb) = (floats(&nair, l.findex as usize), floats(&genhl, other));
+        if fa != fb {
+            differ.push(format!("{}: float constants nAIR {fa:?}, genhl {fb:?}", l.name));
+        }
+        if wa.iter().any(Option::is_some) {
+            wrapped_seen += 1;
+        }
+        if !fa.is_empty() {
+            floats_seen += 1;
+        }
     }
     assert!(differ.is_empty(), "{fixture}:\n{}", differ.join("\n"));
     assert!(
@@ -94,11 +137,13 @@ fn agree(fixture: &str, classes: &[&str], at_least: usize) {
         "{fixture}: only {matched} of {} lowered functions matched a genhl function",
         done.len()
     );
+    (matched, wrapped_seen, floats_seen)
 }
 
 #[test]
 fn numeric_functions_have_the_same_kinds_either_way() {
-    agree("tests/lower", &["Main"], 5);
+    let (matched, _, floats) = agree("tests/lower", &["Main"], 5);
+    assert!(matched == 0 || floats > 0, "no function compared float constants");
 }
 
 #[test]
@@ -108,5 +153,6 @@ fn methods_and_constructors_have_the_same_kinds_either_way() {
 
 #[test]
 fn object_arguments_and_results_have_the_same_kinds_either_way() {
-    agree("tests/nulls", &["Main", "Node", "Tree"], 5);
+    let (matched, wrapped, _) = agree("tests/nulls", &["Main", "Node", "Tree"], 5);
+    assert!(matched == 0 || wrapped > 0, "no function compared a Null<T> parameter");
 }

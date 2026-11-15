@@ -1,6 +1,8 @@
 typedef AshTastNativeApi = {
 	function countOnGenerate():Void;
 	function exportOnGenerate(path:String):Void;
+	function exportAfterFilters(path:String):Void;
+	function countAfterFilters():Void;
 }
 
 class AshTastNative {
@@ -18,6 +20,13 @@ class AshTastNative {
 	/** The native counterpart of `ash.tast.Export.init`: writes the TAST file at `path`. */
 	static public function export(path:String):Void
 		plugin().exportOnGenerate(path);
+
+	/** Writes the program as the HashLink generator receives it: after DCE and every type filter. */
+	static public function exportFinal(path:String):Void
+		plugin().exportAfterFilters(path);
+
+	static public function countFinal():Void
+		plugin().countAfterFilters();
 
 	static function pluginPath():String {
 		var file = (function(?p:haxe.PosInfos) return p.fileName)();

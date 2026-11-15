@@ -101,6 +101,47 @@ fn the_native_writer_exports_the_same_program() {
     assert_eq!(entry(&one), entry(&two));
 }
 
+/// `exportFinal` writes the program after DCE and the type filters, which is what the HashLink
+/// generator receives: smaller than the `onGenerate` export, with field initializers already
+/// moved into constructors.
+#[test]
+fn the_final_export_is_the_program_after_dce() {
+    let Some(haxe) = native_haxe() else {
+        eprintln!("skipped: set ASH_HAXE_NATIVE to a haxe with the ash_tast plugin built");
+        return;
+    };
+    let dir = std::env::temp_dir();
+    let id = std::process::id();
+    let (early, late) = (
+        dir.join(format!("ash_tast_native_final_{id}_early.tast")),
+        dir.join(format!("ash_tast_native_final_{id}_late.tast")),
+    );
+    let dce = ["-dce", "full"];
+    export(&haxe, "AshTastNative.export(\"OUT\")", &early, &dce);
+    export(&haxe, "AshTastNative.exportFinal(\"OUT\")", &late, &dce);
+    let (a, b) = (
+        std::fs::read(&early).unwrap(),
+        std::fs::read(&late).unwrap(),
+    );
+    let _ = std::fs::remove_file(&early);
+    let _ = std::fs::remove_file(&late);
+    let (one, two) = (Tast::parse(&a).unwrap(), Tast::parse(&b).unwrap());
+
+    assert!(two.entry().is_some(), "the final program has an entry");
+    assert!(
+        two.nodes().len() < one.nodes().len(),
+        "DCE removed code: {} nodes against {}",
+        two.nodes().len(),
+        one.nodes().len()
+    );
+    let (early_fns, late_fns) = (
+        Dumper::new(&Stack::parse(&[&a]).unwrap()).own_functions(0),
+        Dumper::new(&Stack::parse(&[&b]).unwrap()).own_functions(0),
+    );
+    assert!(late_fns.len() < early_fns.len());
+    assert!(late_fns.len() > 100, "the program keeps what main reaches");
+}
+
 /// With `-D ash_tast_positions` both writers record the same positions, on the same nodes.
 #[test]
 fn the_native_writer_records_the_same_positions() {

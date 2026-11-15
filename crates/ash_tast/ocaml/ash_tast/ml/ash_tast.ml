@@ -50,6 +50,23 @@ class plugin =
 			let compiler = (EvalContext.get_ctx()).curapi in
 			compiler.on_generate (fun _ -> Tast_export.run (compiler.get_com ()) path) true;
 			vnull
+
+		(* Writes the typed program once every filter has run, DCE and the type filters included:
+		   the program the HashLink generator receives. *)
+		method export_after_filters (path : value) : value =
+			let path = EvalDecode.decode_string path in
+			let com = (EvalContext.get_ctx()).curapi.get_com () in
+			com.Common.callbacks#add_after_filters (fun () -> Tast_export.run com path);
+			vnull
+
+		method count_after_filters () : value =
+			let com = (EvalContext.get_ctx()).curapi.get_com () in
+			com.Common.callbacks#add_after_filters (fun () ->
+				let (classes, funcs, nodes, inits) = count_program com.Common.types in
+				Printf.eprintf "ash_tast(ocaml, after filters): %d classes, %d functions, %d variable initializers, %d nodes\n%!"
+					classes funcs inits nodes
+			);
+			vnull
 	end
 ;;
 
@@ -57,4 +74,6 @@ let api = new plugin in
 EvalStdLib.StdContext.register [
 	("countOnGenerate", EvalEncode.vfun0 api#count_on_generate);
 	("exportOnGenerate", EvalEncode.vfun1 api#export_on_generate);
+	("exportAfterFilters", EvalEncode.vfun1 api#export_after_filters);
+	("countAfterFilters", EvalEncode.vfun0 api#count_after_filters);
 ]

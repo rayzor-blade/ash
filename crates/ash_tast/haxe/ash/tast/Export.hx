@@ -255,11 +255,46 @@ class Export {
 				var first = fillAnon(an, id);
 				types[id * 5 + 2] = first;
 				return id;
+			case _ if (hasArguments(next)):
+				// Reserved before the arguments are read: a typedef whose expansion names the
+				// typedef again, such as `typedef C = Map<Int, {next:C}>`, finds this id.
+				var kind = switch (next) {
+					case TInst(_, _): TypeKind.CLASS;
+					case TEnum(_, _): TypeKind.ENUM;
+					case TAbstract(_, _): TypeKind.ABSTRACT;
+					default: TypeKind.FUN;
+				}
+				id = rec(types, [kind, Format.NONE, Format.NONE, 0, 0]);
+				typeIds.set(key, id);
+				if (ps.length == 0) typedefIds.set(d.toString(), id);
+				var def:Int;
+				var argTypes:Array<Type>;
+				switch (next) {
+					case TInst(c, xs): def = classId(c); argTypes = xs;
+					case TEnum(e, xs): def = enumId(e); argTypes = xs;
+					case TAbstract(a, xs): def = abstractId(a); argTypes = xs;
+					case TFun(fargs, ret): def = typeId(ret); argTypes = [for (x in fargs) x.t];
+					default: def = Format.NONE; argTypes = [];
+				}
+				var a = argList(paramIds(argTypes));
+				types[id * 5 + 2] = def;
+				types[id * 5 + 3] = a[0];
+				types[id * 5 + 4] = a[1];
+				return id;
 			default:
 				id = typeId(next);
 				typeIds.set(key, id);
 				if (ps.length == 0) typedefIds.set(d.toString(), id);
 				return id;
+		}
+	}
+
+	/** A type whose record lists argument types: a class, enum or abstract with parameters, or a function. */
+	function hasArguments(t:Type):Bool {
+		return switch (t) {
+			case TInst(_, ps) | TEnum(_, ps) | TAbstract(_, ps): ps.length > 0;
+			case TFun(_, _): true;
+			default: false;
 		}
 	}
 

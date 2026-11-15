@@ -317,6 +317,30 @@ and typedef_id_at st t d ps =
 			let first = fill_anon st an id in
 			Dyn.set st.types (id * 5 + 2) first;
 			id
+		| TInst (_, _ :: _) | TEnum (_, _ :: _) | TAbstract (_, _ :: _) | TFun _ ->
+			(* Reserved before the arguments are read: a typedef whose expansion names the
+			   typedef again, such as `typedef C = Map<Int, {next:C}>`, finds this id. *)
+			let kind = match next with
+				| TInst _ -> F.Type_kind.class_
+				| TEnum _ -> F.Type_kind.enum
+				| TAbstract _ -> F.Type_kind.abstract
+				| _ -> F.Type_kind.fun_
+			in
+			let id = new_rec st.types 5 [kind; none; none; 0; 0] in
+			Hashtbl.replace st.type_ids key id;
+			if ps = [] then Hashtbl.replace st.typedef_ids d.t_path id;
+			let def, arg_types = match next with
+				| TInst (c, ps2) -> (class_id st c, ps2)
+				| TEnum (e, ps2) -> (enum_id st e, ps2)
+				| TAbstract (a, ps2) -> (abstract_id st a, ps2)
+				| TFun (args2, ret) -> (type_id st ret, List.map (fun (_, _, t) -> t) args2)
+				| _ -> (none, [])
+			in
+			let first, count = arg_list st (param_ids st arg_types) in
+			Dyn.set st.types (id * 5 + 2) def;
+			Dyn.set st.types (id * 5 + 3) first;
+			Dyn.set st.types (id * 5 + 4) count;
+			id
 		| _ ->
 			let id = type_id st next in
 			Hashtbl.replace st.type_ids key id;

@@ -23,4 +23,4 @@ grep 'ash_tast\] native' "$TMP/native.log" || true
 
 ALLOWS=()
 for f in $ALLOW; do ALLOWS+=("--allow=$f"); done
-"$DUMP" --against="$TMP/haxe.tast" "${ALLOWS[@]}" "$TMP/native.tast" | grep -E 'against|same|differs|missing|extra'
+"$DUMP" --against="$TMP/haxe.tast" "${ALLOWS[@]}" "$TMP/native.tast" | grep -v -E '^(valid|layer |entry )'

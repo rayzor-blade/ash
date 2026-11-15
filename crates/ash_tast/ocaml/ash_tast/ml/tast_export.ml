@@ -32,7 +32,7 @@ type tkey =
 	| KEnum of path * int list
 	| KAbstract of path * int list
 	| KFun of int list * int * int
-	| KAnon of (string * int) list * int * int
+	| KAnon of (string * int * int) list * int * int
 	| KTypedef of path * int list
 
 type st = {
@@ -69,6 +69,9 @@ type st = {
 	type_ids : (tkey, int) Hashtbl.t;
 	mutable dyn_id : int;
 	class_ids : (path, int) Hashtbl.t;
+	(* Type parameters: two generic methods can each have a `T`, with the same path. *)
+	tparam_ids : (path, (tclass * int) list) Hashtbl.t;
+	tparam_type_ids : (int, int) Hashtbl.t;
 	class_types : tclass Dyn.t;
 	class_filled : bool Dyn.t;
 	field_ids : (path * bool * string, int) Hashtbl.t;
@@ -117,6 +120,8 @@ let create com = {
 	type_ids = Hashtbl.create 4096;
 	dyn_id = -1;
 	class_ids = Hashtbl.create 4096;
+	tparam_ids = Hashtbl.create 256;
+	tparam_type_ids = Hashtbl.create 256;
 	class_types = Dyn.create null_class;
 	class_filled = Dyn.create false;
 	field_ids = Hashtbl.create 16384;
@@ -205,24 +210,45 @@ let arg_list st ids =
 	List.iter (Dyn.push st.type_args) ids;
 	(first, List.length ids)
 
+(* A structure field declared as a method (`typedef T = {function f():Void}`). *)
+let anon_flag cf =
+	match cf.cf_kind with
+	| Method (MethNormal | MethInline) -> F.Field_flag.method_
+	| _ -> 0
+
 (* Anonymous structure fields in the order the macro API lists them: by name. *)
 let anon_field_list an =
 	let l = ref [] in
 	PMap.iter (fun _ cf -> l := cf :: !l) an.a_fields;
 	List.rev !l
 
+let is_type_param c = match c.cl_kind with KTypeParameter _ -> true | _ -> false
+
+let fresh_class st c =
+	let id = Dyn.length st.classes / 9 in
+	for _ = 1 to 7 do Dyn.push st.classes 0 done;
+	Dyn.push st.classes none;
+	Dyn.push st.classes none;
+	Dyn.push st.class_types c;
+	Dyn.push st.class_filled false;
+	id
+
 let class_id st c =
-	match Hashtbl.find_opt st.class_ids c.cl_path with
-	| Some id -> id
-	| None ->
-		let id = Dyn.length st.classes / 9 in
-		for _ = 1 to 7 do Dyn.push st.classes 0 done;
-		Dyn.push st.classes none;
-		Dyn.push st.classes none;
-		Hashtbl.add st.class_ids c.cl_path id;
-		Dyn.push st.class_types c;
-		Dyn.push st.class_filled false;
-		id
+	if is_type_param c then begin
+		let bucket = try Hashtbl.find st.tparam_ids c.cl_path with Not_found -> [] in
+		match List.assq_opt c bucket with
+		| Some id -> id
+		| None ->
+			let id = fresh_class st c in
+			Hashtbl.replace st.tparam_ids c.cl_path ((c, id) :: bucket);
+			id
+	end else
+		match Hashtbl.find_opt st.class_ids c.cl_path with
+		| Some id -> id
+		| None ->
+			let id = fresh_class st c in
+			Hashtbl.add st.class_ids c.cl_path id;
+			id
 
 let dynamic_type st =
 	if st.dyn_id < 0 then st.dyn_id <- new_rec st.types 8 [F.Type_kind.dynamic; none; none; 0; 0; 0; 0; none];
@@ -230,6 +256,14 @@ let dynamic_type st =
 
 let rec type_id st t =
 	match t with
+	| TInst (c, []) when is_type_param c ->
+		let cid = class_id st c in
+		(match Hashtbl.find_opt st.tparam_type_ids cid with
+		| Some id -> id
+		| None ->
+			let id = new_rec st.types 8 [F.Type_kind.class_; none; cid; 0; 0; 0; 0; none] in
+			Hashtbl.replace st.tparam_type_ids cid id;
+			id)
 	| TInst (c, []) ->
 		(match Hashtbl.find_opt st.inst_ids c.cl_path with
 		| Some id -> id
@@ -333,7 +367,7 @@ and slow_type_id st t =
 		let fs = anon_field_list an in
 		let ids = List.map (fun cf -> type_id st cf.cf_type) fs in
 		let status, owner = anon_owner st an in
-		let key = KAnon (List.map2 (fun cf id -> (cf.cf_name, id)) fs ids, status, owner) in
+		let key = KAnon (List.map2 (fun cf id -> (cf.cf_name, id, anon_flag cf)) fs ids, status, owner) in
 		(match Hashtbl.find_opt st.type_ids key with
 		| Some id -> id
 		| None ->
@@ -341,7 +375,7 @@ and slow_type_id st t =
 			List.iter2 (fun cf id ->
 				Dyn.push st.anon_fields (str st cf.cf_name);
 				Dyn.push st.anon_fields id;
-				Dyn.push st.anon_fields 0
+				Dyn.push st.anon_fields (anon_flag cf)
 			) fs ids;
 			let id = new_rec st.types 8 [F.Type_kind.anon; none; first; owner; List.length fs; 0; status; none] in
 			Hashtbl.replace st.type_ids key id;
@@ -373,7 +407,13 @@ and typedef_id_at st t d ps =
 	match Hashtbl.find_opt st.type_ids key with
 	| Some id -> id
 	| None ->
-		let next = follow_once t in
+		(* A typedef's target can still be a lazy or bound type; the branches below need its shape. *)
+		let rec force t = match t with
+			| TLazy f -> force (lazy_type f)
+			| TMono { tm_type = Some inner } -> force inner
+			| _ -> t
+		in
+		let next = force (follow_once t) in
 		(match next with
 		| TAnon an ->
 			(* Given its id before its fields are read, so a structure that names itself finds it. *)
@@ -423,7 +463,7 @@ and fill_anon st an id =
 	List.iter (fun cf ->
 		Dyn.push st.anon_fields (str st cf.cf_name);
 		Dyn.push st.anon_fields 0;
-		Dyn.push st.anon_fields 0
+		Dyn.push st.anon_fields (anon_flag cf)
 	) fs;
 	Dyn.set st.types (id * 8 + 4) (List.length fs);
 	List.iteri (fun i cf -> Dyn.set st.anon_fields ((first + i) * 3 + 1) (type_id st cf.cf_type)) fs;
@@ -518,6 +558,7 @@ let field_flags cf is_static =
 	let flags = ref (if is_static then F.Field_flag.static else 0) in
 	if has_class_field_flag cf CfPublic then flags := !flags lor F.Field_flag.public;
 	if has_class_field_flag cf CfFinal then flags := !flags lor F.Field_flag.final;
+	if has_class_field_flag cf CfOverride then flags := !flags lor F.Field_flag.override;
 	(match cf.cf_kind with
 	| Method m ->
 		flags := !flags lor F.Field_flag.method_;

@@ -308,6 +308,8 @@ record! {
     AnonFieldRec {
         name: U32,
         ty: U32,
+        /// [`field_flag::METHOD`] when the structure declares it as a method, which a back end
+        /// stores as a method pointer, not a function value. Zero otherwise.
         flags: U32,
     }
 }

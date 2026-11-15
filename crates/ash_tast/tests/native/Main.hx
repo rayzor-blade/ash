@@ -29,6 +29,22 @@ abstract Box<T>(Array<T>) {
 		this = items;
 }
 
+// An override gives the method a virtual slot; two generic methods each have a `T`; a structure
+// can contain itself through a typedef and reach a generic function.
+class Base {
+	public function new() {}
+
+	public function name():String
+		return "base";
+}
+
+class Derived extends Base {
+	override public function name():String
+		return "derived";
+}
+
+typedef Rec = {field:Rec}
+
 @:ash.pure("a", -1, 2.5, true, null, foo.bar)
 @author("native")
 class Main {
@@ -50,10 +66,20 @@ class Main {
 	static function constrained<T:Shape>(t:T):Float
 		return t.area();
 
+	static function strings<T:String>(a:Array<T>):Int
+		return a.length;
+
+	static function floats<T:Float>(a:Array<T>):Int
+		return a.length;
+
+	@:generic static function gen<T>(v:T) {}
+
 	static function main() {
 		var @:ash.keep local = 1;
 		counter += @:ash.unchecked(1, 2) opt(local);
 		trace(constrained(new Point(counter)) + replaceable());
 		trace(haxe.Resource.getString("hello"));
+		trace(strings(["x"]) + floats([1.5]) + new Derived().name().length);
+		gen((null:Rec));
 	}
 }

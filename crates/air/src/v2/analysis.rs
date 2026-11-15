@@ -1,6 +1,7 @@
 //! Analyses the optimization passes run on: natural loops with a nesting
 //! forest, and the HL alias-class model derived from the typed values.
 
+use super::facts::{CallSummary, Facts};
 use super::ir::*;
 use super::lower::build_domtree_from_succs;
 use crate::dominance::DominatorTree;
@@ -291,6 +292,7 @@ impl LoopForest {
 /// * `Cell` — one class per pinned-register cell.
 /// * `Any` — unknown storage: calls, `Setref` through a taken reference,
 ///   `Unref`, inline asm, region markers. Aliases everything.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AliasClass {
     ObjField { ty: TypeRef, field: usize },
@@ -401,14 +403,31 @@ pub fn write_class(ins: &Instr) -> Option<AliasClass> {
     }
 }
 
+/// What a direct call may write, when the function carries a summary for it.
+fn summarized_call<'a>(ins: &Instr, facts: &'a Facts) -> Option<&'a CallSummary> {
+    match ins {
+        Instr::Call { fun, .. } => facts.call(*fun),
+        _ => None,
+    }
+}
+
 /// True when the instruction is a barrier for every load: it may write any
 /// storage at all.
-pub fn clobbers_all(ins: &Instr) -> bool {
-    ins.effect() == Effect::ClobberAll || write_class(ins) == Some(AliasClass::Any)
+pub fn clobbers_all(ins: &Instr, facts: &Facts) -> bool {
+    match summarized_call(ins, facts) {
+        Some(s) => s.writes.is_any(),
+        None => ins.effect() == Effect::ClobberAll || write_class(ins) == Some(AliasClass::Any),
+    }
 }
 
 /// True when `ins` may write storage that a load of `class` reads.
-pub fn writes_may_alias(ins: &Instr, class: AliasClass) -> bool {
+///
+/// A summarized call is taken to leave cells alone only in the summary, never here: a cell's
+/// address can be passed to the callee, and a store through it is not named by any class.
+pub fn writes_may_alias(ins: &Instr, class: AliasClass, facts: &Facts) -> bool {
+    if let Some(s) = summarized_call(ins, facts) {
+        return matches!(class, AliasClass::Cell(_)) || s.writes.may_alias(class);
+    }
     match write_class(ins) {
         Some(w) => w.may_alias(class),
         None => false,

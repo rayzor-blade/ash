@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use air::v2::facts::{self, CallSummary};
 use air::v2::ir::{Function, Instr, TypeRef};
 use air::v2::module::{CalleeBody, ModuleInfo, NativeImport};
 use air::v2::passes::{OptLevel, PassManager, PassOptions, PassReport};
@@ -18,6 +19,7 @@ pub struct NairModule {
     types: Vec<HlType>,
     natives: HashMap<usize, NativeImport>,
     callees: HashMap<usize, Function>,
+    summaries: HashMap<usize, CallSummary>,
 }
 
 impl NairModule {
@@ -40,20 +42,31 @@ impl NairModule {
                 );
             }
         }
+        let mut callees: HashMap<usize, Function> = lowered
+            .iter()
+            .map(|l| {
+                (
+                    l.findex as usize,
+                    l.function.clone().with_findex(l.findex as usize),
+                )
+            })
+            .collect();
+        let summaries = facts::summarize(callees.iter().map(|(i, f)| (*i, f)));
+        for f in callees.values_mut() {
+            facts::attach(f, &summaries);
+        }
         NairModule {
             ints: module.ints.clone(),
             types,
             natives,
-            callees: lowered
-                .iter()
-                .map(|l| {
-                    (
-                        l.findex as usize,
-                        l.function.clone().with_findex(l.findex as usize),
-                    )
-                })
-                .collect(),
+            callees,
+            summaries,
         }
+    }
+
+    /// What a call to the function may write, from the bodies lowered so far.
+    pub fn summary(&self, findex: usize) -> Option<&CallSummary> {
+        self.summaries.get(&findex)
     }
 
     fn ty(&self, t: TypeRef) -> Option<&HlType> {
@@ -112,7 +125,7 @@ pub fn instruction_count(f: &Function) -> usize {
     f.blocks.iter().map(|b| b.instrs.len() + 1).sum()
 }
 
-/// Runs the AIR passes over `f` at `level`.
+/// Runs the AIR passes over `f` at `level`, with the module's call summaries attached to it.
 ///
 /// `fma` forms fused multiply-adds, which change the rounding of float arithmetic on purpose;
 /// turn it off for results that must match unfused arithmetic bit for bit.
@@ -122,6 +135,7 @@ pub fn optimize(
     level: OptLevel,
     fma: bool,
 ) -> Result<PassReport, String> {
+    facts::attach(f, &module.summaries);
     let opts = PassOptions {
         fma,
         verify_each: true,

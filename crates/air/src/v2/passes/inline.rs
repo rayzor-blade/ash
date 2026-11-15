@@ -653,6 +653,8 @@ fn inline_at(f: &mut Function, b: BlockId, k: usize, g: &Function) -> Result<()>
 
     // The caller now references whatever the callee did.
     let _ = f.natives.merge(&g.natives)?;
+    // The copied calls keep the summaries the callee had for them.
+    f.facts.merge(&g.facts);
     if !g.float_types.is_empty() {
         f.float_types.extend_from_slice(&g.float_types);
         f.float_types.sort_unstable();

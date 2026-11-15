@@ -3,8 +3,10 @@
 //! Terms. The TAST is the input: what the Haxe compiler knows. nAIR is AIR v2 extended with what
 //! the TAST adds and the bytecode never had (call effects, constructor shape, immutable fields,
 //! non-null, exact receivers, ranges, specializations), so that the AIR passes can use it. This
-//! crate is the lowering from one to the other. What it emits today is plain AIR v2 with none of
-//! that enrichment: the slots for it are not in the `air` crate yet, so it is not nAIR yet.
+//! crate is the lowering from one to the other. So far one kind of enrichment exists: what a
+//! direct call may write (`air::v2::facts`), which [`info`] solves over the lowered functions and
+//! attaches to them. The other slots are not in the `air` crate yet, so most of nAIR is still to
+//! come.
 //!
 //! What is here: the program's type table ([`build`]: the layout of every class, enum and
 //! interface), the generic code used at concrete types ([`collect`]), and function bodies lowered

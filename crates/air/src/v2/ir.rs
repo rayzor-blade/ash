@@ -1,6 +1,7 @@
 //! Core AIR v2 data structures: typed SSA values, blocks, instructions,
 //! terminators, and the effect lattice.
 
+use super::facts::Facts;
 use super::module::NativeTable;
 use std::fmt;
 
@@ -1598,6 +1599,9 @@ pub struct Function {
     /// in [`STRIP`](super::passes::stripmine::STRIP): the induction
     /// variable to test is named here by [`stripmine`](super::passes::stripmine).
     pub strip_tests: Vec<StripTest>,
+    /// What the front end knew about the program beyond the instructions: see
+    /// [`Facts`]. Empty for a function lowered from bytecode.
+    pub facts: Facts,
 }
 
 /// One loop with an induction variable: its header, the header phi the
@@ -1653,7 +1657,8 @@ impl Function {
             + vec_bytes(&self.scalar_remainders)
             + vec_bytes(&self.inline_sites)
             + vec_bytes(&self.strip_tests)
-            + self.natives.allocated_bytes();
+            + self.natives.allocated_bytes()
+            + self.facts.allocated_bytes();
         for block in &self.blocks {
             bytes += vec_bytes(&block.phis) + vec_bytes(&block.instrs);
             for phi in &block.phis {
@@ -1730,6 +1735,7 @@ impl Function {
             inline_sites: Vec::new(),
             simd_scratch: None,
             strip_tests: Vec::new(),
+            facts: Facts::default(),
         }
     }
 

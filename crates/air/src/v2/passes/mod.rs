@@ -12,7 +12,10 @@
 //!   covered by a handler — that would delete the block's exceptional edge
 //!   and with it a predecessor of the handler.
 //! * **`ClobberAll` is a hard barrier.** No load is reused, and nothing is
-//!   hoisted, across a call, `Asm`, or region marker.
+//!   hoisted, across a call, `Asm`, or region marker. The one exception is a
+//!   direct call the function holds a [`CallSummary`](super::facts::CallSummary)
+//!   for: it blocks only the classes the summary says it may write, and never a
+//!   cell, whose address the callee may have been handed.
 //! * **Cells are memory.** `CellGet`/`CellSet`/`CellIncr`/`CellDecr` carry
 //!   [`AliasClass::Cell`](super::analysis::AliasClass::Cell) and take part in
 //!   the same aliasing rules as heap accesses.
@@ -33,7 +36,7 @@
 //! exposes null branches on newly allocated values; folding those first lets
 //! scalar replacement see that the object does not escape.
 
-use super::analysis::{AliasClass, CfgInfo, clobbers_all, write_class};
+use super::analysis::{AliasClass, CfgInfo, clobbers_all, writes_may_alias};
 use super::ir::*;
 use super::module::{ModuleInfo, NO_MODULE_INFO};
 use anyhow::{Result, bail};
@@ -862,12 +865,7 @@ pub fn clobber_free(
             continue;
         }
         for ins in &blk.instrs[start..end] {
-            if clobbers_all(ins) {
-                return false;
-            }
-            if let Some(w) = write_class(ins)
-                && w.may_alias(class)
-            {
+            if clobbers_all(ins, &f.facts) || writes_may_alias(ins, class, &f.facts) {
                 return false;
             }
         }

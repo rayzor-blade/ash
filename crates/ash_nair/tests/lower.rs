@@ -118,6 +118,13 @@ fn numeric_kernels_lower_verify_and_compute_what_the_source_means() {
 
     // the same kernels after the AIR passes: nothing but nAIR and the air crate is involved
     let info = NairModule::new(&module, &done);
+    // numeric kernels that call each other write no memory
+    for l in &done {
+        let s = info
+            .summary(l.findex as usize)
+            .unwrap_or_else(|| panic!("{} has a summary", l.name));
+        assert!(s.writes.is_none(), "{} writes {:?}", l.name, s.writes);
+    }
     let mut optimized = Vec::new();
     for l in &done {
         let mut f = l.function.clone().with_findex(l.findex as usize);

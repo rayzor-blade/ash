@@ -104,6 +104,7 @@
 //! itself.
 
 pub mod analysis;
+pub mod facts;
 pub mod ir;
 pub mod liveness;
 pub mod lower;
@@ -119,6 +120,7 @@ pub mod verify;
 mod tests;
 
 pub use analysis::{AliasClass, CfgInfo, LoopForest, LoopId, NaturalLoop};
+pub use facts::{CallSummary, Facts, Footprint};
 pub use ir::{
     BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, InlineSite,
     Instr, MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,

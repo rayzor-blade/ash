@@ -32,7 +32,7 @@ clap = { workspace = true }
 
 # Both deps below serve only the unix crash-handler complex in main.rs
 # (sigaction/SA_SIGINFO + the frame walk), which is #[cfg(unix)] as a unit;
-# Windows runs without a crash handler for now (docs/windows-port.md).
+# Windows runs without a crash handler for now (docs/internals/windows-port.md).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 ash_std = { path = "../../std" }

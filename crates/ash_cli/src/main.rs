@@ -437,7 +437,7 @@ fn main() {
     // it installs as one unit on unix only. Windows runs without a crash
     // handler for now: the counterpart is an SEH/vectored exception filter —
     // a different architecture, not a per-line substitution — tracked in
-    // docs/windows-port.md. An access violation there dies with the OS
+    // docs/internals/windows-port.md. An access violation there dies with the OS
     // default (exit code 0xC0000005), exactly as any unhandled fault does.
     #[cfg(unix)]
     {

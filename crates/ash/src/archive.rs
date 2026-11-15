@@ -76,6 +76,7 @@ pub fn defined_symbols(archives: &[PathBuf]) -> HashSet<String> {
 /// The function names the wasm objects and archives define, for a primitive the program can
 /// call by its symbol. A file that is not readable defines none; the link says so when it comes
 /// to it.
+#[cfg(feature = "llvm")]
 pub fn defined_wasm_functions(paths: &[PathBuf]) -> HashSet<String> {
     let mut names = HashSet::new();
     for path in paths {
@@ -91,6 +92,12 @@ pub fn defined_wasm_functions(paths: &[PathBuf]) -> HashSet<String> {
         }
     }
     names
+}
+
+/// Without the `llvm` feature there is no wasm build, so no library defines anything for one.
+#[cfg(not(feature = "llvm"))]
+pub fn defined_wasm_functions(_paths: &[PathBuf]) -> HashSet<String> {
+    HashSet::new()
 }
 
 /// Whether a program's native is one the linked libraries define as `hlp_<name>`, so the program

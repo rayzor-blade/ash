@@ -676,3 +676,23 @@ fn a_real_library_links_against_the_real_runtime() {
         .expect("the linked module validates");
     eprintln!("linked {} bytes", module.len());
 }
+
+#[test]
+fn a_dropped_definition_can_be_looked_up_by_the_names_the_program_calls() {
+    let program = object("program.o", &[def("main", Body::Call("needed"))]);
+    let runtime = object("runtime.o", &[def("shared", Body::Const(1))]);
+    let member = object(
+        "needed.o",
+        &[def("needed", Body::Call("shared")), def("shared", Body::Const(2))],
+    );
+    let pulled = pull(
+        &[program, runtime],
+        vec![Archive::from_objects("lib.a", vec![member])],
+    )
+    .unwrap();
+    let hit = pulled.shadowed_named(&["shared".to_string(), "other".to_string()]);
+    assert_eq!(hit.len(), 1);
+    assert_eq!((hit[0].symbol.as_str(), hit[0].kept.as_str()), ("shared", "runtime.o"));
+    assert!(pulled.shadowed_named(&["other".to_string()]).is_empty());
+    assert!(pulled.shadowed_named(&[]).is_empty());
+}

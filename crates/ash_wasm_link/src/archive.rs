@@ -142,6 +142,18 @@ pub struct Pulled {
     pub stubbed: Vec<String>,
 }
 
+impl Pulled {
+    /// The dropped definitions whose symbol is one of `names`: functions the program calls by
+    /// name that a member defined and something already linked defined too. The program's call
+    /// reaches the winner, which is a different function when the two are unrelated primitives.
+    pub fn shadowed_named(&self, names: &[String]) -> Vec<&Shadowed> {
+        self.shadowed
+            .iter()
+            .filter(|s| names.iter().any(|n| *n == s.symbol))
+            .collect()
+    }
+}
+
 type Key = (Kind, String);
 
 /// The global symbols an object defines.

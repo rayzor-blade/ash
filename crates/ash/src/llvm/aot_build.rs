@@ -520,7 +520,8 @@ fn emit_wasm(
         eprintln!("[aot] optimization: air={:?}", crate::air_pipeline::default_level());
     }
     let began = std::time::Instant::now();
-    let bytes = crate::wasm_program::build(file, triple, polls, shadow, allow_refused, host, quiet)?;
+    let (bytes, library_primitives) =
+        crate::wasm_program::build(file, triple, polls, shadow, allow_refused, host, quiet)?;
     crate::air_disk_cache::stage("direct_program", began.elapsed());
     if profiled && !quiet {
         let loaded = crate::callsite_profile::aot_profile_size();
@@ -581,7 +582,7 @@ fn emit_wasm(
         abi_version,
         wasm_fibers,
         quiet,
-        &[],
+        &library_primitives,
     );
     if linked.is_ok() {
         let _ = std::fs::remove_file(&object);

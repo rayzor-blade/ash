@@ -416,14 +416,15 @@ pub struct Host<'a> {
     pub object_tails: &'a [(String, usize)],
     pub object_drops: &'a [String],
     /// The functions the native libraries and objects the program links define. A library
-    /// primitive whose `hlp_<name>` is among them is called by that symbol, as a runtime native
-    /// is, instead of being looked up in a library the host opens.
+    /// primitive whose `hlp_<name>` entry is among them is resolved through that entry at
+    /// start-up, instead of being looked up in a library the host opens.
     pub library_symbols: Option<&'a std::collections::HashSet<String>>,
 }
 
-/// Build `path` for wasm32 as one object. A function that cannot be emitted
-/// fails the build, or, with `allow_refused`, becomes a body that raises when
-/// it is called.
+/// Build `path` for wasm32 as one object, and name the `hlp_<name>` entries it
+/// calls in the libraries it links. A function that cannot be emitted fails the
+/// build, or, with `allow_refused`, becomes a body that raises when it is
+/// called.
 pub fn build(
     path: &std::path::Path,
     triple: &str,
@@ -432,7 +433,7 @@ pub fn build(
     allow_refused: bool,
     host: &Host,
     quiet: bool,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Vec<String>)> {
     crate::native_lib::choose_std_linkage(path);
     crate::native_lib::init_std_library()?;
     let abi = crate::target_abi::TargetAbi::for_triple_str(triple)?;
@@ -646,8 +647,14 @@ pub fn build(
             },
         }
     };
+    // The primitives the program calls through a library's own `hlp_<name>` entry.
+    let library_primitives: Vec<String> = slots
+        .values()
+        .filter(|(_, prim)| crate::archive::defines_native(host.library_symbols, prim))
+        .map(|(_, prim)| format!("hlp_{}", prim.trim_start_matches("hlp_")))
+        .collect();
     image.finish(&slots, host.library_symbols, barriers)?;
-    Ok(obj.finish())
+    Ok((obj.finish(), library_primitives))
 }
 
 impl Image<'_> {

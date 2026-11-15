@@ -738,6 +738,7 @@ fn link_wasm_module(
     runtime: Option<&Path>,
     fibers: bool,
     quiet: bool,
+    library_primitives: &[String],
 ) -> Result<()> {
     let began = std::time::Instant::now();
     // A program that names an HDLL is not refused. A library shipped as a
@@ -784,6 +785,19 @@ fn link_wasm_module(
     if !archives.is_empty() {
         let sizes: Vec<(String, usize)> = archives.iter().map(|a| (a.name.clone(), a.len())).collect();
         let pulled = ash_wasm_link::pull(&inputs, archives)?;
+        // A link has one namespace. A primitive the program calls through a library's
+        // `hlp_<name>` entry would reach the other definition if one won.
+        let clashes = pulled.shadowed_named(library_primitives);
+        if !clashes.is_empty() {
+            let list: Vec<String> = clashes
+                .iter()
+                .map(|c| format!("{} (defined in {} and in {})", c.symbol, c.member, c.kept))
+                .collect();
+            bail!(
+                "the program binds primitives to a library whose entries are also defined elsewhere in the link, so each call would reach the other definition: {}. Rename the primitives in the library.",
+                list.join(", ")
+            );
+        }
         linked_members = !pulled.objects.is_empty();
         if !quiet {
             for ((name, total), taken) in sizes.iter().zip(&pulled.taken) {
@@ -935,7 +949,16 @@ pub fn link_executable(
         bail!("nothing to link");
     }
     if is_wasm_triple(triple) {
-        return link_wasm_module(objects, out, triple, kind, runtime, wasm_fibers, quiet);
+        return link_wasm_module(
+            objects,
+            out,
+            triple,
+            kind,
+            runtime,
+            wasm_fibers,
+            quiet,
+            native_symbols,
+        );
     }
     let os = target_os(triple)?;
     let cross = cross_target(triple);

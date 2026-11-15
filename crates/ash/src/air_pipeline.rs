@@ -39,9 +39,6 @@ use air::v2::{
 };
 
 use crate::bytecode::DecodedBytecode;
-use crate::hl::{
-    hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HUI8, hl_type_kind_HUI16,
-};
 use crate::types::HLFunction;
 
 // Re-exported so callers (ash_cli) can drive the pipeline without taking their
@@ -305,25 +302,18 @@ impl<'b> ModuleInfo for AshModule<'b> {
             .map(|n| n as u32)
     }
 
-    fn is_float(&self, ty: TypeRef) -> bool {
-        self.bc
-            .types
-            .get(ty.0 as usize)
-            .is_some_and(|t| t.kind == hl_type_kind_HF32 || t.kind == hl_type_kind_HF64)
+    fn type_kind(&self, ty: TypeRef) -> Option<air::v2::TypeKind> {
+        crate::type_kind::type_kind(self.bc.types.get(ty.0 as usize)?.kind)
     }
 
-    fn value_is_i32(&self, ty: TypeRef) -> bool {
-        self.bc
-            .types
-            .get(ty.0 as usize)
-            .is_some_and(|t| t.kind == hl_type_kind_HI32)
-    }
-
-    fn value_is_small_uint(&self, ty: TypeRef) -> bool {
-        self.bc
-            .types
-            .get(ty.0 as usize)
-            .is_some_and(|t| t.kind == hl_type_kind_HUI8 || t.kind == hl_type_kind_HUI16)
+    fn fun_sig(&self, findex: usize) -> Option<air::v2::FunSig> {
+        let ty = match self.function(findex) {
+            Some(f) => f.type_.0,
+            None => self.bc.natives[*self.native_at.get(&findex)?].type_.0,
+        };
+        self.bc.types.get(ty)?.fun.as_ref()?;
+        let (args, ret) = self.signature(ty);
+        Some(air::v2::FunSig { args, ret })
     }
 
     fn intrinsic_of(&self, findex: usize) -> Option<air::v2::ir::IntrinsicKind> {
@@ -429,20 +419,6 @@ impl air::v2::tree_fusion::TreeModule for AshModule<'_> {
         let f = self.function(findex)?;
         self.bc.types.get(f.type_.0)?.fun.as_ref()?;
         Some(AshModule::signature(self, f.type_.0))
-    }
-
-    fn is_i32(&self, ty: TypeRef) -> bool {
-        self.bc
-            .types
-            .get(ty.0 as usize)
-            .is_some_and(|t| t.kind == crate::hl::hl_type_kind_HI32)
-    }
-
-    fn is_void(&self, ty: TypeRef) -> bool {
-        self.bc
-            .types
-            .get(ty.0 as usize)
-            .is_some_and(|t| t.kind == crate::hl::hl_type_kind_HVOID)
     }
 
     fn plain_fields(&self, ty: TypeRef) -> Option<Vec<TypeRef>> {

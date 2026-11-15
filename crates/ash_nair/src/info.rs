@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use air::v2::facts::{self, CallSummary, Summaries};
 use air::v2::ir::{Function, Instr, TypeRef};
-use air::v2::module::{CalleeBody, ModuleInfo, NativeImport};
+use air::v2::module::{CalleeBody, FunSig, ModuleInfo, NativeImport, TypeKind};
 use air::v2::passes::{OptLevel, PassManager, PassOptions, PassReport};
 
 use crate::hl::HlType;
@@ -19,6 +19,7 @@ pub struct NairModule {
     types: Vec<HlType>,
     natives: HashMap<usize, NativeImport>,
     callees: HashMap<usize, Function>,
+    sigs: HashMap<usize, FunSig>,
     summaries: Summaries,
 }
 
@@ -56,11 +57,24 @@ impl NairModule {
         for f in callees.values_mut() {
             facts::attach_all(f, &summaries);
         }
+        let mut sigs = HashMap::new();
+        for l in lowered {
+            if let HlType::Fun(args, ret) = &types[l.sig] {
+                sigs.insert(
+                    l.findex as usize,
+                    FunSig {
+                        args: args.iter().map(|a| TypeRef(*a as u32)).collect(),
+                        ret: TypeRef(*ret as u32),
+                    },
+                );
+            }
+        }
         NairModule {
             ints: module.ints.clone(),
             types,
             natives,
             callees,
+            sigs,
             summaries,
         }
     }
@@ -88,16 +102,43 @@ impl ModuleInfo for NairModule {
         self.ints.len()
     }
 
-    fn is_float(&self, ty: TypeRef) -> bool {
-        matches!(self.ty(ty), Some(HlType::F32 | HlType::F64))
+    fn type_kind(&self, ty: TypeRef) -> Option<TypeKind> {
+        Some(match self.ty(ty)? {
+            HlType::Void => TypeKind::Void,
+            HlType::UI8 => TypeKind::UI8,
+            HlType::UI16 => TypeKind::UI16,
+            HlType::I32 => TypeKind::I32,
+            HlType::I64 => TypeKind::I64,
+            HlType::F32 => TypeKind::F32,
+            HlType::F64 => TypeKind::F64,
+            HlType::Bool => TypeKind::Bool,
+            HlType::Bytes => TypeKind::Bytes,
+            HlType::Dyn => TypeKind::Dyn,
+            HlType::Array => TypeKind::Array,
+            HlType::Type => TypeKind::Type,
+            HlType::DynObj => TypeKind::DynObj,
+            HlType::Fun(..) => TypeKind::Fun,
+            HlType::Method(..) => TypeKind::Method,
+            HlType::Obj(_) => TypeKind::Obj,
+            HlType::Struct(_) => TypeKind::Struct,
+            HlType::Enum(_) => TypeKind::Enum,
+            HlType::Virtual(_) => TypeKind::Virtual,
+            HlType::Ref(_) => TypeKind::Ref,
+            HlType::Null(_) => TypeKind::Null,
+            HlType::Packed(_) => TypeKind::Packed,
+            HlType::Abstract(_) => TypeKind::Abstract,
+        })
     }
 
-    fn value_is_i32(&self, ty: TypeRef) -> bool {
-        matches!(self.ty(ty), Some(HlType::I32))
-    }
-
-    fn value_is_small_uint(&self, ty: TypeRef) -> bool {
-        matches!(self.ty(ty), Some(HlType::UI8 | HlType::UI16))
+    fn fun_sig(&self, findex: usize) -> Option<FunSig> {
+        if let Some(sig) = self.sigs.get(&findex) {
+            return Some(sig.clone());
+        }
+        let n = self.natives.get(&findex)?;
+        Some(FunSig {
+            args: n.args.clone(),
+            ret: n.ret,
+        })
     }
 
     fn type_size(&self, ty: TypeRef) -> Option<u32> {

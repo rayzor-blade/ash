@@ -14,7 +14,7 @@
 //! structural proof. The embedder owns registration, rooting and safepoints.
 
 use super::ir::*;
-use super::module::ModuleInfo;
+use super::module::{ModuleInfo, TypeKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod fuse;
@@ -28,8 +28,12 @@ pub trait TreeModule: ModuleInfo {
         self.callee(function)
     }
     fn signature(&self, function: usize) -> Option<(Vec<TypeRef>, TypeRef)>;
-    fn is_i32(&self, ty: TypeRef) -> bool;
-    fn is_void(&self, ty: TypeRef) -> bool;
+    fn is_i32(&self, ty: TypeRef) -> bool {
+        self.value_is_i32(ty)
+    }
+    fn is_void(&self, ty: TypeRef) -> bool {
+        self.type_kind(ty) == Some(TypeKind::Void)
+    }
     /// Complete field layout, including inherited fields, or None. Bindings,
     /// packed fields, and other implicit initialization need separate modeling.
     fn plain_fields(&self, ty: TypeRef) -> Option<Vec<TypeRef>>;

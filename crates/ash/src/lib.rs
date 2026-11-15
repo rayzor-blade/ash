@@ -58,6 +58,7 @@ pub mod runtime_handles;
 pub mod runtime_init;
 pub mod stub_bridge;
 pub mod target_abi;
+pub mod type_kind;
 pub mod types;
 
 use hl_bindings as hl;

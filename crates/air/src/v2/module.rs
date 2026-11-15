@@ -223,6 +223,47 @@ impl CalleeBody {
     }
 }
 
+/// What a type is, in the runtime's own classification.
+///
+/// The runtime builds and reads values by these, so every front end that
+/// produces a program for it names the same set; they are HashLink's type
+/// kinds.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeKind {
+    Void,
+    UI8,
+    UI16,
+    I32,
+    I64,
+    F32,
+    F64,
+    Bool,
+    Bytes,
+    Dyn,
+    Fun,
+    Obj,
+    Array,
+    Type,
+    Ref,
+    Virtual,
+    DynObj,
+    Abstract,
+    Enum,
+    Null,
+    Method,
+    Struct,
+    Packed,
+}
+
+/// The argument and return types of a function, bytecode or native.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunSig {
+    pub args: Vec<TypeRef>,
+    pub ret: TypeRef,
+}
+
 /// The embedder's view of the bytecode module, consulted during lowering and
 /// by the inliner.
 ///
@@ -275,27 +316,40 @@ pub trait ModuleInfo {
         0
     }
 
+    /// What `ty` is. `None` -- the default -- means the embedder does not know
+    /// the type, and every question below that is answered from the kind
+    /// answers "no".
+    fn type_kind(&self, ty: TypeRef) -> Option<TypeKind> {
+        let _ = ty;
+        None
+    }
+
+    /// The argument and return types of function `findex`, bytecode or
+    /// native, when the embedder knows them.
+    fn fun_sig(&self, findex: usize) -> Option<FunSig> {
+        let _ = findex;
+        None
+    }
+
     /// True when values of `ty` are HL floats (`f32`/`f64`). Float-only
     /// rewrites — notably [`Fma`](super::ir::Instr::Fma) formation — consult
-    /// this and refuse when it is false.
+    /// this and refuse when it is false. Answered from [`type_kind`](Self::type_kind).
     fn is_float(&self, ty: TypeRef) -> bool {
-        let _ = ty;
-        false
+        matches!(self.type_kind(ty), Some(TypeKind::F32 | TypeKind::F64))
     }
 
     /// True when values of `ty` are HL `i32`. The unboxing of a nullable
-    /// integer consults this and refuses when it is false.
+    /// integer consults this and refuses when it is false. Answered from
+    /// [`type_kind`](Self::type_kind).
     fn value_is_i32(&self, ty: TypeRef) -> bool {
-        let _ = ty;
-        false
+        self.type_kind(ty) == Some(TypeKind::I32)
     }
 
     /// True when values of `ty` are unsigned 8- or 16-bit integers, which a
-    /// zero-extending `ToInt` turns into `i32` unchanged. Inert unless the
-    /// embedder says so.
+    /// zero-extending `ToInt` turns into `i32` unchanged. Answered from
+    /// [`type_kind`](Self::type_kind).
     fn value_is_small_uint(&self, ty: TypeRef) -> bool {
-        let _ = ty;
-        false
+        matches!(self.type_kind(ty), Some(TypeKind::UI8 | TypeKind::UI16))
     }
 
     /// How many bytes one value of `ty` occupies in memory.
@@ -426,8 +480,35 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     fn native(&self, findex: usize) -> Option<NativeImport> {
         (**self).native(findex)
     }
+    fn intrinsic_of(&self, findex: usize) -> Option<super::ir::IntrinsicKind> {
+        (**self).intrinsic_of(findex)
+    }
+    fn vec_intrinsic_of(&self, findex: usize) -> Option<super::ir::VecIntrinsic> {
+        (**self).vec_intrinsic_of(findex)
+    }
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        (**self).int_value(idx)
+    }
+    fn int_pool_len(&self) -> usize {
+        (**self).int_pool_len()
+    }
+    fn type_kind(&self, ty: TypeRef) -> Option<TypeKind> {
+        (**self).type_kind(ty)
+    }
+    fn fun_sig(&self, findex: usize) -> Option<FunSig> {
+        (**self).fun_sig(findex)
+    }
     fn is_float(&self, ty: TypeRef) -> bool {
         (**self).is_float(ty)
+    }
+    fn value_is_i32(&self, ty: TypeRef) -> bool {
+        (**self).value_is_i32(ty)
+    }
+    fn value_is_small_uint(&self, ty: TypeRef) -> bool {
+        (**self).value_is_small_uint(ty)
+    }
+    fn type_size(&self, ty: TypeRef) -> Option<u32> {
+        (**self).type_size(ty)
     }
     fn method_target(&self, ty: TypeRef, slot: usize) -> Option<usize> {
         (**self).method_target(ty, slot)

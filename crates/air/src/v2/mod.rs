@@ -127,7 +127,8 @@ pub use ir::{
 };
 pub use lower::{ModuleBuilder, lower, lower_with, lower_with_positions};
 pub use module::{
-    CalleeBody, ModuleInfo, ModuleTables, NO_MODULE_INFO, NativeImport, NativeTable, NoModuleInfo,
+    CalleeBody, FunSig, ModuleInfo, ModuleTables, NO_MODULE_INFO, NativeImport, NativeTable,
+    NoModuleInfo, TypeKind,
 };
 pub use passes::{OptLevel, Pass, PassManager, PassOptions, PassReport, PassStats};
 pub use serialize::{Serialized, SerializedLayout, serialize};

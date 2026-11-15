@@ -81,8 +81,9 @@ HL/C produce; those fuse different pairs.
 | `--allow-refused` | flag | emit even when a function could not be lowered; each becomes a throw |
 | `--pgo[=<PROFILE>]` | path | devirtualise from a call-site profile |
 
-Executables link on the host only; a cross build stops at `--emit-aot` and
-you link. `--pgo` reads a profile written by running the program once with
+A cross build links when the target's runtime and system libraries are
+installed (see [Native cross builds](#native-cross-builds)); without them it
+stops at `--emit-aot` and you link. `--pgo` reads a profile written by running the program once with
 `ASH_AOT_PROFILE_OUT` set; without a value it reads `<file>.prof` beside the
 bytecode. Every devirtualised call is guarded, so a stale profile costs a
 compare, never a wrong answer. The value must be attached with `=`.
@@ -125,7 +126,7 @@ Tuning flags beyond these, environment variables and the profiler are in
 release names such as `linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
 `macos-aarch64`, `windows-x86_64` and `windows-aarch64`. An explicit target
 uses a generic CPU even when it names the build machine. With no target, AOT
-uses the host CPU. This policy ends when the build finishes.
+uses the host CPU. The CPU setting is restored when the build finishes.
 
 A foreign executable requires an Ash runtime and system link libraries built
 for its target. Install `libash_std.a` (or the target shared/import library)

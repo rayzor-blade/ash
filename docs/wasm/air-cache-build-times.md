@@ -1,5 +1,9 @@
 # Ashui WASM build times and AIR reuse
 
+These measurements are from before 2026-11-12, when wasm builds went through
+LLVM. The direct backend replaced that path in `9b7d2d78`, so the LLVM stages,
+codegen levels and shards described here no longer exist for wasm.
+
 Local macOS arm64 measurements on 2026-10-28. Ashui WindowPage was compiled
 with its WASM flags and blinc_abi, xgpu and xwindow side modules staged.
 Target: `wasm32-wasip1-threads`; fibers enabled; five LLVM shards; default

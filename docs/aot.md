@@ -42,7 +42,7 @@ runtime directly.
 
 ### Build time and memory
 
-The emitter shards the program across threads. Each shard keeps a slice of
+For a native target, the emitter shards the program across threads. Each shard keeps a slice of
 the functions, reduces the rest to declarations, and runs LLVM's optimiser
 and code generator on its slice; the emitter writes the object holding the
 program's data itself. `--build` hands every object to the linker at once;
@@ -76,15 +76,13 @@ budget, and `--no-air-cache` disables persistence. `ash air-cache` inspects the
 cache; `ash air-cache --clear` clears it. A change to the compiler, target, ABI,
 profile, options or dependencies invalidates the cached entry.
 
-LLVM IR emission, optimization, code generation and linking still run on each
-build. The [Ashui measurements](wasm/air-cache-build-times.md) show their cost
-separately. See [the cache contract](debugging.md#persistent-air-cache-for-aot)
+A native build still runs LLVM IR emission, optimization, code generation and
+linking each time, and a wasm build still runs the direct emitter and the link.
+The [Ashui measurements](wasm/air-cache-build-times.md), taken when wasm builds
+still used LLVM, show the cost of those stages separately. See [the cache contract](debugging.md#persistent-air-cache-for-aot)
 for invalidation details and environment equivalents.
 
 ### Optimization options
-
-The [LLVM WASM research](wasm/llvm-build-times.md) covers source findings,
-CPU measurements of codegen, module sizes and browser validation.
 
 `-O0`, `-O1`, `-O2`, `-O3`, `-Os` and `-Oz` select LLVM IR optimization
 and its matching codegen level. The long form is `--opt-level`.
@@ -94,39 +92,37 @@ remain available independently of LLVM's settings.
 
 | Option | Controls |
 |---|---|
-| `-O`, `--opt-level 0\|1\|2\|3\|s\|z` | LLVM IR pipeline and matching codegen effort |
-| `--air-opt-level 0\|1\|2\|3` | AIR lowering/optimization configuration |
-| `--codegen-opt-level 0\|1\|2\|3` | Override machine codegen effort independently of `-O` |
+| `-O`, `--opt-level 0\|1\|2\|3\|s\|z` | LLVM IR pipeline and matching codegen effort (native targets) |
+| `--air-opt-level 0\|1\|2\|3` | AIR lowering/optimization configuration (native and wasm targets) |
+| `--codegen-opt-level 0\|1\|2\|3` | Override machine codegen effort independently of `-O` (native targets) |
 
-For a WASM preview with strong IR optimization and faster codegen:
+A wasm build is made by the direct emitter, not LLVM, so `-O` and
+`--codegen-opt-level` do not change its output; `--air-opt-level` does. The
+[LLVM WASM research](wasm/llvm-build-times.md) measured codegen levels on wasm
+builds from before the direct backend.
 
-```sh
-ash -O3 --codegen-opt-level 0 --build app.wasm \
-  --target wasm32-wasip1-threads app.hl
-```
-
-Other examples:
+Examples:
 
 ```sh
-ash -O1 --build app.wasm --target wasm32-wasip1-threads app.hl
-ash -Oz --build app.wasm --target wasm32-wasip1-threads app.hl
-ash -O0 --air-opt-level 0 --build app.wasm --target wasm32-wasip1-threads app.hl
+ash -O1 --build app app.hl
+ash -Oz --build app app.hl
+ash --air-opt-level 0 --build app.wasm --target wasm32-wasip1-threads app.hl
 ```
 
 Explicit options override the corresponding environment settings. With no
-options, the existing defaults and environment variables apply. A selected
-`-O` also overrides `ASH_AOT_CODEGEN_LEVEL` unless `--codegen-opt-level` is
-specified. Options apply to `--build` and `--emit-aot` for native AOT too.
-The settings belong to one build and are inherited by shard workers. Library
-callers can use `emit_aot_with_options` without changing existing `AotRequest`
-values or `emit_aot` calls.
+options, the defaults and environment variables apply. A selected `-O` also
+overrides `ASH_AOT_CODEGEN_LEVEL` unless `--codegen-opt-level` is specified.
+Options apply to `--build` and `--emit-aot`. The settings belong to one build
+and are inherited by shard workers. Library callers can use
+`emit_aot_with_options` without changing existing `AotRequest` values or
+`emit_aot` calls.
 
 ### Dials
 
 | variable | effect |
 |---|---|
 | `ASH_AOT_SHARDS=N` | shard count. `1` is the single-module path, and the first thing to try when a sharded build misbehaves |
-| `ASH_AOT_CODEGEN_LEVEL=0..3` | LLVM machine-codegen effort (default 3), independent of AIR and IR optimization. `0` uses the faster WASM stackification path; measure size and runtime for preview builds |
+| `ASH_AOT_CODEGEN_LEVEL=0..3` | LLVM machine-codegen effort for native builds (default 3), independent of AIR and IR optimization. A wasm build ignores it |
 | `ASH_AOT_NO_OPT=1` | skip the optimiser: fast builds, readable stacks, much slower code |
 | `ASH_AOT_DUMP_IR=<path>` | write the LLVM IR. A directory takes `module.ll`; anything else is the file. Each shard's IR lands beside it |
 | `ASH_LLVM_PASSES=<spec>` | replace the optimiser pipeline (`default<O2>`, …); `off` skips it |
@@ -138,9 +134,10 @@ values or `emit_aot` calls.
 
 Flags:
 
-- `--target <triple>` cross-compiles. A non-host target is built for a
-  generic CPU. Native cross targets use one shard because the host's `ld`
-  reads one object format; WASM can use several shards through Ash's linker. See
+- `--target <triple>` cross-compiles. A named target, the build machine's
+  included, is built for a generic CPU. Native cross targets use one shard
+  because the host's `ld` reads one object format. A wasm build is not
+  sharded: the direct emitter writes one object. See
   [Cross-compiling](#cross-compiling) for which triples a build accepts.
 - `--allow-refused` emits even when some functions could not be lowered; each
   becomes a throw at the point it is reached. Without it a refusal stops the
@@ -209,10 +206,11 @@ architecture; linking it needs that architecture's toolchain and a runtime
 built for it, which is why the platform table calls these "objects only".
 
 The release binary registers the LLVM backends for the targets ash claims:
-x86 (64- and 32-bit), AArch64, ARM, RISC-V 32 and 64, PowerPC64LE, s390x,
-and wasm32. `cargo test -p ash --test cross_targets` emits an object for
-each and checks its ELF header, so those triples are gated. A triple
-outside the set fails with `no target for <triple>`.
+x86 (64- and 32-bit), AArch64, ARM, RISC-V 32 and 64, PowerPC64LE and s390x.
+`cargo test -p ash --test cross_targets` emits an object for each and checks
+its ELF header, so those triples are gated. wasm32 is not an LLVM target here:
+the direct backend builds it, and `wasm_target` tests it. A triple outside the
+set fails with `no target for <triple>`.
 
 The `-dev` tarballs (`ash-linux-x86_64-dev`, `ash-macos-aarch64-dev`;
 `ASH_DEV=1` on the install line) are the same ash built with

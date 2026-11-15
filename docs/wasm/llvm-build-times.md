@@ -1,5 +1,9 @@
 # LLVM WASM build speed
 
+These measurements are from before 2026-11-12, when wasm builds went through
+LLVM. The direct backend replaced that path in `9b7d2d78`, so the LLVM stages,
+codegen levels and shards described here no longer exist for wasm.
+
 LLVM 21.1.2 has a useful iteration setting: keep AIR and LLVM IR optimization
 at level 3, and lower machine-codegen effort to 0. Ash exposes this as:
 

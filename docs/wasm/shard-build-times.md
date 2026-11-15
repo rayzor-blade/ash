@@ -1,5 +1,9 @@
 # WASM shard balancing on the NUC
 
+These measurements are from before 2026-11-12, when wasm builds went through
+LLVM. The direct backend replaced that path in `9b7d2d78`, so the LLVM stages,
+codegen levels and shards described here no longer exist for wasm.
+
 Measured on 2026-10-29 using WindowPage, its unchanged bytecode and native WASM
 side modules. The baseline is `a8f4140a`; the candidate adds a fixed cost of 32
 instruction equivalents per WASM body to the partition weights. This accounts

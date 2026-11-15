@@ -161,10 +161,11 @@ The guest calls `ash_host_dlopen` to check that the library is there and
 `ash_host_dlsym` to get a table index, which is what a function pointer is on
 wasm; `aot_native.rs` then runs the `DEFINE_PRIM` protocol as it always has.
 
+The browser host runs the same steps against `WebAssembly.Instance`, in
+`crates/ash_wasm_runtime/src/browser/dylink.rs`.
+
 ## Not done
 
-- The browser loader. The steps above run against `WebAssembly.instantiate`;
-  fetching a library only when the program uses it is the reason to do it.
 - Threaded programs by `build_wasm_hdll.py`. A `wasm32-wasip1-threads`
   program's memory is shared, so the loader rejects a library built for
   `wasm32-wasip1`. A Rust library built for the threads target links as a side

@@ -41,7 +41,8 @@ snapshots of the live values.
 
 **Runtime.** `ash_std` implements the `hlp_*` primitives and the GC (Immix,
 conservative stack scanning, per-thread TLABs, adaptive trigger). Haxe threads
-are krio fibers on one OS thread. Every native the program can reach is
+are krio fibers run on a pool of worker OS threads, sized by `ASH_WORKERS` or
+the machine's cores minus one. Every native the program can reach is
 resolved once into a process-global `lib@symbol → address` table used by all
 tiers.
 

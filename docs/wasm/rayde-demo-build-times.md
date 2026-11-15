@@ -1,5 +1,9 @@
 # Pocket Studio WASM build investigation
 
+These measurements are from before 2026-11-12, when wasm builds went through
+LLVM. The direct backend replaced that path in `9b7d2d78`, so the LLVM stages,
+codegen levels and shards described here no longer exist for wasm.
+
 Measured on the NUC on 2026-10-29 using `RayDE/site/demo`. Removing an AOT/JIT
 policy mix-up reduces the median WASM build from **20.53 s to 6.98 s**: **66%
 less time**, or **2.9× faster**. The application and optimization settings are

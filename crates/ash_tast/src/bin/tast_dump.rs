@@ -60,7 +60,7 @@ fn main() {
     );
     for (i, (layer, path)) in stack.layers().iter().zip(&paths).enumerate() {
         println!(
-            "layer {i} {path}: Haxe {}, id {:#018x}, strings {}  types {}  classes {}  fields {}  enums {}  locals {}  funcs {}  nodes {}  keys {}  kept {}",
+            "layer {i} {path}: Haxe {}, id {:#018x}, strings {}  types {}  classes {}  fields {}  enums {}  locals {}  funcs {}  nodes {}  keys {}  kept {}  order {}  metas {}  defines {}  resources {}",
             layer.haxe_version(),
             layer.layer_id(),
             layer.strings_len(),
@@ -72,7 +72,11 @@ fn main() {
             layer.funcs().len(),
             layer.nodes().len(),
             layer.keys().len(),
-            layer.kept().len()
+            layer.kept().len(),
+            layer.order().len(),
+            layer.metas().len(),
+            layer.defines().len(),
+            layer.resources().len()
         );
     }
     if keys {

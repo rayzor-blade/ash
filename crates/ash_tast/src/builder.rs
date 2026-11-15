@@ -83,7 +83,14 @@ pub struct Builder {
     pub keys: Vec<KeyRec>,
     pub kept: Vec<KeptRec>,
     pub parents: Vec<u64>,
+    pub order: Vec<OrderRec>,
+    pub metas: Vec<MetaRec>,
+    pub defines: Vec<DefineRec>,
+    pub resources: Vec<ResourceRec>,
+    resource_data: Vec<u8>,
     bodies: Vec<(usize, Tree)>,
+    /// The argument trees of each entry of `metas`, by index.
+    meta_args: Vec<(usize, Vec<Tree>)>,
     pub entry: Option<u32>,
     pub haxe_version: u32,
     /// This layer's identity, which layers above name in `Parents`.
@@ -132,8 +139,42 @@ impl Builder {
             def: U32::new(def),
             args_first: U32::new(first),
             args_count: U32::new(count),
+            opt_mask: U32::new(0),
         });
         (self.types.len() - 1) as u32
+    }
+
+    /// Add metadata `name` (with its leading colon) on `owner` of `owner_kind`, with `args`.
+    pub fn add_meta(&mut self, owner_kind: u32, owner: u32, name: &str, args: Vec<Tree>) {
+        let name = self.string(name);
+        self.metas.push(MetaRec {
+            owner_kind: U32::new(owner_kind),
+            owner: U32::new(owner),
+            name: U32::new(name),
+            args_first: U32::new(0),
+            args_count: U32::new(args.len() as u32),
+        });
+        self.meta_args.push((self.metas.len() - 1, args));
+    }
+
+    /// Add a define.
+    pub fn add_define(&mut self, name: &str, value: &str) {
+        let (name, value) = (self.string(name), self.string(value));
+        self.defines.push(DefineRec {
+            name: U32::new(name),
+            value: U32::new(value),
+        });
+    }
+
+    /// Add an embedded resource.
+    pub fn add_resource(&mut self, name: &str, data: &[u8]) {
+        let name = self.string(name);
+        self.resources.push(ResourceRec {
+            name: U32::new(name),
+            offset: U32::new(self.resource_data.len() as u32),
+            len: U32::new(data.len() as u32),
+        });
+        self.resource_data.extend_from_slice(data);
     }
 
     /// Index `text` as `kind`, answering to `value`, for layers above this one.
@@ -195,6 +236,11 @@ impl Builder {
         for (root, (func, _)) in self.bodies.iter().enumerate() {
             self.funcs[*func].root = U32::new(root as u32);
         }
+        // A metadata entry's arguments are consecutive roots.
+        for (meta, args) in &self.meta_args {
+            self.metas[*meta].args_first = U32::new(queue.len() as u32);
+            queue.extend(args.iter());
+        }
         let mut nodes: Vec<NodeRec> = Vec::new();
         let mut next = queue.len() as u32;
         let mut at = 0;
@@ -224,7 +270,7 @@ impl Builder {
                 id_hi: U32::new((*id >> 32) as u32),
             })
             .collect();
-        let sections: [&[u8]; 18] = [
+        let sections: [&[u8]; 23] = [
             &self.blob,
             self.str_index.as_slice().as_bytes(),
             self.positions.as_slice().as_bytes(),
@@ -243,8 +289,13 @@ impl Builder {
             self.keys.as_slice().as_bytes(),
             self.kept.as_slice().as_bytes(),
             parents.as_slice().as_bytes(),
+            self.order.as_slice().as_bytes(),
+            self.metas.as_slice().as_bytes(),
+            self.defines.as_slice().as_bytes(),
+            self.resources.as_slice().as_bytes(),
+            &self.resource_data,
         ];
-        let counts: [usize; 18] = [
+        let counts: [usize; 23] = [
             self.blob.len(),
             self.str_index.len(),
             self.positions.len(),
@@ -263,6 +314,11 @@ impl Builder {
             self.keys.len(),
             self.kept.len(),
             parents.len(),
+            self.order.len(),
+            self.metas.len(),
+            self.defines.len(),
+            self.resources.len(),
+            self.resource_data.len(),
         ];
         debug_assert_eq!(sections.len(), SECTIONS.len());
 

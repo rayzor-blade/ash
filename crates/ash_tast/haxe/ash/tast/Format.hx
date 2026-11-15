@@ -9,12 +9,12 @@ import haxe.io.Bytes;
 **/
 class Format {
 	public static inline final MAGIC = 0x54534154;
-	public static inline final VERSION = 1;
+	public static inline final VERSION = 2;
 	/** A reference to nothing (`u32::MAX`, which is -1 as an Int). */
 	public static inline final NONE = -1;
-	public static inline final SCHEMA_HASH_LO = 0x193eb42d;
-	public static inline final SCHEMA_HASH_HI = 0x631473a0;
-	public static inline final SECTION_COUNT = 18;
+	public static inline final SCHEMA_HASH_LO = 0x5751e97d;
+	public static inline final SCHEMA_HASH_HI = 0x0671a7c5;
+	public static inline final SECTION_COUNT = 23;
 	public static inline final SECTION_STRINGS = 0;
 	public static inline final SECTION_STRING_INDEX = 1;
 	public static inline final SECTION_POSITIONS = 2;
@@ -33,15 +33,20 @@ class Format {
 	public static inline final SECTION_KEYS = 15;
 	public static inline final SECTION_KEPT = 16;
 	public static inline final SECTION_PARENTS = 17;
+	public static inline final SECTION_ORDER = 18;
+	public static inline final SECTION_METAS = 19;
+	public static inline final SECTION_DEFINES = 20;
+	public static inline final SECTION_RESOURCES = 21;
+	public static inline final SECTION_RESOURCE_DATA = 22;
 	public static inline final STRINGS_ELEM = 1;
 	public static inline final STRING_INDEX_ELEM = 8;
 	public static inline final POSITIONS_ELEM = 12;
-	public static inline final TYPES_ELEM = 20;
+	public static inline final TYPES_ELEM = 24;
 	public static inline final TYPE_ARGS_ELEM = 4;
-	public static inline final CLASSES_ELEM = 28;
+	public static inline final CLASSES_ELEM = 36;
 	public static inline final FIELDS_ELEM = 24;
 	public static inline final ABSTRACTS_ELEM = 16;
-	public static inline final ENUMS_ELEM = 16;
+	public static inline final ENUMS_ELEM = 20;
 	public static inline final ENUM_CTORS_ELEM = 24;
 	public static inline final ANON_FIELDS_ELEM = 12;
 	public static inline final LOCALS_ELEM = 12;
@@ -51,6 +56,11 @@ class Format {
 	public static inline final KEYS_ELEM = 12;
 	public static inline final KEPT_ELEM = 8;
 	public static inline final PARENTS_ELEM = 8;
+	public static inline final ORDER_ELEM = 8;
+	public static inline final METAS_ELEM = 20;
+	public static inline final DEFINES_ELEM = 8;
+	public static inline final RESOURCES_ELEM = 12;
+	public static inline final RESOURCE_DATA_ELEM = 1;
 	public static inline final HEADER_SIZE = 40;
 	public static inline final HEADER_MAGIC_AT = 0;
 	public static inline final HEADER_VERSION_AT = 4;
@@ -72,14 +82,15 @@ class Format {
 	public static inline final POS_REC_FILE_AT = 0;
 	public static inline final POS_REC_START_AT = 4;
 	public static inline final POS_REC_END_AT = 8;
-	public static inline final TYPE_REC_SIZE = 20;
+	public static inline final TYPE_REC_SIZE = 24;
 	public static inline final TYPE_REC_KIND_AT = 0;
 	public static inline final TYPE_REC_FLAGS_AT = 1;
 	public static inline final TYPE_REC_NAME_AT = 4;
 	public static inline final TYPE_REC_DEF_AT = 8;
 	public static inline final TYPE_REC_ARGS_FIRST_AT = 12;
 	public static inline final TYPE_REC_ARGS_COUNT_AT = 16;
-	public static inline final CLASS_REC_SIZE = 28;
+	public static inline final TYPE_REC_OPT_MASK_AT = 20;
+	public static inline final CLASS_REC_SIZE = 36;
 	public static inline final CLASS_REC_NAME_AT = 0;
 	public static inline final CLASS_REC_SUPER_TYPE_AT = 4;
 	public static inline final CLASS_REC_FLAGS_AT = 8;
@@ -87,6 +98,8 @@ class Format {
 	public static inline final CLASS_REC_FIELDS_COUNT_AT = 16;
 	public static inline final CLASS_REC_INTERFACES_FIRST_AT = 20;
 	public static inline final CLASS_REC_INTERFACES_COUNT_AT = 24;
+	public static inline final CLASS_REC_INIT_FUNC_AT = 28;
+	public static inline final CLASS_REC_META_ROOT_AT = 32;
 	public static inline final FIELD_REC_SIZE = 24;
 	public static inline final FIELD_REC_NAME_AT = 0;
 	public static inline final FIELD_REC_TY_AT = 4;
@@ -99,11 +112,12 @@ class Format {
 	public static inline final ABSTRACT_REC_UNDERLYING_AT = 4;
 	public static inline final ABSTRACT_REC_IMPL_CLASS_AT = 8;
 	public static inline final ABSTRACT_REC_FLAGS_AT = 12;
-	public static inline final ENUM_REC_SIZE = 16;
+	public static inline final ENUM_REC_SIZE = 20;
 	public static inline final ENUM_REC_NAME_AT = 0;
 	public static inline final ENUM_REC_CTORS_FIRST_AT = 4;
 	public static inline final ENUM_REC_CTORS_COUNT_AT = 8;
 	public static inline final ENUM_REC_FLAGS_AT = 12;
+	public static inline final ENUM_REC_META_ROOT_AT = 16;
 	public static inline final ENUM_CTOR_REC_SIZE = 24;
 	public static inline final ENUM_CTOR_REC_NAME_AT = 0;
 	public static inline final ENUM_CTOR_REC_ENUM_ID_AT = 4;
@@ -148,6 +162,22 @@ class Format {
 	public static inline final PARENT_REC_SIZE = 8;
 	public static inline final PARENT_REC_ID_LO_AT = 0;
 	public static inline final PARENT_REC_ID_HI_AT = 4;
+	public static inline final ORDER_REC_SIZE = 8;
+	public static inline final ORDER_REC_KIND_AT = 0;
+	public static inline final ORDER_REC_ID_AT = 4;
+	public static inline final META_REC_SIZE = 20;
+	public static inline final META_REC_OWNER_KIND_AT = 0;
+	public static inline final META_REC_OWNER_AT = 4;
+	public static inline final META_REC_NAME_AT = 8;
+	public static inline final META_REC_ARGS_FIRST_AT = 12;
+	public static inline final META_REC_ARGS_COUNT_AT = 16;
+	public static inline final DEFINE_REC_SIZE = 8;
+	public static inline final DEFINE_REC_NAME_AT = 0;
+	public static inline final DEFINE_REC_VALUE_AT = 4;
+	public static inline final RESOURCE_REC_SIZE = 12;
+	public static inline final RESOURCE_REC_NAME_AT = 0;
+	public static inline final RESOURCE_REC_OFFSET_AT = 4;
+	public static inline final RESOURCE_REC_LEN_AT = 8;
 
 	/** Write one `Header` at byte `at`. */
 	public static inline function writeHeader(out:Bytes, at:Int, magic:Int, version:Int, schemaHashLo:Int, schemaHashHi:Int, haxeVersion:Int, layerIdLo:Int, layerIdHi:Int, flags:Int, entry:Int, sectionCount:Int):Void {
@@ -183,16 +213,17 @@ class Format {
 	}
 
 	/** Write one `TypeRec` at byte `at`. */
-	public static inline function writeTypeRec(out:Bytes, at:Int, kind:Int, flags:Int, name:Int, def:Int, argsFirst:Int, argsCount:Int):Void {
+	public static inline function writeTypeRec(out:Bytes, at:Int, kind:Int, flags:Int, name:Int, def:Int, argsFirst:Int, argsCount:Int, optMask:Int):Void {
 		out.setInt32(at + 0, (kind & 0xff) | ((flags & 0xff) << 8));
 		out.setInt32(at + 4, name);
 		out.setInt32(at + 8, def);
 		out.setInt32(at + 12, argsFirst);
 		out.setInt32(at + 16, argsCount);
+		out.setInt32(at + 20, optMask);
 	}
 
 	/** Write one `ClassRec` at byte `at`. */
-	public static inline function writeClassRec(out:Bytes, at:Int, name:Int, superType:Int, flags:Int, fieldsFirst:Int, fieldsCount:Int, interfacesFirst:Int, interfacesCount:Int):Void {
+	public static inline function writeClassRec(out:Bytes, at:Int, name:Int, superType:Int, flags:Int, fieldsFirst:Int, fieldsCount:Int, interfacesFirst:Int, interfacesCount:Int, initFunc:Int, metaRoot:Int):Void {
 		out.setInt32(at + 0, name);
 		out.setInt32(at + 4, superType);
 		out.setInt32(at + 8, flags);
@@ -200,6 +231,8 @@ class Format {
 		out.setInt32(at + 16, fieldsCount);
 		out.setInt32(at + 20, interfacesFirst);
 		out.setInt32(at + 24, interfacesCount);
+		out.setInt32(at + 28, initFunc);
+		out.setInt32(at + 32, metaRoot);
 	}
 
 	/** Write one `FieldRec` at byte `at`. */
@@ -221,11 +254,12 @@ class Format {
 	}
 
 	/** Write one `EnumRec` at byte `at`. */
-	public static inline function writeEnumRec(out:Bytes, at:Int, name:Int, ctorsFirst:Int, ctorsCount:Int, flags:Int):Void {
+	public static inline function writeEnumRec(out:Bytes, at:Int, name:Int, ctorsFirst:Int, ctorsCount:Int, flags:Int, metaRoot:Int):Void {
 		out.setInt32(at + 0, name);
 		out.setInt32(at + 4, ctorsFirst);
 		out.setInt32(at + 8, ctorsCount);
 		out.setInt32(at + 12, flags);
+		out.setInt32(at + 16, metaRoot);
 	}
 
 	/** Write one `EnumCtorRec` at byte `at`. */
@@ -296,6 +330,34 @@ class Format {
 	public static inline function writeParentRec(out:Bytes, at:Int, idLo:Int, idHi:Int):Void {
 		out.setInt32(at + 0, idLo);
 		out.setInt32(at + 4, idHi);
+	}
+
+	/** Write one `OrderRec` at byte `at`. */
+	public static inline function writeOrderRec(out:Bytes, at:Int, kind:Int, id:Int):Void {
+		out.setInt32(at + 0, kind);
+		out.setInt32(at + 4, id);
+	}
+
+	/** Write one `MetaRec` at byte `at`. */
+	public static inline function writeMetaRec(out:Bytes, at:Int, ownerKind:Int, owner:Int, name:Int, argsFirst:Int, argsCount:Int):Void {
+		out.setInt32(at + 0, ownerKind);
+		out.setInt32(at + 4, owner);
+		out.setInt32(at + 8, name);
+		out.setInt32(at + 12, argsFirst);
+		out.setInt32(at + 16, argsCount);
+	}
+
+	/** Write one `DefineRec` at byte `at`. */
+	public static inline function writeDefineRec(out:Bytes, at:Int, name:Int, value:Int):Void {
+		out.setInt32(at + 0, name);
+		out.setInt32(at + 4, value);
+	}
+
+	/** Write one `ResourceRec` at byte `at`. */
+	public static inline function writeResourceRec(out:Bytes, at:Int, name:Int, offset:Int, len:Int):Void {
+		out.setInt32(at + 0, name);
+		out.setInt32(at + 4, offset);
+		out.setInt32(at + 8, len);
 	}
 
 	#if macro
@@ -422,6 +484,9 @@ class FieldFlag {
 	public static inline final INLINE = 8;
 	public static inline final PUBLIC = 16;
 	public static inline final OVERRIDE = 32;
+	public static inline final NOT_PHYSICAL = 64;
+	public static inline final EXTERN = 128;
+	public static inline final DYNAMIC = 256;
 }
 
 /** `LocalRec.flags`. */
@@ -454,6 +519,16 @@ class KeptKind {
 	public static inline final FIELD = 1;
 	public static inline final ENUM = 2;
 	public static inline final ABSTRACT = 3;
+}
+
+/** `MetaRec.owner_kind`: which table `owner` indexes. */
+class MetaOwner {
+	public static inline final CLASS = 0;
+	public static inline final FIELD = 1;
+	public static inline final ENUM = 2;
+	public static inline final ENUM_CTOR = 3;
+	public static inline final ABSTRACT = 4;
+	public static inline final LOCAL = 5;
 }
 
 /** `haxe.macro.Expr.Binop` constructors, by the index `BINOP` nodes carry. */

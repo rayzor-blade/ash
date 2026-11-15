@@ -22,8 +22,8 @@ module Dyn = struct
 		d.n <- d.n + 1
 end
 
-type pseudo = { pkind : int; pa : int; kids : texpr list }
-type item = Empty | Expr of texpr | Pseudo of pseudo
+type pseudo = { pkind : int; pa : int; kids : item list }
+and item = Empty | Expr of texpr | Arg of Ast.expr | Pseudo of pseudo
 
 type path = Globals.path
 
@@ -31,7 +31,7 @@ type tkey =
 	| KInst of path * int list
 	| KEnum of path * int list
 	| KAbstract of path * int list
-	| KFun of int list * int
+	| KFun of int list * int * int
 	| KAnon of (string * int) list
 	| KTypedef of path * int list
 
@@ -42,12 +42,12 @@ type st = {
 	str_off : int Dyn.t;
 	str_len : int Dyn.t;
 	str_ids : (string, int) Hashtbl.t;
-	types : int Dyn.t; (* kind, name, def, args_first, args_count *)
+	types : int Dyn.t; (* kind, name, def, args_first, args_count, opt_mask *)
 	type_args : int Dyn.t;
-	classes : int Dyn.t; (* name, super_type, flags, fields_first, fields_count, ifaces_first, ifaces_count *)
+	classes : int Dyn.t; (* name, super_type, flags, fields_first, fields_count, ifaces_first, ifaces_count, init_func, meta_root *)
 	fields : int Dyn.t; (* name, ty, owner, flags, func, pos *)
 	abstracts : int Dyn.t; (* name, underlying, impl_class, flags *)
-	enums : int Dyn.t; (* name, ctors_first, ctors_count, flags *)
+	enums : int Dyn.t; (* name, ctors_first, ctors_count, flags, meta_root *)
 	enum_ctors : int Dyn.t; (* name, enum_id, index, ty, args_first, args_count *)
 	anon_fields : int Dyn.t; (* name, ty, flags *)
 	locals : int Dyn.t; (* name, ty, flags *)
@@ -55,6 +55,12 @@ type st = {
 	funcs : int Dyn.t; (* ret, params_first, params_count, root, flags, pos *)
 	positions : int Dyn.t; (* file, start, end *)
 	nodes : int Dyn.t; (* kind, flags, ty, pos, a, b, first_kid, kid_count *)
+	order : int Dyn.t; (* module kind, id *)
+	metas : int Dyn.t; (* owner_kind, owner, name, args_first, args_count *)
+	mutable pending : (int * int * Ast.metadata) list; (* metadata waiting for a safe point to queue its arguments *)
+	defines : int Dyn.t; (* name, value *)
+	resources : int Dyn.t; (* name, offset, len *)
+	resource_data : Buffer.t;
 	queue : item Dyn.t;
 	inst_ids : (path, int) Hashtbl.t;
 	abstract_type_ids : (path, int) Hashtbl.t;
@@ -97,6 +103,12 @@ let create com = {
 	funcs = Dyn.create 0;
 	positions = Dyn.create 0;
 	nodes = Dyn.create 0;
+	order = Dyn.create 0;
+	metas = Dyn.create 0;
+	pending = [];
+	defines = Dyn.create 0;
+	resources = Dyn.create 0;
+	resource_data = Buffer.create 1024;
 	queue = Dyn.create Empty;
 	inst_ids = Hashtbl.create 1024;
 	abstract_type_ids = Hashtbl.create 64;
@@ -155,6 +167,39 @@ let pos_id st (p : Globals.pos) =
 		Hashtbl.add st.pos_ids key id;
 		id
 
+(* Bit i is set when argument i is optional; bit 31 stands for every argument from the 31st on. *)
+let opt_mask args =
+	let m = ref 0 in
+	List.iteri (fun i (_, opt, _) -> if opt then m := !m lor (1 lsl (min i 31))) args;
+	!m
+
+(* The metadata a back end reads: our own namespace, and what HashLink's generator reads. *)
+let exported_meta m =
+	let name = Meta.to_string m in
+	(String.length name > 5 && String.sub name 0 5 = ":ash.")
+	|| (match name with
+		| ":hlNative" | ":struct" | ":packed" | ":coreType" | ":realPath" | ":noExpr" -> true
+		| _ -> false)
+
+(* Declaration metadata is queued later, between nodes: its arguments are nodes, and a group of
+   children must stay consecutive in the queue. *)
+let queue_metas st owner_kind owner (metas : Ast.metadata) =
+	let keep = List.filter (fun (m, _, _) -> exported_meta m) metas in
+	if keep <> [] then st.pending <- (owner_kind, owner, keep) :: st.pending
+
+let flush_metas st =
+	if st.pending <> [] then begin
+		let todo = List.rev st.pending in
+		st.pending <- [];
+		List.iter (fun (kind, owner, metas) ->
+			List.iter (fun (m, args, _) ->
+				let first = Dyn.length st.queue in
+				List.iter (fun a -> Dyn.push st.queue (Arg a)) args;
+				List.iter (Dyn.push st.metas) [kind; owner; str st (Meta.to_string m); first; List.length args]
+			) metas
+		) todo
+	end
+
 let arg_list st ids =
 	let first = Dyn.length st.type_args in
 	List.iter (Dyn.push st.type_args) ids;
@@ -170,15 +215,17 @@ let class_id st c =
 	match Hashtbl.find_opt st.class_ids c.cl_path with
 	| Some id -> id
 	| None ->
-		let id = Dyn.length st.classes / 7 in
+		let id = Dyn.length st.classes / 9 in
 		for _ = 1 to 7 do Dyn.push st.classes 0 done;
+		Dyn.push st.classes none;
+		Dyn.push st.classes none;
 		Hashtbl.add st.class_ids c.cl_path id;
 		Dyn.push st.class_types c;
 		Dyn.push st.class_filled false;
 		id
 
 let dynamic_type st =
-	if st.dyn_id < 0 then st.dyn_id <- new_rec st.types 5 [F.Type_kind.dynamic; none; none; 0; 0];
+	if st.dyn_id < 0 then st.dyn_id <- new_rec st.types 6 [F.Type_kind.dynamic; none; none; 0; 0; 0];
 	st.dyn_id
 
 let rec type_id st t =
@@ -188,7 +235,7 @@ let rec type_id st t =
 		| Some id -> id
 		| None ->
 			let cid = class_id st c in
-			let id = new_rec st.types 5 [F.Type_kind.class_; none; cid; 0; 0] in
+			let id = new_rec st.types 6 [F.Type_kind.class_; none; cid; 0; 0; 0] in
 			Hashtbl.replace st.inst_ids c.cl_path id;
 			id)
 	| TAbstract (a, []) ->
@@ -196,7 +243,7 @@ let rec type_id st t =
 		| Some id -> id
 		| None ->
 			let aid = abstract_id st a in
-			let id = new_rec st.types 5 [F.Type_kind.abstract; none; aid; 0; 0] in
+			let id = new_rec st.types 6 [F.Type_kind.abstract; none; aid; 0; 0; 0] in
 			Hashtbl.replace st.abstract_type_ids a.a_path id;
 			id)
 	| TEnum (e, []) ->
@@ -204,7 +251,7 @@ let rec type_id st t =
 		| Some id -> id
 		| None ->
 			let eid = enum_id st e in
-			let id = new_rec st.types 5 [F.Type_kind.enum; none; eid; 0; 0] in
+			let id = new_rec st.types 6 [F.Type_kind.enum; none; eid; 0; 0; 0] in
 			Hashtbl.replace st.enum_type_ids e.e_path id;
 			id)
 	| TDynamic _ -> dynamic_type st
@@ -228,7 +275,7 @@ and slow_type_id st t =
 		| None ->
 			let first, count = arg_list st args in
 			let cid = class_id st c in
-			let id = new_rec st.types 5 [F.Type_kind.class_; none; cid; first; count] in
+			let id = new_rec st.types 6 [F.Type_kind.class_; none; cid; first; count; 0] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TEnum (e, ps) ->
@@ -239,7 +286,7 @@ and slow_type_id st t =
 		| None ->
 			let first, count = arg_list st args in
 			let eid = enum_id st e in
-			let id = new_rec st.types 5 [F.Type_kind.enum; none; eid; first; count] in
+			let id = new_rec st.types 6 [F.Type_kind.enum; none; eid; first; count; 0] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TAbstract (a, ps) ->
@@ -250,18 +297,19 @@ and slow_type_id st t =
 		| None ->
 			let first, count = arg_list st args in
 			let aid = abstract_id st a in
-			let id = new_rec st.types 5 [F.Type_kind.abstract; none; aid; first; count] in
+			let id = new_rec st.types 6 [F.Type_kind.abstract; none; aid; first; count; 0] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TFun (args, ret) ->
 		let ids = List.map (fun (_, _, t) -> type_id st t) args in
 		let r = type_id st ret in
-		let key = KFun (ids, r) in
+		let mask = opt_mask args in
+		let key = KFun (ids, r, mask) in
 		(match Hashtbl.find_opt st.type_ids key with
 		| Some id -> id
 		| None ->
 			let first, count = arg_list st ids in
-			let id = new_rec st.types 5 [F.Type_kind.fun_; none; r; first; count] in
+			let id = new_rec st.types 6 [F.Type_kind.fun_; none; r; first; count; mask] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| TAnon an ->
@@ -277,7 +325,7 @@ and slow_type_id st t =
 				Dyn.push st.anon_fields id;
 				Dyn.push st.anon_fields 0
 			) fs ids;
-			let id = new_rec st.types 5 [F.Type_kind.anon; none; first; 0; List.length fs] in
+			let id = new_rec st.types 6 [F.Type_kind.anon; none; first; 0; List.length fs; 0] in
 			Hashtbl.replace st.type_ids key id;
 			id)
 	| _ ->
@@ -311,11 +359,11 @@ and typedef_id_at st t d ps =
 		(match next with
 		| TAnon an ->
 			(* Given its id before its fields are read, so a structure that names itself finds it. *)
-			let id = new_rec st.types 5 [F.Type_kind.anon; none; 0; 0; 0] in
+			let id = new_rec st.types 6 [F.Type_kind.anon; none; 0; 0; 0; 0] in
 			Hashtbl.replace st.type_ids key id;
 			if ps = [] then Hashtbl.replace st.typedef_ids d.t_path id;
 			let first = fill_anon st an id in
-			Dyn.set st.types (id * 5 + 2) first;
+			Dyn.set st.types (id * 6 + 2) first;
 			id
 		| TInst (_, _ :: _) | TEnum (_, _ :: _) | TAbstract (_, _ :: _) | TFun _ ->
 			(* Reserved before the arguments are read: a typedef whose expansion names the
@@ -326,20 +374,21 @@ and typedef_id_at st t d ps =
 				| TAbstract _ -> F.Type_kind.abstract
 				| _ -> F.Type_kind.fun_
 			in
-			let id = new_rec st.types 5 [kind; none; none; 0; 0] in
+			let id = new_rec st.types 6 [kind; none; none; 0; 0; 0] in
 			Hashtbl.replace st.type_ids key id;
 			if ps = [] then Hashtbl.replace st.typedef_ids d.t_path id;
-			let def, arg_types = match next with
-				| TInst (c, ps2) -> (class_id st c, ps2)
-				| TEnum (e, ps2) -> (enum_id st e, ps2)
-				| TAbstract (a, ps2) -> (abstract_id st a, ps2)
-				| TFun (args2, ret) -> (type_id st ret, List.map (fun (_, _, t) -> t) args2)
-				| _ -> (none, [])
+			let def, arg_types, mask = match next with
+				| TInst (c, ps2) -> (class_id st c, ps2, 0)
+				| TEnum (e, ps2) -> (enum_id st e, ps2, 0)
+				| TAbstract (a, ps2) -> (abstract_id st a, ps2, 0)
+				| TFun (args2, ret) -> (type_id st ret, List.map (fun (_, _, t) -> t) args2, opt_mask args2)
+				| _ -> (none, [], 0)
 			in
 			let first, count = arg_list st (param_ids st arg_types) in
-			Dyn.set st.types (id * 5 + 2) def;
-			Dyn.set st.types (id * 5 + 3) first;
-			Dyn.set st.types (id * 5 + 4) count;
+			Dyn.set st.types (id * 6 + 2) def;
+			Dyn.set st.types (id * 6 + 3) first;
+			Dyn.set st.types (id * 6 + 4) count;
+			Dyn.set st.types (id * 6 + 5) mask;
 			id
 		| _ ->
 			let id = type_id st next in
@@ -356,7 +405,7 @@ and fill_anon st an id =
 		Dyn.push st.anon_fields 0;
 		Dyn.push st.anon_fields 0
 	) fs;
-	Dyn.set st.types (id * 5 + 4) (List.length fs);
+	Dyn.set st.types (id * 6 + 4) (List.length fs);
 	List.iteri (fun i cf -> Dyn.set st.anon_fields ((first + i) * 3 + 1) (type_id st cf.cf_type)) fs;
 	first
 
@@ -365,16 +414,18 @@ and enum_id st e =
 	| Some id -> id
 	| None ->
 		let key = Globals.s_type_path e.e_path in
-		let id = new_rec st.enums 4 [str st key; 0; 0; 0] in
+		let id = new_rec st.enums 5 [str st key; 0; 0; 0; none] in
 		Hashtbl.replace st.enum_ids e.e_path id;
+		queue_metas st F.Meta_owner.enum id e.e_meta;
 		let first = Dyn.length st.enum_ctors / 6 in
 		List.iter (fun name ->
 			let ef = PMap.find name e.e_constrs in
 			let ctor = new_rec st.enum_ctors 6 [str st name; id; ef.ef_index; 0; 0; 0] in
+			queue_metas st F.Meta_owner.enum_ctor ctor ef.ef_meta;
 			Hashtbl.replace st.enum_ctor_ids (e.e_path, name) ctor
 		) e.e_names;
-		Dyn.set st.enums (id * 4 + 1) first;
-		Dyn.set st.enums (id * 4 + 2) (List.length e.e_names);
+		Dyn.set st.enums (id * 5 + 1) first;
+		Dyn.set st.enums (id * 5 + 2) (List.length e.e_names);
 		(* Types last: they may name this enum again. *)
 		List.iter (fun name ->
 			let ef = PMap.find name e.e_constrs in
@@ -395,6 +446,7 @@ and abstract_id st a =
 	| None ->
 		let id = new_rec st.abstracts 4 [str st (Globals.s_type_path a.a_path); none; none; 0] in
 		Hashtbl.replace st.abstract_ids a.a_path id;
+		queue_metas st F.Meta_owner.abstract id a.a_meta;
 		Dyn.set st.abstracts (id * 4 + 1) (type_id st a.a_this);
 		(match a.a_impl with Some c -> Dyn.set st.abstracts (id * 4 + 2) (class_id st c) | None -> ());
 		id
@@ -406,6 +458,7 @@ let local_id st v =
 		let flags = if has_var_flag v VCaptured then F.Local_flag.captured else 0 in
 		let id = new_rec st.locals 3 [str st v.v_name; 0; flags] in
 		Hashtbl.replace st.local_ids v.v_id id;
+		queue_metas st F.Meta_owner.local id v.v_meta;
 		Dyn.set st.locals (id * 3 + 1) (type_id st v.v_type);
 		id
 
@@ -427,17 +480,19 @@ let func_id st tf =
 	Dyn.set st.funcs (id * 6 + 3) (enqueue_root st tf.tf_expr);
 	id
 
+(* An expression run once, as a function with no parameters: a variable's initializer, an `__init__` block. *)
+let body_func st e =
+	let ty = type_id st e.etype in
+	let root = enqueue_root st e in
+	new_rec st.funcs 6 [ty; 0; 0; root; 0; none]
+
 let func_of_field st cf =
 	match cf.cf_expr with
 	| None -> none
 	| Some e ->
 		(match e.eexpr with
 		| TFunction tf -> func_id st tf
-		| _ ->
-			(* A variable's initializer: a function with no parameters. *)
-			let ty = type_id st e.etype in
-			let root = enqueue_root st e in
-			new_rec st.funcs 6 [ty; 0; 0; root; 0; none])
+		| _ -> body_func st e)
 
 let field_flags cf is_static =
 	let flags = ref (if is_static then F.Field_flag.static else 0) in
@@ -448,6 +503,9 @@ let field_flags cf is_static =
 		flags := !flags lor F.Field_flag.method_;
 		if m = MethInline then flags := !flags lor F.Field_flag.inline
 	| _ -> ());
+	if not (is_physical_field cf) then flags := !flags lor F.Field_flag.not_physical;
+	if has_class_field_flag cf CfExtern then flags := !flags lor F.Field_flag.extern;
+	(match cf.cf_kind with Method MethDynamic -> flags := !flags lor F.Field_flag.dynamic | _ -> ());
 	!flags
 
 (* Fill a class's fields, once. *)
@@ -463,12 +521,17 @@ let fill_class st id =
 		if has_class_flag c CExtern then flags := !flags lor F.Class_flag.extern;
 		if has_class_flag c CAbstract then flags := !flags lor F.Class_flag.abstract;
 		(match c.cl_kind with KTypeParameter _ -> flags := !flags lor F.Class_flag.type_param | _ -> ());
-		let base = id * 7 in
+		let base = id * 9 in
+		queue_metas st F.Meta_owner.class_ id c.cl_meta;
 		Dyn.set st.classes base (str st (Globals.s_type_path path));
 		Dyn.set st.classes (base + 1)
 			(match c.cl_super with None -> none | Some (sc, ps) -> type_id st (TInst (sc, ps)));
 		Dyn.set st.classes (base + 2) !flags;
-		let ifaces = List.map (fun (ic, ps) -> type_id st (TInst (ic, ps))) c.cl_implements in
+		(* A type parameter's constraints take the place of the interfaces. *)
+		let ifaces = match c.cl_kind with
+			| KTypeParameter constraints -> List.map (type_id st) constraints
+			| _ -> List.map (fun (ic, ps) -> type_id st (TInst (ic, ps))) c.cl_implements
+		in
 		let ifirst, icount = arg_list st ifaces in
 		Dyn.set st.classes (base + 5) ifirst;
 		Dyn.set st.classes (base + 6) icount;
@@ -482,6 +545,7 @@ let fill_class st id =
 		(* Reserve the records, so a field type that reaches this class again finds its fields in place. *)
 		List.iter (fun (cf, is_static) ->
 			let fid = new_rec st.fields 6 [str st cf.cf_name; 0; id; field_flags cf is_static; none; none] in
+			queue_metas st F.Meta_owner.field fid cf.cf_meta;
 			Hashtbl.replace st.field_ids (path, is_static, cf.cf_name) fid
 		) all;
 		Dyn.set st.classes (base + 3) first;
@@ -490,7 +554,10 @@ let fill_class st id =
 			let fid = first + i in
 			Dyn.set st.fields (fid * 6 + 1) (type_id st cf.cf_type);
 			Dyn.set st.fields (fid * 6 + 4) (func_of_field st cf)
-		) all
+		) all;
+		(match c.cl_init with
+		| Some e -> Dyn.set st.classes (base + 7) (body_func st e)
+		| None -> ())
 	end
 
 (* The id of the field `name` of `c` or of the nearest superclass that declares it. *)
@@ -549,7 +616,8 @@ let write_node st kind flags ty pos a b first count =
 	List.iter (Dyn.push st.nodes) [kind; flags; ty; pos; a; b; first; count]
 
 let push_kid st e = Dyn.push st.queue (Expr e)
-let push_pseudo st kind a kids = Dyn.push st.queue (Pseudo { pkind = kind; pa = a; kids })
+let push_pseudo_items st kind a kids = Dyn.push st.queue (Pseudo { pkind = kind; pa = a; kids })
+let push_pseudo st kind a kids = push_pseudo_items st kind a (List.map (fun e -> Expr e) kids)
 
 (* Write node `e` of the queue and enqueue its children. *)
 let visit st e =
@@ -697,10 +765,11 @@ let visit st e =
 			a := i
 		| None -> ());
 		push_kid st e1
-	| TMeta ((m, _, _), e1) ->
+	| TMeta ((m, args, _), e1) ->
 		kind := F.Node_kind.meta;
 		a := str st (Meta.to_string m);
-		push_kid st e1
+		push_kid st e1;
+		if exported_meta m then List.iter (fun x -> Dyn.push st.queue (Arg x)) args
 	| TEnumParameter (e1, ef, index) ->
 		kind := F.Node_kind.enum_parameter;
 		a := enum_ctor_id st e1 ef;
@@ -718,8 +787,53 @@ let visit st e =
 
 let visit_pseudo st p =
 	let first = Dyn.length st.queue in
-	List.iter (push_kid st) p.kids;
+	List.iter (Dyn.push st.queue) p.kids;
 	write_node st p.pkind 0 none none p.pa 0 first (List.length p.kids)
+
+(* A metadata argument, an untyped expression: constants, identifiers, arrays and objects. *)
+let visit_arg st (arg : Ast.expr) =
+	let kind = ref F.Node_kind.ident and flags = ref 0 and a = ref 0 in
+	let first = Dyn.length st.queue in
+	let const k v = kind := F.Node_kind.const; flags := k; a := v in
+	let ident text = kind := F.Node_kind.ident; a := str st text in
+	let rec dotted ((def, _) : Ast.expr) =
+		match def with
+		| Ast.EConst (Ast.Ident s) -> Some s
+		| Ast.EField (inner, name, _) -> Option.map (fun p -> p ^ "." ^ name) (dotted inner)
+		| _ -> None
+	in
+	let int_const negate text =
+		match Int32.of_string_opt ((if negate then "-" else "") ^ text) with
+		| Some i -> const F.Const_kind.int (Int32.to_int i)
+		| None -> unsupported st "meta argument"; ident text
+	in
+	let rec go ((def, _) as e : Ast.expr) =
+		match def with
+		| Ast.EConst (Ast.Int (s, _)) -> int_const false s
+		| Ast.EConst (Ast.Float (s, _)) -> const F.Const_kind.float (str st s)
+		| Ast.EConst (Ast.String (s, _)) -> const F.Const_kind.string (str st s)
+		| Ast.EConst (Ast.Ident "true") -> const F.Const_kind.bool 1
+		| Ast.EConst (Ast.Ident "false") -> const F.Const_kind.bool 0
+		| Ast.EConst (Ast.Ident "null") -> const F.Const_kind.null 0
+		| Ast.EConst (Ast.Ident s) -> ident s
+		| Ast.EConst (Ast.Regexp (s, _)) -> unsupported st "meta argument"; ident s
+		| Ast.EParenthesis inner -> go inner
+		| Ast.EUnop (Ast.Neg, Ast.Prefix, (Ast.EConst (Ast.Int (s, _)), _)) -> int_const true s
+		| Ast.EUnop (Ast.Neg, Ast.Prefix, (Ast.EConst (Ast.Float (s, _)), _)) -> const F.Const_kind.float (str st ("-" ^ s))
+		| Ast.EArrayDecl l ->
+			kind := F.Node_kind.array_decl;
+			List.iter (fun x -> Dyn.push st.queue (Arg x)) l
+		| Ast.EObjectDecl fields ->
+			kind := F.Node_kind.object_decl;
+			List.iter (fun ((name, _, _), v) -> push_pseudo_items st F.Node_kind.object_field (str st name) [Arg v]) fields
+		| Ast.EField _ ->
+			(match dotted e with
+			| Some p -> ident p
+			| None -> unsupported st "meta argument"; ident "?")
+		| _ -> unsupported st "meta argument"; ident "?"
+	in
+	go arg;
+	write_node st !kind !flags none none !a 0 first (Dyn.length st.queue - first)
 
 (* The program's entry: a function with no parameters whose body is the whole main expression. *)
 let entry_func st =
@@ -739,16 +853,19 @@ let haxe_version () =
 let assemble st entry =
 	let len d = Dyn.length d in
 	let counts = [|
-		Buffer.length st.blob; len st.str_off; len st.positions / 3; len st.types / 5; len st.type_args;
-		len st.classes / 7; len st.fields / 6; len st.abstracts / 4; len st.enums / 4;
+		Buffer.length st.blob; len st.str_off; len st.positions / 3; len st.types / 6; len st.type_args;
+		len st.classes / 9; len st.fields / 6; len st.abstracts / 4; len st.enums / 5;
 		len st.enum_ctors / 6; len st.anon_fields / 3; len st.locals / 3; len st.params / 2;
 		len st.funcs / 6; len st.nodes / 8; 0; 0; 0;
+		len st.order / 2; len st.metas / 5; len st.defines / 2; len st.resources / 3;
+		Buffer.length st.resource_data;
 	|] in
 	let elems = [|
 		F.strings_elem; F.string_index_elem; F.positions_elem; F.types_elem; F.type_args_elem;
 		F.classes_elem; F.fields_elem; F.abstracts_elem; F.enums_elem; F.enum_ctors_elem;
 		F.anon_fields_elem; F.locals_elem; F.params_elem; F.funcs_elem; F.nodes_elem;
-		F.keys_elem; F.kept_elem; F.parents_elem;
+		F.keys_elem; F.kept_elem; F.parents_elem; F.order_elem; F.metas_elem; F.defines_elem;
+		F.resources_elem; F.resource_data_elem;
 	|] in
 	let offsets = Array.make F.section_count 0 in
 	let at = ref (F.header_size + F.section_count * F.section_rec_size) in
@@ -775,19 +892,20 @@ let assemble st entry =
 			~file:(g st.positions r) ~start:(g st.positions (r + 1)) ~end_:(g st.positions (r + 2))
 	done;
 	for i = 0 to counts.(F.section_types) - 1 do
-		let r = i * 5 in
+		let r = i * 6 in
 		F.write_type_rec out (offsets.(F.section_types) + i * F.type_rec_size)
 			~kind:(g st.types r) ~flags:0 ~name:(g st.types (r + 1)) ~def:(g st.types (r + 2))
-			~args_first:(g st.types (r + 3)) ~args_count:(g st.types (r + 4))
+			~args_first:(g st.types (r + 3)) ~args_count:(g st.types (r + 4)) ~opt_mask:(g st.types (r + 5))
 	done;
 	for i = 0 to Dyn.length st.type_args - 1 do
 		Bytes.set_int32_le out (offsets.(F.section_type_args) + i * 4) (Int32.of_int (g st.type_args i))
 	done;
 	for i = 0 to counts.(F.section_classes) - 1 do
-		let r = i * 7 and c = st.classes in
+		let r = i * 9 and c = st.classes in
 		F.write_class_rec out (offsets.(F.section_classes) + i * F.class_rec_size)
 			~name:(g c r) ~super_type:(g c (r + 1)) ~flags:(g c (r + 2)) ~fields_first:(g c (r + 3))
 			~fields_count:(g c (r + 4)) ~interfaces_first:(g c (r + 5)) ~interfaces_count:(g c (r + 6))
+			~init_func:(g c (r + 7)) ~meta_root:(g c (r + 8))
 	done;
 	for i = 0 to counts.(F.section_fields) - 1 do
 		let r = i * 6 and f = st.fields in
@@ -801,9 +919,10 @@ let assemble st entry =
 			~name:(g a r) ~underlying:(g a (r + 1)) ~impl_class:(g a (r + 2)) ~flags:(g a (r + 3))
 	done;
 	for i = 0 to counts.(F.section_enums) - 1 do
-		let r = i * 4 and e = st.enums in
+		let r = i * 5 and e = st.enums in
 		F.write_enum_rec out (offsets.(F.section_enums) + i * F.enum_rec_size)
 			~name:(g e r) ~ctors_first:(g e (r + 1)) ~ctors_count:(g e (r + 2)) ~flags:(g e (r + 3))
+			~meta_root:(g e (r + 4))
 	done;
 	for i = 0 to counts.(F.section_enum_ctors) - 1 do
 		let r = i * 6 and c = st.enum_ctors in
@@ -837,6 +956,27 @@ let assemble st entry =
 			~kind:(g n r) ~flags:(g n (r + 1)) ~ty:(g n (r + 2)) ~pos:(g n (r + 3)) ~a:(g n (r + 4))
 			~b:(g n (r + 5)) ~first_kid:(g n (r + 6)) ~kid_count:(g n (r + 7))
 	done;
+	for i = 0 to counts.(F.section_order) - 1 do
+		F.write_order_rec out (offsets.(F.section_order) + i * F.order_rec_size)
+			~kind:(g st.order (i * 2)) ~id:(g st.order (i * 2 + 1))
+	done;
+	for i = 0 to counts.(F.section_metas) - 1 do
+		let r = i * 5 and m = st.metas in
+		F.write_meta_rec out (offsets.(F.section_metas) + i * F.meta_rec_size)
+			~owner_kind:(g m r) ~owner:(g m (r + 1)) ~name:(g m (r + 2)) ~args_first:(g m (r + 3))
+			~args_count:(g m (r + 4))
+	done;
+	for i = 0 to counts.(F.section_defines) - 1 do
+		F.write_define_rec out (offsets.(F.section_defines) + i * F.define_rec_size)
+			~name:(g st.defines (i * 2)) ~value:(g st.defines (i * 2 + 1))
+	done;
+	for i = 0 to counts.(F.section_resources) - 1 do
+		let r = i * 3 and x = st.resources in
+		F.write_resource_rec out (offsets.(F.section_resources) + i * F.resource_rec_size)
+			~name:(g x r) ~offset:(g x (r + 1)) ~len:(g x (r + 2))
+	done;
+	Bytes.blit_string (Buffer.contents st.resource_data) 0 out offsets.(F.section_resource_data)
+		(Buffer.length st.resource_data);
 	out
 
 (* The kind and path of a type, which orders the types the compiler hands over. *)
@@ -865,6 +1005,32 @@ let run com path =
 		fill_class st !filled;
 		incr filled
 	done;
+	(* The compiler's own order: a class after what its static initializers reach. *)
+	List.iter (function
+		| TClassDecl c -> List.iter (Dyn.push st.order) [F.Module_kind.class_; class_id st c]
+		| TEnumDecl e -> List.iter (Dyn.push st.order) [F.Module_kind.enum; enum_id st e]
+		| TAbstractDecl a -> List.iter (Dyn.push st.order) [F.Module_kind.abstract; abstract_id st a]
+		| TTypeDecl _ -> ()
+	) com.Common.types;
+	(* The runtime metadata object that reflection reads, as an expression. *)
+	let runtime_meta mt =
+		match (try Texpr.build_metadata com.Common.basic mt with _ -> unsupported st "runtime metadata"; None) with
+		| Some e -> enqueue_root st e
+		| None -> none
+	in
+	List.iter (function
+		| TClassDecl c as mt -> Dyn.set st.classes (class_id st c * 9 + 8) (runtime_meta mt)
+		| TEnumDecl e as mt -> Dyn.set st.enums (enum_id st e * 5 + 4) (runtime_meta mt)
+		| _ -> ()
+	) all;
+	PMap.iter (fun name value -> List.iter (Dyn.push st.defines) [str st name; str st value])
+		com.Common.defines.Define.values;
+	let resources = List.sort compare (Hashtbl.fold (fun name data acc -> (name, data) :: acc) com.Common.resources []) in
+	List.iter (fun (name, data) ->
+		List.iter (Dyn.push st.resources) [str st name; Buffer.length st.resource_data; String.length data];
+		Buffer.add_string st.resource_data data
+	) resources;
+	flush_metas st;
 	let entry = entry_func st in
 	let i = ref 0 in
 	let continue = ref true in
@@ -874,8 +1040,10 @@ let run com path =
 			(match Dyn.get st.queue !i with
 			| Expr e -> visit st e
 			| Pseudo p -> visit_pseudo st p
+			| Arg a -> visit_arg st a
 			| Empty -> ());
-			incr i
+			incr i;
+			flush_metas st
 		done;
 		st.walking <- false;
 		(* A class reached from an expression is filled too, which can queue its bodies. *)
@@ -885,6 +1053,7 @@ let run com path =
 			incr k
 		done;
 		filled := Dyn.length st.class_types;
+		flush_metas st;
 		if !i = Dyn.length st.queue then continue := false
 	done;
 	let t_built = Unix.gettimeofday () in
@@ -895,8 +1064,8 @@ let run com path =
 	if verbose then begin
 		let ms a b = int_of_float ((b -. a) *. 1000.) in
 		Printf.printf "[ash_tast] %s: %d bytes, %d nodes, %d types, %d classes, %d fields, %d functions, %d locals, %d strings\n"
-			path (Bytes.length bytes) (Dyn.length st.nodes / 8) (Dyn.length st.types / 5)
-			(Dyn.length st.classes / 7) (Dyn.length st.fields / 6) (Dyn.length st.funcs / 6)
+			path (Bytes.length bytes) (Dyn.length st.nodes / 8) (Dyn.length st.types / 6)
+			(Dyn.length st.classes / 9) (Dyn.length st.fields / 6) (Dyn.length st.funcs / 6)
 			(Dyn.length st.locals / 3) (Dyn.length st.str_off);
 		Printf.printf "[ash_tast] native: build %d ms, assemble and write %d ms\n"
 			(ms t0 t_built) (ms t_built (Unix.gettimeofday ()));

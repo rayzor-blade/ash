@@ -73,7 +73,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 /// The first word of every file: the bytes `TAST`.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"TAST");
 /// The layout version. Any change to a record or a section bumps it.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// A reference to nothing.
 pub const NONE: u32 = u32::MAX;
 
@@ -196,6 +196,11 @@ record! {
     /// | `FUN` | return type id | argument types |
     /// | `ANON` | first anonymous field id | `args_count` is the field count |
     /// | `MONO`, `DYNAMIC` | [`NONE`] | none |
+    ///
+    /// A `FUN` type's `opt_mask` has bit `i` set when argument `i` is optional, for
+    /// `i < 31`; bit 31 set means every argument from the 31st on is optional.
+    /// Two function types that differ only here are different types: a back end
+    /// passes an optional argument that is not nullable by reference.
     TypeRec {
         kind: u8,
         flags: u8,
@@ -205,11 +210,15 @@ record! {
         def: U32,
         args_first: U32,
         args_count: U32,
+        opt_mask: U32,
     }
 }
 
 record! {
     /// A class or interface.
+    ///
+    /// For a class with [`class_flag::TYPE_PARAM`] the `interfaces_first..+count` types are
+    /// the type parameter's constraints, in the order the program declared them.
     ClassRec {
         name: U32,
         /// The superclass as a type id (with its arguments), or [`NONE`].
@@ -222,6 +231,11 @@ record! {
         /// Implemented interfaces as type ids, in `TypeArgs`.
         interfaces_first: U32,
         interfaces_count: U32,
+        /// The class's `__init__` block as a function id, or [`NONE`].
+        init_func: U32,
+        /// The root node of the runtime metadata object (`@:meta` and user metadata, as
+        /// the reflection API reads it), or [`NONE`].
+        meta_root: U32,
     }
 }
 
@@ -261,6 +275,8 @@ record! {
         ctors_first: U32,
         ctors_count: U32,
         flags: U32,
+        /// The root node of the runtime metadata object, or [`NONE`].
+        meta_root: U32,
     }
 }
 
@@ -368,6 +384,60 @@ record! {
     }
 }
 
+record! {
+    /// One program type, in the order the compiler generates them.
+    ///
+    /// The compiler sorts types so a class follows its superclass, its interfaces and what
+    /// its static initializers and constructors reach. A back end runs class initializers and
+    /// static variable initializers in this order. A class, enum or abstract that is not listed
+    /// is only referenced, not generated.
+    OrderRec {
+        /// A [`module_kind`].
+        kind: U32,
+        /// The class, enum or abstract id, by `kind`.
+        id: U32,
+    }
+}
+
+record! {
+    /// One piece of declaration metadata: `@:name(args)` on a class, field, enum, enum
+    /// constructor, abstract or local.
+    ///
+    /// Only metadata a back end reads is written: the `@:ash.` namespace, and the names
+    /// HashLink's generator reads (`@:hlNative`, `@:struct`, `@:packed`, `@:coreType`,
+    /// `@:realPath`, `@:noExpr`). The arguments are the consecutive nodes
+    /// `args_first..+args_count`: constants, identifiers (a dotted path is one identifier),
+    /// array and object declarations. A metadata entry on an expression is a `META` node.
+    MetaRec {
+        /// A [`meta_owner`].
+        owner_kind: U32,
+        /// The id of the owner in the table `owner_kind` names.
+        owner: U32,
+        /// A string id: the name with its leading colon, as `Meta.to_string` prints it.
+        name: U32,
+        args_first: U32,
+        args_count: U32,
+    }
+}
+
+record! {
+    /// A compiler define: `-D name=value`, with the value `1` for a flag.
+    DefineRec {
+        name: U32,
+        value: U32,
+    }
+}
+
+record! {
+    /// An embedded resource (`-resource file@name`). The bytes are in `ResourceData`.
+    ResourceRec {
+        /// A string id.
+        name: U32,
+        offset: U32,
+        len: U32,
+    }
+}
+
 /// A section's name and element size.
 #[derive(Debug, Clone, Copy)]
 pub struct SectionDesc {
@@ -395,6 +465,11 @@ pub mod section {
     pub const KEYS: usize = 15;
     pub const KEPT: usize = 16;
     pub const PARENTS: usize = 17;
+    pub const ORDER: usize = 18;
+    pub const METAS: usize = 19;
+    pub const DEFINES: usize = 20;
+    pub const RESOURCES: usize = 21;
+    pub const RESOURCE_DATA: usize = 22;
 }
 
 /// Every section, in [`section`] order, with its element size.
@@ -471,6 +546,26 @@ pub const SECTIONS: &[SectionDesc] = &[
         name: "Parents",
         elem: ParentRec::SIZE,
     },
+    SectionDesc {
+        name: "Order",
+        elem: OrderRec::SIZE,
+    },
+    SectionDesc {
+        name: "Metas",
+        elem: MetaRec::SIZE,
+    },
+    SectionDesc {
+        name: "Defines",
+        elem: DefineRec::SIZE,
+    },
+    SectionDesc {
+        name: "Resources",
+        elem: ResourceRec::SIZE,
+    },
+    SectionDesc {
+        name: "ResourceData",
+        elem: 1,
+    },
 ];
 
 /// Every record, for the generators and the schema hash.
@@ -493,6 +588,10 @@ pub const RECORDS: &[&RecordDesc] = &[
     &KeyRec::DESC,
     &KeptRec::DESC,
     &ParentRec::DESC,
+    &OrderRec::DESC,
+    &MetaRec::DESC,
+    &DefineRec::DESC,
+    &ResourceRec::DESC,
 ];
 
 /// A group of named byte constants, as an enum for the generators.
@@ -668,6 +767,12 @@ constants! {
         INLINE = 8,
         PUBLIC = 16,
         OVERRIDE = 32,
+        /// A variable with no storage of its own (a property whose accessors compute it).
+        NOT_PHYSICAL = 64,
+        /// Declared `extern`: the body, if any, is not generated.
+        EXTERN = 128,
+        /// A method that is also a variable, which can be reassigned (`dynamic function`).
+        DYNAMIC = 256,
     }
 }
 
@@ -723,6 +828,18 @@ constants! {
         FIELD = 1,
         ENUM = 2,
         ABSTRACT = 3,
+    }
+}
+
+constants! {
+    /// `MetaRec::owner_kind`: which table `owner` indexes.
+    meta_owner, META_OWNERS, u32 {
+        CLASS = 0,
+        FIELD = 1,
+        ENUM = 2,
+        ENUM_CTOR = 3,
+        ABSTRACT = 4,
+        LOCAL = 5,
     }
 }
 
@@ -861,6 +978,10 @@ pub fn schema_hash() -> u64 {
     group(
         "kept_kind",
         KEPT_KINDS.iter().map(|(n, v)| (*n, *v as u64)).collect(),
+    );
+    group(
+        "meta_owner",
+        META_OWNERS.iter().map(|(n, v)| (*n, *v as u64)).collect(),
     );
     group(
         "tag",

@@ -338,6 +338,12 @@ pub fn generate() -> String {
     group(&mut out, "LocalFlag", "`LocalRec.flags`.", LOCAL_FLAGS);
     group(&mut out, "KeyKind", "`KeyRec.kind`.", KEY_KINDS);
     group(&mut out, "KeptKind", "`KeptRec.kind`.", KEPT_KINDS);
+    group(
+        &mut out,
+        "MetaOwner",
+        "`MetaRec.owner_kind`: which table `owner` indexes.",
+        META_OWNERS,
+    );
     names(
         &mut out,
         "Binops",

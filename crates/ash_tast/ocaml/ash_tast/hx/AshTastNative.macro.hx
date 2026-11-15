@@ -9,8 +9,15 @@ class AshTastNative {
 	static var _plugin:AshTastNativeApi;
 
 	static public function plugin():AshTastNativeApi {
-		if (_plugin == null)
+		if (_plugin == null) {
 			_plugin = eval.vm.Context.loadPlugin(pluginPath());
+			// The typer drops metadata on an expression it does not know unless this is defined, and a
+			// back end reads `@:ash.*` hints there. Init macros run after the typer exists, so a
+			// macro cannot set it; the build has to.
+			if (!haxe.macro.Context.defined("retain-untyped-meta"))
+				haxe.macro.Context.warning("ash_tast: add -D retain-untyped-meta, or the typer drops @:ash.* metadata on expressions",
+					haxe.macro.Context.currentPos());
+		}
 		return _plugin;
 	}
 

@@ -168,6 +168,11 @@ pub struct Tast<'a> {
     keys: &'a [KeyRec],
     kept: &'a [KeptRec],
     parents: &'a [ParentRec],
+    order: &'a [OrderRec],
+    metas: &'a [MetaRec],
+    defines: &'a [DefineRec],
+    resources: &'a [ResourceRec],
+    resource_data: &'a [u8],
 }
 
 fn slice<'a, T: FromBytes + KnownLayout + Immutable>(
@@ -321,6 +326,11 @@ impl<'a> Tast<'a> {
             keys: slice(bytes, table, section::KEYS)?,
             kept: slice(bytes, table, section::KEPT)?,
             parents: slice(bytes, table, section::PARENTS)?,
+            order: slice(bytes, table, section::ORDER)?,
+            metas: slice(bytes, table, section::METAS)?,
+            defines: slice(bytes, table, section::DEFINES)?,
+            resources: slice(bytes, table, section::RESOURCES)?,
+            resource_data: slice(bytes, table, section::RESOURCE_DATA)?,
         };
         tast.validate(parents)?;
         Ok(tast)
@@ -468,6 +478,8 @@ impl<'a> Tast<'a> {
                 c.interfaces_count,
                 type_args,
             )?;
+            reference("Classes", i, "init_func", c.init_func, funcs, true)?;
+            reference("Classes", i, "meta_root", c.meta_root, nodes, true)?;
         }
         for (i, f) in self.fields.iter().enumerate() {
             reference("Fields", i, "name", f.name, strs, false)?;
@@ -501,6 +513,7 @@ impl<'a> Tast<'a> {
                 e.ctors_count,
                 self.enum_ctors.len(),
             )?;
+            reference("Enums", i, "meta_root", e.meta_root, nodes, true)?;
         }
         for (i, c) in self.enum_ctors.iter().enumerate() {
             reference("EnumCtors", i, "name", c.name, strs, false)?;
@@ -539,6 +552,60 @@ impl<'a> Tast<'a> {
             )?;
             reference("Funcs", i, "root", f.root, nodes, true)?;
             reference("Funcs", i, "pos", f.pos, positions, true)?;
+        }
+        for (i, o) in self.order.iter().enumerate() {
+            let limit = match o.kind.get() {
+                k if k == u32::from(module_kind::CLASS) => classes,
+                k if k == u32::from(module_kind::ENUM) => self.enums.len(),
+                k if k == u32::from(module_kind::ABSTRACT) => self.abstracts.len(),
+                other => {
+                    return Err(TastError::BadReference {
+                        table: "Order",
+                        index: i,
+                        field: "kind",
+                        value: other,
+                        limit: MODULE_KINDS.len(),
+                    });
+                }
+            };
+            reference("Order", i, "id", o.id, limit, false)?;
+        }
+        for (i, m) in self.metas.iter().enumerate() {
+            let limit = match m.owner_kind.get() {
+                meta_owner::CLASS => classes,
+                meta_owner::FIELD => fields,
+                meta_owner::ENUM => self.enums.len(),
+                meta_owner::ENUM_CTOR => self.enum_ctors.len(),
+                meta_owner::ABSTRACT => self.abstracts.len(),
+                meta_owner::LOCAL => locals,
+                other => {
+                    return Err(TastError::BadReference {
+                        table: "Metas",
+                        index: i,
+                        field: "owner_kind",
+                        value: other,
+                        limit: META_OWNERS.len(),
+                    });
+                }
+            };
+            reference("Metas", i, "owner", m.owner, limit, false)?;
+            reference("Metas", i, "name", m.name, strs, false)?;
+            range("Metas", i, "args_first", m.args_first, m.args_count, nodes)?;
+        }
+        for (i, d) in self.defines.iter().enumerate() {
+            reference("Defines", i, "name", d.name, strs, false)?;
+            reference("Defines", i, "value", d.value, strs, false)?;
+        }
+        for (i, r) in self.resources.iter().enumerate() {
+            reference("Resources", i, "name", r.name, strs, false)?;
+            range(
+                "Resources",
+                i,
+                "offset",
+                r.offset,
+                r.len,
+                self.resource_data.len(),
+            )?;
         }
         for (i, k) in self.keys.iter().enumerate() {
             reference("Keys", i, "key", k.key, strs, false)?;
@@ -794,6 +861,53 @@ impl<'a> Tast<'a> {
         self.parents
             .iter()
             .map(|p| u64::from(p.id_hi.get()) << 32 | u64::from(p.id_lo.get()))
+    }
+
+    /// The program's types in the order the compiler generates them (see [`OrderRec`]).
+    pub fn order(&self) -> &'a [OrderRec] {
+        self.order
+    }
+
+    /// Every metadata entry on a declaration.
+    pub fn metas(&self) -> &'a [MetaRec] {
+        self.metas
+    }
+
+    /// The metadata entries of one owner, in source order.
+    pub fn metas_of(&self, owner_kind: u32, owner: u32) -> impl Iterator<Item = &'a MetaRec> + 'a {
+        self.metas
+            .iter()
+            .filter(move |m| m.owner_kind.get() == owner_kind && m.owner.get() == owner)
+    }
+
+    /// The argument nodes of a metadata entry.
+    pub fn meta_args(&self, meta: &MetaRec) -> &'a [NodeRec] {
+        let first = meta.args_first.get() as usize;
+        &self.nodes[first..first + meta.args_count.get() as usize]
+    }
+
+    /// The compiler defines the program was built with.
+    pub fn defines(&self) -> &'a [DefineRec] {
+        self.defines
+    }
+
+    /// The value of define `name`, if it is set.
+    pub fn define(&self, name: &str) -> Option<&'a str> {
+        self.defines
+            .iter()
+            .find(|d| self.string(d.name.get()) == name)
+            .map(|d| self.string(d.value.get()))
+    }
+
+    /// The embedded resources.
+    pub fn resources(&self) -> &'a [ResourceRec] {
+        self.resources
+    }
+
+    /// The bytes of a resource.
+    pub fn resource_data(&self, resource: &ResourceRec) -> &'a [u8] {
+        let first = resource.offset.get() as usize;
+        &self.resource_data[first..first + resource.len.get() as usize]
     }
 
     /// The key index layers above use to find what is in this one.

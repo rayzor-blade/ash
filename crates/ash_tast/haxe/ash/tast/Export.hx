@@ -13,8 +13,15 @@ import ash.tast.Format;
 	Writes the program the compiler just typed as a TAST file.
 
 	Add `--macro ash.tast.Export.init("out.tast")` to a build; it runs once the
-	program is typed and unused code is removed (`Context.onGenerate`), and
-	writes the file. With `--no-output` the target's own generator does not run.
+	program is typed and the expression filters have run, before dead-code removal
+	and the type filters (`Context.onGenerate`), and writes the file. With
+	`--no-output` the target's own generator does not run.
+
+	This exporter works with a stock `haxe`. It cannot write what a back end reads
+	after the type filters (the program the HashLink generator receives), the
+	initialization order, `__init__` blocks, declaration metadata, defines or
+	resources; those sections stay empty. The compiler plugin in `ocaml/ash_tast`
+	writes them, and is the exporter the lowering reads.
 	`-D ash_tast_positions` adds a source position to every node, and
 	`-D ash_tast_verbose` prints what was written and what could not be.
 
@@ -1288,14 +1295,17 @@ class Export {
 			Std.int(classes.length / 7), Std.int(fields.length / 6), Std.int(abstracts.length / 4),
 			Std.int(enums.length / 4), Std.int(enumCtors.length / 6), Std.int(anonFields.length / 3),
 			Std.int(locals.length / 3), Std.int(params.length / 2), Std.int(funcs.length / 6), nodeCount,
-			Std.int(keyRecs.length / 3), Std.int(keptRecs.length / 2), Std.int(parentRecs.length / 2)
+			Std.int(keyRecs.length / 3), Std.int(keptRecs.length / 2), Std.int(parentRecs.length / 2),
+			// Order, Metas, Defines, Resources and ResourceData: only the compiler plugin writes them.
+			0, 0, 0, 0, 0
 		];
 		var elems = [
 			Format.STRINGS_ELEM, Format.STRING_INDEX_ELEM, Format.POSITIONS_ELEM, Format.TYPES_ELEM,
 			Format.TYPE_ARGS_ELEM, Format.CLASSES_ELEM, Format.FIELDS_ELEM, Format.ABSTRACTS_ELEM,
 			Format.ENUMS_ELEM, Format.ENUM_CTORS_ELEM, Format.ANON_FIELDS_ELEM, Format.LOCALS_ELEM,
 			Format.PARAMS_ELEM, Format.FUNCS_ELEM, Format.NODES_ELEM, Format.KEYS_ELEM, Format.KEPT_ELEM,
-			Format.PARENTS_ELEM
+			Format.PARENTS_ELEM, Format.ORDER_ELEM, Format.METAS_ELEM, Format.DEFINES_ELEM, Format.RESOURCES_ELEM,
+			Format.RESOURCE_DATA_ELEM
 		];
 		var offsets:Array<Int> = [];
 		var at = Format.HEADER_SIZE + Format.SECTION_COUNT * Format.SECTION_REC_SIZE;
@@ -1318,14 +1328,14 @@ class Export {
 		for (i in 0...counts[Format.SECTION_TYPES]) {
 			var r = i * 5;
 			Format.writeTypeRec(out, offsets[Format.SECTION_TYPES] + i * Format.TYPE_REC_SIZE, types[r], 0, types[r + 1],
-				types[r + 2], types[r + 3], types[r + 4]);
+				types[r + 2], types[r + 3], types[r + 4], 0);
 		}
 		for (i in 0...typeArgs.length)
 			out.setInt32(offsets[Format.SECTION_TYPE_ARGS] + i * 4, typeArgs[i]);
 		for (i in 0...counts[Format.SECTION_CLASSES]) {
 			var r = i * 7;
 			Format.writeClassRec(out, offsets[Format.SECTION_CLASSES] + i * Format.CLASS_REC_SIZE, classes[r], classes[r + 1],
-				classes[r + 2], classes[r + 3], classes[r + 4], classes[r + 5], classes[r + 6]);
+				classes[r + 2], classes[r + 3], classes[r + 4], classes[r + 5], classes[r + 6], Format.NONE, Format.NONE);
 		}
 		for (i in 0...counts[Format.SECTION_FIELDS]) {
 			var r = i * 6;
@@ -1340,7 +1350,7 @@ class Export {
 		for (i in 0...counts[Format.SECTION_ENUMS]) {
 			var r = i * 4;
 			Format.writeEnumRec(out, offsets[Format.SECTION_ENUMS] + i * Format.ENUM_REC_SIZE, enums[r], enums[r + 1],
-				enums[r + 2], enums[r + 3]);
+				enums[r + 2], enums[r + 3], Format.NONE);
 		}
 		for (i in 0...counts[Format.SECTION_ENUM_CTORS]) {
 			var r = i * 6;

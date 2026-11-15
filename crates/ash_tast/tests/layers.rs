@@ -23,6 +23,8 @@ fn library() -> Vec<u8> {
         fields_count: U32::new(1),
         interfaces_first: U32::new(0),
         interfaces_count: U32::new(0),
+        init_func: U32::new(NONE),
+        meta_root: U32::new(NONE),
     });
     let class_type = b.add_type(type_kind::CLASS, None, 0, &[]);
     let body = Tree::new(node_kind::RETURN)

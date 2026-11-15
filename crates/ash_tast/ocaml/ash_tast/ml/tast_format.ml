@@ -2,11 +2,11 @@
 (* The TAST layout: constants, and one writer per record. Words are little-endian. *)
 
 let magic = 0x54534154
-let version = 1
+let version = 2
 let none = -1
-let schema_hash_lo = 0x193eb42d
-let schema_hash_hi = 0x631473a0
-let section_count = 18
+let schema_hash_lo = 0x5751e97d
+let schema_hash_hi = 0x0671a7c5
+let section_count = 23
 let section_strings = 0
 let section_string_index = 1
 let section_positions = 2
@@ -25,15 +25,20 @@ let section_nodes = 14
 let section_keys = 15
 let section_kept = 16
 let section_parents = 17
+let section_order = 18
+let section_metas = 19
+let section_defines = 20
+let section_resources = 21
+let section_resource_data = 22
 let strings_elem = 1
 let string_index_elem = 8
 let positions_elem = 12
-let types_elem = 20
+let types_elem = 24
 let type_args_elem = 4
-let classes_elem = 28
+let classes_elem = 36
 let fields_elem = 24
 let abstracts_elem = 16
-let enums_elem = 16
+let enums_elem = 20
 let enum_ctors_elem = 24
 let anon_fields_elem = 12
 let locals_elem = 12
@@ -43,15 +48,20 @@ let nodes_elem = 28
 let keys_elem = 12
 let kept_elem = 8
 let parents_elem = 8
+let order_elem = 8
+let metas_elem = 20
+let defines_elem = 8
+let resources_elem = 12
+let resource_data_elem = 1
 let header_size = 40
 let section_rec_size = 8
 let str_rec_size = 8
 let pos_rec_size = 12
-let type_rec_size = 20
-let class_rec_size = 28
+let type_rec_size = 24
+let class_rec_size = 36
 let field_rec_size = 24
 let abstract_rec_size = 16
-let enum_rec_size = 16
+let enum_rec_size = 20
 let enum_ctor_rec_size = 24
 let anon_field_rec_size = 12
 let local_rec_size = 12
@@ -61,6 +71,10 @@ let node_rec_size = 28
 let key_rec_size = 12
 let kept_rec_size = 8
 let parent_rec_size = 8
+let order_rec_size = 8
+let meta_rec_size = 20
+let define_rec_size = 8
+let resource_rec_size = 12
 
 let write_header out at ~magic ~version ~schema_hash_lo ~schema_hash_hi ~haxe_version ~layer_id_lo ~layer_id_hi ~flags ~entry ~section_count =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int magic);
@@ -91,15 +105,16 @@ let write_pos_rec out at ~file ~start ~end_ =
 	Bytes.set_int32_le out (at + 8) (Int32.of_int end_);
 	()
 
-let write_type_rec out at ~kind ~flags ~name ~def ~args_first ~args_count =
+let write_type_rec out at ~kind ~flags ~name ~def ~args_first ~args_count ~opt_mask =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int ((kind land 0xff) lor ((flags land 0xff) lsl 8)));
 	Bytes.set_int32_le out (at + 4) (Int32.of_int name);
 	Bytes.set_int32_le out (at + 8) (Int32.of_int def);
 	Bytes.set_int32_le out (at + 12) (Int32.of_int args_first);
 	Bytes.set_int32_le out (at + 16) (Int32.of_int args_count);
+	Bytes.set_int32_le out (at + 20) (Int32.of_int opt_mask);
 	()
 
-let write_class_rec out at ~name ~super_type ~flags ~fields_first ~fields_count ~interfaces_first ~interfaces_count =
+let write_class_rec out at ~name ~super_type ~flags ~fields_first ~fields_count ~interfaces_first ~interfaces_count ~init_func ~meta_root =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int name);
 	Bytes.set_int32_le out (at + 4) (Int32.of_int super_type);
 	Bytes.set_int32_le out (at + 8) (Int32.of_int flags);
@@ -107,6 +122,8 @@ let write_class_rec out at ~name ~super_type ~flags ~fields_first ~fields_count 
 	Bytes.set_int32_le out (at + 16) (Int32.of_int fields_count);
 	Bytes.set_int32_le out (at + 20) (Int32.of_int interfaces_first);
 	Bytes.set_int32_le out (at + 24) (Int32.of_int interfaces_count);
+	Bytes.set_int32_le out (at + 28) (Int32.of_int init_func);
+	Bytes.set_int32_le out (at + 32) (Int32.of_int meta_root);
 	()
 
 let write_field_rec out at ~name ~ty ~owner ~flags ~func ~pos =
@@ -125,11 +142,12 @@ let write_abstract_rec out at ~name ~underlying ~impl_class ~flags =
 	Bytes.set_int32_le out (at + 12) (Int32.of_int flags);
 	()
 
-let write_enum_rec out at ~name ~ctors_first ~ctors_count ~flags =
+let write_enum_rec out at ~name ~ctors_first ~ctors_count ~flags ~meta_root =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int name);
 	Bytes.set_int32_le out (at + 4) (Int32.of_int ctors_first);
 	Bytes.set_int32_le out (at + 8) (Int32.of_int ctors_count);
 	Bytes.set_int32_le out (at + 12) (Int32.of_int flags);
+	Bytes.set_int32_le out (at + 16) (Int32.of_int meta_root);
 	()
 
 let write_enum_ctor_rec out at ~name ~enum_id ~index ~ty ~args_first ~args_count =
@@ -191,6 +209,30 @@ let write_kept_rec out at ~kind ~id =
 let write_parent_rec out at ~id_lo ~id_hi =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int id_lo);
 	Bytes.set_int32_le out (at + 4) (Int32.of_int id_hi);
+	()
+
+let write_order_rec out at ~kind ~id =
+	Bytes.set_int32_le out (at + 0) (Int32.of_int kind);
+	Bytes.set_int32_le out (at + 4) (Int32.of_int id);
+	()
+
+let write_meta_rec out at ~owner_kind ~owner ~name ~args_first ~args_count =
+	Bytes.set_int32_le out (at + 0) (Int32.of_int owner_kind);
+	Bytes.set_int32_le out (at + 4) (Int32.of_int owner);
+	Bytes.set_int32_le out (at + 8) (Int32.of_int name);
+	Bytes.set_int32_le out (at + 12) (Int32.of_int args_first);
+	Bytes.set_int32_le out (at + 16) (Int32.of_int args_count);
+	()
+
+let write_define_rec out at ~name ~value =
+	Bytes.set_int32_le out (at + 0) (Int32.of_int name);
+	Bytes.set_int32_le out (at + 4) (Int32.of_int value);
+	()
+
+let write_resource_rec out at ~name ~offset ~len =
+	Bytes.set_int32_le out (at + 0) (Int32.of_int name);
+	Bytes.set_int32_le out (at + 4) (Int32.of_int offset);
+	Bytes.set_int32_le out (at + 8) (Int32.of_int len);
 	()
 
 module Node_kind = struct
@@ -289,6 +331,9 @@ module Field_flag = struct
 	let inline = 8
 	let public = 16
 	let override = 32
+	let not_physical = 64
+	let extern = 128
+	let dynamic = 256
 end
 
 module Local_flag = struct
@@ -318,6 +363,15 @@ module Kept_kind = struct
 	let field = 1
 	let enum = 2
 	let abstract = 3
+end
+
+module Meta_owner = struct
+	let class_ = 0
+	let field = 1
+	let enum = 2
+	let enum_ctor = 3
+	let abstract = 4
+	let local = 5
 end
 
 let binops = [| "OpAdd"; "OpMult"; "OpDiv"; "OpSub"; "OpAssign"; "OpEq"; "OpNotEq"; "OpGt"; "OpGte"; "OpLt"; "OpLte"; "OpAnd"; "OpOr"; "OpXor"; "OpBoolAnd"; "OpBoolOr"; "OpShl"; "OpShr"; "OpUShr"; "OpMod"; "OpAssignOp"; "OpInterval"; "OpArrow"; "OpIn"; "OpNullCoal" |]

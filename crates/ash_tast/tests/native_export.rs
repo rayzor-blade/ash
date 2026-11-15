@@ -8,8 +8,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use zerocopy::little_endian::U32;
+
 use ash_tast::dump::Dumper;
-use ash_tast::format::NONE;
+use ash_tast::format::*;
 use ash_tast::{Stack, Tast};
 
 fn root() -> PathBuf {
@@ -29,6 +31,11 @@ fn native_haxe() -> Option<String> {
 }
 
 fn export(haxe: &str, init: &str, out: &std::path::Path, extra: &[&str]) {
+    export_in("tests/export", haxe, init, out, extra)
+}
+
+/// Compiles `dir`'s `Main` with `--no-output` and the macro `init`, `OUT` standing for `out`.
+fn export_in(dir: &str, haxe: &str, init: &str, out: &std::path::Path, extra: &[&str]) {
     let root = root();
     let output = Command::new(haxe)
         .arg("-cp")
@@ -36,7 +43,7 @@ fn export(haxe: &str, init: &str, out: &std::path::Path, extra: &[&str]) {
         .arg("-cp")
         .arg(root.join("ocaml/ash_tast/hx"))
         .arg("-cp")
-        .arg(root.join("tests/export"))
+        .arg(root.join(dir))
         .arg("--macro")
         .arg(init.replace("OUT", &out.display().to_string()))
         .args(extra)
@@ -166,23 +173,214 @@ fn the_native_writer_records_the_same_positions() {
     let _ = std::fs::remove_file(&from_plugin);
     let (one, two) = (Tast::parse(&a).unwrap(), Tast::parse(&b).unwrap());
 
+    // The plugin also writes what the Haxe exporter cannot reach (`__init__` blocks, metadata), so
+    // the comparison is over the program's own file.
+    let own = |t: &Tast, pos: U32| {
+        t.opt_string(t.positions()[pos.get() as usize].file)
+            .is_some_and(|f| f.ends_with("export/Main.hx"))
+    };
     let spans = |t: &Tast| {
-        let mut all: Vec<(String, u32, u32)> = t
+        let mut all: Vec<(u32, u32)> = t
             .positions()
             .iter()
-            .map(|p| {
-                (
-                    t.opt_string(p.file).unwrap_or("?").to_owned(),
-                    p.start.get(),
-                    p.end.get(),
-                )
-            })
+            .enumerate()
+            .filter(|(i, _)| own(t, U32::new(*i as u32)))
+            .map(|(_, p)| (p.start.get(), p.end.get()))
             .collect();
         all.sort();
         all
     };
-    assert!(!one.positions().is_empty());
+    assert!(!spans(&one).is_empty());
     assert_eq!(spans(&one), spans(&two));
-    let placed = |t: &Tast| t.nodes().iter().filter(|n| n.pos.get() != NONE).count();
+    let placed = |t: &Tast| {
+        t.nodes()
+            .iter()
+            .filter(|n| n.pos.get() != NONE && own(t, n.pos))
+            .count()
+    };
     assert_eq!(placed(&one), placed(&two));
+}
+
+/// A metadata argument as source text.
+fn show(t: &Tast, n: &NodeRec) -> String {
+    let join = |nodes: Vec<String>| nodes.join(", ");
+    match n.kind {
+        node_kind::CONST => match n.flags {
+            const_kind::STRING => format!("{:?}", t.string(n.a.get())),
+            const_kind::INT => (n.a.get() as i32).to_string(),
+            const_kind::FLOAT => t.string(n.a.get()).to_owned(),
+            const_kind::BOOL => (n.a.get() == 1).to_string(),
+            const_kind::NULL => "null".to_owned(),
+            other => panic!("constant kind {other}"),
+        },
+        node_kind::IDENT => t.string(n.a.get()).to_owned(),
+        node_kind::ARRAY_DECL => {
+            format!("[{}]", join(t.kids(n).iter().map(|k| show(t, k)).collect()))
+        }
+        node_kind::OBJECT_DECL => format!(
+            "{{{}}}",
+            join(
+                t.kids(n)
+                    .iter()
+                    .map(|f| format!("{}: {}", t.string(f.a.get()), show(t, &t.kids(f)[0])))
+                    .collect()
+            )
+        ),
+        other => panic!("node kind {other}"),
+    }
+}
+
+/// What the plugin writes beyond the code: the order, `__init__` blocks, declaration and
+/// expression metadata, field flags, optional arguments, constraints, runtime metadata, defines
+/// and resources.
+#[test]
+fn the_plugin_writes_what_the_lowering_reads() {
+    let Some(haxe) = native_haxe() else {
+        eprintln!("skipped: set ASH_HAXE_NATIVE to a haxe with the ash_tast plugin built");
+        return;
+    };
+    let out = std::env::temp_dir().join(format!(
+        "ash_tast_native_content_{}.tast",
+        std::process::id()
+    ));
+    let resource = format!("{}@hello", root().join("tests/native/hello.txt").display());
+    export_in(
+        "tests/native",
+        &haxe,
+        "AshTastNative.exportFinal(\"OUT\")",
+        &out,
+        &[
+            "-D",
+            "my_flag=value",
+            "-D",
+            "retain-untyped-meta",
+            "-resource",
+            &resource,
+        ],
+    );
+    let bytes = std::fs::read(&out).unwrap();
+    let _ = std::fs::remove_file(&out);
+    let t = Tast::parse(&bytes).expect("a valid file");
+
+    let class_id = |name: &str| {
+        t.classes()
+            .iter()
+            .position(|c| t.opt_string(c.name) == Some(name))
+            .unwrap_or_else(|| panic!("class {name}")) as u32
+    };
+    let field_id = |class: &str, name: &str| {
+        let c = &t.classes()[class_id(class) as usize];
+        let first = c.fields_first.get();
+        (first..first + c.fields_count.get())
+            .find(|f| t.opt_string(t.fields()[*f as usize].name) == Some(name))
+            .unwrap_or_else(|| panic!("field {class}.{name}")) as u32
+    };
+    let metas = |kind: u32, owner: u32| -> Vec<(String, String)> {
+        t.metas_of(kind, owner)
+            .map(|m| {
+                let args: Vec<String> = t.meta_args(m).iter().map(|a| show(&t, a)).collect();
+                (t.string(m.name.get()).to_owned(), args.join(", "))
+            })
+            .collect()
+    };
+    let has = |list: &[(String, String)], name: &str, args: &str| {
+        assert!(
+            list.iter().any(|(n, a)| n == name && a == args),
+            "{name}({args}) in {list:?}"
+        )
+    };
+    let (main, point, shape) = (class_id("Main"), class_id("Point"), class_id("Shape"));
+
+    // Metadata of our own namespace on a class, with every argument shape.
+    let on_main = metas(meta_owner::CLASS, main);
+    has(&on_main, ":ash.pure", "\"a\", -1, 2.5, true, null, foo.bar");
+    has(
+        &metas(meta_owner::CLASS, point),
+        ":ash.layout",
+        "{align: 16, fields: [\"x\", \"y\"]}",
+    );
+    // Runtime metadata (`@author`) is not declaration metadata: it is an object for reflection.
+    assert!(on_main.iter().all(|(n, _)| n != "author"));
+    // Metadata on a field and on a local.
+    has(
+        &metas(meta_owner::FIELD, field_id("Point", "x")),
+        ":ash.noThrow",
+        "",
+    );
+    has(
+        &metas(meta_owner::FIELD, field_id("Main", "counter")),
+        ":ash.hot",
+        "",
+    );
+    let local = t
+        .locals()
+        .iter()
+        .position(|l| t.opt_string(l.name) == Some("local"))
+        .expect("the local") as u32;
+    has(&metas(meta_owner::LOCAL, local), ":ash.keep", "");
+    // Metadata on an expression keeps its arguments after the expression.
+    let on_expr = t
+        .nodes()
+        .iter()
+        .find(|n| n.kind == node_kind::META && t.string(n.a.get()) == ":ash.unchecked")
+        .expect("the :ash.unchecked node");
+    let kids: Vec<String> = t
+        .kids(on_expr)
+        .iter()
+        .skip(1)
+        .map(|k| show(&t, k))
+        .collect();
+    assert_eq!(kids, ["1", "2"]);
+
+    // `__init__`, and the compiler's order: an interface before the class that implements it.
+    let main_rec = &t.classes()[main as usize];
+    assert_ne!(main_rec.init_func.get(), NONE);
+    assert_eq!(t.classes()[point as usize].init_func.get(), NONE);
+    let at = |class: u32| {
+        t.order()
+            .iter()
+            .position(|o| o.kind.get() == u32::from(module_kind::CLASS) && o.id.get() == class)
+            .expect("listed in the order")
+    };
+    assert!(at(shape) < at(point));
+
+    // Field kinds.
+    let flags = |class: &str, name: &str| t.fields()[field_id(class, name) as usize].flags.get();
+    assert_ne!(flags("Point", "y") & field_flag::NOT_PHYSICAL, 0);
+    assert_eq!(flags("Point", "x") & field_flag::NOT_PHYSICAL, 0);
+    assert_ne!(flags("Main", "replaceable") & field_flag::DYNAMIC, 0);
+    assert_eq!(flags("Main", "opt") & field_flag::DYNAMIC, 0);
+
+    // `?b` and `c = 3` are optional, `a` is not.
+    let opt = &t.types()[t.fields()[field_id("Main", "opt") as usize].ty.get() as usize];
+    assert_eq!(opt.kind, type_kind::FUN);
+    assert_eq!(opt.opt_mask.get(), 0b110);
+
+    // A type parameter's constraint takes the place of its interfaces.
+    let constrained = t.classes().iter().any(|c| {
+        c.flags.get() & class_flag::TYPE_PARAM != 0
+            && t.type_args(c.interfaces_first, c.interfaces_count)
+                .iter()
+                .any(|ty| {
+                    let ty = &t.types()[ty.get() as usize];
+                    ty.kind == type_kind::CLASS && ty.def.get() == shape
+                })
+    });
+    assert!(constrained, "T:Shape has its constraint");
+
+    // The runtime metadata object `{obj: {author: ["native"]}}`.
+    let root = t.node(main_rec.meta_root.get());
+    assert_eq!(root.kind, node_kind::OBJECT_DECL);
+    assert_eq!(show(&t, root), "{obj: {author: [\"native\"]}}");
+
+    // Defines and resources.
+    assert_eq!(t.define("my_flag"), Some("value"));
+    assert!(t.define("hl").is_some());
+    assert_eq!(t.define("no_such_define"), None);
+    let [resource] = t.resources() else {
+        panic!("one resource")
+    };
+    assert_eq!(t.string(resource.name.get()), "hello");
+    assert_eq!(t.resource_data(resource), b"hello from the fixture\n");
+    assert!(t.entry().is_some());
 }

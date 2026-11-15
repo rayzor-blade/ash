@@ -227,6 +227,7 @@ pub fn generate() -> String {
     group(&mut out, "Local_flag", LOCAL_FLAGS);
     group(&mut out, "Key_kind", KEY_KINDS);
     group(&mut out, "Kept_kind", KEPT_KINDS);
+    group(&mut out, "Meta_owner", META_OWNERS);
     names(&mut out, "binops", &BINOPS);
     names(&mut out, "unops", &UNOPS);
     names(&mut out, "typed_expr_def", &TYPED_EXPR_DEF);

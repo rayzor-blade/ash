@@ -236,7 +236,7 @@ fn a_string_id_past_the_table_is_refused() {
 fn the_schema_hash_changes_only_on_purpose() {
     // Changing a record, a section or a constant table changes this. Bump
     // `VERSION`, regenerate Format.hx with `gen_haxe`, and update the hash.
-    assert_eq!(schema_hash(), 0xdf64_499b_956a_98aa);
+    assert_eq!(schema_hash(), 0xc6b1_fba0_6254_463b);
 }
 
 #[test]

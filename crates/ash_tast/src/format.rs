@@ -73,7 +73,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 /// The first word of every file: the bytes `TAST`.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"TAST");
 /// The layout version. Any change to a record or a section bumps it.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// A reference to nothing.
 pub const NONE: u32 = u32::MAX;
 
@@ -431,6 +431,22 @@ record! {
 }
 
 record! {
+    /// The type parameters a class, field (a method), enum or abstract declares, in order.
+    ///
+    /// Each is a type id of a type-parameter class (`class_flag::TYPE_PARAM`), which the
+    /// declaration's own types refer to. A back end that specializes a generic substitutes its
+    /// arguments for these. An owner with no parameters has no record.
+    GenericRec {
+        /// A [`meta_owner`]: `CLASS`, `FIELD`, `ENUM` or `ABSTRACT`.
+        owner_kind: U32,
+        owner: U32,
+        /// The parameters are `params_first..+params_count` in `TypeArgs`.
+        params_first: U32,
+        params_count: U32,
+    }
+}
+
+record! {
     /// A compiler define: `-D name=value`, with the value `1` for a flag.
     DefineRec {
         name: U32,
@@ -480,6 +496,7 @@ pub mod section {
     pub const DEFINES: usize = 20;
     pub const RESOURCES: usize = 21;
     pub const RESOURCE_DATA: usize = 22;
+    pub const GENERICS: usize = 23;
 }
 
 /// Every section, in [`section`] order, with its element size.
@@ -576,6 +593,10 @@ pub const SECTIONS: &[SectionDesc] = &[
         name: "ResourceData",
         elem: 1,
     },
+    SectionDesc {
+        name: "Generics",
+        elem: GenericRec::SIZE,
+    },
 ];
 
 /// Every record, for the generators and the schema hash.
@@ -602,6 +623,7 @@ pub const RECORDS: &[&RecordDesc] = &[
     &MetaRec::DESC,
     &DefineRec::DESC,
     &ResourceRec::DESC,
+    &GenericRec::DESC,
 ];
 
 /// A group of named byte constants, as an enum for the generators.

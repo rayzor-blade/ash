@@ -87,6 +87,7 @@ pub struct Builder {
     pub metas: Vec<MetaRec>,
     pub defines: Vec<DefineRec>,
     pub resources: Vec<ResourceRec>,
+    pub generics: Vec<GenericRec>,
     resource_data: Vec<u8>,
     bodies: Vec<(usize, Tree)>,
     /// The argument trees of each entry of `metas`, by index.
@@ -271,7 +272,7 @@ impl Builder {
                 id_hi: U32::new((*id >> 32) as u32),
             })
             .collect();
-        let sections: [&[u8]; 23] = [
+        let sections: [&[u8]; 24] = [
             &self.blob,
             self.str_index.as_slice().as_bytes(),
             self.positions.as_slice().as_bytes(),
@@ -295,8 +296,9 @@ impl Builder {
             self.defines.as_slice().as_bytes(),
             self.resources.as_slice().as_bytes(),
             &self.resource_data,
+            self.generics.as_slice().as_bytes(),
         ];
-        let counts: [usize; 23] = [
+        let counts: [usize; 24] = [
             self.blob.len(),
             self.str_index.len(),
             self.positions.len(),
@@ -320,6 +322,7 @@ impl Builder {
             self.defines.len(),
             self.resources.len(),
             self.resource_data.len(),
+            self.generics.len(),
         ];
         debug_assert_eq!(sections.len(), SECTIONS.len());
 

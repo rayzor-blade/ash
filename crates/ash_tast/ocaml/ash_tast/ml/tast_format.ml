@@ -2,11 +2,11 @@
 (* The TAST layout: constants, and one writer per record. Words are little-endian. *)
 
 let magic = 0x54534154
-let version = 3
+let version = 4
 let none = -1
-let schema_hash_lo = 0x956a98aa
-let schema_hash_hi = 0xdf64499b
-let section_count = 23
+let schema_hash_lo = 0x6254463b
+let schema_hash_hi = 0xc6b1fba0
+let section_count = 24
 let section_strings = 0
 let section_string_index = 1
 let section_positions = 2
@@ -30,6 +30,7 @@ let section_metas = 19
 let section_defines = 20
 let section_resources = 21
 let section_resource_data = 22
+let section_generics = 23
 let strings_elem = 1
 let string_index_elem = 8
 let positions_elem = 12
@@ -53,6 +54,7 @@ let metas_elem = 20
 let defines_elem = 8
 let resources_elem = 12
 let resource_data_elem = 1
+let generics_elem = 16
 let header_size = 40
 let section_rec_size = 8
 let str_rec_size = 8
@@ -75,6 +77,7 @@ let order_rec_size = 8
 let meta_rec_size = 20
 let define_rec_size = 8
 let resource_rec_size = 12
+let generic_rec_size = 16
 
 let write_header out at ~magic ~version ~schema_hash_lo ~schema_hash_hi ~haxe_version ~layer_id_lo ~layer_id_hi ~flags ~entry ~section_count =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int magic);
@@ -234,6 +237,13 @@ let write_resource_rec out at ~name ~offset ~len =
 	Bytes.set_int32_le out (at + 0) (Int32.of_int name);
 	Bytes.set_int32_le out (at + 4) (Int32.of_int offset);
 	Bytes.set_int32_le out (at + 8) (Int32.of_int len);
+	()
+
+let write_generic_rec out at ~owner_kind ~owner ~params_first ~params_count =
+	Bytes.set_int32_le out (at + 0) (Int32.of_int owner_kind);
+	Bytes.set_int32_le out (at + 4) (Int32.of_int owner);
+	Bytes.set_int32_le out (at + 8) (Int32.of_int params_first);
+	Bytes.set_int32_le out (at + 12) (Int32.of_int params_count);
 	()
 
 module Node_kind = struct

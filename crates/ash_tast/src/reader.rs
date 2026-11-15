@@ -173,6 +173,7 @@ pub struct Tast<'a> {
     defines: &'a [DefineRec],
     resources: &'a [ResourceRec],
     resource_data: &'a [u8],
+    generics: &'a [GenericRec],
 }
 
 fn slice<'a, T: FromBytes + KnownLayout + Immutable>(
@@ -331,6 +332,7 @@ impl<'a> Tast<'a> {
             defines: slice(bytes, table, section::DEFINES)?,
             resources: slice(bytes, table, section::RESOURCES)?,
             resource_data: slice(bytes, table, section::RESOURCE_DATA)?,
+            generics: slice(bytes, table, section::GENERICS)?,
         };
         tast.validate(parents)?;
         Ok(tast)
@@ -625,6 +627,32 @@ impl<'a> Tast<'a> {
             reference("Metas", i, "name", m.name, strs, false)?;
             range("Metas", i, "args_first", m.args_first, m.args_count, nodes)?;
         }
+        for (i, g) in self.generics.iter().enumerate() {
+            let limit = match g.owner_kind.get() {
+                meta_owner::CLASS => classes,
+                meta_owner::FIELD => fields,
+                meta_owner::ENUM => self.enums.len(),
+                meta_owner::ABSTRACT => self.abstracts.len(),
+                other => {
+                    return Err(TastError::BadReference {
+                        table: "Generics",
+                        index: i,
+                        field: "owner_kind",
+                        value: other,
+                        limit: META_OWNERS.len(),
+                    });
+                }
+            };
+            reference("Generics", i, "owner", g.owner, limit, false)?;
+            range(
+                "Generics",
+                i,
+                "params_first",
+                g.params_first,
+                g.params_count,
+                type_args,
+            )?;
+        }
         for (i, d) in self.defines.iter().enumerate() {
             reference("Defines", i, "name", d.name, strs, false)?;
             reference("Defines", i, "value", d.value, strs, false)?;
@@ -917,6 +945,20 @@ impl<'a> Tast<'a> {
     pub fn meta_args(&self, meta: &MetaRec) -> &'a [NodeRec] {
         let first = meta.args_first.get() as usize;
         &self.nodes[first..first + meta.args_count.get() as usize]
+    }
+
+    /// The type parameters of a class, field, enum or abstract, as type ids; empty when it is
+    /// not generic.
+    pub fn generics_of(&self, owner_kind: u32, owner: u32) -> &'a [U32] {
+        self.generics
+            .iter()
+            .find(|g| g.owner_kind.get() == owner_kind && g.owner.get() == owner)
+            .map_or(&[], |g| self.type_args(g.params_first, g.params_count))
+    }
+
+    /// Every declaration that has type parameters.
+    pub fn generics(&self) -> &'a [GenericRec] {
+        self.generics
     }
 
     /// The compiler defines the program was built with.

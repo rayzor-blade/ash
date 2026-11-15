@@ -45,6 +45,20 @@ class Derived extends Base {
 
 typedef Rec = {field:Rec}
 
+// A generic class: `Pair<Int, String>` is one class to HashLink, which stores both fields boxed.
+class Pair<A, B> {
+	public var first:A;
+	public var second:B;
+
+	public function new(a:A, b:B) {
+		first = a;
+		second = b;
+	}
+
+	public function swap():Pair<B, A>
+		return new Pair(second, first);
+}
+
 @:ash.pure("a", -1, 2.5, true, null, foo.bar)
 @author("native")
 class Main {
@@ -81,5 +95,6 @@ class Main {
 		trace(haxe.Resource.getString("hello"));
 		trace(strings(["x"]) + floats([1.5]) + new Derived().name().length);
 		gen((null:Rec));
+		trace(new Pair(1, "x").swap().first);
 	}
 }

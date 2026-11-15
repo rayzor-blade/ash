@@ -1296,8 +1296,8 @@ class Export {
 			Std.int(enums.length / 4), Std.int(enumCtors.length / 6), Std.int(anonFields.length / 3),
 			Std.int(locals.length / 3), Std.int(params.length / 2), Std.int(funcs.length / 6), nodeCount,
 			Std.int(keyRecs.length / 3), Std.int(keptRecs.length / 2), Std.int(parentRecs.length / 2),
-			// Order, Metas, Defines, Resources and ResourceData: only the compiler plugin writes them.
-			0, 0, 0, 0, 0
+			// Order, Metas, Defines, Resources, ResourceData and Generics: only the compiler plugin writes them.
+			0, 0, 0, 0, 0, 0
 		];
 		var elems = [
 			Format.STRINGS_ELEM, Format.STRING_INDEX_ELEM, Format.POSITIONS_ELEM, Format.TYPES_ELEM,
@@ -1305,7 +1305,7 @@ class Export {
 			Format.ENUMS_ELEM, Format.ENUM_CTORS_ELEM, Format.ANON_FIELDS_ELEM, Format.LOCALS_ELEM,
 			Format.PARAMS_ELEM, Format.FUNCS_ELEM, Format.NODES_ELEM, Format.KEYS_ELEM, Format.KEPT_ELEM,
 			Format.PARENTS_ELEM, Format.ORDER_ELEM, Format.METAS_ELEM, Format.DEFINES_ELEM, Format.RESOURCES_ELEM,
-			Format.RESOURCE_DATA_ELEM
+			Format.RESOURCE_DATA_ELEM, Format.GENERICS_ELEM
 		];
 		var offsets:Array<Int> = [];
 		var at = Format.HEADER_SIZE + Format.SECTION_COUNT * Format.SECTION_REC_SIZE;

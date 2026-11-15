@@ -9,12 +9,12 @@ import haxe.io.Bytes;
 **/
 class Format {
 	public static inline final MAGIC = 0x54534154;
-	public static inline final VERSION = 3;
+	public static inline final VERSION = 4;
 	/** A reference to nothing (`u32::MAX`, which is -1 as an Int). */
 	public static inline final NONE = -1;
-	public static inline final SCHEMA_HASH_LO = 0x956a98aa;
-	public static inline final SCHEMA_HASH_HI = 0xdf64499b;
-	public static inline final SECTION_COUNT = 23;
+	public static inline final SCHEMA_HASH_LO = 0x6254463b;
+	public static inline final SCHEMA_HASH_HI = 0xc6b1fba0;
+	public static inline final SECTION_COUNT = 24;
 	public static inline final SECTION_STRINGS = 0;
 	public static inline final SECTION_STRING_INDEX = 1;
 	public static inline final SECTION_POSITIONS = 2;
@@ -38,6 +38,7 @@ class Format {
 	public static inline final SECTION_DEFINES = 20;
 	public static inline final SECTION_RESOURCES = 21;
 	public static inline final SECTION_RESOURCE_DATA = 22;
+	public static inline final SECTION_GENERICS = 23;
 	public static inline final STRINGS_ELEM = 1;
 	public static inline final STRING_INDEX_ELEM = 8;
 	public static inline final POSITIONS_ELEM = 12;
@@ -61,6 +62,7 @@ class Format {
 	public static inline final DEFINES_ELEM = 8;
 	public static inline final RESOURCES_ELEM = 12;
 	public static inline final RESOURCE_DATA_ELEM = 1;
+	public static inline final GENERICS_ELEM = 16;
 	public static inline final HEADER_SIZE = 40;
 	public static inline final HEADER_MAGIC_AT = 0;
 	public static inline final HEADER_VERSION_AT = 4;
@@ -179,6 +181,11 @@ class Format {
 	public static inline final RESOURCE_REC_NAME_AT = 0;
 	public static inline final RESOURCE_REC_OFFSET_AT = 4;
 	public static inline final RESOURCE_REC_LEN_AT = 8;
+	public static inline final GENERIC_REC_SIZE = 16;
+	public static inline final GENERIC_REC_OWNER_KIND_AT = 0;
+	public static inline final GENERIC_REC_OWNER_AT = 4;
+	public static inline final GENERIC_REC_PARAMS_FIRST_AT = 8;
+	public static inline final GENERIC_REC_PARAMS_COUNT_AT = 12;
 
 	/** Write one `Header` at byte `at`. */
 	public static inline function writeHeader(out:Bytes, at:Int, magic:Int, version:Int, schemaHashLo:Int, schemaHashHi:Int, haxeVersion:Int, layerIdLo:Int, layerIdHi:Int, flags:Int, entry:Int, sectionCount:Int):Void {
@@ -360,6 +367,14 @@ class Format {
 		out.setInt32(at + 0, name);
 		out.setInt32(at + 4, offset);
 		out.setInt32(at + 8, len);
+	}
+
+	/** Write one `GenericRec` at byte `at`. */
+	public static inline function writeGenericRec(out:Bytes, at:Int, ownerKind:Int, owner:Int, paramsFirst:Int, paramsCount:Int):Void {
+		out.setInt32(at + 0, ownerKind);
+		out.setInt32(at + 4, owner);
+		out.setInt32(at + 8, paramsFirst);
+		out.setInt32(at + 12, paramsCount);
 	}
 
 	#if macro

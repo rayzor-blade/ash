@@ -58,6 +58,7 @@ type st = {
 	order : int Dyn.t; (* module kind, id *)
 	metas : int Dyn.t; (* owner_kind, owner, name, args_first, args_count *)
 	mutable pending : (int * int * Ast.metadata) list; (* metadata waiting for a safe point to queue its arguments *)
+	generics : int Dyn.t; (* owner_kind, owner, params_first, params_count *)
 	defines : int Dyn.t; (* name, value *)
 	resources : int Dyn.t; (* name, offset, len *)
 	resource_data : Buffer.t;
@@ -109,6 +110,7 @@ let create com = {
 	order = Dyn.create 0;
 	metas = Dyn.create 0;
 	pending = [];
+	generics = Dyn.create 0;
 	defines = Dyn.create 0;
 	resources = Dyn.create 0;
 	resource_data = Buffer.create 1024;
@@ -306,6 +308,14 @@ and abstract_via st id a ps =
 	if not (Meta.has Meta.CoreType a.a_meta) then
 		Dyn.set st.types (id * 8 + 7) (type_id st (Abstract.get_underlying_type a ps))
 
+(* The type parameters a declaration has, for a back end that specializes it. *)
+and add_generics st owner_kind owner (params : typed_type_param list) =
+	if params <> [] then begin
+		let ids = List.map (fun tp -> type_id st tp.ttp_type) params in
+		let first, count = arg_list st ids in
+		List.iter (Dyn.push st.generics) [owner_kind; owner; first; count]
+	end
+
 (* A structure that is the statics of a class, an enum or an abstract is that type's object. *)
 and anon_owner st an =
 	match !(an.a_status) with
@@ -477,6 +487,7 @@ and enum_id st e =
 		let id = new_rec st.enums 5 [str st key; 0; 0; 0; none] in
 		Hashtbl.replace st.enum_ids e.e_path id;
 		queue_metas st F.Meta_owner.enum id e.e_meta;
+		add_generics st F.Meta_owner.enum id e.e_params;
 		let first = Dyn.length st.enum_ctors / 6 in
 		List.iter (fun name ->
 			let ef = PMap.find name e.e_constrs in
@@ -507,6 +518,7 @@ and abstract_id st a =
 		let id = new_rec st.abstracts 4 [str st (Globals.s_type_path a.a_path); none; none; 0] in
 		Hashtbl.replace st.abstract_ids a.a_path id;
 		queue_metas st F.Meta_owner.abstract id a.a_meta;
+		add_generics st F.Meta_owner.abstract id a.a_params;
 		Dyn.set st.abstracts (id * 4 + 1) (type_id st a.a_this);
 		(match a.a_impl with Some c -> Dyn.set st.abstracts (id * 4 + 2) (class_id st c) | None -> ());
 		id
@@ -587,6 +599,7 @@ let fill_class st id =
 		| _ -> ());
 		let base = id * 9 in
 		queue_metas st F.Meta_owner.class_ id c.cl_meta;
+		add_generics st F.Meta_owner.class_ id c.cl_params;
 		Dyn.set st.classes base (str st (Globals.s_type_path path));
 		Dyn.set st.classes (base + 1)
 			(match c.cl_super with None -> none | Some (sc, ps) -> type_id st (TInst (sc, ps)));
@@ -610,6 +623,7 @@ let fill_class st id =
 		List.iter (fun (cf, is_static) ->
 			let fid = new_rec st.fields 6 [str st cf.cf_name; 0; id; field_flags cf is_static; none; none] in
 			queue_metas st F.Meta_owner.field fid cf.cf_meta;
+			add_generics st F.Meta_owner.field fid cf.cf_params;
 			Hashtbl.replace st.field_ids (path, is_static, cf.cf_name) fid
 		) all;
 		Dyn.set st.classes (base + 3) first;
@@ -922,14 +936,14 @@ let assemble st entry =
 		len st.enum_ctors / 6; len st.anon_fields / 3; len st.locals / 3; len st.params / 2;
 		len st.funcs / 6; len st.nodes / 8; 0; 0; 0;
 		len st.order / 2; len st.metas / 5; len st.defines / 2; len st.resources / 3;
-		Buffer.length st.resource_data;
+		Buffer.length st.resource_data; len st.generics / 4;
 	|] in
 	let elems = [|
 		F.strings_elem; F.string_index_elem; F.positions_elem; F.types_elem; F.type_args_elem;
 		F.classes_elem; F.fields_elem; F.abstracts_elem; F.enums_elem; F.enum_ctors_elem;
 		F.anon_fields_elem; F.locals_elem; F.params_elem; F.funcs_elem; F.nodes_elem;
 		F.keys_elem; F.kept_elem; F.parents_elem; F.order_elem; F.metas_elem; F.defines_elem;
-		F.resources_elem; F.resource_data_elem;
+		F.resources_elem; F.resource_data_elem; F.generics_elem;
 	|] in
 	let offsets = Array.make F.section_count 0 in
 	let at = ref (F.header_size + F.section_count * F.section_rec_size) in
@@ -1042,6 +1056,11 @@ let assemble st entry =
 	done;
 	Bytes.blit_string (Buffer.contents st.resource_data) 0 out offsets.(F.section_resource_data)
 		(Buffer.length st.resource_data);
+	for i = 0 to counts.(F.section_generics) - 1 do
+		let r = i * 4 and x = st.generics in
+		F.write_generic_rec out (offsets.(F.section_generics) + i * F.generic_rec_size)
+			~owner_kind:(g x r) ~owner:(g x (r + 1)) ~params_first:(g x (r + 2)) ~params_count:(g x (r + 3))
+	done;
 	out
 
 (* The kind and path of a type, which orders the types the compiler hands over. *)

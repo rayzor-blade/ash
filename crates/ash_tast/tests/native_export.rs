@@ -429,6 +429,29 @@ fn the_plugin_writes_what_the_lowering_reads() {
         "the statics of haxe.Log"
     );
 
+    // The type parameters a declaration has, which a back end substitutes when it specializes.
+    let params = |kind: u32, owner: u32| t.generics_of(kind, owner).to_vec();
+    let is_type_param = |ty: U32| {
+        let ty = &t.types()[ty.get() as usize];
+        ty.kind == type_kind::CLASS
+            && t.classes()[ty.def.get() as usize].flags.get() & class_flag::TYPE_PARAM != 0
+    };
+    let pair = params(meta_owner::CLASS, class_id("Pair"));
+    assert_eq!(pair.len(), 2, "Pair<A, B>");
+    assert!(pair.iter().all(|p| is_type_param(*p)));
+    assert_eq!(params(meta_owner::ABSTRACT, abstract_id("Box")).len(), 1);
+    assert!(params(meta_owner::CLASS, main).is_empty());
+    let strings = params(meta_owner::FIELD, field_id("Main", "strings"));
+    assert_eq!(strings.len(), 1, "strings<T:String>");
+    let constraint = t.classes()[t.types()[strings[0].get() as usize].def.get() as usize];
+    let [only] = t.type_args(constraint.interfaces_first, constraint.interfaces_count) else {
+        panic!("T has one constraint")
+    };
+    assert_eq!(
+        t.opt_string(t.classes()[t.types()[only.get() as usize].def.get() as usize].name),
+        Some("String")
+    );
+
     // Defines and resources.
     assert_eq!(t.define("my_flag"), Some("value"));
     assert!(t.define("hl").is_some());

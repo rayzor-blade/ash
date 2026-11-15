@@ -1,5 +1,8 @@
 <p align="center">
-<img style="display: block;" src="ash.png" alt="ASH Logo" width="250"/>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="ash-volcano-dark.svg">
+  <img style="display: block;" src="ash-volcano.svg" alt="ASH Logo" width="250"/>
+</picture>
 </p>
 
 <h1 align="center">ASH</h1>

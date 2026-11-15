@@ -72,3 +72,44 @@ pub fn defined_symbols(archives: &[PathBuf]) -> HashSet<String> {
         })
         .collect()
 }
+
+/// The function names the wasm objects and archives define, for a primitive the program can
+/// call by its symbol. A file that is not readable defines none; the link says so when it comes
+/// to it.
+pub fn defined_wasm_functions(paths: &[PathBuf]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for path in paths {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Ok(defined) = ash_wasm_link::defined_functions(&name, &bytes) {
+            names.extend(defined);
+        }
+    }
+    names
+}
+
+/// Whether a program's native is one the linked libraries define as `hlp_<name>`, so the program
+/// calls it by that symbol instead of asking a library the host opens.
+pub fn defines_native(defined: Option<&HashSet<String>>, name: &str) -> bool {
+    defined.is_some_and(|d| d.contains(&format!("hlp_{}", name.trim_start_matches("hlp_"))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_native_is_defined_by_the_hlp_symbol_of_its_name() {
+        let defined: HashSet<String> = ["hlp_greeter_new".to_string()].into();
+        assert!(defines_native(Some(&defined), "greeter_new"));
+        // A name written with its own prefix names the same symbol.
+        assert!(defines_native(Some(&defined), "hlp_greeter_new"));
+        assert!(!defines_native(Some(&defined), "greeter_greet"));
+        assert!(!defines_native(None, "greeter_new"));
+    }
+}

@@ -333,11 +333,20 @@ define one name are still an error; only an archive's definitions give way.
 
 A function a member names that nothing defines and no host supplies, such as `chdir`
 from `std`, links as a call that traps. A program that never reaches it is
-unaffected. When an archive is linked, the module imports only what reachable code
-uses, so a member's unused functions add no imports. A library built
+unaffected. When a member joins the link, the module imports only what reachable code
+uses, so a member's unused functions add no imports; an archive that contributes no
+member leaves the link as it was. A library built
 position-independent links too: a function whose address it reads through the global
 offset table gets a table slot. Imports the host does supply, the `ash_host_*`
 functions, stay imports.
+
+A program reaches a library's primitives the way it reaches an HDLL's. Each
+primitive a library defines has an entry `hlp_<name>`, which takes the address of a
+signature string and returns the function. When an archive defines the entry for a
+primitive the program calls, the program calls that entry once at start-up and keeps
+the result in the primitive's slot, so no `.wasm` side module has to sit beside the
+output and the build does not note one. A primitive no library defines is looked for
+in the libraries the host opens, as before.
 
 Building the runtime object for the target, when working from source:
 

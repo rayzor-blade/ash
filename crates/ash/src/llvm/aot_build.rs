@@ -140,6 +140,9 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
     // A wasm program is built by the direct AIR-to-wasm backend: no LLVM
     // context is ever made for it.
     if crate::llvm::aot_link::is_wasm_triple(&triple) {
+        // The functions the program's libraries define, so a primitive one of them provides is
+        // called by its symbol and the link pulls it in.
+        let library_symbols = crate::archive::defined_wasm_functions(&language_objects);
         return emit_wasm(
             WasmBuild {
                 file,
@@ -158,6 +161,7 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
                 closures: &closures,
                 object_tails: &object_tails,
                 object_drops: &object_drops,
+                library_symbols: (!library_symbols.is_empty()).then_some(&library_symbols),
             },
             language_objects,
         );
@@ -556,7 +560,9 @@ fn emit_wasm(
     .natives
     .iter()
     .any(|n| {
-        !crate::native_lib::is_runtime_lib(&n.lib) && crate::native_lib::host_link(&n.lib, &n.name).is_none()
+        !crate::native_lib::is_runtime_lib(&n.lib)
+            && crate::native_lib::host_link(&n.lib, &n.name).is_none()
+            && !crate::archive::defines_native(host.library_symbols, &n.name)
     });
     let kind = if host_libraries {
         crate::llvm::aot_link::Runtime::Shared

@@ -1325,16 +1325,24 @@ fn run() -> Result<()> {
         let target_loads_libraries = abi.as_ref().is_none_or(|abi| abi.native_dynamic_loading);
         // A phone program links its libraries from `--native-lib` archives, so
         // a primitive one of them defines is not missing.
-        let natives: Vec<_> = if abi.as_ref().is_some_and(|abi| abi.static_natives) {
-            let defined = ash_core::archive::defined_symbols(&cli.native_libs);
-            bytecode
+        // A wasm program links its libraries from `--native-lib` archives too, and calls each
+        // primitive they define by its symbol.
+        let wasm = cli.target.as_deref().is_some_and(|t| t.starts_with("wasm"));
+        let defined = if abi.as_ref().is_some_and(|abi| abi.static_natives) {
+            Some(ash_core::archive::defined_symbols(&cli.native_libs))
+        } else if wasm && !cli.native_libs.is_empty() {
+            Some(ash_core::archive::defined_wasm_functions(&cli.native_libs))
+        } else {
+            None
+        };
+        let natives: Vec<_> = match &defined {
+            Some(defined) => bytecode
                 .natives
                 .iter()
-                .filter(|n| !defined.contains(&format!("hlp_{}", n.name.trim_start_matches("hlp_"))))
+                .filter(|n| !ash_core::archive::defines_native(Some(defined), &n.name))
                 .cloned()
-                .collect()
-        } else {
-            bytecode.natives.clone()
+                .collect(),
+            None => bytecode.natives.clone(),
         };
         native_resolver.discover_and_load_libraries(
             search_dir,

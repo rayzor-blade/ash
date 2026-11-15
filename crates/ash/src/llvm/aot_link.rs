@@ -778,10 +778,13 @@ fn link_wasm_module(
             inputs.push(ash_wasm_link::read(&name, &bytes)?);
         }
     }
-    let has_archives = !archives.is_empty();
-    if has_archives {
+    // Whether any archive member joined the link. A link where none did is the link it would
+    // have been without the archive.
+    let mut linked_members = false;
+    if !archives.is_empty() {
         let sizes: Vec<(String, usize)> = archives.iter().map(|a| (a.name.clone(), a.len())).collect();
         let pulled = ash_wasm_link::pull(&inputs, archives)?;
+        linked_members = !pulled.objects.is_empty();
         if !quiet {
             for ((name, total), taken) in sizes.iter().zip(&pulled.taken) {
                 crate::progress::note(&format!("[ash] {name}: {taken} of {total} members linked"));
@@ -875,7 +878,7 @@ fn link_wasm_module(
         shared_memory: triple.ends_with("-threads"),
         // A library holds functions the program never calls, and they name things no host
         // supplies; only what is reached is imported.
-        prune_imports: has_archives,
+        prune_imports: linked_members,
         hdll_imports,
         hdll_data,
         hdll_host_imports,

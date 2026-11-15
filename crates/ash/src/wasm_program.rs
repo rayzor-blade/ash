@@ -415,6 +415,10 @@ pub struct Host<'a> {
     pub closures: &'a [crate::host_export::HostClosure],
     pub object_tails: &'a [(String, usize)],
     pub object_drops: &'a [String],
+    /// The functions the native libraries and objects the program links define. A library
+    /// primitive whose `hlp_<name>` is among them is called by that symbol, as a runtime native
+    /// is, instead of being looked up in a library the host opens.
+    pub library_symbols: Option<&'a std::collections::HashSet<String>>,
 }
 
 /// Build `path` for wasm32 as one object. A function that cannot be emitted
@@ -642,12 +646,17 @@ pub fn build(
             },
         }
     };
-    image.finish(&slots, barriers)?;
+    image.finish(&slots, host.library_symbols, barriers)?;
     Ok(obj.finish())
 }
 
 impl Image<'_> {
-    fn finish(&mut self, slots: &BTreeMap<String, (String, String)>, barriers: bool) -> Result<()> {
+    fn finish(
+        &mut self,
+        slots: &BTreeMap<String, (String, String)>,
+        library_symbols: Option<&std::collections::HashSet<String>>,
+        barriers: bool,
+    ) -> Result<()> {
         let bc = self.bc;
         self.type_table();
 
@@ -735,7 +744,7 @@ impl Image<'_> {
         }
         let placed = self.static_constants();
         let trampolines = self.trampolines()?;
-        let late = self.late_init(slots, &link_slots, &trampolines)?;
+        let late = self.late_init(slots, library_symbols, &link_slots, &trampolines)?;
         let init = self.module_init(barriers, &placed)?;
         self.entry(init, late)?;
         Ok(())
@@ -1227,6 +1236,7 @@ impl Image<'_> {
     fn late_init(
         &mut self,
         slots: &BTreeMap<String, (String, String)>,
+        library_symbols: Option<&std::collections::HashSet<String>>,
         link_slots: &[(String, String)],
         trampolines: &Option<(Sym, Sym, usize)>,
     ) -> Result<Sym> {
@@ -1240,11 +1250,31 @@ impl Image<'_> {
         }
         if !slots.is_empty() {
             let resolve = self.imp("hlp_aot_native", &[I32, I32], &[I32]);
+            // Where a statically linked library's `hlp_<name>` writes the signature it returns.
+            let mut sign = None;
             for (slot, (lib, prim)) in slots {
                 let slot_sym = self
                     .obj
                     .lookup(slot)
                     .ok_or_else(|| anyhow!("no slot {slot}"))?;
+                if crate::archive::defines_native(library_symbols, prim) {
+                    // `hlp_<name>(&signature)` is how a library hands over a primitive: it
+                    // returns the function, which is a table index here. A side module is asked
+                    // the same way, by the runtime.
+                    let sign = *sign.get_or_insert_with(|| {
+                        self.obj.declare_data("ash_native_sign", 4, 2, Linkage::Local)
+                    });
+                    let entry = self.imp(
+                        &format!("hlp_{}", prim.trim_start_matches("hlp_")),
+                        &[I32],
+                        &[I32],
+                    );
+                    f.addr(slot_sym, 0)
+                        .addr(sign, 0)
+                        .call(entry)
+                        .i(I::I32Store(mem(0, 2)));
+                    continue;
+                }
                 let lib_s = self.cstr(lib);
                 let prim_s = self.cstr(prim);
                 f.addr(slot_sym, 0)

@@ -96,6 +96,29 @@ pub fn read_archive(name: &str, bytes: &[u8]) -> Result<Archive> {
     })
 }
 
+/// The function names a file defines for other objects to call: an archive's members', or one
+/// object's. A file that is neither is an error.
+pub fn defined_functions(name: &str, bytes: &[u8]) -> Result<HashSet<String>> {
+    let objects: Vec<Object> = if is_archive(bytes) {
+        read_archive(name, bytes)?
+            .members
+            .into_iter()
+            .flatten()
+            .collect()
+    } else {
+        vec![read(name, bytes)?]
+    };
+    let mut names = HashSet::new();
+    for obj in &objects {
+        for (_, (kind, symbol), _) in definitions(obj) {
+            if kind == Kind::Function {
+                names.insert(symbol);
+            }
+        }
+    }
+    Ok(names)
+}
+
 /// A definition in a pulled member that gave way to one the link already had.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shadowed {

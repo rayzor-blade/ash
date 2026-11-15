@@ -62,7 +62,7 @@ pub mod object;
 pub mod suspend;
 pub mod waits;
 
-pub use archive::{Archive, Pulled, Shadowed, is_archive, pull, read_archive};
+pub use archive::{Archive, Pulled, Shadowed, defined_functions, is_archive, pull, read_archive};
 pub use dylink::{SIDE_MODULE_PREFIX, SideModule, looks_like_side_module, read_side_module};
 pub use link::{LinkOptions, LinkTimings, link, link_with_timings};
 pub use object::{Object, Symbol, SymbolTarget, read};

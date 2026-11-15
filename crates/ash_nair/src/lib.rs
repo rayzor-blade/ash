@@ -10,9 +10,12 @@
 //!
 //! What is here: the program's type table ([`build`]: the layout of every class, enum and
 //! interface), the generic code used at concrete types ([`collect`]), and function bodies lowered
-//! to AIR ([`lower`]) that [`info`] runs the AIR passes over. The lowering covers numeric code so
-//! far: integers, floats and bools, locals, arithmetic, `if`, loops and direct calls. [`eval`] is
-//! a small interpreter for that AIR, so a test can check what a lowered function computes.
+//! to AIR ([`lower`]) that [`info`] runs the AIR passes over. The lowering covers numeric code and
+//! objects of non-generic classes so far: integers, floats and bools, locals, arithmetic, `if`,
+//! loops, direct calls, `new`, instance variables, method calls and `null`. [`eval`] is a small
+//! interpreter for that AIR, so a test can check what a lowered function computes. The
+//! `lower_report` binary lowers each function of a TAST file on its own and counts why the ones
+//! that fail do, which is how the next construct to lower is chosen.
 //!
 //! The runtime builds objects from the layouts, so the table is built to match them. [`hlfile`]
 //! reads a `.hl` so a test can check that it does; that test checks agreement with the existing

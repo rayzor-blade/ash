@@ -2,9 +2,9 @@
 //!
 //! This covers what a numeric kernel is made of: integer, float and bool values, locals,
 //! arithmetic and comparisons, `if` and loops, `break` and `continue`, `return`, and direct calls
-//! of static functions; and objects of non-generic classes: `new`, instance variables, `this`, and
-//! calls of methods that no subclass overrides. Anything else is refused with a message that names
-//! it, so a body that does not lower is never half lowered.
+//! of static functions; and objects of non-generic classes: `new`, instance variables, `this`,
+//! calls of methods, and `null` with `==` and `!=` against it. Anything else is refused with a
+//! message that names it, so a body that does not lower is never half lowered.
 //!
 //! Locals are put in SSA form as the body is walked (Braun et al., "Simple and Efficient
 //! Construction of Static Single Assignment Form"): a block is sealed once all its predecessors
@@ -21,6 +21,7 @@ use crate::build::TypeBuilder;
 use crate::hl::{HlType, TypeIx};
 
 mod methods;
+mod nulls;
 mod objects;
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -510,7 +511,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             HlType::I32 => Ok(self.int_const(0)),
             HlType::F64 => Ok(self.float_const(0.0)),
             HlType::Bool => Ok(self.bool_const(false)),
-            HlType::Obj(_) => {
+            _ if self.m.types.table.is_nullable(ty) => {
                 let dst = self.value(ty);
                 self.emit(Instr::Null { dst });
                 Ok(dst)
@@ -666,6 +667,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 Ok(self.float_const(v))
             }
             const_kind::BOOL => Ok(self.bool_const(n.a.get() != 0)),
+            const_kind::NULL => self.null_value(n),
             other => Err(format!("constant kind {other} is not lowered yet")),
         }
     }
@@ -950,6 +952,11 @@ impl<'m, 'a> FnLower<'m, 'a> {
             node_kind::BINOP => {
                 let op = BINOPS[n.a.get() as usize];
                 let ids = self.kids(&n);
+                if matches!(op, "OpEq" | "OpNotEq")
+                    && let Some(operand) = self.null_operand(&n)
+                {
+                    return self.null_test(operand, op == "OpEq", yes, no);
+                }
                 match op {
                     "OpBoolAnd" | "OpBoolOr" => {
                         let mid = self.new_block();

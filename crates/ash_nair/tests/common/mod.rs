@@ -64,7 +64,8 @@ pub fn export(compiler: &str, fixture: &str, tag: &str) -> Vec<u8> {
     bytes
 }
 
-/// The loads that sit in a loop of `f`.
+/// The loads that sit in a loop of `f`. Not every test crate that includes this module uses it.
+#[allow(dead_code)]
 pub fn loads_in_loops(f: &air::v2::ir::Function) -> usize {
     use air::v2::analysis::{CfgInfo, LoopForest};
     use air::v2::ir::Instr;

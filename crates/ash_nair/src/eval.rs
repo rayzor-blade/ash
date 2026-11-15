@@ -310,6 +310,8 @@ fn compare(cond: CondKind, a: Val, b: Option<Val>) -> Result<bool, String> {
     Ok(match (cond, a, b) {
         (True, Val::B(x), None) => x,
         (False, Val::B(x), None) => !x,
+        (Null, x, None) => x == Val::Void,
+        (NotNull, x, None) => x != Val::Void,
         (Eq, x, Some(y)) => x == y,
         (NotEq, x, Some(y)) => x != y,
         (SLt, Val::I(x), Some(Val::I(y))) => x < y,

@@ -125,3 +125,31 @@ fn a_tree_built_and_checked_at_once_is_fused_in_nairs_file_as_in_genhls() {
     let _ = std::fs::remove_file(&genhl);
     let _ = std::fs::remove_file(&nair);
 }
+
+#[test]
+fn dynamic_arrays_and_trace_print_on_the_engines_what_genhls_file_prints() {
+    let (Some(compiler), Some(ash)) = (common::native_haxe(), common::ash_binary()) else {
+        eprintln!("skipped: set ASH_HAXE_NATIVE and ASH_BIN");
+        return;
+    };
+    let dir = std::env::temp_dir();
+    let id = std::process::id();
+    let genhl = dir.join(format!("ash_nair_hl_{id}_dyn_genhl.hl"));
+    let nair = dir.join(format!("ash_nair_hl_{id}_dyn_nair.hl"));
+    std::fs::write(&genhl, common::genhl_file(&compiler, "tests/dyn", "dg")).unwrap();
+    let tast = common::export(&compiler, "tests/dyn", "dn");
+    std::fs::write(&nair, nair_file(&tast)).unwrap();
+
+    for mode in ["interp", "jit", "hybrid"] {
+        let (expected, code) = run(&ash, mode, &genhl);
+        assert!(
+            expected.starts_with("dyn 2 5 7\n") && expected.contains(": traced 5\n"),
+            "genhl's file on {mode} (exit {code}): {expected:?}"
+        );
+        let (actual, nair_code) = run(&ash, mode, &nair);
+        assert_eq!(actual, expected, "nAIR's file on {mode} (exit {nair_code})");
+        assert_eq!(nair_code, code, "nAIR's exit code on {mode}");
+    }
+    let _ = std::fs::remove_file(&genhl);
+    let _ = std::fs::remove_file(&nair);
+}

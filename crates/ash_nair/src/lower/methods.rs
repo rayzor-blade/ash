@@ -132,6 +132,72 @@ impl<'m, 'a> FnLower<'m, 'a> {
         }
     }
 
+    /// A call of the method `name` of the class `class`, on `obj` and values already evaluated: the
+    /// function the class hierarchy says, or the method table.
+    pub(super) fn call_known_method(
+        &mut self,
+        obj: ValueId,
+        class: &str,
+        name: &str,
+        args: &[ValueId],
+    ) -> Result<ValueId> {
+        let c = self
+            .m
+            .types
+            .class_id(class)
+            .ok_or_else(|| format!("the program has no {class} class"))?;
+        let field = self
+            .m
+            .types
+            .declared_field(c, name)
+            .ok_or_else(|| format!("{class}.{name} is not in the program"))?;
+        let rec = self.tast.fields()[field as usize];
+        let sig = self.m.types.to_type(rec.ty.get())?;
+        let HlType::Fun(params, ret) = self.m.types.table.types[sig].clone() else {
+            return Err(format!("{class}.{name} is not a function"));
+        };
+        let mut all = vec![obj];
+        for (a, p) in args.iter().zip(&params) {
+            all.push(self.coerce(*a, *p)?);
+        }
+        let dst = self.value(ret);
+        match self.m.types.resolve_method(c, field)? {
+            Resolution::One(target) => {
+                let t = self.tast.fields()[target as usize];
+                let owner = self.m.types.class_name(t.owner.get()).to_owned();
+                let fun = self.m.types.fun_id(&owner, name) as usize;
+                self.m.called.insert(fun as u32);
+                self.m.request(target);
+                self.emit(Instr::Call {
+                    dst,
+                    fun,
+                    args: all,
+                });
+            }
+            Resolution::Many { slot, targets } => {
+                let held = self.val_ty(obj);
+                let mut funs = Vec::new();
+                for target in targets {
+                    let t = self.tast.fields()[target as usize];
+                    let owner = self.m.types.class_name(t.owner.get()).to_owned();
+                    let fun = self.m.types.fun_id(&owner, name);
+                    self.m.called.insert(fun);
+                    self.m.request(target);
+                    funs.push(fun as usize);
+                }
+                self.m
+                    .table_calls
+                    .insert((TypeRef(held as u32), slot as usize), funs);
+                self.emit(Instr::CallMethod {
+                    dst,
+                    field: slot as usize,
+                    args: all,
+                });
+            }
+        }
+        Ok(dst)
+    }
+
     /// `super(arguments)` in a constructor: the superclass's constructor, run on this object.
     pub(super) fn super_constructor(&mut self, ids: &[u32]) -> Result<Option<ValueId>> {
         let class = self.this_class.ok_or("`super` outside a method")?;

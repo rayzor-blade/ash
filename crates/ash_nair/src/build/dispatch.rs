@@ -4,7 +4,7 @@
 //! can override a method are known. That is what lets a call that HashLink would send through the
 //! method table be one direct call, when no class below the receiver's overrides the method.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ash_tast::format::*;
 
@@ -186,8 +186,21 @@ impl<'a> TypeBuilder<'a> {
 
     /// Records each class under its superclass.
     pub(super) fn find_children(&mut self) {
+        // only the classes the program is made of can be an object's class: the file also holds
+        // some that are declared outside it, such as the generic base of the byte-buffer arrays,
+        // which exists only as its specializations
+        let made: HashSet<u32> = self
+            .tast
+            .order()
+            .iter()
+            .filter(|o| o.kind.get() == u32::from(module_kind::CLASS))
+            .map(|o| o.id.get())
+            .collect();
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         for c in 0..self.classes.len() as u32 {
+            if !made.contains(&c) || self.is_extern(c) {
+                continue;
+            }
             if let Some(sup) = self.super_class(c) {
                 children.entry(sup).or_default().push(c);
             }

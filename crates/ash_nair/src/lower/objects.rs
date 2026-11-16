@@ -88,6 +88,9 @@ impl<'m, 'a> FnLower<'m, 'a> {
     }
 
     pub(super) fn field_get(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
+        if let Some(read) = self.dynamic_array_length(n)? {
+            return Ok(read);
+        }
         let Some((obj, slot)) = self.field_target(n)? else {
             return Ok(None);
         };
@@ -204,5 +207,42 @@ impl<'m, 'a> FnLower<'m, 'a> {
             }
         }
         Ok(Some(obj))
+    }
+
+    /// The `length` of an `Array<Dynamic>`, which is not a variable of the class that stands for
+    /// the array but a property that the class reads through `get_length`, as genhl does. `None`
+    /// when `n` is not that read.
+    fn dynamic_array_length(&mut self, n: &NodeRec) -> Result<Option<Option<ValueId>>> {
+        if n.a.get() != field_access::INSTANCE || n.b.get() == NONE {
+            return Ok(None);
+        }
+        let field = n.b.get();
+        let owner = self.tast.fields()[field as usize].owner.get();
+        if self.m.types.field_name(field) != "length"
+            || !self.m.types.is_extern_class(owner)
+            || self.m.types.class_name(owner) != "Array"
+        {
+            return Ok(None);
+        }
+        let receiver = *self.tast.node(self.kid(n, 0));
+        let held = self.node_ty(&receiver)?;
+        if !matches!(self.m.types.table.types[held],
+            HlType::Obj(o) if self.m.types.table.objs[o].name == "hl.types.ArrayDyn")
+        {
+            return Ok(None);
+        }
+        let Some(array) = self.expr(self.kid(n, 0))? else {
+            return Ok(Some(None));
+        };
+        self.emit(Instr::NullCheck { value: array });
+        let fun = self.class_function("hl.types.ArrayDyn", "get_length")?;
+        let int = self.ty_of(HlType::I32);
+        let dst = self.value(int);
+        self.emit(Instr::Call {
+            dst,
+            fun,
+            args: vec![array],
+        });
+        Ok(Some(Some(dst)))
     }
 }

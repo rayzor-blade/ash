@@ -177,8 +177,16 @@ impl<'a> TypeBuilder<'a> {
             .ok_or_else(|| format!("the program has no class {name}"))
     }
 
+    /// Whether genhl takes `c` as declared outside the program: a class marked `extern`, and the
+    /// byte-buffer array's generic base and the iterators over a byte buffer, which it makes so.
     fn is_extern(&self, c: u32) -> bool {
         self.classes[c as usize].flags & class_flag::EXTERN != 0
+            || matches!(
+                self.classes[c as usize].name.as_str(),
+                "hl.types.BytesIterator"
+                    | "hl.types.BytesKeyValueIterator"
+                    | "hl.types.ArrayBytes"
+            )
     }
 
     fn is_interface(&self, c: u32) -> bool {

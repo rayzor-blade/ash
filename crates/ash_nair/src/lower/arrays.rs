@@ -18,12 +18,16 @@ enum Elements {
     Bytes(i32),
     /// A native array of Dynamic, holding objects.
     Refs,
+    /// An `Array<Dynamic>`, which wraps another array: its elements are read and written through
+    /// the `getDyn` and `setDyn` of the class.
+    Dynamic,
 }
 
 impl<'m, 'a> FnLower<'m, 'a> {
     /// How an array of `elem` is laid out.
     fn elements(&self, elem: TypeIx) -> Result<Elements> {
         match self.m.types.table.types[elem] {
+            HlType::Dyn => Ok(Elements::Dynamic),
             HlType::I32 => Ok(Elements::Bytes(2)),
             HlType::F64 => Ok(Elements::Bytes(3)),
             HlType::Obj(_)
@@ -43,6 +47,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
         let held = match elems {
             Elements::Bytes(_) => "bytes",
             Elements::Refs => "array",
+            Elements::Dynamic => return Err("an Array<Dynamic> has no elements of its own".into()),
         };
         let slots = (
             self.m.types.slot_in(arr_ty, "length"),
@@ -97,6 +102,10 @@ impl<'m, 'a> FnLower<'m, 'a> {
         elem: TypeIx,
         elems: Elements,
     ) -> Result<ValueId> {
+        if matches!(elems, Elements::Dynamic) {
+            let got = self.call_known_method(arr, "hl.types.ArrayDyn", "getDyn", &[idx])?;
+            return self.coerce_forced(got, elem);
+        }
         let (length, held) = self.array_slots(arr, elems)?;
         let i32_ty = self.ty_of(HlType::I32);
         let len = self.load_field(arr, length);
@@ -139,6 +148,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 });
                 dst
             }
+            Elements::Dynamic => unreachable!("an Array<Dynamic> is read through getDyn"),
             Elements::Refs => {
                 // the native array holds Dynamic, which is the object itself
                 let dynamic = self.ty_of(HlType::Dyn);
@@ -174,6 +184,12 @@ impl<'m, 'a> FnLower<'m, 'a> {
         value: ValueId,
         elems: Elements,
     ) -> Result<()> {
+        if matches!(elems, Elements::Dynamic) {
+            let dynamic = self.ty_of(HlType::Dyn);
+            let boxed = self.coerce(value, dynamic)?;
+            self.call_known_method(arr, "hl.types.ArrayDyn", "setDyn", &[idx, boxed])?;
+            return Ok(());
+        }
         let (length, held) = self.array_slots(arr, elems)?;
         let i32_ty = self.ty_of(HlType::I32);
         let len = self.load_field(arr, length);
@@ -219,6 +235,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
                     src: value,
                 });
             }
+            Elements::Dynamic => unreachable!("an Array<Dynamic> is written through setDyn"),
             Elements::Refs => {
                 let dynamic = self.ty_of(HlType::Dyn);
                 let boxed = self.coerce(value, dynamic)?;
@@ -293,6 +310,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
         let int = self.ty_of(HlType::I32);
         let count = self.int_const(ids.len() as i32);
         match elems {
+            Elements::Dynamic => Err("an array literal of Dynamic is not lowered yet".into()),
             Elements::Bytes(bits) => {
                 let make = match self.m.types.table.types[elem] {
                     HlType::I32 => "allocI32",

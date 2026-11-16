@@ -798,10 +798,9 @@ impl<'m, 'a> FnLower<'m, 'a> {
         self.coerce_with(v, to, false)
     }
 
-    /// [`Self::coerce`] as genhl's `cast_to ~force:true` does it: a Dynamic that the program says
-    /// is an object is checked at run time, where a plain conversion has no rule for it. A call's
-    /// result is converted this way, since a generic function returns its type parameter as
-    /// Dynamic.
+    /// [`Self::coerce`] as genhl's `cast_to ~force:true` does it: a pair of types that no rule
+    /// knows is checked at run time. A call's result is converted this way, since a generic
+    /// function returns its type parameter as Dynamic.
     fn coerce_forced(&mut self, v: ValueId, to: TypeIx) -> Result<ValueId> {
         self.coerce_with(v, to, true)
     }
@@ -844,9 +843,21 @@ impl<'m, 'a> FnLower<'m, 'a> {
             return Ok(dst);
         }
         let kind = match (a, b) {
-            (HlType::I32, HlType::F64) => CastKind::ToSFloat,
-            (HlType::F64, HlType::I32) => CastKind::ToInt,
-            (HlType::I32 | HlType::F64 | HlType::Bool, HlType::Dyn) => CastKind::ToDyn,
+            // numbers convert between their widths as the compiler's `cast_to` has it
+            (
+                HlType::I32 | HlType::UI8 | HlType::UI16 | HlType::I64 | HlType::F32 | HlType::F64,
+                HlType::F32 | HlType::F64,
+            ) => CastKind::ToSFloat,
+            (
+                HlType::I32 | HlType::UI8 | HlType::UI16 | HlType::I64 | HlType::F32 | HlType::F64,
+                HlType::I32 | HlType::UI8 | HlType::UI16 | HlType::I64,
+            ) => CastKind::ToInt,
+            (HlType::Void, HlType::Dyn) => {
+                let dst = self.value(to);
+                self.emit(Instr::Null { dst });
+                return Ok(dst);
+            }
+            (_, HlType::Dyn) => CastKind::ToDyn,
             // a structure of other fields is made one of these by looking its fields up by name
             (HlType::Virtual(_), HlType::Virtual(_)) => {
                 if self.m.types.structure_fits(from, to) {
@@ -856,10 +867,13 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 }
             }
             (HlType::Dyn | HlType::DynObj, HlType::Virtual(_)) => CastKind::ToVirtual,
-            (
-                HlType::Dyn,
-                HlType::Obj(_) | HlType::Struct(_) | HlType::Enum(_),
-            ) if force => CastKind::SafeCast,
+            // a Dynamic is checked, and unboxed when it holds a number, at run time
+            (HlType::Dyn, _) => CastKind::SafeCast,
+            // a nullable number is its Dynamic: boxed in, checked out
+            (HlType::Null(inner), _) if inner == to => CastKind::SafeCast,
+            (_, HlType::Null(inner)) if inner == from => CastKind::ToDyn,
+            // what the program says a call returns, where no rule above knows the pair
+            _ if force => CastKind::SafeCast,
             (a, b) => return Err(format!("no conversion from {a:?} to {b:?} yet")),
         };
         let dst = self.value(to);

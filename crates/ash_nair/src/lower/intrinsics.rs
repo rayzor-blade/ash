@@ -194,12 +194,29 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 });
                 Ok(Some(dst))
             }
+            ("$bytes_nullvalue", [b]) => {
+                let (elem, _) = self.byte_element(*b)?;
+                // zero, in a register of the element's own type
+                let dst = self.value(elem);
+                match self.m.types.table.types[elem] {
+                    HlType::F32 | HlType::F64 => {
+                        let idx = self.m.float_index(0.0);
+                        self.emit(Instr::Float { dst, idx });
+                    }
+                    _ => {
+                        let idx = self.m.int_index(0);
+                        self.emit(Instr::Int { dst, idx });
+                    }
+                }
+                Ok(Some(dst))
+            }
             ("$bytes_sizebits", [b]) => {
                 let (_, bits) = self.byte_element(*b)?;
                 Ok(Some(self.int_const(bits)))
             }
             ("$bget", [b, pos]) => {
                 let (elem, bits) = self.byte_element(*b)?;
+                let (kind, held) = self.byte_access(elem, bits);
                 let Some(buffer) = self.expr(*b)? else {
                     return Ok(None);
                 };
@@ -207,9 +224,9 @@ impl<'m, 'a> FnLower<'m, 'a> {
                     return Ok(None);
                 };
                 let at = self.byte_offset(pos, bits)?;
-                let dst = self.value(elem);
+                let dst = self.value(held);
                 self.emit(Instr::MemGet {
-                    kind: MemAccess::Mem,
+                    kind,
                     dst,
                     base: buffer,
                     index: at,
@@ -218,6 +235,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             }
             ("$bset", [b, pos, value]) => {
                 let (elem, bits) = self.byte_element(*b)?;
+                let (kind, held) = self.byte_access(elem, bits);
                 let Some(buffer) = self.expr(*b)? else {
                     return Ok(None);
                 };
@@ -227,10 +245,10 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 let Some(value) = self.expr(*value)? else {
                     return Ok(None);
                 };
-                let value = self.coerce(value, elem)?;
+                let value = self.coerce(value, held)?;
                 let at = self.byte_offset(pos, bits)?;
                 self.emit(Instr::MemSet {
-                    kind: MemAccess::Mem,
+                    kind,
                     base: buffer,
                     index: at,
                     src: value,
@@ -340,8 +358,18 @@ impl<'m, 'a> FnLower<'m, 'a> {
         fun
     }
 
+    /// How an element of `elem`, `1 << bits` bytes wide, is read and written, and the type of the
+    /// register that holds it: a byte or a 16-bit element is held as an integer.
+    fn byte_access(&mut self, elem: TypeIx, bits: i32) -> (MemAccess, TypeIx) {
+        match bits {
+            0 => (MemAccess::I8, self.ty_of(HlType::I32)),
+            1 => (MemAccess::I16, self.ty_of(HlType::I32)),
+            _ => (MemAccess::Mem, elem),
+        }
+    }
+
     /// The element type of the `hl.BytesAccess<T>` that `buffer` is typed as, and log2 of its
-    /// size in bytes. Only 32-bit integers and 64-bit floats so far.
+    /// size in bytes.
     fn byte_element(&mut self, buffer: u32) -> Result<(TypeIx, i32)> {
         let n = *self.tast.node(buffer);
         let t = self.tast.types()[n.ty.get() as usize];
@@ -370,8 +398,10 @@ impl<'m, 'a> FnLower<'m, 'a> {
         };
         let elem = self.m.types.to_type(arg.get())?;
         match self.m.types.table.types[elem] {
-            HlType::I32 => Ok((elem, 2)),
-            HlType::F64 => Ok((elem, 3)),
+            HlType::UI8 => Ok((elem, 0)),
+            HlType::UI16 => Ok((elem, 1)),
+            HlType::I32 | HlType::F32 => Ok((elem, 2)),
+            HlType::F64 | HlType::I64 => Ok((elem, 3)),
             ref other => Err(format!("a byte buffer of {other:?} is not lowered yet")),
         }
     }

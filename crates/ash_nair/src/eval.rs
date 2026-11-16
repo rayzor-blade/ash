@@ -508,6 +508,8 @@ fn call(
                     vals[dst.idx()] = Some(match (kind, v) {
                         (CastKind::ToSFloat, Val::I(x)) => Val::F(f64::from(x)),
                         (CastKind::ToInt, Val::F(x)) => Val::I(x as i32),
+                        (CastKind::ToInt, Val::I(x)) => Val::I(x),
+                        (CastKind::ToSFloat, Val::F(x)) => Val::F(x),
                         (CastKind::UnsafeCast | CastKind::SafeCast | CastKind::ToDyn, v) => v,
                         (k, v) => return Err(format!("{k:?} of {v:?}")),
                     });

@@ -4,7 +4,8 @@
 //!
 //! With class names, only those classes' functions are tried; without, every class is. With
 //! `LOWER_REPORT_OK` set, the functions that do lower are listed too. With `LOWER_REPORT_MAIN`
-//! set to a class, its `main` is lowered with everything it reaches instead. A body
+//! set to a class, its `main` is lowered with everything it reaches instead, and
+//! `LOWER_REPORT_DUMP` then prints the AIR of the functions named like its value. A body
 //! stops at the first thing it uses that is not lowered, so the counts say which construct to
 //! lower next, not how many each body needs.
 
@@ -42,6 +43,13 @@ fn main() {
                     .map(|n| format!("{}@{}", n.lib, n.name))
                     .collect();
                 println!("natives: {}", natives.join(" "));
+                // With `LOWER_REPORT_DUMP` set to some text, the AIR of each function whose name
+                // contains it is printed.
+                if let Ok(wanted) = std::env::var("LOWER_REPORT_DUMP") {
+                    for l in done.iter().filter(|l| l.name.contains(&wanted)) {
+                        println!("== {}\n{}", l.name, l.function.dump());
+                    }
+                }
             }
             Err(why) => println!("{class}.main does not lower whole: {why}"),
         }

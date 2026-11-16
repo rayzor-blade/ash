@@ -14,13 +14,21 @@ use ash_tast::Tast;
 
 /// What `file` prints on `mode`, and its exit code.
 fn run(ash: &Path, mode: &str, file: &Path) -> (String, i32) {
+    let (stdout, _, code) = run_with(ash, mode, &[], file);
+    (stdout, code)
+}
+
+/// What `file` prints to standard output and to standard error, and its exit code, with `flags`.
+fn run_with(ash: &Path, mode: &str, flags: &[&str], file: &Path) -> (String, String, i32) {
     let out = Command::new(ash)
         .args(["--mode", mode])
+        .args(flags)
         .arg(file)
         .output()
         .expect("run ash");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.code().unwrap_or(-1),
     )
 }
@@ -72,6 +80,48 @@ fn a_whole_program_runs_on_the_engines_and_prints_what_genhls_file_prints() {
         assert_eq!(actual, expected, "nAIR's file on {mode} (exit {nair_code})");
         assert_eq!(nair_code, code, "nAIR's exit code on {mode}");
     }
+    let _ = std::fs::remove_file(&genhl);
+    let _ = std::fs::remove_file(&nair);
+}
+
+/// The helper line of tree fusion's log: `ops=` and `node_allocations=`, and how many sites.
+fn fusion(stderr: &str) -> Option<(String, String, String)> {
+    let helper = stderr.lines().find(|l| l.contains("helper="))?;
+    let field = |name: &str| {
+        helper
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix(name))
+            .map(str::to_owned)
+    };
+    let sites = stderr
+        .lines()
+        .find_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix("transformed_sites=")))?;
+    Some((field("ops=")?, field("node_allocations=")?, sites.to_owned()))
+}
+
+#[test]
+fn a_tree_built_and_checked_at_once_is_fused_in_nairs_file_as_in_genhls() {
+    let (Some(compiler), Some(ash)) = (common::native_haxe(), common::ash_binary()) else {
+        eprintln!("skipped: set ASH_HAXE_NATIVE and ASH_BIN");
+        return;
+    };
+    let dir = std::env::temp_dir();
+    let id = std::process::id();
+    let genhl = dir.join(format!("ash_nair_hl_{id}_trees_genhl.hl"));
+    let nair = dir.join(format!("ash_nair_hl_{id}_trees_nair.hl"));
+    std::fs::write(&genhl, common::genhl_file(&compiler, "tests/trees", "tg")).unwrap();
+    let tast = common::export(&compiler, "tests/trees", "tn");
+    std::fs::write(&nair, nair_file(&tast)).unwrap();
+
+    let (expected, genhl_log, code) = run_with(&ash, "jit", &["--tree-fusion-log"], &genhl);
+    let (actual, nair_log, nair_code) = run_with(&ash, "jit", &["--tree-fusion-log"], &nair);
+    assert_eq!(actual, expected, "what the files print");
+    assert_eq!(nair_code, code);
+    // the same helper is built, which allocates no nodes, at the same sites
+    let theirs = fusion(&genhl_log).unwrap_or_else(|| panic!("genhl's file is fused:\n{genhl_log}"));
+    let ours = fusion(&nair_log).unwrap_or_else(|| panic!("nAIR's file is fused:\n{nair_log}"));
+    assert_eq!(ours, theirs, "nAIR's file:\n{nair_log}\ngenhl's file:\n{genhl_log}");
+    assert_eq!(ours.1, "0", "the helper allocates no tree nodes");
     let _ = std::fs::remove_file(&genhl);
     let _ = std::fs::remove_file(&nair);
 }

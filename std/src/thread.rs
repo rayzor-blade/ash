@@ -718,8 +718,11 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
         if semaphore_take(s) {
             return true;
         }
-        // No fibers: exact HashLink !HL_THREADS semantics — never block.
-        if !crate::rt::fibers_active() {
+        // No fibers: exact HashLink !HL_THREADS semantics — never block. Unless a library watches
+        // a word for the program: its handler, run by this thread while it waits, may release
+        // the lock, so the wait is as long as it was asked to be.
+        let serving = !crate::rt::fibers_active();
+        if serving && !(crate::fiber::watching() && crate::fiber::is_main_thread()) {
             return false;
         }
         // Fibers exist: HL_THREADS semantics — wait for a release, cooperatively.
@@ -741,6 +744,9 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
             }
             Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
         };
+        if serving {
+            return crate::fiber::wait_serving_watches(deadline, || semaphore_take(s));
+        }
         semaphore_wait(s, deadline)
     }
 }

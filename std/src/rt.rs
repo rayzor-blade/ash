@@ -611,6 +611,12 @@ mod ash {
                 crate::fiber::sleep_until(Instant::now() + duration);
                 return;
             }
+            // A library that watches a word on the program's behalf has its handlers run by the
+            // program's thread, and the thread that sleeps is the one that runs them.
+            if crate::fiber::watching() && crate::fiber::is_main_thread() {
+                crate::fiber::wait_serving_watches(Some(Instant::now() + duration), || false);
+                return;
+            }
             crate::thread::hlp_blocking(true);
             std::thread::sleep(duration);
             crate::thread::hlp_blocking(false);

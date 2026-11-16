@@ -1136,6 +1136,31 @@ unsafe fn poll_watches() {
     }
 }
 
+/// Whether a library has asked, with [`ash_host_watch`], for a handler to run on the program's thread.
+pub(crate) fn watching() -> bool {
+    !WATCHES.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+}
+
+/// The program's thread waits, with no fiber to run, until `done` is true (the answer) or `deadline`
+/// passes (false), running the handlers of the watched words that change meanwhile and waking at
+/// once when an agent notifies the wake word. For the waits that would otherwise block the thread
+/// where nothing polls its watches: `Sys.sleep`, and a lock's timed wait.
+pub(crate) unsafe fn wait_serving_watches(
+    deadline: Option<Instant>,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    loop {
+        unsafe { poll_watches() };
+        if done() {
+            return true;
+        }
+        if deadline.is_some_and(|limit| Instant::now() >= limit) {
+            return false;
+        }
+        unsafe { scheduler_idle(deadline) };
+    }
+}
+
 unsafe fn scheduler_idle(deadline: Option<Instant>) {
     // The main scheduler can spend an arbitrary amount of time waiting for a
     // logical thread. It is still a registered GC mutator, so rendezvous with
@@ -1993,6 +2018,70 @@ mod host_wait_tests {
             host_resumed();
         }
         assert_eq!(CALLED.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_wait_with_no_fiber_runs_the_handlers_of_the_words_that_change() {
+        static WORD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static CALLED: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn completed(_: *mut c_void) {
+            CALLED.fetch_add(1, Ordering::Release);
+        }
+        unsafe {
+            ash_host_watch(WORD.as_ptr(), completed, ptr::null_mut());
+            assert!(watching());
+            // an agent publishes a completion while the program waits
+            let agent = std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                WORD.fetch_add(1, Ordering::Release);
+            });
+            let began = Instant::now();
+            let served = wait_serving_watches(
+                Some(began + std::time::Duration::from_secs(5)),
+                || CALLED.load(Ordering::Acquire) > 0,
+            );
+            agent.join().unwrap();
+            assert!(served);
+            assert!(began.elapsed() < std::time::Duration::from_secs(2));
+            // with nothing to serve it waits out its time, and says so
+            let began = Instant::now();
+            assert!(!wait_serving_watches(
+                Some(began + std::time::Duration::from_millis(40)),
+                || false
+            ));
+            assert!(began.elapsed() >= std::time::Duration::from_millis(40));
+        }
+    }
+
+    #[test]
+    fn a_timed_lock_wait_serves_the_watches_on_the_program_thread_and_nowhere_else() {
+        static WORD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        unsafe extern "C" fn release(lock: *mut c_void) {
+            unsafe { crate::thread::hlp_lock_release(lock) };
+        }
+        unsafe {
+            let lock = crate::thread::hlp_lock_create();
+            ash_host_watch(WORD.as_ptr(), release, lock);
+            let mut seconds: crate::hl::vdynamic = std::mem::zeroed();
+            seconds.t = crate::types::hlt_f64();
+            seconds.v.d = 5.0;
+            let agent = std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                WORD.fetch_add(1, Ordering::Release);
+            });
+            let began = Instant::now();
+            let got = crate::thread::hlp_lock_wait(lock, &mut seconds);
+            agent.join().unwrap();
+            if is_main_thread() {
+                // the handler released the lock while the wait ran
+                assert!(got);
+                assert!(began.elapsed() < std::time::Duration::from_secs(3));
+            } else {
+                // another thread's wait is HashLink's without threads: it never blocks
+                assert!(!got);
+                assert!(began.elapsed() < std::time::Duration::from_secs(1));
+            }
+        }
     }
 
     #[test]

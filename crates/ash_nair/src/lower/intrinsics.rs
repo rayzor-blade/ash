@@ -9,8 +9,89 @@ use super::{FnLower, Result};
 use crate::hl::{HlType, TypeIx};
 
 impl<'m, 'a> FnLower<'m, 'a> {
-    pub(super) fn intrinsic(&mut self, name: &str, args: &[u32]) -> Result<Option<ValueId>> {
+    /// `ty` is the type of the call.
+    pub(super) fn intrinsic(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        ty: u32,
+    ) -> Result<Option<ValueId>> {
         match (name, args) {
+            ("$asize", [a]) => {
+                let Some(array) = self.expr(*a)? else {
+                    return Ok(None);
+                };
+                let int = self.ty_of(HlType::I32);
+                let dst = self.value(int);
+                self.emit(Instr::ArraySize { dst, array });
+                Ok(Some(dst))
+            }
+            ("$aget", [a, pos]) => {
+                let elem = self.native_element(self.tast.node(*a).ty.get())?;
+                let Some(array) = self.expr(*a)? else {
+                    return Ok(None);
+                };
+                let Some(pos) = self.expr(*pos)? else {
+                    return Ok(None);
+                };
+                let int = self.ty_of(HlType::I32);
+                let pos = self.coerce(pos, int)?;
+                let dst = self.value(elem);
+                self.emit(Instr::MemGet {
+                    kind: MemAccess::Array,
+                    dst,
+                    base: array,
+                    index: pos,
+                });
+                let want = self.m.types.to_type(ty)?;
+                self.coerce(dst, want).map(Some)
+            }
+            ("$aset", [a, pos, value]) => {
+                let elem = self.native_element(self.tast.node(*a).ty.get())?;
+                let Some(array) = self.expr(*a)? else {
+                    return Ok(None);
+                };
+                let Some(pos) = self.expr(*pos)? else {
+                    return Ok(None);
+                };
+                let Some(value) = self.expr(*value)? else {
+                    return Ok(None);
+                };
+                let int = self.ty_of(HlType::I32);
+                let pos = self.coerce(pos, int)?;
+                let value = self.coerce(value, elem)?;
+                self.emit(Instr::MemSet {
+                    kind: MemAccess::Array,
+                    base: array,
+                    index: pos,
+                    src: value,
+                });
+                Ok(Some(value))
+            }
+            ("$aalloc", [size]) => {
+                let elem = self.native_element(ty)?;
+                let Some(size) = self.expr(*size)? else {
+                    return Ok(None);
+                };
+                let int = self.ty_of(HlType::I32);
+                let size = self.coerce(size, int)?;
+                // the runtime's `alloc_array(type, size)` makes the array of that element type
+                let type_ty = self.ty_of(HlType::Type);
+                let array_ty = self.ty_of(HlType::Array);
+                let of = self.value(type_ty);
+                self.emit(Instr::TypeConst {
+                    dst: of,
+                    ty: TypeRef(elem as u32),
+                });
+                let fun = self.std_native("alloc_array", &[type_ty, int], array_ty);
+                let dst = self.value(array_ty);
+                self.emit(Instr::Call {
+                    dst,
+                    fun,
+                    args: vec![of, size],
+                });
+                Ok(Some(dst))
+            }
             ("$bytes_sizebits", [b]) => {
                 let (_, bits) = self.byte_element(*b)?;
                 Ok(Some(self.int_const(bits)))
@@ -122,6 +203,39 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 .tast
                 .opt_string(self.tast.abstracts()[t.def.get() as usize].name)
                 == Some("UInt")
+    }
+
+    /// The element type of the `hl.NativeArray<T>` that type `ty` is.
+    fn native_element(&mut self, ty: u32) -> Result<TypeIx> {
+        let t = self.tast.types()[ty as usize];
+        let is_native = t.kind == type_kind::ABSTRACT
+            && self
+                .tast
+                .opt_string(self.tast.abstracts()[t.def.get() as usize].name)
+                == Some("hl.NativeArray");
+        let arg = self.tast.type_args(t.args_first, t.args_count).first().copied();
+        let (true, Some(arg)) = (is_native, arg) else {
+            return Err("a native array intrinsic on something that is not an hl.NativeArray".into());
+        };
+        self.m.types.to_type(arg.get())
+    }
+
+    /// A function of the runtime's `std` library, which the interpreter and the engines provide:
+    /// declared once, and called by its function index.
+    pub(super) fn std_native(&mut self, name: &str, params: &[TypeIx], ret: TypeIx) -> usize {
+        let fun = self.m.types.fun_id("std", name) as usize;
+        self.m.called.insert(fun as u32);
+        let sig = self.m.types.table.add(HlType::Fun(params.to_vec(), ret));
+        let import = air::v2::module::NativeImport::new(
+            fun,
+            "std".to_owned(),
+            name.to_owned(),
+            params.iter().map(|p| TypeRef(*p as u32)).collect(),
+            TypeRef(ret as u32),
+        );
+        let _ = self.f.natives.declare(import);
+        self.m.add_native("std".to_owned(), name.to_owned(), sig, fun as u32);
+        fun
     }
 
     /// The element type of the `hl.BytesAccess<T>` that `buffer` is typed as, and log2 of its

@@ -20,6 +20,8 @@ pub enum Val {
     Obj(usize),
     /// A buffer of bytes, by its place in the heap.
     Mem(usize),
+    /// A native array of values, by its place in the heap.
+    Arr(usize),
     /// What a void call returns, and null.
     Void,
 }
@@ -40,6 +42,9 @@ pub struct Program<'a> {
     /// The `String` objects the module's globals hold, by global and text; see
     /// [`Heap::init_constants`].
     pub constants: Vec<(usize, usize)>,
+    /// The native functions the interpreter runs itself, by function index; see
+    /// [`Program::with_natives`].
+    pub natives: HashMap<usize, String>,
 }
 
 impl<'a> Program<'a> {
@@ -67,7 +72,18 @@ impl<'a> Program<'a> {
             types: table.types.clone(),
             strings: Vec::new(),
             constants: Vec::new(),
+            natives: HashMap::new(),
         }
+    }
+
+    /// The natives the functions call. `alloc_array` is the only one run: it makes a native
+    /// array of nulls.
+    pub fn with_natives(mut self, natives: &[crate::lower::Native]) -> Program<'a> {
+        self.natives = natives
+            .iter()
+            .map(|n| (n.findex as usize, n.name.clone()))
+            .collect();
+        self
     }
 
     /// The globals that hold string constants, which [`Heap::init_constants`] fills.
@@ -122,6 +138,7 @@ pub fn layouts(table: &TypeTable) -> HashMap<usize, Vec<Val>> {
 pub struct Heap {
     objects: Vec<(usize, Vec<Val>)>,
     memory: Vec<Vec<u8>>,
+    arrays: Vec<Vec<Val>>,
     globals: Vec<Val>,
 }
 
@@ -130,6 +147,18 @@ impl Heap {
     pub fn bytes(&mut self, bytes: Vec<u8>) -> Val {
         self.memory.push(bytes);
         Val::Mem(self.memory.len() - 1)
+    }
+
+    /// A native array holding `items`.
+    pub fn array(&mut self, items: Vec<Val>) -> Val {
+        self.arrays.push(items);
+        Val::Arr(self.arrays.len() - 1)
+    }
+
+    /// The elements of a native array.
+    pub fn array_items(&self, array: Val) -> Option<&[Val]> {
+        let Val::Arr(a) = array else { return None };
+        self.arrays.get(a).map(Vec::as_slice)
     }
 
     /// Builds the `String` object of each string constant and puts it in its global, as the
@@ -226,6 +255,15 @@ fn call(
 ) -> Result<Val, String> {
     if depth > 2000 {
         return Err("the call stack is too deep".into());
+    }
+    if let Some(name) = p.natives.get(&findex) {
+        return match (name.as_str(), args) {
+            ("alloc_array", [_, Val::I(n)]) => {
+                let n = usize::try_from(*n).map_err(|_| "a negative array size")?;
+                Ok(heap.array(vec![Val::Void; n]))
+            }
+            _ => Err(format!("the interpreter has no native {name}")),
+        };
     }
     let f = p
         .functions
@@ -439,6 +477,46 @@ fn call(
                         .ok_or("a write past the end of the bytes")?
                         .copy_from_slice(&value);
                 }
+                Instr::MemGet {
+                    kind: MemAccess::Array,
+                    dst,
+                    base,
+                    index,
+                } => {
+                    let (Val::Arr(a), Val::I(at)) = (get(&vals, *base)?, get(&vals, *index)?)
+                    else {
+                        return Err("a read of something that is not an array".into());
+                    };
+                    vals[dst.idx()] = Some(
+                        *usize::try_from(at)
+                            .ok()
+                            .and_then(|at| heap.arrays[a].get(at))
+                            .ok_or("an array read out of range")?,
+                    );
+                }
+                Instr::MemSet {
+                    kind: MemAccess::Array,
+                    base,
+                    index,
+                    src,
+                } => {
+                    let (Val::Arr(a), Val::I(at)) = (get(&vals, *base)?, get(&vals, *index)?)
+                    else {
+                        return Err("a write to something that is not an array".into());
+                    };
+                    let v = get(&vals, *src)?;
+                    *usize::try_from(at)
+                        .ok()
+                        .and_then(|at| heap.arrays[a].get_mut(at))
+                        .ok_or("an array write out of range")? = v;
+                }
+                Instr::ArraySize { dst, array } => {
+                    let Val::Arr(a) = get(&vals, *array)? else {
+                        return Err("the size of something that is not an array".into());
+                    };
+                    vals[dst.idx()] = Some(Val::I(heap.arrays[a].len() as i32));
+                }
+                Instr::TypeConst { dst, ty } => vals[dst.idx()] = Some(Val::I(ty.0 as i32)),
                 other => return Err(format!("the interpreter has no {other:?}")),
             }
         }

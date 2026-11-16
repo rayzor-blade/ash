@@ -12,8 +12,8 @@
 //! interface), the generic code used at concrete types ([`collect`]), and function bodies lowered
 //! to AIR ([`lower`]) that [`info`] runs the AIR passes over. The lowering covers numeric code and
 //! objects of non-generic classes so far: integers, floats and bools, locals, arithmetic, `if`,
-//! loops, direct calls, `new`, instance variables, method calls, `null`, and reads of integer and
-//! float arrays. [`eval`] is a small
+//! loops, direct calls, `new`, instance variables, method calls, `null`, and arrays read, written and
+//! made empty. [`eval`] is a small
 //! interpreter for that AIR, so a test can check what a lowered function computes. The
 //! `lower_report` binary lowers each function of a TAST file on its own and counts why the ones
 //! that fail do, which is how the next construct to lower is chosen.

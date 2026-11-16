@@ -57,6 +57,13 @@ impl<'a> TypeBuilder<'a> {
         })
     }
 
+    /// The field `name` that `class` itself declares, found in the file's field list.
+    pub fn declared_field(&self, class: u32, name: &str) -> Option<u32> {
+        let rec = self.tast.classes()[class as usize];
+        (rec.fields_first.get()..rec.fields_first.get() + rec.fields_count.get())
+            .find(|f| self.field_name(*f) == name)
+    }
+
     /// The constructor of `class`, if it has one.
     pub fn constructor(&self, class: u32) -> Option<u32> {
         self.classes[class as usize].ctor

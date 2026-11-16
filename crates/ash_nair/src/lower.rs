@@ -3,9 +3,9 @@
 //! This covers what a numeric kernel is made of: integer, float and bool values, locals,
 //! arithmetic and comparisons, `if` and loops, `break` and `continue`, `return`, and direct calls
 //! of static functions; and objects of non-generic classes: `new`, instance variables, `this`,
-//! calls of methods, and `null` with `==` and `!=` against it; and reads of `Array<Int>` and
-//! `Array<Float>` by index, and their `length`. Anything else is refused with a message that
-//! names it, so a body that does not lower is never half lowered.
+//! calls of methods, and `null` with `==` and `!=` against it; `new Array<T>()`, and reads and
+//! writes of array elements by index, and their `length`. Anything else is refused with a message
+//! that names it, so a body that does not lower is never half lowered.
 //!
 //! Locals are put in SSA form as the body is walked (Braun et al., "Simple and Efficient
 //! Construction of Static Single Assignment Form"): a block is sealed once all its predecessors
@@ -218,9 +218,6 @@ impl<'a> Module<'a> {
         // a method takes its object first, which its declared type does not say
         let this_ty = if flags & field_flag::METHOD != 0 && flags & field_flag::STATIC == 0 {
             let owner = rec.owner.get();
-            if !self.tast.generics_of(meta_owner::CLASS, owner).is_empty() {
-                return Err(format!("{class} is generic, which is not lowered yet"));
-            }
             let t = self.types.class_type(owner, &[], false, None)?;
             if let HlType::Fun(params, ret) = self.types.table.types[sig].clone() {
                 let mut all = vec![t];
@@ -807,7 +804,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
         if callee.kind == node_kind::IDENT {
             let name = self.tast.string(callee.a.get());
             if name.starts_with('$') {
-                return self.intrinsic(name, &ids[1..]);
+                return self.intrinsic(name, &ids[1..], n.ty.get());
             }
         }
         if callee.kind != node_kind::FIELD || callee.a.get() != field_access::STATIC {
@@ -939,8 +936,14 @@ impl<'m, 'a> FnLower<'m, 'a> {
         if t.kind == node_kind::FIELD {
             return self.assign_field(&t, value, op);
         }
+        if t.kind == node_kind::ARRAY {
+            return self.assign_element(&t, value, op);
+        }
         if t.kind != node_kind::LOCAL {
-            return Err("only assignment to a local or an instance variable is lowered yet".into());
+            return Err(
+                "only assignment to a local, an instance variable or an array element is lowered yet"
+                    .into(),
+            );
         }
         let local = t.a.get();
         self.ensure_var(local)?;

@@ -123,15 +123,24 @@ impl<'m, 'a> FnLower<'m, 'a> {
 
     /// `new Class(arguments)`: allocate, then run the constructor on the object.
     pub(super) fn new_object(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
-        let class = n.a.get();
-        let cname = self.m.types.class_name(class).to_owned();
+        let mut class = n.a.get();
+        let mut cname = self.m.types.class_name(class).to_owned();
         if self.m.types.is_extern_class(class) {
-            return Err(format!(
-                "new {cname}: the class is declared outside the program"
-            ));
-        }
-        if !self.tast.generics_of(meta_owner::CLASS, class).is_empty() {
-            return Err(format!("new {cname}: generic classes are not lowered yet"));
+            if cname != "Array" {
+                return Err(format!(
+                    "new {cname}: the class is declared outside the program"
+                ));
+            }
+            // `Array<T>` is the class for T's representation, as genhl's `resolve_class` has it
+            let t = self.tast.types()[n.ty.get() as usize];
+            let args: Vec<u32> = self
+                .tast
+                .type_args(t.args_first, t.args_count)
+                .iter()
+                .map(|a| a.get())
+                .collect();
+            class = self.m.types.resolve_class(class, &args, false)?;
+            cname = self.m.types.class_name(class).to_owned();
         }
         let ty = self.m.types.class_type(class, &[], false, None)?;
         if !matches!(self.m.types.table.types[ty], HlType::Obj(_)) {

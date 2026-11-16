@@ -577,7 +577,7 @@ impl<'a> TypeBuilder<'a> {
     // ---- classes
 
     /// `Array<T>` is the class for T's representation; any other extern class is not supported.
-    fn resolve_class(&mut self, c: u32, pl: &[u32], statics: bool) -> Result<u32> {
+    pub fn resolve_class(&mut self, c: u32, pl: &[u32], statics: bool) -> Result<u32> {
         let name = self.classes[c as usize].name.clone();
         if name == "Array" {
             if statics {

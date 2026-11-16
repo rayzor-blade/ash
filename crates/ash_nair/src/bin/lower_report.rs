@@ -2,7 +2,8 @@
 //!
 //!     cargo run -p ash_nair --bin lower_report -- program.tast [Class ...]
 //!
-//! With class names, only those classes' functions are tried; without, every class is. A body
+//! With class names, only those classes' functions are tried; without, every class is. With
+//! `LOWER_REPORT_OK` set, the functions that do lower are listed too. A body
 //! stops at the first thing it uses that is not lowered, so the counts say which construct to
 //! lower next, not how many each body needs.
 
@@ -37,7 +38,12 @@ fn main() {
             let mut module = Module::new(tast);
             let name = format!("{cname}.{}", module.types.field_name(f));
             match module.lower_field(f) {
-                Ok(_) => ok += 1,
+                Ok(_) => {
+                    ok += 1;
+                    if std::env::var_os("LOWER_REPORT_OK").is_some() {
+                        println!("ok  {name}");
+                    }
+                }
                 Err(why) => refused.entry(why).or_default().push(name),
             }
         }

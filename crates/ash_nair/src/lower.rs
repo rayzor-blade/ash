@@ -23,6 +23,7 @@ use crate::hl::{HlType, TypeIx};
 
 mod arrays;
 mod init;
+mod intrinsics;
 mod methods;
 mod nulls;
 mod objects;
@@ -628,6 +629,18 @@ impl<'m, 'a> FnLower<'m, 'a> {
             self.m.types.table.types[from].clone(),
             self.m.types.table.types[to].clone(),
         );
+        // an object is its own Dynamic: the runtime boxes values, never objects
+        if matches!(b, HlType::Dyn)
+            && matches!(a, HlType::Obj(_) | HlType::Struct(_) | HlType::Virtual(_) | HlType::Array)
+        {
+            let dst = self.value(to);
+            self.emit(Instr::Cast {
+                kind: CastKind::UnsafeCast,
+                dst,
+                src: v,
+            });
+            return Ok(dst);
+        }
         let kind = match (a, b) {
             (HlType::I32, HlType::F64) => CastKind::ToSFloat,
             (HlType::F64, HlType::I32) => CastKind::ToInt,
@@ -718,6 +731,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 Ok(None)
             }
             node_kind::CALL => self.call(&n),
+            node_kind::THROW => self.throw(&n),
             node_kind::CAST if n.flags & node_flag::HAS_TYPE == 0 => {
                 let v = self.expr(self.kid(&n, 0))?;
                 let to = self.node_ty(&n)?;
@@ -790,8 +804,28 @@ impl<'m, 'a> FnLower<'m, 'a> {
         if callee.kind == node_kind::FIELD && callee.a.get() == field_access::INSTANCE {
             return self.method_call(&ids, &callee);
         }
+        if callee.kind == node_kind::IDENT {
+            let name = self.tast.string(callee.a.get());
+            if name.starts_with('$') {
+                return self.intrinsic(name, &ids[1..]);
+            }
+        }
         if callee.kind != node_kind::FIELD || callee.a.get() != field_access::STATIC {
-            return Err("only calls of static functions and methods are lowered yet".into());
+            let kind = NODE_KINDS
+                .iter()
+                .find(|e| e.1 == callee.kind)
+                .map_or("?", |e| e.0);
+            let how = if callee.kind == node_kind::FIELD {
+                FIELD_ACCESSES
+                    .iter()
+                    .find(|e| e.1 == callee.a.get())
+                    .map_or("?", |e| e.0)
+            } else if callee.kind == node_kind::IDENT {
+                self.tast.string(callee.a.get())
+            } else {
+                ""
+            };
+            return Err(format!("a call of a {kind} {how} is not lowered yet"));
         }
         let field = callee.b.get();
         if field == NONE {

@@ -160,6 +160,18 @@ impl Heap {
         Ok(())
     }
 
+    /// Field `at` of an object.
+    pub fn field(&self, obj: Val, at: usize) -> Option<Val> {
+        let Val::Obj(h) = obj else { return None };
+        self.objects.get(h)?.1.get(at).copied()
+    }
+
+    /// The bytes of a buffer.
+    pub fn memory(&self, buffer: Val) -> Option<&[u8]> {
+        let Val::Mem(m) = buffer else { return None };
+        self.memory.get(m).map(Vec::as_slice)
+    }
+
     /// The text of a `String` object whose bytes and length sit in fields `bytes` and `length`.
     pub fn read_string(&self, v: Val, bytes: usize, length: usize) -> Option<String> {
         let Val::Obj(h) = v else { return None };
@@ -406,6 +418,27 @@ fn call(
                         other => return Err(format!("a memory read of {other:?}")),
                     });
                 }
+                Instr::MemSet {
+                    kind: MemAccess::Mem,
+                    base,
+                    index,
+                    src,
+                } => {
+                    let (Val::Mem(m), Val::I(at)) = (get(&vals, *base)?, get(&vals, *index)?)
+                    else {
+                        return Err("a write to something that is not bytes".into());
+                    };
+                    let at = usize::try_from(at).map_err(|_| "a negative byte offset")?;
+                    let value = match get(&vals, *src)? {
+                        Val::I(x) => x.to_le_bytes().to_vec(),
+                        Val::F(x) => x.to_le_bytes().to_vec(),
+                        other => return Err(format!("a memory write of {other:?}")),
+                    };
+                    heap.memory[m]
+                        .get_mut(at..at + value.len())
+                        .ok_or("a write past the end of the bytes")?
+                        .copy_from_slice(&value);
+                }
                 other => return Err(format!("the interpreter has no {other:?}")),
             }
         }
@@ -432,6 +465,7 @@ fn call(
                 prev = Some(block);
                 block = if taken { if_true.idx() } else { if_false.idx() };
             }
+            Terminator::Throw { .. } => return Err("an exception was thrown".into()),
             other => return Err(format!("the interpreter has no {other:?}")),
         }
     }

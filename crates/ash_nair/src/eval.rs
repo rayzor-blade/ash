@@ -35,6 +35,11 @@ pub struct Program<'a> {
     pub vtables: HashMap<usize, Vec<u32>>,
     /// The type table's types, so an access can ask what it reads.
     pub types: Vec<HlType>,
+    /// The string constants; see [`Program::with_strings`].
+    pub strings: Vec<String>,
+    /// The `String` objects the module's globals hold, by global and text; see
+    /// [`Heap::init_constants`].
+    pub constants: Vec<(usize, usize)>,
 }
 
 impl<'a> Program<'a> {
@@ -60,7 +65,24 @@ impl<'a> Program<'a> {
             layouts: layouts(table),
             vtables,
             types: table.types.clone(),
+            strings: Vec::new(),
+            constants: Vec::new(),
         }
+    }
+
+    /// The globals that hold string constants, which [`Heap::init_constants`] fills.
+    pub fn with_constants(mut self, constants: &[crate::lower::Constant]) -> Program<'a> {
+        self.constants = constants
+            .iter()
+            .map(|c| (c.global as usize, c.text))
+            .collect();
+        self
+    }
+
+    /// The string constants the functions index.
+    pub fn with_strings(mut self, strings: &[String]) -> Program<'a> {
+        self.strings = strings.to_vec();
+        self
     }
 }
 
@@ -100,6 +122,7 @@ pub fn layouts(table: &TypeTable) -> HashMap<usize, Vec<Val>> {
 pub struct Heap {
     objects: Vec<(usize, Vec<Val>)>,
     memory: Vec<Vec<u8>>,
+    globals: Vec<Val>,
 }
 
 impl Heap {
@@ -107,6 +130,51 @@ impl Heap {
     pub fn bytes(&mut self, bytes: Vec<u8>) -> Val {
         self.memory.push(bytes);
         Val::Mem(self.memory.len() - 1)
+    }
+
+    /// Builds the `String` object of each string constant and puts it in its global, as the
+    /// module does when it starts. `ty` is the `String` class, with its `bytes` and `length` at
+    /// the given field indexes.
+    pub fn init_constants(
+        &mut self,
+        p: &Program,
+        ty: usize,
+        bytes: usize,
+        length: usize,
+    ) -> Result<(), String> {
+        for (global, text) in &p.constants {
+            let text = p.strings.get(*text).ok_or("a constant outside the string pool")?;
+            let buf = self.bytes(
+                text.encode_utf16()
+                    .chain(std::iter::once(0))
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            );
+            let units = Val::I(text.encode_utf16().count() as i32);
+            let obj = self.object(p, ty, &[(bytes, buf), (length, units)])?;
+            if self.globals.len() <= *global {
+                self.globals.resize(global + 1, Val::Void);
+            }
+            self.globals[*global] = obj;
+        }
+        Ok(())
+    }
+
+    /// The text of a `String` object whose bytes and length sit in fields `bytes` and `length`.
+    pub fn read_string(&self, v: Val, bytes: usize, length: usize) -> Option<String> {
+        let Val::Obj(h) = v else { return None };
+        let fields = &self.objects.get(h)?.1;
+        let (Val::Mem(m), Val::I(n)) = (*fields.get(bytes)?, *fields.get(length)?) else {
+            return None;
+        };
+        let raw = self.memory.get(m)?.get(..usize::try_from(n).ok()? * 2)?;
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16(&units).ok()
     }
 
     /// An object of type `ty` with the fields the runtime would zero, and `set` written over them.
@@ -183,6 +251,19 @@ fn call(
                     vals[dst.idx()] = Some(*args.get(*reg as usize).ok_or("a missing argument")?)
                 }
                 Instr::Pos { .. } => {}
+                Instr::GetGlobal { dst, global } => {
+                    vals[dst.idx()] = Some(heap.globals.get(*global).copied().unwrap_or(Val::Void));
+                }
+                Instr::String { dst, idx } => {
+                    let text = p.strings.get(*idx).ok_or("a string outside the pool")?;
+                    // UTF-16, with the terminator the runtime keeps
+                    let bytes = text
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .flat_map(u16::to_le_bytes)
+                        .collect();
+                    vals[dst.idx()] = Some(heap.bytes(bytes));
+                }
                 Instr::Copy { dst, src } => vals[dst.idx()] = Some(get(&vals, *src)?),
                 Instr::Int { dst, idx } => {
                     let v = f

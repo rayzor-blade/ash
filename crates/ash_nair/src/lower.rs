@@ -25,6 +25,7 @@ mod arrays;
 mod methods;
 mod nulls;
 mod objects;
+mod strings;
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -37,6 +38,14 @@ pub struct Lowered {
     pub function: Function,
     /// The class this function is the constructor of.
     pub ctor_of: Option<u32>,
+}
+
+/// A constant object the module holds in a global: a string literal.
+#[derive(Clone, Copy, Debug)]
+pub struct Constant {
+    pub global: u32,
+    /// The text, as an index into the module's string pool.
+    pub text: usize,
 }
 
 /// A function the runtime provides, which the module calls.
@@ -64,6 +73,12 @@ pub struct Module<'a> {
     int_at: HashMap<i32, usize>,
     pub floats: Vec<f64>,
     float_at: HashMap<u64, usize>,
+    pub strings: Vec<String>,
+    string_at: HashMap<String, usize>,
+    /// The global that holds each string literal's `String` object, and the constants to put in
+    /// them when the module starts.
+    string_globals: HashMap<String, u32>,
+    pub constants: Vec<Constant>,
 }
 
 impl<'a> Module<'a> {
@@ -80,6 +95,10 @@ impl<'a> Module<'a> {
             int_at: HashMap::new(),
             floats: Vec::new(),
             float_at: HashMap::new(),
+            strings: Vec::new(),
+            string_at: HashMap::new(),
+            string_globals: HashMap::new(),
+            constants: Vec::new(),
         }
     }
 
@@ -102,6 +121,31 @@ impl<'a> Module<'a> {
     }
 
     /// Asks for the function a field holds to be lowered, if it has not been asked for.
+    fn string_index(&mut self, text: &str) -> usize {
+        if let Some(i) = self.string_at.get(text) {
+            return *i;
+        }
+        self.strings.push(text.to_owned());
+        self.string_at.insert(text.to_owned(), self.strings.len() - 1);
+        self.strings.len() - 1
+    }
+
+    /// The global that holds the `String` constant `text`, made on first use.
+    fn string_global(&mut self, text: &str, ty: TypeIx) -> u32 {
+        if let Some(g) = self.string_globals.get(text) {
+            return *g;
+        }
+        let global = self.types.table.globals.len() as u32;
+        self.types.table.globals.push((String::new(), ty));
+        let text_ix = self.string_index(text);
+        self.string_globals.insert(text.to_owned(), global);
+        self.constants.push(Constant {
+            global,
+            text: text_ix,
+        });
+        global
+    }
+
     fn request(&mut self, field: u32) {
         if self.requested.insert(field) {
             self.pending.push(field);
@@ -145,6 +189,13 @@ impl<'a> Module<'a> {
                 let (class, name) = &self.types.fun_names[*findex as usize];
                 return Err(format!("{class}.{name} is called but not lowered"));
             }
+        }
+        // The pool kept growing after the first function was done. An index at or past a
+        // function's base means a pass minted it, so every base is the final length, or a
+        // function that finished early would read its callees' constants as minted ones once
+        // they are inlined into it.
+        for l in &mut out {
+            l.function.int_pool_base = self.ints.len();
         }
         Ok(out)
     }
@@ -675,6 +726,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             }
             const_kind::BOOL => Ok(self.bool_const(n.a.get() != 0)),
             const_kind::NULL => self.null_value(n),
+            const_kind::STRING => self.string_constant(n),
             other => Err(format!("constant kind {other} is not lowered yet")),
         }
     }

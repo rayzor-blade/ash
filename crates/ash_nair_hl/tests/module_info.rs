@@ -38,6 +38,25 @@ fn floats(m: &dyn ModuleInfo, findex: usize) -> Vec<u64> {
     out
 }
 
+/// The distinct texts of the string constants a function's body uses, in order.
+fn strings(m: &dyn ModuleInfo, findex: usize) -> Vec<String> {
+    let Some(CalleeBody::Air(body)) = m.callee(findex) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = body
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::GetGlobal { global, .. } => m.string_constant(*global),
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// What each argument of a signature wraps, by kind; an argument that wraps nothing gives `None`.
 fn wrapped(m: &dyn ModuleInfo, sig: &FunSig) -> Vec<Option<TypeKind>> {
     sig.args
@@ -61,10 +80,10 @@ fn genhl_name(name: &str) -> String {
     }
 }
 
-fn agree(fixture: &str, classes: &[&str], at_least: usize) -> (usize, usize, usize) {
+fn agree(fixture: &str, classes: &[&str], at_least: usize) -> (usize, usize, usize, usize) {
     let Some(compiler) = common::native_haxe() else {
         eprintln!("skipped: set ASH_HAXE_NATIVE to a haxe with the ash_tast plugin built");
-        return (0, 0, 0);
+        return (0, 0, 0, 0);
     };
     let tag = fixture.replace('/', "_");
 
@@ -100,7 +119,7 @@ fn agree(fixture: &str, classes: &[&str], at_least: usize) -> (usize, usize, usi
     let nair = NairModule::new(&module, &done);
 
     let mut matched = 0;
-    let (mut wrapped_seen, mut floats_seen) = (0, 0);
+    let (mut wrapped_seen, mut floats_seen, mut strings_seen) = (0, 0, 0);
     let mut differ = Vec::new();
     for l in &done {
         let Some(&other) = by_name.get(&genhl_name(&l.name)) else {
@@ -124,6 +143,13 @@ fn agree(fixture: &str, classes: &[&str], at_least: usize) -> (usize, usize, usi
         if fa != fb {
             differ.push(format!("{}: float constants nAIR {fa:?}, genhl {fb:?}", l.name));
         }
+        let (ta, tb) = (strings(&nair, l.findex as usize), strings(&genhl, other));
+        if ta != tb {
+            differ.push(format!("{}: string constants nAIR {ta:?}, genhl {tb:?}", l.name));
+        }
+        if !ta.is_empty() {
+            strings_seen += 1;
+        }
         if wa.iter().any(Option::is_some) {
             wrapped_seen += 1;
         }
@@ -137,12 +163,12 @@ fn agree(fixture: &str, classes: &[&str], at_least: usize) -> (usize, usize, usi
         "{fixture}: only {matched} of {} lowered functions matched a genhl function",
         done.len()
     );
-    (matched, wrapped_seen, floats_seen)
+    (matched, wrapped_seen, floats_seen, strings_seen)
 }
 
 #[test]
 fn numeric_functions_have_the_same_kinds_either_way() {
-    let (matched, _, floats) = agree("tests/lower", &["Main"], 5);
+    let (matched, _, floats, _) = agree("tests/lower", &["Main"], 5);
     assert!(matched == 0 || floats > 0, "no function compared float constants");
 }
 
@@ -153,6 +179,12 @@ fn methods_and_constructors_have_the_same_kinds_either_way() {
 
 #[test]
 fn object_arguments_and_results_have_the_same_kinds_either_way() {
-    let (matched, wrapped, _) = agree("tests/nulls", &["Main", "Node", "Tree"], 5);
+    let (matched, wrapped, _, _) = agree("tests/nulls", &["Main", "Node", "Tree"], 5);
     assert!(matched == 0 || wrapped > 0, "no function compared a Null<T> parameter");
+}
+
+#[test]
+fn string_constants_have_the_same_text_either_way() {
+    let (matched, _, _, strings) = agree("tests/strings", &["Main"], 3);
+    assert!(matched == 0 || strings > 0, "no function compared a string constant");
 }

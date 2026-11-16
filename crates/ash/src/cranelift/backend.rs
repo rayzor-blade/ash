@@ -942,9 +942,8 @@ impl CraneliftTierContext {
             return Ok(p);
         }
         let s = self
-            .bytecode()?
-            .strings
-            .get(index)
+            .module()
+            .string_value(index)
             .ok_or_else(|| anyhow!("string constant {index} out of range"))?;
         let buf: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
         let addr = Box::leak(buf.into_boxed_slice()).as_ptr() as usize;

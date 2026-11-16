@@ -327,6 +327,24 @@ pub trait ModuleInfo {
         0
     }
 
+    /// The text of string constant-pool entry `idx`.
+    fn string_value(&self, idx: usize) -> Option<String> {
+        let _ = idx;
+        None
+    }
+
+    /// How many entries the string pool holds.
+    fn string_pool_len(&self) -> usize {
+        0
+    }
+
+    /// The text of the `String` constant that global `global` holds: a string literal in the
+    /// source is a read of such a global, not an allocation.
+    fn string_constant(&self, global: usize) -> Option<String> {
+        let _ = global;
+        None
+    }
+
     /// The type that a `Ref`, `Null` or `Packed` type wraps; `None` for any
     /// other type, and for a type the embedder does not know.
     fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
@@ -525,6 +543,15 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     }
     fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
         (**self).type_param(ty)
+    }
+    fn string_value(&self, idx: usize) -> Option<String> {
+        (**self).string_value(idx)
+    }
+    fn string_pool_len(&self) -> usize {
+        (**self).string_pool_len()
+    }
+    fn string_constant(&self, global: usize) -> Option<String> {
+        (**self).string_constant(global)
     }
     fn type_kind(&self, ty: TypeRef) -> Option<TypeKind> {
         (**self).type_kind(ty)

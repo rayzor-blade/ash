@@ -17,6 +17,9 @@ use crate::lower::{Lowered, Module};
 pub struct NairModule {
     ints: Vec<i32>,
     floats: Vec<f64>,
+    strings: Vec<String>,
+    /// The text of the string constant each global holds.
+    constants: HashMap<usize, String>,
     types: Vec<HlType>,
     natives: HashMap<usize, NativeImport>,
     callees: HashMap<usize, Function>,
@@ -59,6 +62,10 @@ impl NairModule {
             .collect();
         for (i, f) in callees.iter_mut() {
             f.facts.immutable = immutable.get(i).cloned().unwrap_or_default();
+            // the pool may have grown since the function was lowered; see `Module::lower_all`
+            if f.pending_ints.is_empty() {
+                f.int_pool_base = module.ints.len();
+            }
         }
         let summaries =
             facts::summarize_with(callees.iter().map(|(i, f)| (*i, f)), &module.table_calls);
@@ -80,6 +87,12 @@ impl NairModule {
         NairModule {
             ints: module.ints.clone(),
             floats: module.floats.clone(),
+            strings: module.strings.clone(),
+            constants: module
+                .constants
+                .iter()
+                .map(|c| (c.global as usize, module.strings[c.text].clone()))
+                .collect(),
             types,
             natives,
             callees,
@@ -128,6 +141,18 @@ impl ModuleInfo for NairModule {
 
     fn float_pool_len(&self) -> usize {
         self.floats.len()
+    }
+
+    fn string_value(&self, idx: usize) -> Option<String> {
+        self.strings.get(idx).cloned()
+    }
+
+    fn string_pool_len(&self) -> usize {
+        self.strings.len()
+    }
+
+    fn string_constant(&self, global: usize) -> Option<String> {
+        self.constants.get(&global).cloned()
     }
 
     fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
@@ -253,6 +278,9 @@ pub fn optimize(
     fma: bool,
 ) -> Result<PassReport, String> {
     facts::attach_all(f, &module.summaries);
+    if f.pending_ints.is_empty() {
+        f.int_pool_base = module.ints.len();
+    }
     if let Some(i) = f.findex
         && let Some(set) = module.immutable.get(&i)
     {

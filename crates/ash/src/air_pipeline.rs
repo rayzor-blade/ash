@@ -298,6 +298,23 @@ impl<'b> ModuleInfo for AshModule<'b> {
         self.bc.floats.len()
     }
 
+    fn string_value(&self, idx: usize) -> Option<String> {
+        self.bc.strings.get(idx).cloned()
+    }
+
+    fn string_pool_len(&self) -> usize {
+        self.bc.strings.len()
+    }
+
+    fn string_constant(&self, global: usize) -> Option<String> {
+        let c = self.bc.constants.iter().find(|c| c.global as usize == global)?;
+        let class = self.bc.types.get(self.bc.globals.get(global)?.0)?.obj.as_ref()?;
+        // a String's first field is its UTF-16 buffer, which a constant gives as a string index
+        (class.name == "String")
+            .then(|| self.bc.strings.get(usize::try_from(*c.fields.first()?).ok()?).cloned())
+            .flatten()
+    }
+
     fn type_param(&self, ty: TypeRef) -> Option<TypeRef> {
         let t = self.bc.types.get(ty.0 as usize)?;
         Some(TypeRef(t.tparam.as_ref()?.0 as u32))

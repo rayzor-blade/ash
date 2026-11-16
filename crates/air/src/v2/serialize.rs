@@ -584,12 +584,30 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
                         if_false,
                     } => {
                         let et = resolve_jump(*b, if_true.idx());
+                        let ef = resolve_jump(*b, if_false.idx());
+                        // The branch goes to the arm that is not next, so that the arm that is next
+                        // is the fall-through and no jump follows: when the true arm is next, the
+                        // opcode tests the negation and goes to the false arm.
+                        if et == next
+                            && ef != next
+                            && let Some((inverse, swap)) = inverted(f, *cond, *a)
+                        {
+                            sites.push(Site::Simple {
+                                idx: ops.len(),
+                                entry: ef,
+                            });
+                            let (x, y) = (rg(*a), (*rhs).map(rg));
+                            ops.push(match (swap, y) {
+                                (true, Some(y)) => cond_opcode(inverse, y, Some(x))?,
+                                _ => cond_opcode(inverse, x, y)?,
+                            });
+                            continue;
+                        }
                         sites.push(Site::Simple {
                             idx: ops.len(),
                             entry: et,
                         });
                         ops.push(cond_opcode(*cond, rg(*a), (*rhs).map(rg))?);
-                        let ef = resolve_jump(*b, if_false.idx());
                         if ef != next {
                             sites.push(Site::Simple {
                                 idx: ops.len(),
@@ -738,6 +756,48 @@ fn sequentialize(par: &[(u32, u32)], reg_types: &mut Vec<TypeRef>) -> Vec<(u32, 
         }
     }
     out
+}
+
+/// The condition that is true exactly when `cond` of `a` and the other operand is false, and
+/// whether it takes its operands the other way round. For integers, references and booleans
+/// every condition has one. For floats an ordering is false when an operand is NaN, so its
+/// negation is the `NotLt` or `NotGte` form, with the operands swapped for `>` and `<=`. A function
+/// whose float types are not known has no inverse for an ordering.
+pub(crate) fn inverted(f: &Function, cond: CondKind, a: ValueId) -> Option<(CondKind, bool)> {
+    use CondKind::*;
+    Some(match cond {
+        True => (False, false),
+        False => (True, false),
+        Null => (NotNull, false),
+        NotNull => (Null, false),
+        Eq => (NotEq, false),
+        NotEq => (Eq, false),
+        NotLt => (SLt, false),
+        NotGte => (SGte, false),
+        SLt | SGte | SGt | SLte | ULt | UGte => {
+            let ty = f.value_ty(a);
+            if f.float_types.binary_search(&ty).is_ok() {
+                match cond {
+                    SLt => (NotLt, false),
+                    SGte => (NotGte, false),
+                    SGt => (NotLt, true),
+                    SLte => (NotGte, true),
+                    _ => return None,
+                }
+            } else if f.float_types_known {
+                match cond {
+                    SLt => (SGte, false),
+                    SGte => (SLt, false),
+                    SGt => (SLte, false),
+                    SLte => (SGt, false),
+                    ULt => (UGte, false),
+                    _ => (ULt, false),
+                }
+            } else {
+                return None;
+            }
+        }
+    })
 }
 
 fn cond_opcode(cond: CondKind, a: Reg, b: Option<Reg>) -> Result<Opcode> {

@@ -217,9 +217,21 @@ pub fn assemble(module: &Module, lowered: &[Lowered], entry: u32) -> Result<Deco
             fields: vec![c.text as i32, (bc.ints.len() - 1) as i32],
         });
     }
+    // the module's float types, which the serializer needs to negate an ordering of floats
+    let floats: Vec<air::v2::ir::TypeRef> = module
+        .types
+        .table
+        .types
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t, HlType::F32 | HlType::F64))
+        .map(|(ix, _)| air::v2::ir::TypeRef(ix as u32))
+        .collect();
     for l in lowered {
-        let s =
-            air::v2::serialize::serialize(&l.function).map_err(|e| format!("{}: {e}", l.name))?;
+        let mut function = l.function.clone();
+        function.float_types = floats.clone();
+        function.float_types_known = true;
+        let s = air::v2::serialize::serialize(&function).map_err(|e| format!("{}: {e}", l.name))?;
         if !s.new_ints.is_empty() {
             return Err(format!(
                 "{}: the serializer asked for constants the pool lacks",

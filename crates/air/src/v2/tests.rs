@@ -8543,3 +8543,113 @@ fn a_nullable_int_that_is_also_returned_is_left_boxed() {
 }
 
 mod call_summaries;
+
+// ---------------------------------------------------------------------------
+// the negation a branch is serialized with
+// ---------------------------------------------------------------------------
+
+/// Whether `cond` of `(a, b)` holds, where an ordering is false if an operand is NaN, as the
+/// bytecode's jumps have it and `NotLt` and `NotGte` are true then.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(a < b)` is not `a >= b` when an operand is NaN
+fn cond_holds(cond: CondKind, a: f64, b: f64) -> bool {
+    match cond {
+        CondKind::SLt | CondKind::ULt => a < b,
+        CondKind::SGte | CondKind::UGte => a >= b,
+        CondKind::SGt => a > b,
+        CondKind::SLte => a <= b,
+        CondKind::NotLt => !(a < b),
+        CondKind::NotGte => !(a >= b),
+        CondKind::Eq => a == b,
+        CondKind::NotEq => a != b,
+        other => panic!("{other:?} is not a comparison of two numbers"),
+    }
+}
+
+#[test]
+fn a_branch_is_negated_exactly_for_integers_and_for_floats_with_nan() {
+    use crate::v2::serialize::inverted;
+    use CondKind::*;
+    let int = TypeRef(0);
+    let float = TypeRef(1);
+    let mut f = Function::new(vec![int, float]);
+    f.float_types = vec![float];
+    f.float_types_known = true;
+    let (i, x) = (f.new_value(int, 0), f.new_value(float, 1));
+
+    let values = [-1.0, 0.0, 2.0, f64::NAN];
+    for cond in [SLt, SGte, SGt, SLte, NotLt, NotGte, Eq, NotEq] {
+        for (operand, ordinary) in [(x, false), (i, true)] {
+            let Some((inverse, swap)) = inverted(&f, cond, operand) else {
+                // only an ordering that cannot be negated is left alone, and none such here
+                panic!("{cond:?} has no inverse");
+            };
+            for a in values {
+                for b in values {
+                    // integers have no NaN
+                    if ordinary && (a.is_nan() || b.is_nan()) {
+                        continue;
+                    }
+                    let (p, q) = if swap { (b, a) } else { (a, b) };
+                    assert_eq!(
+                        cond_holds(inverse, p, q),
+                        !cond_holds(cond, a, b),
+                        "{cond:?} on {a}, {b} ({}) by {inverse:?} (swapped: {swap})",
+                        if ordinary { "integers" } else { "floats" }
+                    );
+                }
+            }
+        }
+    }
+    // a function that does not know its float types leaves an ordering as it is
+    let mut unknown = Function::new(vec![float]);
+    let y = unknown.new_value(float, 0);
+    assert!(inverted(&unknown, SLt, y).is_none());
+    assert!(inverted(&unknown, Eq, y).is_some());
+}
+
+#[test]
+fn a_branch_to_the_next_block_is_written_as_its_negation_with_no_jump_after_it() {
+    // `if (n < 2) return n; return n - 1`, with the return of n laid out right after the test:
+    // the opcode branches past it on `n >= 2`, so there is no jump for the other arm
+    let int = TypeRef(0);
+    let mut f = Function::new(vec![int]);
+    f.float_types_known = true;
+    let n = f.new_value(int, 0);
+    let two = f.new_value(int, 1);
+    let m = f.new_value(int, 2);
+    let (done, rest) = (BlockId(1), BlockId(2));
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Param { dst: n, reg: 0 }, Instr::Int { dst: two, idx: 0 }],
+        term: Terminator::CondJump {
+            cond: CondKind::SLt,
+            a: n,
+            b: Some(two),
+            if_true: done,
+            if_false: rest,
+        },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Ret { value: n },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Int { dst: m, idx: 0 }],
+        term: Terminator::Ret { value: m },
+        handler: None,
+    });
+    let ops = crate::v2::serialize::serialize(&f).expect("it serializes").ops;
+    assert!(
+        ops.iter().any(|o| matches!(o, Opcode::JSGte { .. })),
+        "{ops:?}"
+    );
+    assert!(
+        !ops.iter()
+            .any(|o| matches!(o, Opcode::JSLt { .. } | Opcode::JAlways { .. })),
+        "{ops:?}"
+    );
+}

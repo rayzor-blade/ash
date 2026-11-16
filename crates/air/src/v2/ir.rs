@@ -1559,6 +1559,9 @@ pub struct Function {
     /// this; when it is empty (no module info was supplied at lowering) those
     /// rewrites are inert.
     pub float_types: Vec<TypeRef>,
+    /// Whether `float_types` was made from a module's types, so that a type it lacks is not a
+    /// float. False for a function built without one, whose empty list says nothing.
+    pub float_types_known: bool,
     /// i32 constants this function needs that the module's pool does not
     /// hold, in the order a pass minted them.
     ///
@@ -1728,6 +1731,7 @@ impl Function {
             reg_types,
             natives: NativeTable::new(),
             float_types: Vec::new(),
+            float_types_known: false,
             pending_ints: Vec::new(),
             int_pool_base: 0,
             findex: None,

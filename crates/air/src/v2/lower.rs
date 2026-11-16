@@ -472,6 +472,7 @@ pub fn lower_with_positions(
         fts.dedup();
         fts
     };
+    func.float_types_known = true;
 
     // Per-block phi state: (base reg, dst value, incoming).
     let mut phi_nodes: Vec<Vec<PhiNode>> = phi_regs

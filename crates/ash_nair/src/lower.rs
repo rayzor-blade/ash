@@ -45,6 +45,15 @@ pub struct Lowered {
     pub ctor_of: Option<u32>,
 }
 
+/// The parts of a function a call of it, or a stub for it, needs: see [`Module::lower_field`].
+struct FieldHeader {
+    class: String,
+    name: String,
+    findex: u32,
+    sig: TypeIx,
+    this_ty: Option<(TypeIx, u32)>,
+}
+
 /// A constant object the module holds in a global: a string literal.
 #[derive(Clone, Copy, Debug)]
 pub struct Constant {
@@ -213,13 +222,10 @@ impl<'a> Module<'a> {
         Ok(out)
     }
 
-    /// Lowers the function a field holds, naming it as calls to it do.
-    pub fn lower_field(&mut self, field: u32) -> Result<Lowered> {
+    /// What a call of a function needs to know of it: its name, its function index, its type
+    /// (a method's taking its object first), and the object's type and class for a method.
+    fn field_header(&mut self, field: u32) -> Result<FieldHeader> {
         let rec = self.tast.fields()[field as usize];
-        let func = rec.func.get();
-        if func == NONE {
-            return Err("the field has no body".into());
-        }
         let class = self.types.class_name(rec.owner.get()).to_owned();
         let name = self.types.field_name(field).to_owned();
         let findex = self.types.fun_id(&class, &name);
@@ -238,7 +244,31 @@ impl<'a> Module<'a> {
         } else {
             None
         };
+        Ok(FieldHeader {
+            class,
+            name,
+            findex,
+            sig,
+            this_ty,
+        })
+    }
+
+    /// Lowers the function a field holds, naming it as calls to it do.
+    pub fn lower_field(&mut self, field: u32) -> Result<Lowered> {
+        let rec = self.tast.fields()[field as usize];
+        let func = rec.func.get();
+        if func == NONE {
+            return Err("the field has no body".into());
+        }
+        let FieldHeader {
+            class,
+            name,
+            findex,
+            sig,
+            this_ty,
+        } = self.field_header(field)?;
         let function = FnLower::new(self, func, this_ty)?.run()?;
+        let flags = rec.flags.get();
         let ctor_of = (name == "new" && flags & field_flag::STATIC == 0).then(|| rec.owner.get());
         Ok(Lowered {
             name: format!("{class}.{name}"),
@@ -247,6 +277,76 @@ impl<'a> Module<'a> {
             function,
             ctor_of,
         })
+    }
+
+    /// A function of the field's type whose body asserts, to stand where an object's method table
+    /// names a method that nothing lowered defines: the table is part of the type, so the file
+    /// needs something there, but no call the program makes reaches it.
+    pub fn lower_stub(&mut self, field: u32) -> Result<Lowered> {
+        let FieldHeader {
+            class,
+            name,
+            findex,
+            sig,
+            ..
+        } = self.field_header(field)?;
+        let HlType::Fun(params, ret) = self.types.table.types[sig].clone() else {
+            return Err(format!("{class}.{name} is not a function"));
+        };
+        let function = FnLower::stub(self, &params, ret)?;
+        Ok(Lowered {
+            name: format!("{class}.{name}"),
+            findex,
+            sig,
+            function,
+            ctor_of: None,
+        })
+    }
+
+    /// A stub for each method that an object's method table or bindings name and that `lowered`
+    /// and the natives do not define, ready to be written into the file with the rest.
+    pub fn stubs_for_layouts(&mut self, lowered: &[Lowered]) -> Result<Vec<Lowered>> {
+        let defined: HashSet<u32> = lowered
+            .iter()
+            .map(|l| l.findex)
+            .chain(self.natives.iter().map(|n| n.findex))
+            .collect();
+        let mut named = std::collections::BTreeSet::new();
+        for o in &self.types.table.objs {
+            named.extend(o.proto.iter().map(|p| p.findex));
+            named.extend(o.bindings.iter().map(|(_, f)| *f));
+        }
+        let mut out = Vec::new();
+        for findex in named {
+            if defined.contains(&findex) {
+                continue;
+            }
+            let (class, name) = self.types.fun_names[findex as usize].clone();
+            let id = self.types.class_id(&class);
+            if name == "__string"
+                && let Some(c) = id
+            {
+                // the method the compiler adds to a class with a `toString`, for the runtime's
+                // printing of an object: it takes the object and gives the text's buffer
+                let this = self.types.class_type(c, &[], false, None)?;
+                let bytes = self.types.table.add(HlType::Bytes);
+                let sig = self.types.table.add(HlType::Fun(vec![this], bytes));
+                let function = FnLower::stub(self, &[this], bytes)?;
+                out.push(Lowered {
+                    name: format!("{class}.__string"),
+                    findex,
+                    sig,
+                    function,
+                    ctor_of: None,
+                });
+                continue;
+            }
+            let field = id
+                .and_then(|c| self.types.declared_field(c, &name))
+                .ok_or_else(|| format!("{class}.{name} is in a method table but is no field"))?;
+            out.push(self.lower_stub(field)?);
+        }
+        Ok(out)
     }
 }
 
@@ -368,15 +468,35 @@ impl<'m, 'a> FnLower<'m, 'a> {
         Ok(s)
     }
 
+    /// A function of these parameter types whose body asserts and returns the default of `ret`.
+    fn stub(m: &'m mut Module<'a>, params: &[TypeIx], ret: TypeIx) -> Result<Function> {
+        let mut s = FnLower::bare_with(m, params, ret);
+        for (at, ty) in params.iter().enumerate() {
+            let v = s.f.new_value(TypeRef(*ty as u32), at as u32);
+            s.emit(Instr::Param {
+                dst: v,
+                reg: at as u32,
+            });
+        }
+        s.emit(Instr::Assert);
+        let value = s.default_value(ret)?;
+        s.terminate(Terminator::Ret { value });
+        s.finish()
+    }
+
     /// A function that takes nothing and has no body in the file, which the lowering builds from
     /// pieces: see [`Module::lower_init`].
     fn bare(m: &'m mut Module<'a>) -> Self {
+        let void = m.types.table.add(HlType::Void);
+        FnLower::bare_with(m, &[], void)
+    }
+
+    fn bare_with(m: &'m mut Module<'a>, params: &[TypeIx], ret_ty: TypeIx) -> Self {
         let tast = m.tast;
-        let ret_ty = m.types.table.add(HlType::Void);
         let mut s = FnLower {
             m,
             tast,
-            f: Function::new(Vec::new()),
+            f: Function::new(params.iter().map(|t| TypeRef(*t as u32)).collect()),
             term: Vec::new(),
             cur: None,
             preds: Vec::new(),

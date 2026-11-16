@@ -317,6 +317,20 @@ fn proves_both_shapes_without_changing_ir() {
 }
 
 #[test]
+fn a_constructor_that_spells_out_its_void_result_is_the_same_constructor() {
+    // a front end that writes a void function's result as a null of the void type, where bytecode
+    // returns a register nothing ever wrote
+    let mut m = fixture();
+    m.bodies
+        .get_mut(&CTOR)
+        .unwrap()
+        .ops
+        .insert(3, Opcode::Null { dst: Reg(4) });
+    let shape = analyze_pair(&m, BUILD, FOLD, Limits::default()).expect("the pair is still proved");
+    assert_eq!(shape.child_fields, vec![0, 1]);
+}
+
+#[test]
 fn allocation_and_reload_contracts_are_separate_blockers() {
     let mut m = fixture();
     m.policy = AllocationElision::Unknown;

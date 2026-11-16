@@ -261,6 +261,10 @@ impl Checker<'_> {
                     Instr::Null { dst } if f.value_ty(*dst) == tree => {
                         values[dst.idx()] = Some(Value::Null)
                     }
+                    // what a void function returns, when its producer spells it out
+                    Instr::Null { dst } if self.info.is_void(f.value_ty(*dst)) => {
+                        values[dst.idx()] = Some(Value::Void)
+                    }
                     Instr::BinOp { dst, op, a, b }
                         if self.info.is_i32(f.value_ty(*dst))
                             && matches!(

@@ -27,6 +27,7 @@ pub mod compare;
 pub mod eval;
 pub mod hl;
 pub mod hlfile;
+pub mod immutable;
 pub mod info;
 pub mod lower;
 pub mod ty;

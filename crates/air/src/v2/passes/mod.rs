@@ -37,7 +37,7 @@
 //! exposes null branches on newly allocated values; folding those first lets
 //! scalar replacement see that the object does not escape.
 
-use super::analysis::{AliasClass, CfgInfo, clobbers_all, writes_may_alias};
+use super::analysis::{AliasClass, CfgInfo, may_clobber};
 use super::ir::*;
 use super::module::{ModuleInfo, NO_MODULE_INFO};
 use anyhow::{Result, bail};
@@ -866,7 +866,7 @@ pub fn clobber_free(
             continue;
         }
         for ins in &blk.instrs[start..end] {
-            if clobbers_all(ins, f) || writes_may_alias(ins, class, f) {
+            if may_clobber(ins, class, f) {
                 return false;
             }
         }

@@ -120,17 +120,29 @@ pub struct Facts {
     /// What a call through an object's method table may do, by the type of the receiver value
     /// and the table slot: the join of what each function the slot may run does.
     pub methods: HashMap<(TypeRef, usize), CallSummary>,
+    /// Fields, by declaring class type and field index, that nothing in this function writes and
+    /// that nothing running during it can: they are written only while their object is being
+    /// constructed, and not by the function itself. A load of one is the same wherever the object
+    /// is visible, so no store and no call moves or invalidates it.
+    pub immutable: HashSet<(TypeRef, usize)>,
 }
 
 impl Facts {
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.methods.is_empty()
+        self.calls.is_empty() && self.methods.is_empty() && self.immutable.is_empty()
+    }
+
+    /// True when a load of field `field` of `ty` is the same value for as long as its object is
+    /// visible to this function.
+    pub fn immutable_field(&self, ty: TypeRef, field: usize) -> bool {
+        self.immutable.contains(&(ty, field))
     }
 
     /// Storage retained beyond the struct itself, rounded up.
     pub fn allocated_bytes(&self) -> usize {
         let per = std::mem::size_of::<(usize, CallSummary)>() + 8 + MAX_CLASSES / 2 * 16;
         (self.calls.capacity() + self.methods.capacity()) * per
+            + self.immutable.capacity() * std::mem::size_of::<(TypeRef, usize)>()
     }
 
     /// The summary of a direct call, when the front end gave one.
@@ -144,8 +156,11 @@ impl Facts {
     }
 
     /// Takes in the facts of a body copied into this function. A callee both sides know is
-    /// the same function, so the wider footprint stands if they ever differ.
+    /// the same function, so the wider footprint stands if they ever differ. A field is
+    /// immutable in the result only if it is in both: the copied body may be the constructor that
+    /// writes it, and a body that says nothing says nothing.
     pub fn merge(&mut self, other: &Facts) {
+        self.immutable.retain(|k| other.immutable.contains(k));
         for (findex, s) in &other.calls {
             self.calls
                 .entry(*findex)

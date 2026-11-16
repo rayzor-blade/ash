@@ -439,6 +439,17 @@ pub fn writes_may_alias(ins: &Instr, class: AliasClass, f: &Function) -> bool {
     }
 }
 
+/// True when `ins` may change what a load of `class` reads: it writes that storage, or writes
+/// anything at all. A field the function's facts call immutable is changed by nothing.
+pub fn may_clobber(ins: &Instr, class: AliasClass, f: &Function) -> bool {
+    if let AliasClass::ObjField { ty, field } = class
+        && f.facts.immutable_field(ty, field)
+    {
+        return false;
+    }
+    clobbers_all(ins, f) || writes_may_alias(ins, class, f)
+}
+
 /// True when the instruction produces a value that is provably not null: a
 /// fresh allocation, a constant with an address, or the address of a cell.
 pub fn is_non_null_result(ins: &Instr) -> bool {

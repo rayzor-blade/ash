@@ -33,6 +33,8 @@ pub struct Lowered {
     /// The function's type.
     pub sig: TypeIx,
     pub function: Function,
+    /// The class this function is the constructor of.
+    pub ctor_of: Option<u32>,
 }
 
 /// A function the runtime provides, which the module calls.
@@ -174,11 +176,13 @@ impl<'a> Module<'a> {
             None
         };
         let function = FnLower::new(self, func, this_ty)?.run()?;
+        let ctor_of = (name == "new" && flags & field_flag::STATIC == 0).then(|| rec.owner.get());
         Ok(Lowered {
             name: format!("{class}.{name}"),
             findex,
             sig,
             function,
+            ctor_of,
         })
     }
 }

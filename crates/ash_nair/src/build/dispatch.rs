@@ -62,6 +62,22 @@ impl<'a> TypeBuilder<'a> {
         self.classes[class as usize].ctor
     }
 
+    /// [`Self::field_slot`] for a class whose type is already built; `None` for one that is not,
+    /// so that asking adds nothing to the table.
+    pub fn built_field_slot(&self, field: u32) -> Option<FieldSlot> {
+        let owner = self.tast.fields()[field as usize].owner.get();
+        let t = *self.cached.get(self.class_name(owner))?;
+        let (HlType::Obj(o) | HlType::Struct(o)) = self.table.types[t] else {
+            return None;
+        };
+        let &(index, ty) = self.table.objs[o].index.get(self.field_name(field))?;
+        (index >= 0).then_some(FieldSlot {
+            owner: t,
+            index: index as u32,
+            ty,
+        })
+    }
+
     /// Whether the class is declared outside the program, so that it has no body to lower.
     pub fn is_extern_class(&self, class: u32) -> bool {
         self.is_extern(class)

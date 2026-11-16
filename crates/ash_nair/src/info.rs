@@ -4,7 +4,7 @@
 //! optimized with them directly: the inliner copies the lowered callees (`CalleeBody::Air`), and
 //! no bytecode is involved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use air::v2::facts::{self, CallSummary, Summaries};
 use air::v2::ir::{Function, Instr, TypeRef};
@@ -22,6 +22,8 @@ pub struct NairModule {
     callees: HashMap<usize, Function>,
     sigs: HashMap<usize, FunSig>,
     names: HashMap<usize, String>,
+    /// The fields nothing in the function writes and nothing it runs can, by function.
+    immutable: HashMap<usize, HashSet<(TypeRef, usize)>>,
     summaries: Summaries,
 }
 
@@ -45,6 +47,7 @@ impl NairModule {
                 );
             }
         }
+        let immutable = immutable_by_function(module, lowered);
         let mut callees: HashMap<usize, Function> = lowered
             .iter()
             .map(|l| {
@@ -54,6 +57,9 @@ impl NairModule {
                 )
             })
             .collect();
+        for (i, f) in callees.iter_mut() {
+            f.facts.immutable = immutable.get(i).cloned().unwrap_or_default();
+        }
         let summaries =
             facts::summarize_with(callees.iter().map(|(i, f)| (*i, f)), &module.table_calls);
         for f in callees.values_mut() {
@@ -78,12 +84,19 @@ impl NairModule {
             natives,
             callees,
             sigs,
+            immutable,
             names: lowered
                 .iter()
                 .map(|l| (l.findex as usize, l.name.clone()))
                 .collect(),
             summaries,
         }
+    }
+
+    /// The fields that nothing in the function writes, and nothing it runs can, because they
+    /// are written only while their object is built: by declaring class type and index.
+    pub fn immutable_fields_of(&self, findex: usize) -> Option<&HashSet<(TypeRef, usize)>> {
+        self.immutable.get(&findex)
     }
 
     /// What a call to the function may write, from the bodies lowered so far.
@@ -188,6 +201,42 @@ impl ModuleInfo for NairModule {
     }
 }
 
+/// For each lowered function, the fields it may treat as fixed: those the program writes only
+/// while their object is built, except the ones the function itself builds, which it writes.
+fn immutable_by_function(
+    module: &Module,
+    lowered: &[Lowered],
+) -> HashMap<usize, HashSet<(TypeRef, usize)>> {
+    let tast = module.types.tast();
+    let mut by_class: HashMap<u32, Vec<(TypeRef, usize)>> = HashMap::new();
+    for field in crate::immutable::immutable_fields(tast) {
+        // a class no lowered code touches has no type to name
+        if let Some(slot) = module.types.built_field_slot(field) {
+            let owner = tast.fields()[field as usize].owner.get();
+            by_class
+                .entry(owner)
+                .or_default()
+                .push((TypeRef(slot.owner as u32), slot.index as usize));
+        }
+    }
+    let all: HashSet<(TypeRef, usize)> = by_class.values().flatten().copied().collect();
+    lowered
+        .iter()
+        .map(|l| {
+            let mut set = all.clone();
+            // a constructor writes the fields of its class and of the classes above it
+            let mut at = l.ctor_of;
+            while let Some(class) = at {
+                for key in by_class.get(&class).into_iter().flatten() {
+                    set.remove(key);
+                }
+                at = module.types.superclass(class);
+            }
+            (l.findex as usize, set)
+        })
+        .collect()
+}
+
 /// Instructions in `f`, terminators included.
 pub fn instruction_count(f: &Function) -> usize {
     f.blocks.iter().map(|b| b.instrs.len() + 1).sum()
@@ -204,6 +253,11 @@ pub fn optimize(
     fma: bool,
 ) -> Result<PassReport, String> {
     facts::attach_all(f, &module.summaries);
+    if let Some(i) = f.findex
+        && let Some(set) = module.immutable.get(&i)
+    {
+        f.facts.immutable = set.clone();
+    }
     let opts = PassOptions {
         fma,
         verify_each: true,

@@ -2,7 +2,7 @@
 //! solved over direct calls and used by the passes that move or reuse loads.
 
 use super::*;
-use crate::v2::facts::{CallSummary, Footprint, attach, summarize};
+use crate::v2::facts::{CallSummary, Facts, Footprint, attach, summarize};
 
 fn summary(classes: &[AliasClass]) -> CallSummary {
     CallSummary {
@@ -415,4 +415,94 @@ fn a_summary_of_a_method_table_call_lets_a_load_leave_the_loop() {
     assert_eq!(hoisted_across_a_table_call(Some(&[next_field(class)])), 1);
     assert_eq!(hoisted_across_a_table_call(Some(&[class])), 0);
     assert_eq!(hoisted_across_a_table_call(Some(&[AliasClass::Any])), 0);
+}
+
+// ---- fields nothing writes after construction
+
+fn mark_immutable(f: &mut Function, class: AliasClass) {
+    let AliasClass::ObjField { ty, field } = class else {
+        panic!("not a field class: {class:?}");
+    };
+    f.facts.immutable.insert((ty, field));
+}
+
+/// The loop above, calling a function that may write anything.
+fn loop_with_an_opaque_call(immutable: Option<AliasClass>) -> Function {
+    let mut f = loop_with_load_and_call();
+    f.facts.calls.insert(3, summary(&[AliasClass::Any]));
+    if let Some(c) = immutable {
+        mark_immutable(&mut f, c);
+    }
+    f
+}
+
+#[test]
+fn licm_hoists_an_immutable_field_across_a_call_that_may_write_anything() {
+    let class = load_class(&loop_with_load_and_call());
+    let hoisted = |mut f: Function| {
+        run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default()).hoisted
+    };
+    assert_eq!(hoisted(loop_with_an_opaque_call(None)), 0, "without the fact");
+    assert_eq!(hoisted(loop_with_an_opaque_call(Some(class))), 1);
+    assert_eq!(
+        hoisted(loop_with_an_opaque_call(Some(next_field(class)))),
+        0,
+        "another field's fact says nothing about this one"
+    );
+}
+
+#[test]
+fn gvn_reuses_an_immutable_field_across_a_call_that_may_write_anything() {
+    let eliminated = |immutable: bool| {
+        let ops = vec![
+            Opcode::Field {
+                dst: Reg(1),
+                obj: Reg(0),
+                field: RefField(0),
+            },
+            Opcode::Call0 {
+                dst: Reg(2),
+                fun: RefFun(3),
+            },
+            Opcode::Field {
+                dst: Reg(3),
+                obj: Reg(0),
+                field: RefField(0),
+            },
+            Opcode::Add {
+                dst: Reg(4),
+                a: Reg(1),
+                b: Reg(3),
+            },
+            Opcode::Ret { ret: Reg(4) },
+        ];
+        let mut f = lower(&ops, &[t(5), t(0), t(0), t(0), t(0)]).unwrap();
+        f.facts.calls.insert(3, summary(&[AliasClass::Any]));
+        if immutable {
+            let class = load_class(&f);
+            mark_immutable(&mut f, class);
+        }
+        run_pass(&mut f, &GlobalValueNumbering, PassOptions::default()).eliminated
+    };
+    assert_eq!(eliminated(false), 0);
+    assert_eq!(eliminated(true), 1);
+}
+
+#[test]
+fn merging_facts_keeps_a_field_immutable_only_if_both_sides_say_so() {
+    let class = load_class(&loop_with_load_and_call());
+    let mut mine = Facts::default();
+    let mut theirs = Facts::default();
+    let AliasClass::ObjField { ty, field } = class else {
+        unreachable!()
+    };
+    mine.immutable.insert((ty, field));
+    mine.immutable.insert((ty, field + 1));
+    theirs.immutable.insert((ty, field));
+    mine.merge(&theirs);
+    assert!(mine.immutable_field(ty, field));
+    assert!(!mine.immutable_field(ty, field + 1), "the copied body may write it");
+    // a body that says nothing says nothing
+    mine.merge(&Facts::default());
+    assert!(mine.immutable.is_empty());
 }

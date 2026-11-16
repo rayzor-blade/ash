@@ -4,9 +4,7 @@ use super::{
     Pass, PassOptions, PassStats, RegClaims, def_sites, feeds_handler_phi, handler_blocks,
     param_values, privatize,
 };
-use crate::v2::analysis::{
-    CfgInfo, LoopForest, LoopId, clobbers_all, read_class, writes_may_alias,
-};
+use crate::v2::analysis::{CfgInfo, LoopForest, LoopId, may_clobber, read_class};
 use crate::v2::ir::*;
 use anyhow::{Result, bail};
 use std::collections::HashSet;
@@ -106,7 +104,7 @@ fn movable(
             // No aliasing write and no full clobber anywhere in the loop.
             for &lb in &lp.blocks {
                 for other in &f.blocks[lb.idx()].instrs {
-                    if clobbers_all(other, f) || writes_may_alias(other, class, f) {
+                    if may_clobber(other, class, f) {
                         return false;
                     }
                 }

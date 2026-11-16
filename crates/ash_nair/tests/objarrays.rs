@@ -1,7 +1,7 @@
 //! Arrays of objects and writes to array elements. The functions of a program that index and
 //! build arrays are lowered, and the std's `ArrayObj` methods with them, then run on arrays laid
-//! out as the runtime would. Growing an array calls the std's `__expand`, which is not lowered
-//! yet, so the programs here stay inside the arrays' capacity.
+//! out as the runtime would. A write past the length calls the std's `__expand`, which is lowered
+//! with them.
 
 mod common;
 
@@ -41,27 +41,24 @@ fn object_arrays_are_read_written_and_built() {
         ("Main", "make"),
         ("Main", "empty"),
         ("Main", "ints"),
-        ("hl.types.ArrayObj", "new"),
-        ("hl.types.ArrayObj", "push"),
         ("hl.types.ArrayObj", "pop"),
         ("hl.types.ArrayObj", "reverse"),
     ];
-    let mut done = Vec::new();
-    for (class, name) in wanted {
-        let c = module
-            .types
-            .class_id(class)
-            .unwrap_or_else(|| panic!("{class}"));
-        let field = module
-            .types
-            .declared_field(c, name)
-            .unwrap_or_else(|| panic!("{class}.{name}"));
-        done.push(
+    let entries: Vec<u32> = wanted
+        .iter()
+        .map(|(class, name)| {
+            let c = module
+                .types
+                .class_id(class)
+                .unwrap_or_else(|| panic!("{class}"));
             module
-                .lower_field(field)
-                .unwrap_or_else(|e| panic!("{class}.{name} does not lower: {e}")),
-        );
-    }
+                .types
+                .declared_field(c, name)
+                .unwrap_or_else(|| panic!("{class}.{name}"))
+        })
+        .collect();
+    // the program of those, with what they call: the constructor, `push`, and `__expand`
+    let done = module.lower_all(&entries).expect("the program lowers");
     for l in &done {
         verify(&l.function)
             .unwrap_or_else(|e| panic!("{} does not verify: {e}\n{}", l.name, l.function.dump()));
@@ -97,6 +94,11 @@ fn object_arrays_are_read_written_and_built() {
             })
             .unwrap_or_else(|| panic!("a type {name}"))
     };
+    let string_ty = find_type("String");
+    let (string_bytes_at, string_length_at) = (
+        module.types.slot_in(string_ty, "bytes").unwrap().index as usize,
+        module.types.slot_in(string_ty, "length").unwrap().index as usize,
+    );
     let (body_ty, refs_ty, floats_ty) = (
         find_type("Body"),
         find_type("hl.types.ArrayObj"),
@@ -113,8 +115,12 @@ fn object_arrays_are_read_written_and_built() {
 
     let run = |what: &str, functions: HashMap<usize, &Function>| {
         let program = Program::new(functions, &module.ints, &module.floats, &module.types.table)
+            .with_strings(&module.strings)
+            .with_constants(&module.constants)
             .with_natives(&module.natives);
         let mut heap = Heap::default();
+        heap.init_constants(&program, string_ty, string_bytes_at, string_length_at)
+            .expect("the constants are built");
         let findex = |name: &str| by_name(&done, name).findex as usize;
         let body = |heap: &mut Heap, x: f64| {
             heap.object(&program, body_ty, &[(x_at, Val::F(x))]).unwrap()
@@ -188,6 +194,36 @@ fn object_arrays_are_read_written_and_built() {
             "{what}: push"
         );
         assert_eq!(heap.array_items(held).unwrap(), &[b3, b0, b4], "{what}: push slot");
+
+        // a write past the length grows the array: the elements stay, the gap is null
+        let grown_from = refs(&mut heap, vec![b0, b3, b4], 3);
+        run_in(&program, findex("Main.put"), &[grown_from, Val::I(5), b1], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: put past the end: {e}"));
+        assert_eq!(heap.field(grown_from, length_at), Some(Val::I(6)), "{what}: grown length");
+        let grown = heap.field(grown_from, array_at).unwrap();
+        let items = heap.array_items(grown).unwrap();
+        assert!(items.len() >= 6, "{what}: grown capacity {}", items.len());
+        assert_eq!(
+            &items[..6],
+            &[b0, b3, b4, Val::Void, Val::Void, b1],
+            "{what}: grown elements"
+        );
+        // and a negative index is thrown
+        let refused = run_in(&program, findex("Main.put"), &[a, Val::I(-1), b1], &mut heap);
+        assert!(
+            refused.as_ref().is_err_and(|e| e.contains("exception was thrown")),
+            "{what}: {refused:?}"
+        );
+
+        // `new Array`, then pushes that grow it from nothing
+        let made = run_in(&program, findex("Main.make"), &[Val::I(3)], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: make: {e}"));
+        assert_eq!(heap.field(made, length_at), Some(Val::I(3)), "{what}: made length");
+        assert_eq!(
+            run_in(&program, findex("Main.total"), &[made], &mut heap),
+            Ok(Val::F(3.0)),
+            "{what}: total of made"
+        );
 
         // an empty array is a constructed object with a native array of no elements
         let fresh = run_in(&program, findex("Main.empty"), &[], &mut heap)

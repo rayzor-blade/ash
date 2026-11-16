@@ -6,6 +6,7 @@ use air::v2::ir::*;
 use ash_tast::format::*;
 
 use super::{FnLower, Result};
+use crate::hl::{HlType, TypeIx};
 
 impl<'m, 'a> FnLower<'m, 'a> {
     pub(super) fn string_constant(&mut self, n: &NodeRec) -> Result<ValueId> {
@@ -25,5 +26,110 @@ impl<'m, 'a> FnLower<'m, 'a> {
             global: global as usize,
         });
         Ok(dst)
+    }
+
+    /// Whether `ty` is the `String` class.
+    pub(super) fn is_string(&self, ty: TypeIx) -> bool {
+        matches!(self.m.types.table.types[ty],
+            HlType::Obj(o) if self.m.types.table.objs[o].name == "String")
+    }
+
+    /// The type of a `String`.
+    fn string_type(&mut self) -> Result<TypeIx> {
+        let class = self
+            .m
+            .types
+            .class_id("String")
+            .ok_or("the program has no String class")?;
+        self.m.types.class_type(class, &[], false, None)
+    }
+
+    /// A function the std's `String` class declares, which the program lowers with the caller.
+    fn string_function(&mut self, name: &str) -> Result<usize> {
+        let class = self
+            .m
+            .types
+            .class_id("String")
+            .ok_or("the program has no String class")?;
+        let field = self
+            .m
+            .types
+            .declared_field(class, name)
+            .ok_or_else(|| format!("String.{name} is not in the program"))?;
+        let fun = self.m.types.fun_id("String", name) as usize;
+        self.m.called.insert(fun as u32);
+        self.m.request(field);
+        Ok(fun)
+    }
+
+    /// A value as a `String`, as genhl's `to_string` makes it: an integer or a float is written by
+    /// the runtime into a buffer whose length comes back through a reference.
+    pub(super) fn stringify(&mut self, v: ValueId) -> Result<ValueId> {
+        let ty = self.val_ty(v);
+        if self.is_string(ty) {
+            return Ok(v);
+        }
+        let int = self.ty_of(HlType::I32);
+        let native = match self.m.types.table.types[ty] {
+            HlType::I32 => "itos",
+            HlType::F64 => "ftos",
+            ref other => return Err(format!("{other:?} as a string is not lowered yet")),
+        };
+        let bytes_ty = self.ty_of(HlType::Bytes);
+        let ref_ty = self.ty_of(HlType::Ref(int));
+        let length = self.new_cell(int);
+        let at = self.value(ref_ty);
+        self.emit(Instr::CellRef {
+            dst: at,
+            cell: length,
+        });
+        let fun = self.std_native(native, &[ty, ref_ty], bytes_ty);
+        let bytes = self.value(bytes_ty);
+        self.emit(Instr::Call {
+            dst: bytes,
+            fun,
+            args: vec![v, at],
+        });
+        let len = self.value(int);
+        self.emit(Instr::CellGet {
+            dst: len,
+            cell: length,
+        });
+        let string = self.string_type()?;
+        let alloc = self.string_function("__alloc__")?;
+        let out = self.value(string);
+        self.emit(Instr::Call {
+            dst: out,
+            fun: alloc,
+            args: vec![bytes, len],
+        });
+        Ok(out)
+    }
+
+    /// `a + b` on strings, either of which may be a number.
+    pub(super) fn concat(&mut self, a: ValueId, b: ValueId) -> Result<ValueId> {
+        let (a, b) = (self.stringify(a)?, self.stringify(b)?);
+        let string = self.string_type()?;
+        let add = self.string_function("__add__")?;
+        let out = self.value(string);
+        self.emit(Instr::Call {
+            dst: out,
+            fun: add,
+            args: vec![a, b],
+        });
+        Ok(out)
+    }
+
+    /// A register whose address is taken, which lives in memory for as long as the function runs.
+    fn new_cell(&mut self, ty: TypeIx) -> CellId {
+        let t = TypeRef(ty as u32);
+        let reg = self.f.new_reg(t);
+        let id = CellId(self.f.cells.len() as u32);
+        self.f.cells.push(CellData {
+            reg,
+            ty: t,
+            reason: PinReason::RefTaken,
+        });
+        id
     }
 }

@@ -22,6 +22,8 @@ pub enum Val {
     Mem(usize),
     /// A native array of values, by its place in the heap.
     Arr(usize),
+    /// A reference to a cell, by its place in the heap.
+    Ref(usize),
     /// What a void call returns, and null.
     Void,
 }
@@ -76,8 +78,9 @@ impl<'a> Program<'a> {
         }
     }
 
-    /// The natives the functions call. `alloc_array` is the only one run: it makes a native
-    /// array of nulls.
+    /// The natives the functions call. Those the interpreter runs: `alloc_array` (a native array
+    /// of nulls), `array_blit`, `alloc_bytes`, `bytes_blit`, and `itos` and `ftos`, which write a number as
+    /// UTF-16 and give its length through a reference.
     pub fn with_natives(mut self, natives: &[crate::lower::Native]) -> Program<'a> {
         self.natives = natives
             .iter()
@@ -139,6 +142,8 @@ pub struct Heap {
     objects: Vec<(usize, Vec<Val>)>,
     memory: Vec<Vec<u8>>,
     arrays: Vec<Vec<Val>>,
+    /// The registers whose address was taken: one slot each, for as long as the heap lives.
+    cells: Vec<Val>,
     globals: Vec<Val>,
 }
 
@@ -262,6 +267,54 @@ fn call(
                 let n = usize::try_from(*n).map_err(|_| "a negative array size")?;
                 Ok(heap.array(vec![Val::Void; n]))
             }
+            ("alloc_bytes", [Val::I(n)]) => {
+                let n = usize::try_from(*n).map_err(|_| "a negative size")?;
+                Ok(heap.bytes(vec![0; n]))
+            }
+            ("bytes_blit", [Val::Mem(dst), Val::I(dpos), Val::Mem(src), Val::I(spos), Val::I(n)]) => {
+                let (dpos, spos, n) = (*dpos as usize, *spos as usize, *n as usize);
+                let from = heap.memory[*src]
+                    .get(spos..spos + n)
+                    .ok_or("a blit from past the end of the bytes")?
+                    .to_vec();
+                heap.memory[*dst]
+                    .get_mut(dpos..dpos + n)
+                    .ok_or("a blit to past the end of the bytes")?
+                    .copy_from_slice(&from);
+                Ok(Val::Void)
+            }
+            ("array_blit", [Val::Arr(dst), Val::I(dpos), Val::Arr(src), Val::I(spos), Val::I(n)]) => {
+                let (dpos, spos, n) = (*dpos as usize, *spos as usize, *n as usize);
+                let from = heap.arrays[*src]
+                    .get(spos..spos + n)
+                    .ok_or("a blit from past the end of the array")?
+                    .to_vec();
+                heap.arrays[*dst]
+                    .get_mut(dpos..dpos + n)
+                    .ok_or("a blit to past the end of the array")?
+                    .copy_from_slice(&from);
+                Ok(Val::Void)
+            }
+            ("itos" | "ftos", [number, Val::Ref(at)]) => {
+                let text = match number {
+                    Val::I(x) => x.to_string(),
+                    Val::F(x) if x.is_nan() => "NaN".to_owned(),
+                    Val::F(x) if x.is_infinite() => {
+                        if *x > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
+                    }
+                    Val::F(x) => x.to_string(),
+                    other => return Err(format!("{name} of {other:?}")),
+                };
+                let units: Vec<u16> = text.encode_utf16().collect();
+                heap.cells[*at] = Val::I(units.len() as i32);
+                Ok(heap.bytes(
+                    units
+                        .iter()
+                        .chain(std::iter::once(&0))
+                        .flat_map(|u| u.to_le_bytes())
+                        .collect(),
+                ))
+            }
             _ => Err(format!("the interpreter has no native {name}")),
         };
     }
@@ -270,6 +323,8 @@ fn call(
         .get(&findex)
         .ok_or_else(|| format!("no function {findex}"))?;
     let mut vals: Vec<Option<Val>> = vec![None; f.values.len()];
+    // each cell's place in the heap, made when it is first used
+    let mut cells: Vec<Option<usize>> = vec![None; f.cells.len()];
     let get = |vals: &[Option<Val>], v: ValueId| -> Result<Val, String> {
         vals[v.idx()].ok_or_else(|| format!("v{} is read before it is defined", v.0))
     };
@@ -354,7 +409,7 @@ fn call(
                     vals[dst.idx()] = Some(match (kind, v) {
                         (CastKind::ToSFloat, Val::I(x)) => Val::F(f64::from(x)),
                         (CastKind::ToInt, Val::F(x)) => Val::I(x as i32),
-                        (CastKind::UnsafeCast, v) => v,
+                        (CastKind::UnsafeCast | CastKind::ToDyn, v) => v,
                         (k, v) => return Err(format!("{k:?} of {v:?}")),
                     });
                 }
@@ -424,6 +479,46 @@ fn call(
                     if get(&vals, *value)? == Val::Void {
                         return Err("a null reference".into());
                     }
+                }
+                Instr::MemGet {
+                    kind: kind @ (MemAccess::I8 | MemAccess::I16),
+                    dst,
+                    base,
+                    index,
+                } => {
+                    let (Val::Mem(m), Val::I(at)) = (get(&vals, *base)?, get(&vals, *index)?)
+                    else {
+                        return Err("a read of something that is not bytes".into());
+                    };
+                    let at = usize::try_from(at).map_err(|_| "a negative byte offset")?;
+                    let bytes = &heap.memory[m];
+                    let v = if *kind == MemAccess::I8 {
+                        i32::from(*bytes.get(at).ok_or("a read past the end of the bytes")?)
+                    } else {
+                        let pair = bytes
+                            .get(at..at + 2)
+                            .ok_or("a read past the end of the bytes")?;
+                        i32::from(u16::from_le_bytes([pair[0], pair[1]]))
+                    };
+                    vals[dst.idx()] = Some(Val::I(v));
+                }
+                Instr::MemSet {
+                    kind: kind @ (MemAccess::I8 | MemAccess::I16),
+                    base,
+                    index,
+                    src,
+                } => {
+                    let (Val::Mem(m), Val::I(at), Val::I(x)) =
+                        (get(&vals, *base)?, get(&vals, *index)?, get(&vals, *src)?)
+                    else {
+                        return Err("a write to something that is not bytes".into());
+                    };
+                    let at = usize::try_from(at).map_err(|_| "a negative byte offset")?;
+                    let width = if *kind == MemAccess::I8 { 1 } else { 2 };
+                    heap.memory[m]
+                        .get_mut(at..at + width)
+                        .ok_or("a write past the end of the bytes")?
+                        .copy_from_slice(&x.to_le_bytes()[..width]);
                 }
                 Instr::MemGet {
                     kind: MemAccess::Mem,
@@ -517,6 +612,25 @@ fn call(
                     vals[dst.idx()] = Some(Val::I(heap.arrays[a].len() as i32));
                 }
                 Instr::TypeConst { dst, ty } => vals[dst.idx()] = Some(Val::I(ty.0 as i32)),
+                Instr::CellRef { dst, cell } => {
+                    let at = *cells[cell.idx()].get_or_insert_with(|| {
+                        heap.cells.push(Val::Void);
+                        heap.cells.len() - 1
+                    });
+                    vals[dst.idx()] = Some(Val::Ref(at));
+                }
+                Instr::CellSet { cell, src } => {
+                    let v = get(&vals, *src)?;
+                    let at = *cells[cell.idx()].get_or_insert_with(|| {
+                        heap.cells.push(Val::Void);
+                        heap.cells.len() - 1
+                    });
+                    heap.cells[at] = v;
+                }
+                Instr::CellGet { dst, cell } => {
+                    let at = cells[cell.idx()].ok_or("a cell is read before it is written")?;
+                    vals[dst.idx()] = Some(heap.cells[at]);
+                }
                 other => return Err(format!("the interpreter has no {other:?}")),
             }
         }

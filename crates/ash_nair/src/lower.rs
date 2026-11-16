@@ -641,6 +641,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
         let kind = match (a, b) {
             (HlType::I32, HlType::F64) => CastKind::ToSFloat,
             (HlType::F64, HlType::I32) => CastKind::ToInt,
+            (HlType::I32 | HlType::F64 | HlType::Bool, HlType::Dyn) => CastKind::ToDyn,
             (a, b) => return Err(format!("no conversion from {a:?} to {b:?} yet")),
         };
         let dst = self.value(to);
@@ -899,6 +900,9 @@ impl<'m, 'a> FnLower<'m, 'a> {
     }
 
     fn arith(&mut self, op: &str, a: ValueId, b: ValueId, ty: TypeIx) -> Result<ValueId> {
+        if op == "OpAdd" && self.is_string(ty) {
+            return self.concat(a, b);
+        }
         let (a, b) = (self.coerce(a, ty)?, self.coerce(b, ty)?);
         let kind = match op {
             "OpAdd" => BinOp::Add,

@@ -8,6 +8,20 @@ use ash_tast::format::*;
 use super::{FnLower, Result};
 use crate::hl::{HlType, TypeIx};
 
+/// What `$bget<name>` and `$bset<name>` read and write: the access, and the type the value has in
+/// a register. The position is a byte offset, not an element index.
+fn raw_access(name: &str) -> Option<(MemAccess, HlType)> {
+    Some(match name {
+        "ui8" => (MemAccess::I8, HlType::I32),
+        "ui16" => (MemAccess::I16, HlType::I32),
+        "i32" => (MemAccess::Mem, HlType::I32),
+        "i64" => (MemAccess::Mem, HlType::I64),
+        "f32" => (MemAccess::Mem, HlType::F32),
+        "f64" => (MemAccess::Mem, HlType::F64),
+        _ => return None,
+    })
+}
+
 impl<'m, 'a> FnLower<'m, 'a> {
     /// `ty` is the type of the call.
     pub(super) fn intrinsic(
@@ -17,6 +31,58 @@ impl<'m, 'a> FnLower<'m, 'a> {
         ty: u32,
     ) -> Result<Option<ValueId>> {
         match (name, args) {
+            ("$new", [_]) => {
+                let want = self.m.types.to_type(ty)?;
+                if !matches!(self.m.types.table.types[want], HlType::Obj(_)) {
+                    return Err("$new of something that is not an object".into());
+                }
+                let dst = self.value(want);
+                self.emit(Instr::New { dst });
+                Ok(Some(dst))
+            }
+            (n, [b, pos]) if n.starts_with("$bget") && raw_access(&n[5..]).is_some() => {
+                let (kind, held) = raw_access(&n[5..]).unwrap();
+                let Some(buffer) = self.expr(*b)? else {
+                    return Ok(None);
+                };
+                let Some(pos) = self.expr(*pos)? else {
+                    return Ok(None);
+                };
+                let int = self.ty_of(HlType::I32);
+                let pos = self.coerce(pos, int)?;
+                let held = self.ty_of(held);
+                let dst = self.value(held);
+                self.emit(Instr::MemGet {
+                    kind,
+                    dst,
+                    base: buffer,
+                    index: pos,
+                });
+                Ok(Some(dst))
+            }
+            (n, [b, pos, value]) if n.starts_with("$bset") && raw_access(&n[5..]).is_some() => {
+                let (kind, held) = raw_access(&n[5..]).unwrap();
+                let Some(buffer) = self.expr(*b)? else {
+                    return Ok(None);
+                };
+                let Some(pos) = self.expr(*pos)? else {
+                    return Ok(None);
+                };
+                let Some(value) = self.expr(*value)? else {
+                    return Ok(None);
+                };
+                let int = self.ty_of(HlType::I32);
+                let pos = self.coerce(pos, int)?;
+                let held = self.ty_of(held);
+                let value = self.coerce(value, held)?;
+                self.emit(Instr::MemSet {
+                    kind,
+                    base: buffer,
+                    index: pos,
+                    src: value,
+                });
+                Ok(Some(value))
+            }
             ("$asize", [a]) => {
                 let Some(array) = self.expr(*a)? else {
                     return Ok(None);

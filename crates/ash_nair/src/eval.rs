@@ -1,7 +1,7 @@
 //! A reference interpreter for the AIR that [`crate::lower`] produces.
 //!
-//! It runs integers, floats and bools, branches, phis, direct calls, and objects with their
-//! fields and method tables, and nothing else. Its job
+//! It runs integers, floats and bools, branches, phis, direct calls, objects with their
+//! fields and method tables, and reads of byte buffers, and nothing else. Its job
 //! is to say what a lowered function computes, so a test can compare that with what the Haxe
 //! source means without going through an engine.
 
@@ -18,6 +18,8 @@ pub enum Val {
     B(bool),
     /// An object, by its place in the heap.
     Obj(usize),
+    /// A buffer of bytes, by its place in the heap.
+    Mem(usize),
     /// What a void call returns, and null.
     Void,
 }
@@ -31,6 +33,8 @@ pub struct Program<'a> {
     pub layouts: HashMap<usize, Vec<Val>>,
     /// The function each virtual slot of each object type runs, by type index.
     pub vtables: HashMap<usize, Vec<u32>>,
+    /// The type table's types, so an access can ask what it reads.
+    pub types: Vec<HlType>,
 }
 
 impl<'a> Program<'a> {
@@ -55,6 +59,7 @@ impl<'a> Program<'a> {
             floats,
             layouts: layouts(table),
             vtables,
+            types: table.types.clone(),
         }
     }
 }
@@ -89,15 +94,46 @@ pub fn layouts(table: &TypeTable) -> HashMap<usize, Vec<Val>> {
     out
 }
 
-/// The objects made so far: each with the type it was made as, and its fields.
-type Heap = Vec<(usize, Vec<Val>)>;
+/// What has been made so far: objects, each with the type it was made as and its fields, and
+/// byte buffers.
+#[derive(Default)]
+pub struct Heap {
+    objects: Vec<(usize, Vec<Val>)>,
+    memory: Vec<Vec<u8>>,
+}
+
+impl Heap {
+    /// A buffer holding `bytes`.
+    pub fn bytes(&mut self, bytes: Vec<u8>) -> Val {
+        self.memory.push(bytes);
+        Val::Mem(self.memory.len() - 1)
+    }
+
+    /// An object of type `ty` with the fields the runtime would zero, and `set` written over them.
+    pub fn object(&mut self, p: &Program, ty: usize, set: &[(usize, Val)]) -> Result<Val, String> {
+        let mut fields = p
+            .layouts
+            .get(&ty)
+            .ok_or_else(|| format!("no layout for type {ty}"))?
+            .clone();
+        for (at, v) in set {
+            *fields.get_mut(*at).ok_or("a field outside the object")? = *v;
+        }
+        self.objects.push((ty, fields));
+        Ok(Val::Obj(self.objects.len() - 1))
+    }
+}
 
 const STEP_LIMIT: usize = 50_000_000;
 
 pub fn run(p: &Program, findex: usize, args: &[Val]) -> Result<Val, String> {
+    run_in(p, findex, args, &mut Heap::default())
+}
+
+/// [`run`] over a heap the caller has put objects in, which the arguments may name.
+pub fn run_in(p: &Program, findex: usize, args: &[Val], heap: &mut Heap) -> Result<Val, String> {
     let mut steps = 0;
-    let mut heap = Heap::new();
-    call(p, findex, args, &mut steps, &mut heap, 0)
+    call(p, findex, args, &mut steps, heap, 0)
 }
 
 fn call(
@@ -203,7 +239,7 @@ fn call(
                     let Some(Val::Obj(h)) = argv.first().copied() else {
                         return Err("a method call on null".into());
                     };
-                    let ty = heap[h].0;
+                    let ty = heap.objects[h].0;
                     let target = *p
                         .vtables
                         .get(&ty)
@@ -219,8 +255,8 @@ fn call(
                         .get(&ty)
                         .ok_or_else(|| format!("no layout for type {ty}"))?
                         .clone();
-                    heap.push((ty, fields));
-                    vals[dst.idx()] = Some(Val::Obj(heap.len() - 1));
+                    heap.objects.push((ty, fields));
+                    vals[dst.idx()] = Some(Val::Obj(heap.objects.len() - 1));
                 }
                 Instr::FieldGet {
                     dst, obj, field, ..
@@ -228,7 +264,10 @@ fn call(
                     let Val::Obj(h) = get(&vals, *obj)? else {
                         return Err("a field of null".into());
                     };
-                    let v = *heap[h].1.get(*field).ok_or("a field outside the object")?;
+                    let v = *heap.objects[h]
+                        .1
+                        .get(*field)
+                        .ok_or("a field outside the object")?;
                     vals[dst.idx()] = Some(v);
                 }
                 Instr::FieldSet {
@@ -238,10 +277,46 @@ fn call(
                     let Val::Obj(h) = get(&vals, *obj)? else {
                         return Err("a field of null".into());
                     };
-                    *heap[h]
+                    *heap.objects[h]
                         .1
                         .get_mut(*field)
                         .ok_or("a field outside the object")? = v;
+                }
+                Instr::NullCheck { value } => {
+                    if get(&vals, *value)? == Val::Void {
+                        return Err("a null reference".into());
+                    }
+                }
+                Instr::MemGet {
+                    kind: MemAccess::Mem,
+                    dst,
+                    base,
+                    index,
+                } => {
+                    let (Val::Mem(m), Val::I(at)) = (get(&vals, *base)?, get(&vals, *index)?)
+                    else {
+                        return Err("a read of something that is not bytes".into());
+                    };
+                    let at = usize::try_from(at).map_err(|_| "a negative byte offset")?;
+                    let bytes = &heap.memory[m];
+                    let ty = f.values[dst.idx()].ty.0 as usize;
+                    vals[dst.idx()] = Some(match p.types.get(ty) {
+                        Some(HlType::I32) => Val::I(i32::from_le_bytes(
+                            bytes
+                                .get(at..at + 4)
+                                .ok_or("a read past the end of the bytes")?
+                                .try_into()
+                                .unwrap(),
+                        )),
+                        Some(HlType::F64) => Val::F(f64::from_le_bytes(
+                            bytes
+                                .get(at..at + 8)
+                                .ok_or("a read past the end of the bytes")?
+                                .try_into()
+                                .unwrap(),
+                        )),
+                        other => return Err(format!("a memory read of {other:?}")),
+                    });
                 }
                 other => return Err(format!("the interpreter has no {other:?}")),
             }

@@ -3,8 +3,9 @@
 //! This covers what a numeric kernel is made of: integer, float and bool values, locals,
 //! arithmetic and comparisons, `if` and loops, `break` and `continue`, `return`, and direct calls
 //! of static functions; and objects of non-generic classes: `new`, instance variables, `this`,
-//! calls of methods, and `null` with `==` and `!=` against it. Anything else is refused with a
-//! message that names it, so a body that does not lower is never half lowered.
+//! calls of methods, and `null` with `==` and `!=` against it; and reads of `Array<Int>` and
+//! `Array<Float>` by index, and their `length`. Anything else is refused with a message that
+//! names it, so a body that does not lower is never half lowered.
 //!
 //! Locals are put in SSA form as the body is walked (Braun et al., "Simple and Efficient
 //! Construction of Static Single Assignment Form"): a block is sealed once all its predecessors
@@ -20,6 +21,7 @@ use ash_tast::format::*;
 use crate::build::TypeBuilder;
 use crate::hl::{HlType, TypeIx};
 
+mod arrays;
 mod methods;
 mod nulls;
 mod objects;
@@ -585,6 +587,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             }
             node_kind::CONST => self.constant(&n).map(Some),
             node_kind::FIELD => self.field_get(&n),
+            node_kind::ARRAY => self.array_get(&n),
             node_kind::NEW => self.new_object(&n),
             node_kind::LOCAL => {
                 let local = n.a.get();

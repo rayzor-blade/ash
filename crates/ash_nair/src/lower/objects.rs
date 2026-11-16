@@ -38,7 +38,16 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 self.m.types.table.types[held]
             ));
         }
-        let slot = self.m.types.field_slot(field)?;
+        let owner = self.tast.fields()[field as usize].owner.get();
+        let slot = if self.m.types.is_extern_class(owner) {
+            // an extern class stands for the class its receiver's type names
+            let name = self.m.types.field_name(field);
+            self.m.types.slot_in(held, name).ok_or_else(|| {
+                format!("{name} has no slot in the layout of the receiver's class")
+            })?
+        } else {
+            self.m.types.field_slot(field)?
+        };
         Ok(Some((obj, slot)))
     }
 
@@ -49,7 +58,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
         Ok(Some(self.load_field(obj, slot)))
     }
 
-    fn load_field(&mut self, obj: ValueId, slot: FieldSlot) -> ValueId {
+    pub(super) fn load_field(&mut self, obj: ValueId, slot: FieldSlot) -> ValueId {
         let dst = self.value(slot.ty);
         self.emit(Instr::FieldGet {
             dst,

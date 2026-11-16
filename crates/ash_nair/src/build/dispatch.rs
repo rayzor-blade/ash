@@ -62,6 +62,29 @@ impl<'a> TypeBuilder<'a> {
         self.classes[class as usize].ctor
     }
 
+    /// The slot of the instance variable `name` in objects of type `ty`, found through that
+    /// type's layout and those of its superclasses: a class's index holds the names it declares.
+    /// An extern class such as `Array<T>` stands for the class its receiver's type names, so its
+    /// variables are found this way. The class that declares the name names the slot, as in
+    /// [`Self::field_slot`].
+    pub fn slot_in(&self, ty: TypeIx, name: &str) -> Option<FieldSlot> {
+        let mut at = Some(ty);
+        while let Some(t) = at {
+            let (HlType::Obj(o) | HlType::Struct(o)) = self.table.types[t] else {
+                return None;
+            };
+            if let Some(&(index, field_ty)) = self.table.objs[o].index.get(name) {
+                return (index >= 0).then_some(FieldSlot {
+                    owner: t,
+                    index: index as u32,
+                    ty: field_ty,
+                });
+            }
+            at = self.table.objs[o].super_;
+        }
+        None
+    }
+
     /// [`Self::field_slot`] for a class whose type is already built; `None` for one that is not,
     /// so that asking adds nothing to the table.
     pub fn built_field_slot(&self, field: u32) -> Option<FieldSlot> {

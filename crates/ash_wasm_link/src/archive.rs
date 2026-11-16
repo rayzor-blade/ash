@@ -149,7 +149,7 @@ impl Pulled {
     pub fn shadowed_named(&self, names: &[String]) -> Vec<&Shadowed> {
         self.shadowed
             .iter()
-            .filter(|s| names.iter().any(|n| *n == s.symbol))
+            .filter(|s| names.contains(&s.symbol))
             .collect()
     }
 }

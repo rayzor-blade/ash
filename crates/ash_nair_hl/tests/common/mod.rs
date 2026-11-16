@@ -64,7 +64,9 @@ pub fn export(compiler: &str, fixture: &str, tag: &str) -> Vec<u8> {
     bytes
 }
 
-/// The `ash` binary the compiled files are run with: `ASH_BIN`, else the release build.
+/// The `ash` binary the compiled files are run with: `ASH_BIN`, else the release build. Not every
+/// test crate that includes this module uses it.
+#[allow(dead_code)]
 pub fn ash_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ASH_BIN") {
         return Some(PathBuf::from(p));

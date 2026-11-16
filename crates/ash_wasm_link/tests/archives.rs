@@ -283,7 +283,7 @@ fn the_first_library_wins_between_libraries() {
             &[def("b", Body::Call("dup")), def("dup", Body::Const(4))],
         )],
     );
-    let pulled = pull(&[program.clone()], vec![first, second]).unwrap();
+    let pulled = pull(std::slice::from_ref(&program), vec![first, second]).unwrap();
     assert_eq!(names(&pulled.objects), ["a.o", "b.o"]);
     assert_eq!(pulled.taken, [1, 1]);
     assert_eq!(pulled.shadowed.len(), 1);
@@ -317,7 +317,7 @@ fn a_strong_member_definition_displaces_a_weak_one() {
 fn a_program_that_names_nothing_pulls_nothing() {
     let program = object("program.o", &[def("main", Body::Const(5))]);
     let lib = Archive::from_objects("lib.a", vec![object("a.o", &[def("a", Body::Const(1))])]);
-    let pulled = pull(&[program.clone()], vec![lib]).unwrap();
+    let pulled = pull(std::slice::from_ref(&program), vec![lib]).unwrap();
     assert!(pulled.objects.is_empty());
     assert_eq!(run_main(vec![program]).unwrap(), 5);
 }
@@ -495,7 +495,7 @@ fn a_function_reached_only_through_the_got_lands_on_its_own_table_slot() {
             object("unused.o", &[def("unused", Body::Const(1))]),
         ],
     );
-    let pulled = pull(&[program.clone()], vec![lib]).unwrap();
+    let pulled = pull(std::slice::from_ref(&program), vec![lib]).unwrap();
     assert_eq!(names(&pulled.objects), ["seven.o", "nine.o"]);
     let mut inputs = vec![program];
     inputs.extend(pulled.objects);
@@ -567,7 +567,7 @@ fn call_program(sig: FuncType, target: &str) -> Object {
         exports: Vec::new(),
         elements: Vec::new(),
         code_payload: body,
-        code_bodies: vec![0..len],
+        code_bodies: vec![std::ops::Range { start: 0, end: len }],
         data_payload: Vec::new(),
         data_segments: Vec::new(),
         symbols: vec![

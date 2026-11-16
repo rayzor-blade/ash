@@ -13,8 +13,11 @@ impl<'m, 'a> FnLower<'m, 'a> {
         if n.a.get() == field_access::STATIC {
             return self.static_target(n);
         }
+        if n.a.get() == field_access::ANON {
+            return self.structure_target(n);
+        }
         if n.a.get() != field_access::INSTANCE {
-            return Err("only instance and static variables are lowered yet".into());
+            return Err("only instance, static and structure variables are lowered yet".into());
         }
         let field = n.b.get();
         if field == NONE {
@@ -52,6 +55,36 @@ impl<'m, 'a> FnLower<'m, 'a> {
             self.m.types.field_slot(field)?
         };
         Ok(Some((obj, slot)))
+    }
+
+    /// A field of a structure, found by its name in the structure's fields, which are in the
+    /// order of their names.
+    fn structure_target(&mut self, n: &NodeRec) -> Result<Option<(ValueId, FieldSlot)>> {
+        let name = self.tast.string(n.b.get()).to_owned();
+        let Some(obj) = self.expr(self.kid(n, 0))? else {
+            return Ok(None);
+        };
+        let held = self.val_ty(obj);
+        let HlType::Virtual(v) = self.m.types.table.types[held] else {
+            return Err(format!(
+                "the field {name} of {:?} is not lowered yet",
+                self.m.types.table.types[held]
+            ));
+        };
+        let fields = &self.m.types.table.virts[v];
+        let Some(at) = fields.iter().position(|(f, _)| *f == name) else {
+            return Err(format!("{name} is not a field of the structure"));
+        };
+        let ty = fields[at].1;
+        self.emit(Instr::NullCheck { value: obj });
+        Ok(Some((
+            obj,
+            FieldSlot {
+                owner: held,
+                index: at as u32,
+                ty,
+            },
+        )))
     }
 
     pub(super) fn field_get(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {

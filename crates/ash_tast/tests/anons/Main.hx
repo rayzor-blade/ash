@@ -6,6 +6,15 @@ class Main {
 		return {x: a, y: b};
 	}
 
+	// fields of a structure are read and written by their place among the structure's fields
+	static function total(p:Point):Int {
+		return p.x + p.y;
+	}
+
+	static function shift(p:Point, by:Int):Void {
+		p.x += by;
+	}
+
 	// as a Dynamic, the literal is still the structure
 	static function loose(a:Int):Dynamic {
 		return {x: a, y: a};

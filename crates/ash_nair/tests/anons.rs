@@ -38,7 +38,7 @@ fn object_literals_are_structures_or_dynamic_objects_converted_to_one() {
             .declared_field(class, name)
             .unwrap_or_else(|| panic!("Main.{name}"))
     };
-    let entries: Vec<u32> = ["make", "loose", "where"]
+    let entries: Vec<u32> = ["make", "loose", "where", "total", "shift"]
         .iter()
         .map(|n| field(&module, n))
         .collect();
@@ -116,6 +116,20 @@ fn object_literals_are_structures_or_dynamic_objects_converted_to_one() {
             .unwrap_or_else(|e| panic!("{what}: make: {e}"));
         assert_eq!(heap.field(p, 0), Some(Val::I(3)), "{what}: x");
         assert_eq!(heap.field(p, 1), Some(Val::I(4)), "{what}: y");
+        // a field of a structure is read and written through its place in the structure
+        assert_eq!(
+            run_in(&program, findex("Main.total"), &[p], &mut heap),
+            Ok(Val::I(7)),
+            "{what}: total"
+        );
+        run_in(&program, findex("Main.shift"), &[p, Val::I(10)], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: shift: {e}"));
+        assert_eq!(heap.field(p, 0), Some(Val::I(13)), "{what}: shifted x");
+        assert_eq!(
+            run_in(&program, findex("Main.total"), &[p], &mut heap),
+            Ok(Val::I(17)),
+            "{what}: total after shift"
+        );
         let d = run_in(&program, findex("Main.loose"), &[Val::I(5)], &mut heap)
             .unwrap_or_else(|e| panic!("{what}: loose: {e}"));
         assert_eq!(heap.field(d, 0), Some(Val::I(5)), "{what}: loose x");

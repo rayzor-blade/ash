@@ -1095,13 +1095,20 @@ impl<'m, 'a> FnLower<'m, 'a> {
                             return Ok(());
                         };
                         let (a, b) = self.common(a, b)?;
-                        let cond = match op {
-                            "OpEq" => CondKind::Eq,
-                            "OpNotEq" => CondKind::NotEq,
-                            "OpGt" => CondKind::SGt,
-                            "OpGte" => CondKind::SGte,
-                            "OpLt" => CondKind::SLt,
-                            _ => CondKind::SLte,
+                        // genhl compares unsigned when both sides are `UInt` or integer constants;
+                        // the unsigned conditions are `<` and `>=`, so the others swap operands
+                        let unsigned = self.is_unsigned(ids[0]) && self.is_unsigned(ids[1]);
+                        let (cond, a, b) = match (op, unsigned) {
+                            ("OpEq", _) => (CondKind::Eq, a, b),
+                            ("OpNotEq", _) => (CondKind::NotEq, a, b),
+                            ("OpGt", false) => (CondKind::SGt, a, b),
+                            ("OpGte", false) => (CondKind::SGte, a, b),
+                            ("OpLt", false) => (CondKind::SLt, a, b),
+                            (_, false) => (CondKind::SLte, a, b),
+                            ("OpGt", true) => (CondKind::ULt, b, a),
+                            ("OpGte", true) => (CondKind::UGte, a, b),
+                            ("OpLt", true) => (CondKind::ULt, a, b),
+                            (_, true) => (CondKind::UGte, b, a),
                         };
                         self.terminate(Terminator::CondJump {
                             cond,

@@ -54,11 +54,74 @@ impl<'m, 'a> FnLower<'m, 'a> {
                 });
                 Ok(Some(value))
             }
+            ("$int", [e]) => self.truncate_to_int(*e),
             _ => Err(format!(
                 "the intrinsic {name} with {} arguments is not lowered yet",
                 args.len()
             )),
         }
+    }
+
+    /// `$int(e)`, which is `Std.int`: a float cut to an integer. When `e` is a division of two
+    /// integers it is an integer division, as in genhl, and unsigned when both operands are.
+    fn truncate_to_int(&mut self, e: u32) -> Result<Option<ValueId>> {
+        let int = self.ty_of(HlType::I32);
+        let n = *self.tast.node(e);
+        if n.kind == node_kind::BINOP && BINOPS[n.a.get() as usize] == "OpDiv" {
+            let ids = self.kids(&n);
+            if self.is_integer(ids[0])? && self.is_integer(ids[1])? {
+                let op = if self.is_unsigned(ids[0]) && self.is_unsigned(ids[1]) {
+                    BinOp::UDiv
+                } else {
+                    BinOp::SDiv
+                };
+                let Some(a) = self.expr(ids[0])? else {
+                    return Ok(None);
+                };
+                let Some(b) = self.expr(ids[1])? else {
+                    return Ok(None);
+                };
+                let (a, b) = (self.coerce(a, int)?, self.coerce(b, int)?);
+                let dst = self.value(int);
+                self.emit(Instr::BinOp { op, dst, a, b });
+                return Ok(Some(dst));
+            }
+        }
+        let Some(v) = self.expr(e)? else {
+            return Ok(None);
+        };
+        match self.m.types.table.types[self.val_ty(v)] {
+            HlType::I32 => Ok(Some(v)),
+            HlType::F64 => self.coerce(v, int).map(Some),
+            ref other => Err(format!("$int of {other:?} is not lowered yet")),
+        }
+    }
+
+    /// Whether the node is of an integer type, as genhl's `is_int` takes it.
+    fn is_integer(&mut self, id: u32) -> Result<bool> {
+        let n = *self.tast.node(id);
+        let ty = self.node_ty(&n)?;
+        Ok(matches!(
+            self.m.types.table.types[ty],
+            HlType::UI8 | HlType::UI16 | HlType::I32 | HlType::I64
+        ))
+    }
+
+    /// genhl's `unsigned_op` for one operand: an integer constant, or a `UInt`.
+    pub(super) fn is_unsigned(&self, id: u32) -> bool {
+        let n = *self.tast.node(id);
+        if n.kind == node_kind::CONST && n.flags == const_kind::INT {
+            return true;
+        }
+        if n.ty.get() == NONE {
+            return false;
+        }
+        let t = self.tast.types()[n.ty.get() as usize];
+        t.kind == type_kind::ABSTRACT
+            && self
+                .tast
+                .opt_string(self.tast.abstracts()[t.def.get() as usize].name)
+                == Some("UInt")
     }
 
     /// The element type of the `hl.BytesAccess<T>` that `buffer` is typed as, and log2 of its

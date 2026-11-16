@@ -4,6 +4,7 @@ mod common;
 
 use std::collections::HashMap;
 
+use air::v2::ir::{BinOp, CastKind, Instr};
 use air::v2::passes::OptLevel;
 use air::v2::verify::verify;
 use ash_nair::eval::{Program, Val, run};
@@ -85,7 +86,7 @@ fn numeric_kernels_lower_verify_and_compute_what_the_source_means() {
     let mut module = Module::new(tast);
     let (done, refused) = lowered(&mut module, "Main");
     assert!(refused.is_empty(), "refused: {refused:?}");
-    assert!(done.len() >= 13, "lowered only {}", done.len());
+    assert!(done.len() >= 21, "lowered only {}", done.len());
     if std::env::var("ASH_NAIR_DUMP").is_ok() {
         for l in &done {
             eprintln!("== {}\n{}", l.name, l.function.dump());
@@ -95,6 +96,22 @@ fn numeric_kernels_lower_verify_and_compute_what_the_source_means() {
         verify(&l.function)
             .unwrap_or_else(|e| panic!("{} does not verify: {e}\n{}", l.name, l.function.dump()));
     }
+
+    // Std.int(a / b) on two integers divides them as integers, with no float in between
+    let quotient = &done
+        .iter()
+        .find(|l| l.name == "Main.quotient")
+        .expect("quotient was lowered")
+        .function;
+    let instrs: Vec<_> = quotient.blocks.iter().flat_map(|b| b.instrs.iter()).collect();
+    assert!(instrs.iter().any(|i| matches!(i, Instr::BinOp { op: BinOp::SDiv, .. })));
+    assert!(!instrs.iter().any(|i| matches!(
+        i,
+        Instr::Cast {
+            kind: CastKind::ToSFloat,
+            ..
+        }
+    )));
 
     let functions: HashMap<usize, _> = done
         .iter()
@@ -212,6 +229,26 @@ fn check_kernels(call: &dyn Fn(&str, &[Val]) -> Val) {
     for n in [0, 1, 9, 10] {
         let expect: i32 = (1..=n).filter(|k| k % 2 != 0).sum();
         assert_eq!(call("skipEven", &[i(n)]), i(expect), "skipEven({n})");
+    }
+    for (a, b) in [(7, 2), (-7, 2), (7, -2), (0, 5), (100, 7)] {
+        assert_eq!(call("quotient", &[i(a), i(b)]), i(a / b), "quotient({a}, {b})");
+    }
+    for x in [0.0, 2.5, -2.5, 2.9, -0.5, 1e9] {
+        assert_eq!(call("cut", &[f(x)]), i(x as i32), "cut({x})");
+    }
+    for (x, y) in [(7.0, 2.0), (-7.0, 2.0), (1.0, 3.0), (10.0, 0.25)] {
+        assert_eq!(call("ratio", &[f(x), f(y)]), i((x / y) as i32), "ratio({x}, {y})");
+    }
+    let patterns: [u32; 5] = [0, 1, 5, 0x7fff_ffff, 0x8000_0000];
+    for a in patterns {
+        for b in patterns {
+            let (x, y) = (i(a as i32), i(b as i32));
+            assert_eq!(call("above", &[x, y]), Val::B(a > b), "above({a}, {b})");
+            assert_eq!(call("atMost", &[x, y]), Val::B(a <= b), "atMost({a}, {b})");
+            assert_eq!(call("below", &[x, y]), Val::B(a < b), "below({a}, {b})");
+            assert_eq!(call("atLeast", &[x, y]), Val::B(a >= b), "atLeast({a}, {b})");
+        }
+        assert_eq!(call("overFive", &[i(a as i32)]), Val::B(a > 5), "overFive({a})");
     }
     for n in [0, 1, 6, 12] {
         let mut c = 0;

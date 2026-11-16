@@ -109,7 +109,35 @@ class Main {
 		return count;
 	}
 
+	// Std.int(a / b) on two integers is an integer division; on floats it cuts the quotient
+	static function quotient(a:Int, b:Int):Int
+		return Std.int(a / b);
+
+	static function cut(x:Float):Int
+		return Std.int(x);
+
+	static function ratio(x:Float, y:Float):Int
+		return Std.int(x / y);
+
+	// UInt and integer constants compare unsigned; the values arrive as their 32-bit patterns
+	static function above(a:UInt, b:UInt):Bool
+		return a > b;
+
+	static function atMost(a:UInt, b:UInt):Bool
+		return a <= b;
+
+	static function below(a:UInt, b:UInt):Bool
+		return a < b;
+
+	static function atLeast(a:UInt, b:UInt):Bool
+		return a >= b;
+
+	static function overFive(a:UInt):Bool
+		return a > 5;
+
 	static function main() {
+		trace(above(1, 2) && atMost(1, 2) && below(1, 2) && atLeast(1, 2) && overFive(9));
+		trace(quotient(7, 2) + cut(2.5) + ratio(7.0, 2.0));
 		trace(fib(10) + sum(10) + gcd(12, 18) + collatz(27) + abs(-5) + firstBig(50) + skipEven(9) + sumDo(5) + nested(6));
 		trace(isPrime(97) && both(1, 2));
 		trace(mix(1.0, 3) + clamp(5.0, 0.0, 1.0));

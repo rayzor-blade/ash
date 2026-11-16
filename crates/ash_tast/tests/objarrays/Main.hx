@@ -29,6 +29,11 @@ class Main {
 		return a[i];
 	}
 
+	// pop returns its type parameter as Dynamic, which the call site checks to be a Body
+	static function last(a:Array<Body>):Body {
+		return a.pop();
+	}
+
 	static function size(a:Array<Body>):Int {
 		return a.length;
 	}

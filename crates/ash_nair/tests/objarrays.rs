@@ -36,6 +36,7 @@ fn object_arrays_are_read_written_and_built() {
         ("Main", "total"),
         ("Main", "at"),
         ("Main", "size"),
+        ("Main", "last"),
         ("Main", "put"),
         ("Main", "bump"),
         ("Main", "make"),
@@ -77,6 +78,19 @@ fn object_arrays_are_read_written_and_built() {
         .filter(|i| matches!(i, Instr::Call { .. }))
         .count();
     assert_eq!(calls, 1, "{}", put.dump());
+    // the result of pop is Dynamic until the call site checks it
+    let last = &by_name(&done, "Main.last").function;
+    assert!(
+        last.blocks.iter().flat_map(|b| b.instrs.iter()).any(|i| matches!(
+            i,
+            Instr::Cast {
+                kind: air::v2::ir::CastKind::SafeCast,
+                ..
+            }
+        )),
+        "{}",
+        last.dump()
+    );
     // an empty array is a new object and its constructor
     let empty = &by_name(&done, "Main.empty").function;
     let kinds: Vec<_> = empty
@@ -181,6 +195,15 @@ fn object_arrays_are_read_written_and_built() {
             Ok(Val::F(15.5)),
             "{what}: total after put"
         );
+
+        // the same, through a function that checks the Dynamic it gets back
+        let top = refs(&mut heap, vec![b0, b1, Val::Void], 2);
+        assert_eq!(
+            run_in(&program, findex("Main.last"), &[top], &mut heap),
+            Ok(b1),
+            "{what}: last"
+        );
+        assert_eq!(heap.field(top, length_at), Some(Val::I(1)), "{what}: length after last");
 
         // pop returns the last element and clears its slot; reverse swaps the ends
         let popped = run_in(&program, findex("hl.types.ArrayObj.pop"), &[a], &mut heap)

@@ -609,6 +609,18 @@ impl<'m, 'a> FnLower<'m, 'a> {
     }
 
     fn coerce(&mut self, v: ValueId, to: TypeIx) -> Result<ValueId> {
+        self.coerce_with(v, to, false)
+    }
+
+    /// [`Self::coerce`] as genhl's `cast_to ~force:true` does it: a Dynamic that the program says
+    /// is an object is checked at run time, where a plain conversion has no rule for it. A call's
+    /// result is converted this way, since a generic function returns its type parameter as
+    /// Dynamic.
+    fn coerce_forced(&mut self, v: ValueId, to: TypeIx) -> Result<ValueId> {
+        self.coerce_with(v, to, true)
+    }
+
+    fn coerce_with(&mut self, v: ValueId, to: TypeIx, force: bool) -> Result<ValueId> {
         let from = self.val_ty(v);
         if from == to {
             return Ok(v);
@@ -642,6 +654,10 @@ impl<'m, 'a> FnLower<'m, 'a> {
             (HlType::I32, HlType::F64) => CastKind::ToSFloat,
             (HlType::F64, HlType::I32) => CastKind::ToInt,
             (HlType::I32 | HlType::F64 | HlType::Bool, HlType::Dyn) => CastKind::ToDyn,
+            (
+                HlType::Dyn,
+                HlType::Obj(_) | HlType::Struct(_) | HlType::Virtual(_) | HlType::Enum(_),
+            ) if force => CastKind::SafeCast,
             (a, b) => return Err(format!("no conversion from {a:?} to {b:?} yet")),
         };
         let dst = self.value(to);
@@ -794,7 +810,22 @@ impl<'m, 'a> FnLower<'m, 'a> {
         Ok(())
     }
 
+    /// A call, with its result converted to the type the program gives the call.
     fn call(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
+        let Some(result) = self.call_unconverted(n)? else {
+            return Ok(None);
+        };
+        if n.ty.get() == NONE {
+            return Ok(Some(result));
+        }
+        let want = self.node_ty(n)?;
+        if self.is_void(want) {
+            return Ok(Some(result));
+        }
+        self.coerce_forced(result, want).map(Some)
+    }
+
+    fn call_unconverted(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
         let ids = self.kids(n);
         let callee = *self.tast.node(ids[0]);
         if callee.kind == node_kind::CONST && callee.flags == const_kind::SUPER {

@@ -68,6 +68,14 @@ const describe = (e) => {
 };
 // Set once the page has its answer, "done" or a failure; the first one stands.
 let ended = false;
+// What a test runner reads, whatever the title says: `window.ashOutcome` and the `data-ash-status`
+// attribute of the document element, set when the program exits or the page fails. `status` is the
+// program's exit status, or -1 when the page failed before one existed; `trapped` is the reason, or
+// null.
+const publish = (status, trapped) => {
+  window.ashOutcome = { status, trapped };
+  document.documentElement.dataset.ashStatus = String(status);
+};
 // Ends the page as trapped when something the program waits on is gone: an
 // agent that did not start or reported a failure, or the program's own worker.
 // The program may be blocked on a reply that will never come, so it is
@@ -84,6 +92,7 @@ const fail = (source, reason) => {
   worker.terminate();
   if (display) display.terminate();
   for (const agent of threadAgents) agent.terminate();
+  publish(-1, text);
   document.title = `${module.slice(2)} — trapped`;
 };
 const worker = new Worker("./worker.js", { type: "module" });
@@ -92,6 +101,7 @@ worker.onmessage = ({ data }) => {
     if (ended) return;
     ended = true;
     for (const agent of threadAgents) agent.terminate();
+    publish(data.status, data.trapped ?? null);
     document.title = `${module.slice(2)} — ${data.trapped ? "trapped" : "done"}`;
     return;
   }

@@ -269,6 +269,15 @@ mod tests {
     }
 
     #[test]
+    fn the_outcome_is_published_for_a_test_runner() {
+        // the title says "done" whatever the exit status was, so a runner reads these instead
+        assert!(INDEX_HTML.contains("window.ashOutcome = { status, trapped };"));
+        assert!(INDEX_HTML.contains("dataset.ashStatus = String(status);"));
+        assert!(INDEX_HTML.contains("publish(data.status, data.trapped ?? null);"));
+        assert!(INDEX_HTML.contains("publish(-1, text);"));
+    }
+
+    #[test]
     fn the_log_pane_is_hidden_unless_debugging() {
         // Hidden rather than absent: a page runner reads its textContent.
         assert!(INDEX_HTML.contains("<pre id=\"out\" hidden></pre>"));

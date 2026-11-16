@@ -52,6 +52,12 @@ const agents = [];
 const preparing = new Map();
 let prepareCount = 0;
 
+// An agent that is free to be given a thread. An agent is free more than once -- when it says so,
+// and the moment it has answered a request to prepare -- and it is listed once.
+function release(agent) {
+  if (!idle.includes(agent)) idle.push(agent);
+}
+
 function answerPrepare(data) {
   const done = preparing.get(data.id);
   preparing.delete(data.id);
@@ -67,7 +73,14 @@ function prepareOnAgent(what, bytes, threads) {
   if (!agent) return undefined;
   const id = ++prepareCount;
   return new Promise((resolve) => {
-    preparing.set(id, resolve);
+    // The agent is free once it has answered. It also says so in a message that follows the answer,
+    // but that one is not read until this worker is back in its event loop, and the program's
+    // run does not return to it: a program that starts a thread right away would find no idle
+    // agent, with the agent that prepared it standing idle.
+    preparing.set(id, (data) => {
+      release(agent);
+      resolve(data);
+    });
     agent.postMessage({ kind: "prepare", what, id, bytes: bytes.buffer, threads }, [bytes.buffer]);
   });
 }
@@ -76,7 +89,7 @@ function adoptAgents(ports) {
   for (const port of ports) {
     port.onmessage = ({ data }) => {
       if (data.kind === "prepared") answerPrepare(data);
-      else if (data.kind === "agent" && data.state === "idle") idle.push(port);
+      else if (data.kind === "agent" && data.state === "idle") release(port);
     };
     idle.push(port);
   }
@@ -99,7 +112,7 @@ async function warmAgents(count) {
         return;
       }
       if (data.state === "ready") settle(true);
-      idle.push(worker);
+      release(worker);
     };
     // Settled, not left pending: an agent that never starts must not keep the
     // program from starting. Its error has no message; the likeliest cause is

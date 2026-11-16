@@ -269,6 +269,16 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_prepared_a_module_is_idle_as_soon_as_it_has_answered() {
+        // the agent's own "idle" message is read only when the worker is back in its event loop,
+        // which a program that has started does not return to: a thread started at once would
+        // find no idle agent while the one that prepared the program stood idle
+        assert!(WORKER_JS.contains("function release(agent)"));
+        assert!(WORKER_JS.contains("if (!idle.includes(agent)) idle.push(agent);"));
+        assert!(WORKER_JS.contains("release(agent);\n      resolve(data);"));
+    }
+
+    #[test]
     fn the_outcome_is_published_for_a_test_runner() {
         // the title says "done" whatever the exit status was, so a runner reads these instead
         assert!(INDEX_HTML.contains("window.ashOutcome = { status, trapped };"));

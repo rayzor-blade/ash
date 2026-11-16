@@ -683,6 +683,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             node_kind::CONST => self.constant(&n).map(Some),
             node_kind::FIELD => self.field_get(&n),
             node_kind::ARRAY => self.array_get(&n),
+            node_kind::ARRAY_DECL => self.array_literal(&n),
             node_kind::NEW => self.new_object(&n),
             node_kind::LOCAL => {
                 let local = n.a.get();

@@ -41,6 +41,10 @@ fn object_arrays_are_read_written_and_built() {
         ("Main", "make"),
         ("Main", "empty"),
         ("Main", "ints"),
+        ("Main", "lit"),
+        ("Main", "floats"),
+        ("Main", "pair"),
+        ("Main", "none"),
         ("hl.types.ArrayObj", "pop"),
         ("hl.types.ArrayObj", "reverse"),
     ];
@@ -99,10 +103,11 @@ fn object_arrays_are_read_written_and_built() {
         module.types.slot_in(string_ty, "bytes").unwrap().index as usize,
         module.types.slot_in(string_ty, "length").unwrap().index as usize,
     );
-    let (body_ty, refs_ty, floats_ty) = (
+    let (body_ty, refs_ty, floats_ty, ints_ty) = (
         find_type("Body"),
         find_type("hl.types.ArrayObj"),
         find_type("hl.types.ArrayBytes_Float"),
+        find_type("hl.types.ArrayBytes_Int"),
     );
     let at = |ty: usize, name: &str| module.types.slot_in(ty, name).unwrap().index as usize;
     let (x_at, length_at, array_at, bytes_at) = (
@@ -112,6 +117,7 @@ fn object_arrays_are_read_written_and_built() {
         at(floats_ty, "bytes"),
     );
     let floats_length_at = at(floats_ty, "length");
+    let (ints_length_at, ints_bytes_at) = (at(ints_ty, "length"), at(ints_ty, "bytes"));
 
     let run = |what: &str, functions: HashMap<usize, &Function>| {
         let program = Program::new(functions, &module.ints, &module.floats, &module.types.table)
@@ -224,6 +230,38 @@ fn object_arrays_are_read_written_and_built() {
             Ok(Val::F(3.0)),
             "{what}: total of made"
         );
+
+        // array literals: a buffer for numbers, a native array for objects
+        let lit = run_in(&program, findex("Main.lit"), &[], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: lit: {e}"));
+        assert_eq!(heap.field(lit, ints_length_at), Some(Val::I(3)), "{what}: lit length");
+        let held = heap.field(lit, ints_bytes_at).unwrap();
+        let read: Vec<i32> = heap.memory(held).unwrap()[..12]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect();
+        assert_eq!(read, vec![3, 1, 2], "{what}: lit");
+        let fl = run_in(&program, findex("Main.floats"), &[Val::F(2.5)], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: floats: {e}"));
+        assert_eq!(heap.field(fl, floats_length_at), Some(Val::I(2)), "{what}: floats length");
+        let held = heap.field(fl, bytes_at).unwrap();
+        let read: Vec<f64> = heap.memory(held).unwrap()[..16]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| f64::from_le_bytes(*c))
+            .collect();
+        assert_eq!(read, vec![1.5, 2.5], "{what}: floats");
+        let two = run_in(&program, findex("Main.pair"), &[b0, b1], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: pair: {e}"));
+        assert_eq!(heap.field(two, length_at), Some(Val::I(2)), "{what}: pair length");
+        let held = heap.field(two, array_at).unwrap();
+        assert_eq!(heap.array_items(held).unwrap(), &[b0, b1], "{what}: pair");
+        let none = run_in(&program, findex("Main.none"), &[], &mut heap)
+            .unwrap_or_else(|e| panic!("{what}: none: {e}"));
+        assert_eq!(heap.field(none, ints_length_at), Some(Val::I(0)), "{what}: none length");
 
         // an empty array is a constructed object with a native array of no elements
         let fresh = run_in(&program, findex("Main.empty"), &[], &mut heap)

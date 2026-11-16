@@ -275,4 +275,98 @@ impl<'m, 'a> FnLower<'m, 'a> {
         self.array_write(arr, idx, new, elems)?;
         Ok(Some(new))
     }
+
+    /// `[a, b, c]`: the elements are written into a buffer, or a native array of Dynamic, which
+    /// the std's `alloc` functions wrap in the array class.
+    pub(super) fn array_literal(&mut self, n: &NodeRec) -> Result<Option<ValueId>> {
+        let ty = self.node_ty(n)?;
+        let t = self.tast.types()[n.ty.get() as usize];
+        let arg = self
+            .tast
+            .type_args(t.args_first, t.args_count)
+            .first()
+            .map(|a| a.get())
+            .ok_or("an array literal with no element type")?;
+        let elem = self.m.types.to_type(arg)?;
+        let elems = self.elements(elem)?;
+        let ids = self.kids(n);
+        let int = self.ty_of(HlType::I32);
+        let count = self.int_const(ids.len() as i32);
+        match elems {
+            Elements::Bytes(bits) => {
+                let make = match self.m.types.table.types[elem] {
+                    HlType::I32 => "allocI32",
+                    _ => "allocF64",
+                };
+                let bytes_ty = self.ty_of(HlType::Bytes);
+                let size = self.int_const((ids.len() as i32) << bits);
+                let alloc = self.std_native("alloc_bytes", &[int], bytes_ty);
+                let buffer = self.value(bytes_ty);
+                self.emit(Instr::Call {
+                    dst: buffer,
+                    fun: alloc,
+                    args: vec![size],
+                });
+                for (i, id) in ids.iter().enumerate() {
+                    let Some(v) = self.expr(*id)? else {
+                        return Ok(None);
+                    };
+                    let v = self.coerce(v, elem)?;
+                    let at = self.int_const((i as i32) << bits);
+                    self.emit(Instr::MemSet {
+                        kind: MemAccess::Mem,
+                        base: buffer,
+                        index: at,
+                        src: v,
+                    });
+                }
+                let wrap = self.class_function("hl.types.ArrayBase", make)?;
+                let out = self.value(ty);
+                self.emit(Instr::Call {
+                    dst: out,
+                    fun: wrap,
+                    args: vec![buffer, count],
+                });
+                Ok(Some(out))
+            }
+            Elements::Refs => {
+                let dynamic = self.ty_of(HlType::Dyn);
+                let type_ty = self.ty_of(HlType::Type);
+                let array_ty = self.ty_of(HlType::Array);
+                let of = self.value(type_ty);
+                self.emit(Instr::TypeConst {
+                    dst: of,
+                    ty: TypeRef(dynamic as u32),
+                });
+                let alloc = self.std_native("alloc_array", &[type_ty, int], array_ty);
+                let held = self.value(array_ty);
+                self.emit(Instr::Call {
+                    dst: held,
+                    fun: alloc,
+                    args: vec![of, count],
+                });
+                for (i, id) in ids.iter().enumerate() {
+                    let Some(v) = self.expr(*id)? else {
+                        return Ok(None);
+                    };
+                    let v = self.coerce(v, dynamic)?;
+                    let at = self.int_const(i as i32);
+                    self.emit(Instr::MemSet {
+                        kind: MemAccess::Array,
+                        base: held,
+                        index: at,
+                        src: v,
+                    });
+                }
+                let wrap = self.class_function("hl.types.ArrayObj", "alloc")?;
+                let out = self.value(ty);
+                self.emit(Instr::Call {
+                    dst: out,
+                    fun: wrap,
+                    args: vec![held],
+                });
+                Ok(Some(out))
+            }
+        }
+    }
 }

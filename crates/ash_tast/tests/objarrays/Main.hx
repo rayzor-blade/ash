@@ -52,6 +52,18 @@ class Main {
 		return [3, 1, 2];
 	}
 
+	static function floats(x:Float):Array<Float> {
+		return [1.5, x];
+	}
+
+	static function pair(a:Body, b:Body):Array<Body> {
+		return [a, b];
+	}
+
+	static function none():Array<Int> {
+		return [];
+	}
+
 	static function main() {
 		trace(total(make(3)));
 	}

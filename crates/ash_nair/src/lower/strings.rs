@@ -46,17 +46,23 @@ impl<'m, 'a> FnLower<'m, 'a> {
 
     /// A function the std's `String` class declares, which the program lowers with the caller.
     fn string_function(&mut self, name: &str) -> Result<usize> {
-        let class = self
+        self.class_function("String", name)
+    }
+
+    /// The function `name` that the class `class` declares, which the program lowers with the
+    /// caller.
+    pub(super) fn class_function(&mut self, class: &str, name: &str) -> Result<usize> {
+        let id = self
             .m
             .types
-            .class_id("String")
-            .ok_or("the program has no String class")?;
+            .class_id(class)
+            .ok_or_else(|| format!("the program has no {class} class"))?;
         let field = self
             .m
             .types
-            .declared_field(class, name)
-            .ok_or_else(|| format!("String.{name} is not in the program"))?;
-        let fun = self.m.types.fun_id("String", name) as usize;
+            .declared_field(id, name)
+            .ok_or_else(|| format!("{class}.{name} is not in the program"))?;
+        let fun = self.m.types.fun_id(class, name) as usize;
         self.m.called.insert(fun as u32);
         self.m.request(field);
         Ok(fun)

@@ -47,6 +47,8 @@ pub struct Program<'a> {
     /// The native functions the interpreter runs itself, by function index; see
     /// [`Program::with_natives`].
     pub natives: HashMap<usize, String>,
+    /// The fields of each structure type, by structure.
+    pub virts: Vec<Vec<(String, usize)>>,
 }
 
 impl<'a> Program<'a> {
@@ -75,6 +77,7 @@ impl<'a> Program<'a> {
             strings: Vec::new(),
             constants: Vec::new(),
             natives: HashMap::new(),
+            virts: table.virts.clone(),
         }
     }
 
@@ -125,11 +128,24 @@ pub fn layouts(table: &TypeTable) -> HashMap<usize, Vec<Val>> {
         }
     }
     let mut out = HashMap::new();
+    let zero = |ty: usize| match table.types[ty] {
+        HlType::I32 => Val::I(0),
+        HlType::F64 => Val::F(0.0),
+        HlType::Bool => Val::B(false),
+        _ => Val::Void,
+    };
     for (ix, t) in table.types.iter().enumerate() {
-        if let HlType::Obj(o) = t {
-            let mut fields = Vec::new();
-            fill(table, *o, &mut fields);
-            out.insert(ix, fields);
+        match t {
+            HlType::Obj(o) => {
+                let mut fields = Vec::new();
+                fill(table, *o, &mut fields);
+                out.insert(ix, fields);
+            }
+            // a structure holds its fields in the order of its sorted names
+            HlType::Virtual(v) => {
+                out.insert(ix, table.virts[*v].iter().map(|(_, ty)| zero(*ty)).collect());
+            }
+            _ => {}
         }
     }
     out
@@ -144,6 +160,8 @@ pub struct Heap {
     arrays: Vec<Vec<Val>>,
     /// The registers whose address was taken: one slot each, for as long as the heap lives.
     cells: Vec<Val>,
+    /// The fields set by name on dynamic objects, by object and string index.
+    dynamic: HashMap<(usize, usize), Val>,
     globals: Vec<Val>,
 }
 
@@ -404,6 +422,33 @@ fn call(
                         (op, v) => return Err(format!("{op:?} of {v:?}")),
                     });
                 }
+                Instr::Cast {
+                    kind: CastKind::ToVirtual,
+                    dst,
+                    src,
+                } => {
+                    // a structure of the fields it names, each found by name in the object
+                    let ty = f.values[dst.idx()].ty.0 as usize;
+                    let Some(HlType::Virtual(v)) = p.types.get(ty) else {
+                        return Err("a conversion to something that is not a structure".into());
+                    };
+                    let Val::Obj(h) = get(&vals, *src)? else {
+                        return Err("a conversion of something that is not an object".into());
+                    };
+                    let mut fields = p.layouts.get(&ty).cloned().unwrap_or_default();
+                    for (at, (name, _)) in p.virts[*v].iter().enumerate() {
+                        let found = p
+                            .strings
+                            .iter()
+                            .position(|s| s == name)
+                            .and_then(|s| heap.dynamic.get(&(h, s)));
+                        if let Some(x) = found {
+                            fields[at] = *x;
+                        }
+                    }
+                    heap.objects.push((ty, fields));
+                    vals[dst.idx()] = Some(Val::Obj(heap.objects.len() - 1));
+                }
                 Instr::Cast { kind, dst, src } => {
                     let v = get(&vals, *src)?;
                     vals[dst.idx()] = Some(match (kind, v) {
@@ -443,11 +488,15 @@ fn call(
                 }
                 Instr::New { dst } => {
                     let ty = f.values[dst.idx()].ty.0 as usize;
-                    let fields = p
-                        .layouts
-                        .get(&ty)
-                        .ok_or_else(|| format!("no layout for type {ty}"))?
-                        .clone();
+                    // a dynamic object has no fields until some are set by name
+                    let fields = if p.types.get(ty) == Some(&HlType::DynObj) {
+                        Vec::new()
+                    } else {
+                        p.layouts
+                            .get(&ty)
+                            .ok_or_else(|| format!("no layout for type {ty}"))?
+                            .clone()
+                    };
                     heap.objects.push((ty, fields));
                     vals[dst.idx()] = Some(Val::Obj(heap.objects.len() - 1));
                 }
@@ -612,6 +661,18 @@ fn call(
                     vals[dst.idx()] = Some(Val::I(heap.arrays[a].len() as i32));
                 }
                 Instr::TypeConst { dst, ty } => vals[dst.idx()] = Some(Val::I(ty.0 as i32)),
+                Instr::DynSet { obj, field, src } => {
+                    let (Val::Obj(h), v) = (get(&vals, *obj)?, get(&vals, *src)?) else {
+                        return Err("a field set on something that is not an object".into());
+                    };
+                    heap.dynamic.insert((h, *field), v);
+                }
+                Instr::DynGet { dst, obj, field } => {
+                    let Val::Obj(h) = get(&vals, *obj)? else {
+                        return Err("a field read on something that is not an object".into());
+                    };
+                    vals[dst.idx()] = Some(heap.dynamic.get(&(h, *field)).copied().unwrap_or(Val::Void));
+                }
                 Instr::CellRef { dst, cell } => {
                     let at = *cells[cell.idx()].get_or_insert_with(|| {
                         heap.cells.push(Val::Void);

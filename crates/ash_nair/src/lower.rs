@@ -4,8 +4,9 @@
 //! arithmetic and comparisons, `if` and loops, `break` and `continue`, `return`, and direct calls
 //! of static functions; and objects of non-generic classes: `new`, instance variables, `this`,
 //! calls of methods, and `null` with `==` and `!=` against it; `new Array<T>()`, and reads and
-//! writes of array elements by index, and their `length`. Anything else is refused with a message
-//! that names it, so a body that does not lower is never half lowered.
+//! writes of array elements by index, and their `length`; strings joined with numbers; and
+//! object literals. Anything else is refused with a message that names it, so a body that does
+//! not lower is never half lowered.
 //!
 //! Locals are put in SSA form as the body is walked (Braun et al., "Simple and Efficient
 //! Construction of Static Single Assignment Form"): a block is sealed once all its predecessors
@@ -21,6 +22,7 @@ use ash_tast::format::*;
 use crate::build::TypeBuilder;
 use crate::hl::{HlType, TypeIx};
 
+mod anons;
 mod arrays;
 mod init;
 mod intrinsics;
@@ -640,7 +642,14 @@ impl<'m, 'a> FnLower<'m, 'a> {
         );
         // an object is its own Dynamic: the runtime boxes values, never objects
         if matches!(b, HlType::Dyn)
-            && matches!(a, HlType::Obj(_) | HlType::Struct(_) | HlType::Virtual(_) | HlType::Array)
+            && matches!(
+                a,
+                HlType::Obj(_)
+                    | HlType::Struct(_)
+                    | HlType::Virtual(_)
+                    | HlType::Array
+                    | HlType::DynObj
+            )
         {
             let dst = self.value(to);
             self.emit(Instr::Cast {
@@ -654,9 +663,18 @@ impl<'m, 'a> FnLower<'m, 'a> {
             (HlType::I32, HlType::F64) => CastKind::ToSFloat,
             (HlType::F64, HlType::I32) => CastKind::ToInt,
             (HlType::I32 | HlType::F64 | HlType::Bool, HlType::Dyn) => CastKind::ToDyn,
+            // a structure of other fields is made one of these by looking its fields up by name
+            (HlType::Virtual(_), HlType::Virtual(_)) => {
+                if self.m.types.structure_fits(from, to) {
+                    CastKind::UnsafeCast
+                } else {
+                    CastKind::ToVirtual
+                }
+            }
+            (HlType::Dyn | HlType::DynObj, HlType::Virtual(_)) => CastKind::ToVirtual,
             (
                 HlType::Dyn,
-                HlType::Obj(_) | HlType::Struct(_) | HlType::Virtual(_) | HlType::Enum(_),
+                HlType::Obj(_) | HlType::Struct(_) | HlType::Enum(_),
             ) if force => CastKind::SafeCast,
             (a, b) => return Err(format!("no conversion from {a:?} to {b:?} yet")),
         };
@@ -700,6 +718,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
             node_kind::FIELD => self.field_get(&n),
             node_kind::ARRAY => self.array_get(&n),
             node_kind::ARRAY_DECL => self.array_literal(&n),
+            node_kind::OBJECT_DECL => self.object_literal(&n),
             node_kind::NEW => self.new_object(&n),
             node_kind::LOCAL => {
                 let local = n.a.get();

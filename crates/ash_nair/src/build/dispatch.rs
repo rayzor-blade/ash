@@ -57,6 +57,49 @@ impl<'a> TypeBuilder<'a> {
         })
     }
 
+    /// The structure type with these fields, which the runtime orders by name; made on first use,
+    /// so two literals with the same fields have the same type. `prefer` is the type the program
+    /// expects, which is the answer when it has exactly these fields.
+    pub fn structure(&mut self, mut fields: Vec<(String, TypeIx)>, prefer: TypeIx) -> TypeIx {
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        if let HlType::Virtual(v) = self.table.types[prefer]
+            && self.table.virts[v] == fields
+        {
+            return prefer;
+        }
+        for (ix, t) in self.table.types.iter().enumerate() {
+            if let HlType::Virtual(v) = t
+                && self.table.virts[*v] == fields
+            {
+                return ix;
+            }
+        }
+        self.table.virts.push(fields);
+        let v = self.table.virts.len() - 1;
+        self.table.push_raw(HlType::Virtual(v))
+    }
+
+    /// Whether a structure of type `from` can be used as `to` as it is, as genhl's `safe_cast`
+    /// has it: the same structure, a structure whose fields begin with all of `to`'s, or any
+    /// structure as a Dynamic.
+    pub fn structure_fits(&self, from: TypeIx, to: TypeIx) -> bool {
+        if from == to {
+            return true;
+        }
+        match (&self.table.types[from], &self.table.types[to]) {
+            (HlType::Virtual(_), HlType::Dyn) => true,
+            (HlType::Virtual(a), HlType::Virtual(b)) => {
+                let (a, b) = (&self.table.virts[*a], &self.table.virts[*b]);
+                let same = |x: &(String, TypeIx), y: &(String, TypeIx)| {
+                    x.0 == y.0 && self.table.describe(x.1) == self.table.describe(y.1)
+                };
+                (a.len() == b.len() || b.len() < a.len())
+                    && b.iter().zip(a.iter()).all(|(y, x)| same(x, y))
+            }
+            _ => false,
+        }
+    }
+
     /// The field `name` that `class` itself declares, found in the file's field list.
     pub fn declared_field(&self, class: u32, name: &str) -> Option<u32> {
         let rec = self.tast.classes()[class as usize];

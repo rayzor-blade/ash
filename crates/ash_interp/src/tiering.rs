@@ -1720,7 +1720,7 @@ pub(crate) fn compile_with_cranelift(
             if ctx.compiled_only {
                 let sites = ash_core::cranelift::retier_sites(
                     findex,
-                    tier.ctx.bytecode() as *const _ as usize,
+                    tier.ctx.program_id(),
                 );
                 if !sites.is_empty() {
                     ctx.hot_loop_pcs

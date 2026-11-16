@@ -21,6 +21,7 @@ pub struct NairModule {
     natives: HashMap<usize, NativeImport>,
     callees: HashMap<usize, Function>,
     sigs: HashMap<usize, FunSig>,
+    names: HashMap<usize, String>,
     summaries: Summaries,
 }
 
@@ -77,6 +78,10 @@ impl NairModule {
             natives,
             callees,
             sigs,
+            names: lowered
+                .iter()
+                .map(|l| (l.findex as usize, l.name.clone()))
+                .collect(),
             summaries,
         }
     }
@@ -145,6 +150,10 @@ impl ModuleInfo for NairModule {
             HlType::Packed(_) => TypeKind::Packed,
             HlType::Abstract(_) => TypeKind::Abstract,
         })
+    }
+
+    fn function_name(&self, findex: usize) -> Option<String> {
+        self.names.get(&findex).cloned()
     }
 
     fn fun_sig(&self, findex: usize) -> Option<FunSig> {

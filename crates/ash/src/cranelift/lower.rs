@@ -252,7 +252,7 @@ pub fn lower_function(
     ctx: &CraneliftTierContext,
     findex: usize,
 ) -> Result<LoweredFunction> {
-    let bytecode = ctx.bytecode();
+    let bytecode = ctx.bytecode()?;
     let func_idx = ctx
         .func_index(findex)
         .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
@@ -361,7 +361,7 @@ fn import_native_targets(
     ops: &[Opcode],
     def: &mut CraneliftFunctionDef,
 ) -> Result<HashMap<usize, FuncRef>> {
-    let bytecode = ctx.bytecode();
+    let bytecode = ctx.bytecode()?;
     let mut refs: HashMap<usize, FuncRef> = HashMap::new();
     for op in ops {
         let target = match op {
@@ -694,7 +694,7 @@ impl Lowerer<'_, '_> {
             .get(obj.0 as usize)
             .ok_or_else(|| anyhow!("field access on out-of-range register {}", obj.0))?
             .0;
-        let bytecode = self.ctx.bytecode();
+        let bytecode = self.ctx.bytecode()?;
         let kind = bytecode
             .types
             .get(type_index)
@@ -726,7 +726,7 @@ impl Lowerer<'_, '_> {
             .0;
         Ok(self
             .ctx
-            .bytecode()
+            .bytecode()?
             .types
             .get(type_index)
             .ok_or_else(|| anyhow!("register {} has unknown type {type_index}", r.0))?
@@ -896,7 +896,7 @@ impl Lowerer<'_, '_> {
             Opcode::Int { dst, ptr } => {
                 let val = *self
                     .ctx
-                    .bytecode()
+                    .bytecode()?
                     .ints
                     .get(ptr.0)
                     .ok_or_else(|| anyhow!("int constant {} out of range", ptr.0))?;
@@ -906,7 +906,7 @@ impl Lowerer<'_, '_> {
             Opcode::Float { dst, ptr } => {
                 let val = *self
                     .ctx
-                    .bytecode()
+                    .bytecode()?
                     .floats
                     .get(ptr.0)
                     .ok_or_else(|| anyhow!("float constant {} out of range", ptr.0))?;
@@ -1474,7 +1474,7 @@ impl Lowerer<'_, '_> {
     // ── Calls ────────────────────────────────────────────────────────────────
 
     fn lower_call(&mut self, dst: Reg, target: usize, args: &[Reg]) -> Result<()> {
-        let bytecode = self.ctx.bytecode();
+        let bytecode = self.ctx.bytecode()?;
         let (tf, is_native) = if let Some(ni) = self.ctx.native_index(target) {
             let n = &bytecode.natives[ni];
             (

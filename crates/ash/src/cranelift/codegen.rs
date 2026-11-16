@@ -216,27 +216,26 @@ pub fn lower_air_function(
     // calls the matching LLVM entry. An empty map emits no exits.
     osr_exits: &HashMap<u32, std::sync::Arc<crate::retier::Site>>,
 ) -> Result<LoweredFunction> {
-    let bytecode = ctx.bytecode();
-    let func_idx = ctx
-        .func_index(findex)
-        .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
-    let func = &bytecode.functions[func_idx];
-    let tf = bytecode.types[func.type_.0]
-        .fun
-        .as_ref()
-        .ok_or_else(|| anyhow!("no function type"))?;
+    let module = ctx.module();
+    let tf = module
+        .fun_sig(findex)
+        .filter(|_| module.native(findex).is_none())
+        .ok_or_else(|| anyhow!("findex {findex} is not a function with a body"))?;
 
     if let Some(reason) = reject_reason(air) {
         bail!("{reason}");
     }
 
-    let arg_kinds: Vec<hl::hl_type_kind> =
-        tf.args.iter().map(|a| bytecode.types[a.0].kind).collect();
-    let ret_kind = bytecode.types[tf.ret.0].kind;
+    let arg_kinds: Vec<hl::hl_type_kind> = tf
+        .args
+        .iter()
+        .map(|a| ctx.type_kind(a.0 as usize))
+        .collect::<Result<_>>()?;
+    let ret_kind = ctx.type_kind(tf.ret.0 as usize)?;
 
     let mut sig = backend.make_signature();
-    for a in &tf.args {
-        let ty = argument_abi_class(ctx.type_kind(a.0)?)
+    for kind in &arg_kinds {
+        let ty = argument_abi_class(*kind)
             .clif_type()
             .ok_or_else(|| anyhow!("void argument in entry signature"))?;
         sig.params.push(AbiParam::new(ty));
@@ -245,7 +244,10 @@ pub fn lower_air_function(
         sig.returns.push(AbiParam::new(ty));
     }
 
-    let name = backend.unique_name(findex, &func.name());
+    let fun_name = module
+        .function_name(findex)
+        .unwrap_or_else(|| format!("Fun_{findex}"));
+    let name = backend.unique_name(findex, &fun_name);
     let mut def = backend
         .new_def(sig, &name)
         .map_err(|e| anyhow!("declare_function({name}): {e}"))?;
@@ -294,8 +296,7 @@ pub fn lower_air_function(
 
     if super::lower::clif_dump_wanted(findex) {
         eprintln!(
-            "=== CLIF (from AIR) findex={findex} {} ===\n{}",
-            func.name(),
+            "=== CLIF (from AIR) findex={findex} {fun_name} ===\n{}",
             def.ctx.func.display()
         );
     }
@@ -338,7 +339,7 @@ pub fn compile_osr_entry(
     if let Some(reason) = reject_reason(air) {
         bail!("{reason}");
     }
-    let bytecode = ctx.bytecode();
+    let bytecode = ctx.bytecode()?;
     let func_idx = ctx
         .func_index(findex)
         .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
@@ -365,7 +366,7 @@ pub fn compile_osr_entry(
     // function's ordinary compile allocated.
     let osr_exits = super::air::retier_state_for(
         findex,
-        ctx.bytecode() as *const _ as usize,
+        ctx.program_id(),
         opt,
         ctx.fiber_poll_epoch_address().unwrap_or(0),
         Some(header as u32),
@@ -437,7 +438,7 @@ pub fn compile_uniform_entry(
     findex: usize,
     target: usize,
 ) -> Result<usize> {
-    let bytecode = ctx.bytecode();
+    let bytecode = ctx.bytecode()?;
     let func_idx = ctx
         .func_index(findex)
         .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
@@ -1787,7 +1788,7 @@ impl AirCodegen<'_, '_> {
             Instr::Int { dst, idx } => {
                 // Past the pool means a pass minted it; `int_at` answers for
                 // both so a minted constant is indistinguishable here.
-                let module = self.ctx.air_module();
+                let module = self.ctx.module();
                 let val = self
                     .f
                     .int_at(*idx, |i| module.int_value(i))
@@ -1798,7 +1799,7 @@ impl AirCodegen<'_, '_> {
             Instr::Float { dst, idx } => {
                 let val = self
                     .ctx
-                    .air_module()
+                    .module()
                     .float_value(*idx)
                     .ok_or_else(|| anyhow!("float constant {idx} out of range"))?;
                 let v = self.b.ins().f64const(val);
@@ -2063,7 +2064,7 @@ impl AirCodegen<'_, '_> {
                     let p = self.get(*src)?;
                     let void_ty = self
                         .ctx
-                        .bytecode()
+                        .bytecode()?
                         .types
                         .iter()
                         .position(|t| t.kind == hl::hl_type_kind_HVOID)
@@ -2262,7 +2263,7 @@ impl AirCodegen<'_, '_> {
                 let p = self.coerce(raw, types::I64, Widen::Signed)?;
                 let index = self.index_as_addr(*offset)?;
                 let dst_ty = self.f.value_ty(*dst);
-                let module = self.ctx.air_module();
+                let module = self.ctx.module();
                 match module.type_kind(dst_ty) {
                     Some(air::v2::TypeKind::Ref) => {}
                     Some(other) => bail!("RefOffset destination type kind {other:?} is not Ref"),
@@ -2504,7 +2505,7 @@ impl AirCodegen<'_, '_> {
     /// object field.
     fn field_offset(&self, obj_ty: AirTypeRef, field: usize) -> Result<(i32, Type)> {
         let type_index = obj_ty.0 as usize;
-        let bytecode = self.ctx.bytecode();
+        let bytecode = self.ctx.bytecode()?;
         let kind = bytecode
             .types
             .get(type_index)
@@ -3177,7 +3178,7 @@ impl AirCodegen<'_, '_> {
 
         let dyn_type_index = self
             .ctx
-            .bytecode()
+            .bytecode()?
             .types
             .iter()
             .position(|ty| ty.kind == hl::hl_type_kind_HDYN)
@@ -3517,7 +3518,7 @@ impl AirCodegen<'_, '_> {
         }
         Ok(match found {
             Some(Instr::Int { idx, .. }) => {
-                let module = self.ctx.air_module();
+                let module = self.ctx.module();
                 let val = self
                     .f
                     .int_at(idx, |i| module.int_value(i))
@@ -3527,7 +3528,7 @@ impl AirCodegen<'_, '_> {
             Some(Instr::Float { idx, .. }) => {
                 let val = self
                     .ctx
-                    .air_module()
+                    .module()
                     .float_value(idx)
                     .ok_or_else(|| anyhow!("float constant {idx} out of range"))?;
                 Some(self.b.ins().f64const(val))
@@ -3559,7 +3560,7 @@ impl AirCodegen<'_, '_> {
                         // for it, silently skipping the peephole.
                         return self
                             .f
-                            .int_at(*idx, |i| self.ctx.air_module().int_value(i))
+                            .int_at(*idx, |i| self.ctx.module().int_value(i))
                             .map(|i| i as i64);
                     }
                 }
@@ -3741,7 +3742,7 @@ impl AirCodegen<'_, '_> {
         let idx = enum_ty.0 as usize;
         let tenum = self
             .ctx
-            .bytecode()
+            .bytecode()?
             .types
             .get(idx)
             .and_then(|t| t.tenum.as_ref())
@@ -3868,7 +3869,7 @@ impl AirCodegen<'_, '_> {
     /// the same super-chain search as `CallMethod`.
     fn emit_virtual_closure(&mut self, dst: ValueId, obj: ValueId, field: usize) -> Result<()> {
         let obj_type_idx = self.f.value_ty(obj).0 as usize;
-        let bytecode = self.ctx.bytecode();
+        let bytecode = self.ctx.bytecode()?;
         let kind = self.ctx.type_kind(obj_type_idx)?;
         if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
             bail!("VirtualClosure on type kind {kind}");
@@ -4148,28 +4149,15 @@ impl AirCodegen<'_, '_> {
     }
 
     fn emit_call(&mut self, dst: ValueId, target: usize, args: &[ValueId]) -> Result<()> {
-        let bytecode = self.ctx.bytecode();
-        let (tf, is_native) = if let Some(ni) = self.ctx.native_index(target) {
-            let n = &bytecode.natives[ni];
-            (
-                bytecode.types[n.type_.0]
-                    .fun
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("native has no function type"))?,
-                true,
-            )
-        } else if let Some(fi) = self.ctx.func_index(target) {
-            let f = &bytecode.functions[fi];
-            (
-                bytecode.types[f.type_.0]
-                    .fun
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("callee has no function type"))?,
-                false,
-            )
-        } else {
-            bail!("unknown call target findex {target}");
-        };
+        let module = self.ctx.module();
+        let tf = module
+            .fun_sig(target)
+            .ok_or_else(|| anyhow!("unknown call target findex {target}"))?;
+        let native = module.native(target);
+        let is_native = native.is_some();
+        if is_native && self.ctx.bytecode().is_err() {
+            bail!("native findex {target}: the host's native tables are not available for this program yet");
+        }
 
         if args.len() != tf.args.len() {
             bail!("call arity mismatch for findex {target}");
@@ -4178,9 +4166,9 @@ impl AirCodegen<'_, '_> {
         let param_classes: Vec<AbiClass> = tf
             .args
             .iter()
-            .map(|a| argument_abi_class(bytecode.types[a.0].kind))
-            .collect();
-        let ret_class = abi_class(bytecode.types[tf.ret.0].kind);
+            .map(|a| Ok(argument_abi_class(self.ctx.type_kind(a.0 as usize)?)))
+            .collect::<Result<_>>()?;
+        let ret_class = abi_class(self.ctx.type_kind(tf.ret.0 as usize)?);
         let ret_ty = ret_class.clif_type();
 
         let mut arg_vals = Vec::with_capacity(args.len());
@@ -4196,10 +4184,8 @@ impl AirCodegen<'_, '_> {
         // Primitives that are single instructions rather than calls into
         // ash_std. Every entry in the table is unary. See crate::intrinsics.
         if is_native && arg_vals.len() == 1 {
-            if let Some(intr) = self
-                .ctx
-                .native_index(target)
-                .map(|ni| &bytecode.natives[ni])
+            if let Some(intr) = native
+                .as_ref()
                 .and_then(|n| crate::intrinsics::lookup(n.lib.as_str(), n.name.as_str()))
             {
                 let v = self.emit_native_intrinsic(intr, arg_vals[0]);
@@ -4527,7 +4513,7 @@ impl AirCodegen<'_, '_> {
         // the result kind to match the AIR destination also avoids treating a
         // generic Dynamic result as an unboxed primitive (or vice versa).
         let direct_abi = {
-            let bc = self.ctx.bytecode();
+            let bc = self.ctx.bytecode()?;
             bc.types
                 .get(obj_type_idx)
                 .and_then(|t| t.virt.as_ref())
@@ -4712,7 +4698,7 @@ impl AirCodegen<'_, '_> {
             .first()
             .ok_or_else(|| anyhow!("CallMethod with no receiver"))?;
         let obj_type_idx = self.f.value_ty(recv).0 as usize;
-        let bytecode = self.ctx.bytecode();
+        let bytecode = self.ctx.bytecode()?;
         let kind = self.ctx.type_kind(obj_type_idx)?;
         if kind == hl::hl_type_kind_HVIRTUAL {
             return self.emit_virtual_call(dst, obj_type_idx, field, args);

@@ -180,7 +180,11 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
     // optimized array is not guaranteed to stay inside the subset even though
     // the bytecode was. Falling back keeps the tier's accepted set exactly
     // what it is with AIR off.
-    if let Some(reason) = reject_reason_for_ops(ctx.bytecode(), func, &s.ops) {
+    if let Some(reason) = reject_reason_for_ops(
+        ctx.bytecode().expect("opcodes belong to a bytecode context"),
+        func,
+        &s.ops,
+    ) {
         // Fall back to the raw opcodes, which is what the comment above always
         // claimed and what the code did not do: `decline` refuses the function
         // outright, so a normalization the gate happens to exclude cost the
@@ -474,7 +478,7 @@ fn lower_air_codegen(
     findex: usize,
 ) -> anyhow::Result<super::lower::LoweredFunction> {
     let cfg = config();
-    let bytecode = ctx.bytecode();
+    let bytecode = ctx.bytecode()?;
     let func_idx = ctx
         .func_index(findex)
         .ok_or_else(|| anyhow::anyhow!("findex {findex} is not a bytecode function"))?;
@@ -497,7 +501,7 @@ fn lower_air_codegen(
 
     let osr_exits = retier_state_for(
         findex,
-        ctx.bytecode() as *const _ as usize,
+        ctx.bytecode()? as *const _ as usize,
         &opt,
         ctx.fiber_poll_epoch_address().unwrap_or(0),
         None,

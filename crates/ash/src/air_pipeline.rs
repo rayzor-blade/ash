@@ -319,6 +319,10 @@ impl<'b> ModuleInfo for AshModule<'b> {
         crate::type_kind::type_kind(self.bc.types.get(ty.0 as usize)?.kind)
     }
 
+    fn function_name(&self, findex: usize) -> Option<String> {
+        self.function(findex).map(|f| f.name())
+    }
+
     fn fun_sig(&self, findex: usize) -> Option<air::v2::FunSig> {
         let ty = match self.function(findex) {
             Some(f) => f.type_.0,

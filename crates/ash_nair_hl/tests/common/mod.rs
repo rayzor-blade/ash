@@ -1,6 +1,9 @@
 //! Compiles a fixture with the Haxe that has the `ash_tast` plugin, for the tests that need a
 //! typed program. Set `ASH_HAXE_NATIVE` to that `haxe`; the tests skip without it.
 
+// Each test crate that includes this module uses some of the helpers.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -64,9 +67,7 @@ pub fn export(compiler: &str, fixture: &str, tag: &str) -> Vec<u8> {
     bytes
 }
 
-/// The `ash` binary the compiled files are run with: `ASH_BIN`, else the release build. Not every
-/// test crate that includes this module uses it.
-#[allow(dead_code)]
+/// The `ash` binary the compiled files are run with: `ASH_BIN`, else the release build.
 pub fn ash_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ASH_BIN") {
         return Some(PathBuf::from(p));

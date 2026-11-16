@@ -349,6 +349,13 @@ pub trait ModuleInfo {
         None
     }
 
+    /// The name of function `findex` as a trace shows it, when the embedder
+    /// has one.
+    fn function_name(&self, findex: usize) -> Option<String> {
+        let _ = findex;
+        None
+    }
+
     /// True when values of `ty` are HL floats (`f32`/`f64`). Float-only
     /// rewrites — notably [`Fma`](super::ir::Instr::Fma) formation — consult
     /// this and refuse when it is false. Answered from [`type_kind`](Self::type_kind).
@@ -524,6 +531,9 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     }
     fn fun_sig(&self, findex: usize) -> Option<FunSig> {
         (**self).fun_sig(findex)
+    }
+    fn function_name(&self, findex: usize) -> Option<String> {
+        (**self).function_name(findex)
     }
     fn is_float(&self, ty: TypeRef) -> bool {
         (**self).is_float(ty)

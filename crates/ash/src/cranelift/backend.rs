@@ -15,6 +15,8 @@ use beadie::{Bead, CraneliftBackend, CraneliftConfig, CraneliftFunctionDef, JitB
 use cranelift_codegen::ir::{Function, Signature};
 use cranelift_codegen::isa::CallConv;
 
+use air::v2::ModuleInfo;
+
 use crate::air_pipeline::AshModule;
 use crate::bytecode::DecodedBytecode;
 use crate::hl_bindings as hl;
@@ -208,18 +210,59 @@ impl AshCraneliftBackend {
     ) -> Result<(usize, LoweredMeta)> {
         let _phase = crate::profile::scope("cranelift compile");
         crate::profile::count("cranelift attempts", 1);
+        let lowered = {
+            let _phase = crate::profile::scope("clif lower");
+            // AIR codegen first, opcode lowering behind it. See
+            // `super::air::lower_best`.
+            super::air::lower_best(self, ctx, findex)?
+        };
+        self.finish(bead, findex, lowered)
+    }
+
+    /// Compile `air`, the IR of `findex`, to machine code. For a program that
+    /// is not bytecode: its functions arrive as AIR, so there is nothing to
+    /// lower and nothing to fall back to. An `Err` is an error.
+    pub fn compile_air(
+        &self,
+        bead: &Arc<Bead>,
+        ctx: &CraneliftTierContext,
+        findex: usize,
+        air: &air::v2::ir::Function,
+    ) -> Result<(usize, LoweredMeta)> {
+        let _phase = crate::profile::scope("cranelift compile");
+        crate::profile::count("cranelift attempts", 1);
+        let lowered =
+            super::codegen::lower_air_function(self, ctx, findex, air, &HashMap::new())?;
+        self.finish(bead, findex, lowered)
+    }
+
+    /// [`Self::compile_air`] for a caller with no tiering runtime, which makes
+    /// the code's owner here. The caller keeps the returned bead for as long
+    /// as the code runs.
+    pub fn compile_air_detached(
+        &self,
+        ctx: &CraneliftTierContext,
+        findex: usize,
+        air: &air::v2::ir::Function,
+    ) -> Result<(usize, Arc<Bead>)> {
+        let bead = Bead::new(findex as beadie::CoreHandle, None);
+        let (code, _) = self.compile_air(&bead, ctx, findex, air)?;
+        Ok((code, bead))
+    }
+
+    fn finish(
+        &self,
+        bead: &Arc<Bead>,
+        findex: usize,
+        lowered: LoweredFunction,
+    ) -> Result<(usize, LoweredMeta)> {
         let LoweredFunction {
             def,
             arg_kinds,
             ret_kind,
             num_ops,
             positions: chains,
-        } = {
-            let _phase = crate::profile::scope("clif lower");
-            // AIR codegen first, opcode lowering behind it. See
-            // `super::air::lower_best`.
-            super::air::lower_best(self, ctx, findex)?
-        };
+        } = lowered;
         // The source map only when something asked for positions: without it
         // every srcloc is the default and the map is empty anyway, and
         // reading it costs a pass over the emitted runs per compile.
@@ -448,6 +491,11 @@ pub struct CraneliftTierContext {
     /// between a constant and a per-promotion cost on a module with 20k
     /// functions.
     air_module: OnceLock<AshModule<'static>>,
+    /// The module a context built by [`CraneliftTierContext::for_module`]
+    /// answers type, signature and constant questions from. Absent when the
+    /// context was built over bytecode, which answers them through
+    /// [`Self::air_module`].
+    external: Option<Arc<dyn ModuleInfo + Send + Sync>>,
 }
 
 // SAFETY: `bytecode` points at the `DecodedBytecode` owned by the process
@@ -472,15 +520,71 @@ impl CraneliftTierContext {
         max_findex: usize,
         c_types: &[usize],
     ) -> Result<Self> {
+        unsafe {
+            Self::build(
+                backend,
+                Some(bytecode),
+                None,
+                globals_data,
+                nglobals,
+                functions_ptrs,
+                max_findex,
+                c_types,
+            )
+        }
+    }
+
+    /// A context over a module that is not bytecode: types, signatures and
+    /// constants come from `module`. A function that needs anything else of
+    /// the program (objects, enums, natives, runtime types) is refused with
+    /// an error, never compiled from guesses.
+    ///
+    /// # Safety
+    /// `functions_ptrs` must point to at least `max_findex + 1` slots that
+    /// outlive this context and the code compiled against it; calls between
+    /// compiled functions go through them.
+    pub unsafe fn for_module(
+        backend: &AshCraneliftBackend,
+        module: Arc<dyn ModuleInfo + Send + Sync>,
+        functions_ptrs: *mut *mut c_void,
+        max_findex: usize,
+    ) -> Result<Self> {
+        unsafe {
+            Self::build(
+                backend,
+                None,
+                Some(module),
+                std::ptr::null_mut(),
+                0,
+                functions_ptrs,
+                max_findex,
+                &[],
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn build(
+        backend: &AshCraneliftBackend,
+        bytecode: Option<&DecodedBytecode>,
+        external: Option<Arc<dyn ModuleInfo + Send + Sync>>,
+        globals_data: *mut *mut c_void,
+        nglobals: usize,
+        functions_ptrs: *mut *mut c_void,
+        max_findex: usize,
+        c_types: &[usize],
+    ) -> Result<Self> {
+        let functions: &[crate::types::HLFunction] = bytecode.map_or(&[], |b| &b.functions);
+        let natives: &[crate::types::HLNative] = bytecode.map_or(&[], |b| &b.natives);
         let mut findex_to_func = HashMap::new();
-        for (i, f) in bytecode.functions.iter().enumerate() {
+        for (i, f) in functions.iter().enumerate() {
             findex_to_func.insert(f.findex as usize, i);
         }
         let mut findex_to_native = HashMap::new();
-        let mut native_keys = Vec::with_capacity(bytecode.natives.len());
-        let mut native_contexts = Vec::with_capacity(bytecode.natives.len());
-        let mut native_records = Vec::with_capacity(bytecode.natives.len());
-        for (i, n) in bytecode.natives.iter().enumerate() {
+        let mut native_keys = Vec::with_capacity(natives.len());
+        let mut native_contexts = Vec::with_capacity(natives.len());
+        let mut native_records = Vec::with_capacity(natives.len());
+        for (i, n) in natives.iter().enumerate() {
             findex_to_native.insert(n.findex as usize, i);
             let clean = n.lib.strip_prefix('?').unwrap_or(&n.lib);
             let sym = format!("hlp_{}", n.name);
@@ -567,7 +671,7 @@ impl CraneliftTierContext {
         };
 
         Ok(Self {
-            bytecode: bytecode as *const _,
+            bytecode: bytecode.map_or(std::ptr::null(), |b| b as *const _),
             globals_data: globals_data as usize,
             nglobals,
             functions_ptrs: functions_ptrs as usize,
@@ -629,6 +733,7 @@ impl CraneliftTierContext {
             loop_counters: Mutex::new(HashMap::new()),
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
+            external,
         })
     }
 
@@ -656,9 +761,31 @@ impl CraneliftTierContext {
             .or_insert_with(|| Box::into_raw(Box::new(0u64)) as usize)
     }
 
-    pub fn bytecode(&self) -> &DecodedBytecode {
+    /// The bytecode this context was built over. An error for a context built
+    /// by [`Self::for_module`], which has none.
+    pub fn bytecode(&self) -> Result<&DecodedBytecode> {
+        if self.bytecode.is_null() {
+            bail!("this program has no bytecode, and this function needs it");
+        }
         // SAFETY: see the type-level contract.
-        unsafe { &*self.bytecode }
+        Ok(unsafe { &*self.bytecode })
+    }
+
+    /// Names the program this context compiles for, so a key built from it
+    /// cannot collide across programs.
+    pub fn program_id(&self) -> usize {
+        match &self.external {
+            Some(m) => Arc::as_ptr(m) as *const () as usize,
+            None => self.bytecode as usize,
+        }
+    }
+
+    /// What the program says about types, signatures and constants.
+    pub fn module(&self) -> &dyn ModuleInfo {
+        match &self.external {
+            Some(m) => m.as_ref(),
+            None => self.air_module(),
+        }
     }
 
     /// The module view AIR v2 lowers against.
@@ -667,6 +794,8 @@ impl CraneliftTierContext {
             // SAFETY: the same contract `bytecode` is held to — the decoded
             // bytecode outlives this context and is never mutated after
             // decoding — which is exactly what the `'static` claims.
+            // Only a bytecode context lowers opcodes, which is the one caller.
+            assert!(!self.bytecode.is_null(), "a module context has no bytecode");
             AshModule::new(unsafe { &*self.bytecode })
         })
     }
@@ -701,10 +830,9 @@ impl CraneliftTierContext {
     }
 
     pub fn type_kind(&self, type_idx: usize) -> Result<hl::hl_type_kind> {
-        self.bytecode()
-            .types
-            .get(type_idx)
-            .map(|t| t.kind)
+        self.module()
+            .type_kind(air::v2::TypeRef(type_idx as u32))
+            .map(crate::type_kind::hl_kind)
             .ok_or_else(|| anyhow!("type index {type_idx} out of range"))
     }
 
@@ -720,7 +848,7 @@ impl CraneliftTierContext {
             return Ok(hash);
         }
         let name = self
-            .bytecode()
+            .bytecode()?
             .strings
             .get(string_idx)
             .ok_or_else(|| anyhow!("dynamic field name {string_idx} out of range"))?;
@@ -747,7 +875,7 @@ impl CraneliftTierContext {
     /// the lookup on the decoded type here so both Cranelift reads and writes
     /// use exactly the hash the loader computed.
     pub fn virtual_field_hash(&self, type_idx: usize, field: usize) -> Result<i32> {
-        self.bytecode()
+        self.bytecode()?
             .types
             .get(type_idx)
             .and_then(|t| t.virt.as_ref())
@@ -758,7 +886,7 @@ impl CraneliftTierContext {
 
     pub fn virtual_field_kind(&self, type_idx: usize, field: usize) -> Result<hl::hl_type_kind> {
         let field_ty = self
-            .bytecode()
+            .bytecode()?
             .types
             .get(type_idx)
             .and_then(|t| t.virt.as_ref())
@@ -814,7 +942,7 @@ impl CraneliftTierContext {
             return Ok(p);
         }
         let s = self
-            .bytecode()
+            .bytecode()?
             .strings
             .get(index)
             .ok_or_else(|| anyhow!("string constant {index} out of range"))?;
@@ -842,7 +970,7 @@ impl CraneliftTierContext {
         {
             return Ok(p);
         }
-        let bc = self.bytecode();
+        let bc = self.bytecode()?;
         let start = *bc
             .bytes_pos
             .get(index)
@@ -1018,7 +1146,7 @@ impl CraneliftTierContext {
     /// legally target either bytecode or a native (for example
     /// `std@dyn_compare`), and both live in `functions_ptrs`/the findex space.
     pub fn func_type_ptr(&self, findex: usize) -> Result<usize> {
-        let bc = self.bytecode();
+        let bc = self.bytecode()?;
         let type_idx = if let Some(i) = self.func_index(findex) {
             bc.functions[i].type_.0
         } else if let Some(i) = self.native_index(findex) {

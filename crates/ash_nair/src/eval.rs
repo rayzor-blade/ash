@@ -251,6 +251,13 @@ fn call(
                     vals[dst.idx()] = Some(*args.get(*reg as usize).ok_or("a missing argument")?)
                 }
                 Instr::Pos { .. } => {}
+                Instr::SetGlobal { global, src } => {
+                    let v = get(&vals, *src)?;
+                    if heap.globals.len() <= *global {
+                        heap.globals.resize(global + 1, Val::Void);
+                    }
+                    heap.globals[*global] = v;
+                }
                 Instr::GetGlobal { dst, global } => {
                     vals[dst.idx()] = Some(heap.globals.get(*global).copied().unwrap_or(Val::Void));
                 }

@@ -188,3 +188,8 @@ fn string_constants_have_the_same_text_either_way() {
     let (matched, _, _, strings) = agree("tests/strings", &["Main"], 3);
     assert!(matched == 0 || strings > 0, "no function compared a string constant");
 }
+
+#[test]
+fn static_functions_have_the_same_kinds_either_way() {
+    agree("tests/statics", &["Config", "Main"], 3);
+}

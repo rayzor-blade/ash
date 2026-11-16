@@ -10,8 +10,11 @@ use crate::hl::HlType;
 impl<'m, 'a> FnLower<'m, 'a> {
     /// An instance variable access: the object, evaluated, and where the variable lives.
     fn field_target(&mut self, n: &NodeRec) -> Result<Option<(ValueId, FieldSlot)>> {
+        if n.a.get() == field_access::STATIC {
+            return self.static_target(n);
+        }
         if n.a.get() != field_access::INSTANCE {
-            return Err("only instance variables are lowered yet".into());
+            return Err("only instance and static variables are lowered yet".into());
         }
         let field = n.b.get();
         if field == NONE {
@@ -67,6 +70,27 @@ impl<'m, 'a> FnLower<'m, 'a> {
             field: slot.index as usize,
         });
         dst
+    }
+
+    /// `++` and `--` on a variable of an object or a class: read, step, write back.
+    pub(super) fn step_field(
+        &mut self,
+        target: &NodeRec,
+        up: bool,
+        postfix: bool,
+    ) -> Result<Option<ValueId>> {
+        let Some((obj, slot)) = self.field_target(target)? else {
+            return Ok(None);
+        };
+        let old = self.load_field(obj, slot);
+        let new = self.stepped(old, up)?;
+        self.emit(Instr::FieldSet {
+            obj,
+            obj_ty: TypeRef(slot.owner as u32),
+            field: slot.index as usize,
+            src: new,
+        });
+        Ok(Some(if postfix { old } else { new }))
     }
 
     pub(super) fn assign_field(

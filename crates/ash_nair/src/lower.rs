@@ -22,9 +22,11 @@ use crate::build::TypeBuilder;
 use crate::hl::{HlType, TypeIx};
 
 mod arrays;
+mod init;
 mod methods;
 mod nulls;
 mod objects;
+mod statics;
 mod strings;
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -328,6 +330,37 @@ impl<'m, 'a> FnLower<'m, 'a> {
             s.write_var(local, entry, v);
         }
         Ok(s)
+    }
+
+    /// A function that takes nothing and has no body in the file, which the lowering builds from
+    /// pieces: see [`Module::lower_init`].
+    fn bare(m: &'m mut Module<'a>) -> Self {
+        let tast = m.tast;
+        let ret_ty = m.types.table.add(HlType::Void);
+        let mut s = FnLower {
+            m,
+            tast,
+            f: Function::new(Vec::new()),
+            term: Vec::new(),
+            cur: None,
+            preds: Vec::new(),
+            sealed: Vec::new(),
+            defs: Vec::new(),
+            incomplete: Vec::new(),
+            phi_block: HashMap::new(),
+            var_ty: HashMap::new(),
+            replace: HashMap::new(),
+            loops: Vec::new(),
+            temps: 0,
+            ret_ty,
+            func: NONE,
+            this_ty: None,
+            this_class: None,
+        };
+        let entry = s.new_block();
+        s.seal(entry);
+        s.cur = Some(entry);
+        s
     }
 
     fn run(mut self) -> Result<Function> {
@@ -932,44 +965,39 @@ impl<'m, 'a> FnLower<'m, 'a> {
             }
             "OpIncrement" | "OpDecrement" => {
                 let t = *self.tast.node(operand);
+                let postfix = n.flags & node_flag::POSTFIX != 0;
+                if t.kind == node_kind::FIELD {
+                    return self.step_field(&t, op == "OpIncrement", postfix);
+                }
                 if t.kind != node_kind::LOCAL {
-                    return Err("++ and -- on anything but a local are not lowered yet".into());
+                    return Err("++ and -- on anything but a local or a field are not lowered yet".into());
                 }
                 let local = t.a.get();
                 self.ensure_var(local)?;
                 let b = self.cur.ok_or("an increment in unreachable code")?;
                 let old = self.read_var(local, b)?;
-                let ty = self.val_ty(old);
-                let new = if self.m.types.table.types[ty] == HlType::I32 {
-                    let dst = self.value(ty);
-                    self.emit(Instr::UnOp {
-                        op: if op == "OpIncrement" {
-                            UnOp::Incr
-                        } else {
-                            UnOp::Decr
-                        },
-                        dst,
-                        src: old,
-                    });
-                    dst
-                } else {
-                    let one = self.float_const(1.0);
-                    let name = if op == "OpIncrement" {
-                        "OpAdd"
-                    } else {
-                        "OpSub"
-                    };
-                    self.arith(name, old, one, ty)?
-                };
+                let new = self.stepped(old, op == "OpIncrement")?;
                 self.write_var(local, b, new);
-                Ok(Some(if n.flags & node_flag::POSTFIX != 0 {
-                    old
-                } else {
-                    new
-                }))
+                Ok(Some(if postfix { old } else { new }))
             }
             other => Err(format!("operator {other} is not lowered yet")),
         }
+    }
+
+    /// `old` plus one, or minus one.
+    fn stepped(&mut self, old: ValueId, up: bool) -> Result<ValueId> {
+        let ty = self.val_ty(old);
+        if self.m.types.table.types[ty] == HlType::I32 {
+            let dst = self.value(ty);
+            self.emit(Instr::UnOp {
+                op: if up { UnOp::Incr } else { UnOp::Decr },
+                dst,
+                src: old,
+            });
+            return Ok(dst);
+        }
+        let one = self.float_const(1.0);
+        self.arith(if up { "OpAdd" } else { "OpSub" }, old, one, ty)
     }
 
     /// A comparison or `&&`/`||` used as a value: branch, then merge a constant.

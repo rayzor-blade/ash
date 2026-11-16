@@ -97,9 +97,16 @@ Two of them exist for a page, and a host with no page returns 0 for both:
   `-`), and the memory must be shared. A page that installed an `ashAgent`
   hook gets `{ name, memory, address }`. The page that ash writes then imports
   the library's shim, `./<name>.mjs` beside it, on the page's own thread and
-  calls its `start({ memory, address, canvas })`, where `canvas` is the page's
-  `<canvas>` element. The shim decides for itself what to start: a Worker it
-  creates, the canvas transferred to that Worker, listeners on the element.
+  calls its `start({ memory, address, canvas, fail })`, where `canvas` is the
+  page's `<canvas>` element. The shim decides for itself what to start: a
+  Worker it creates, the canvas transferred to that Worker, listeners on the
+  element. A shim that cannot start throws, or rejects if `start` is async. A
+  shim that learns later that the program is waiting on something that will
+  not come, such as a command that threw and has no reply to carry it, calls
+  `fail(reason)` with an `Error` or a string that names the operation. Either
+  way the page writes `agent <name>: <reason>` to its log and its console,
+  stops the program and sets its title to `<module> — trapped`, which is what
+  a runner reads. A failure after the program has finished is ignored.
   The page knows no library by name. `display.js` takes the canvas only for a
   program that presents a framebuffer, and only if no shim transferred it
   first. The program's own agent cannot do this itself: it is inside a call

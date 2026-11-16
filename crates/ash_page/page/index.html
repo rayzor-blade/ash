@@ -61,9 +61,36 @@ const takeScreen = () => {
     return null;
   }
 };
+const describe = (e) => {
+  if (e instanceof Error) return `${e.name}: ${e.message}`;
+  if (e && typeof e.message === "string") return e.message;
+  return String(e);
+};
+// Set once the page has its answer, "done" or a failure; the first one stands.
+let ended = false;
+// Ends the page as trapped when something the program waits on is gone: an
+// agent that did not start or reported a failure, or the program's own worker.
+// The program may be blocked on a reply that will never come, so it is
+// stopped here. The text goes to the console too, which is where a runner
+// reads it, and to the log, which is shown whatever `?debug` says.
+const fail = (source, reason) => {
+  if (ended) return;
+  ended = true;
+  const text = `${source}: ${describe(reason)}`;
+  console.error(text);
+  document.body.classList.add("debug");
+  out.hidden = false;
+  write(text, "err");
+  worker.terminate();
+  if (display) display.terminate();
+  for (const agent of threadAgents) agent.terminate();
+  document.title = `${module.slice(2)} — trapped`;
+};
 const worker = new Worker("./worker.js", { type: "module" });
 worker.onmessage = ({ data }) => {
   if (data.kind === "done") {
+    if (ended) return;
+    ended = true;
     for (const agent of threadAgents) agent.terminate();
     document.title = `${module.slice(2)} — ${data.trapped ? "trapped" : "done"}`;
     return;
@@ -72,14 +99,17 @@ worker.onmessage = ({ data }) => {
   // shim, <name>.mjs beside this page, is loaded here, on the page's thread,
   // and started with the program's memory, the address it named and the
   // canvas element. What it starts -- a Worker, DOM listeners -- is its own.
+  // `fail(reason)` is for what it learns later, such as a command that threw
+  // and has no reply to carry it; the program may be waiting on that reply.
   if (data.kind === "spawn-agent") {
     import(new URL(`./${data.name}.mjs`, location.href))
       .then((shim) => shim.start({
         memory: data.memory,
         address: data.address,
         canvas: document.getElementById("screen"),
+        fail: (reason) => fail(`agent ${data.name}`, reason),
       }))
-      .catch((e) => write(`${data.name}.mjs: ${e && e.message ? e.message : e}`, "err"));
+      .catch((e) => fail(`agent ${data.name} did not start`, e));
     return;
   }
   if (data.kind === "display") {
@@ -94,7 +124,7 @@ worker.onmessage = ({ data }) => {
   }
   write(data.text, data.kind === "err" ? "err" : data.kind === "meta" ? "meta" : "");
 };
-worker.onerror = (e) => write(`worker: ${e.message}`, "err");
+worker.onerror = (e) => fail("worker", e.message || "no reason given");
 
 const query = new URLSearchParams(location.search);
 // The agents Haxe threads run on, made here rather than in worker.js: some

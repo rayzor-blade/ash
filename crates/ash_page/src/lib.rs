@@ -259,6 +259,16 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_fails_ends_the_page_as_trapped() {
+        // A shim gets `fail`, and one that does not start, or calls it, stops
+        // the program, which may be waiting on a reply that will not come.
+        assert!(INDEX_HTML.contains("fail: (reason) => fail("));
+        assert!(INDEX_HTML.contains(".catch((e) => fail("));
+        assert!(INDEX_HTML.contains("worker.terminate();"));
+        assert!(INDEX_HTML.contains("document.title = `${module.slice(2)} — trapped`;"));
+    }
+
+    #[test]
     fn the_log_pane_is_hidden_unless_debugging() {
         // Hidden rather than absent: a page runner reads its textContent.
         assert!(INDEX_HTML.contains("<pre id=\"out\" hidden></pre>"));

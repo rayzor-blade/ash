@@ -31,6 +31,42 @@ impl<'m, 'a> FnLower<'m, 'a> {
         ty: u32,
     ) -> Result<Option<ValueId>> {
         match (name, args) {
+            ("$ref", [local]) => {
+                let n = *self.tast.node(*local);
+                if n.kind != node_kind::LOCAL {
+                    return Err("$ref of something that is not a local variable".into());
+                }
+                let var = n.a.get();
+                self.ensure_var(var)?;
+                let cell = self.cell_for(var);
+                let want = self.m.types.to_type(ty)?;
+                let dst = self.value(want);
+                self.emit(Instr::CellRef { dst, cell });
+                Ok(Some(dst))
+            }
+            ("$unref", [r]) => {
+                let Some(src) = self.expr(*r)? else {
+                    return Ok(None);
+                };
+                let want = self.m.types.to_type(ty)?;
+                let dst = self.value(want);
+                self.emit(Instr::Unref { dst, src });
+                Ok(Some(dst))
+            }
+            ("$setref", [r, value]) => {
+                let Some(held) = self.expr(*r)? else {
+                    return Ok(None);
+                };
+                let HlType::Ref(inner) = self.m.types.table.types[self.val_ty(held)] else {
+                    return Err("$setref of something that is not a reference".into());
+                };
+                let Some(value) = self.expr(*value)? else {
+                    return Ok(None);
+                };
+                let value = self.coerce(value, inner)?;
+                self.emit(Instr::SetRef { r: held, value });
+                Ok(Some(value))
+            }
             ("$new", [_]) => {
                 let want = self.m.types.to_type(ty)?;
                 if !matches!(self.m.types.table.types[want], HlType::Obj(_)) {

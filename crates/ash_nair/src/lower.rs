@@ -182,7 +182,15 @@ impl<'a> Module<'a> {
         }
         let mut out = Vec::new();
         while let Some(f) = self.pending.pop() {
-            out.push(self.lower_field(f)?);
+            let lowered = self.lower_field(f).map_err(|why| {
+                let owner = self.tast.fields()[f as usize].owner.get();
+                format!(
+                    "{}.{}: {why}",
+                    self.types.class_name(owner),
+                    self.types.field_name(f)
+                )
+            })?;
+            out.push(lowered);
         }
         let defined: HashSet<u32> = out
             .iter()
@@ -243,6 +251,25 @@ impl<'a> Module<'a> {
 }
 
 /// A variable of the body: a local of the file, or a temporary the lowering made.
+/// The locals the body of `node` takes the address of with `$ref`.
+fn address_taken(tast: Tast, node: u32, out: &mut HashSet<Var>) {
+    let n = *tast.node(node);
+    let kids: Vec<u32> = tast.kid_ids(&n).collect();
+    if n.kind == node_kind::CALL && kids.len() == 2 {
+        let callee = *tast.node(kids[0]);
+        let arg = *tast.node(kids[1]);
+        if callee.kind == node_kind::IDENT
+            && tast.string(callee.a.get()) == "$ref"
+            && arg.kind == node_kind::LOCAL
+        {
+            out.insert(arg.a.get());
+        }
+    }
+    for k in kids {
+        address_taken(tast, k, out);
+    }
+}
+
 type Var = u32;
 const TEMP: Var = 0x8000_0000;
 /// `this`, which is a variable of a method like any local.
@@ -270,6 +297,10 @@ struct FnLower<'m, 'a> {
     this_ty: Option<TypeIx>,
     /// The class whose method this is.
     this_class: Option<u32>,
+    /// The variables whose address the body takes with `$ref`: they live in memory cells, read and
+    /// written there, instead of being SSA values.
+    address_taken: HashSet<Var>,
+    cell_of: HashMap<Var, CellId>,
 }
 
 impl<'m, 'a> FnLower<'m, 'a> {
@@ -305,7 +336,12 @@ impl<'m, 'a> FnLower<'m, 'a> {
             func,
             this_ty,
             this_class,
+            address_taken: HashSet::new(),
+            cell_of: HashMap::new(),
         };
+        if rec.root.get() != NONE {
+            address_taken(tast, rec.root.get(), &mut s.address_taken);
+        }
         // block 0 holds the parameters and falls into the body
         let entry = s.new_block();
         s.seal(entry);
@@ -356,6 +392,8 @@ impl<'m, 'a> FnLower<'m, 'a> {
             func: NONE,
             this_ty: None,
             this_class: None,
+            address_taken: HashSet::new(),
+            cell_of: HashMap::new(),
         };
         let entry = s.new_block();
         s.seal(entry);
@@ -455,7 +493,23 @@ impl<'m, 'a> FnLower<'m, 'a> {
     // ---- SSA construction
 
     fn write_var(&mut self, var: Var, b: BlockId, v: ValueId) {
+        if self.address_taken.contains(&var) {
+            let cell = self.cell_for(var);
+            self.emit(Instr::CellSet { cell, src: v });
+            return;
+        }
         self.defs[b.idx()].insert(var, v);
+    }
+
+    /// The memory cell of a variable whose address is taken, made on first use.
+    fn cell_for(&mut self, var: Var) -> CellId {
+        if let Some(c) = self.cell_of.get(&var) {
+            return *c;
+        }
+        let ty = self.var_ty[&var];
+        let c = self.new_cell(ty);
+        self.cell_of.insert(var, c);
+        c
     }
 
     fn resolve(&self, mut v: ValueId) -> ValueId {
@@ -466,6 +520,16 @@ impl<'m, 'a> FnLower<'m, 'a> {
     }
 
     fn read_var(&mut self, var: Var, b: BlockId) -> Result<ValueId> {
+        if self.address_taken.contains(&var) {
+            let ty = *self
+                .var_ty
+                .get(&var)
+                .ok_or_else(|| format!("a variable read before its declaration (local {var})"))?;
+            let cell = self.cell_for(var);
+            let dst = self.value(ty);
+            self.emit(Instr::CellGet { dst, cell });
+            return Ok(dst);
+        }
         if let Some(v) = self.defs[b.idx()].get(&var).copied() {
             return Ok(self.resolve(v));
         }

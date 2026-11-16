@@ -82,7 +82,8 @@ impl<'a> Program<'a> {
     }
 
     /// The natives the functions call. Those the interpreter runs: `alloc_array` (a native array
-    /// of nulls), `array_blit`, `alloc_bytes`, `bytes_blit`, and `itos` and `ftos`, which write a number as
+    /// of nulls), `array_blit`, `alloc_bytes`, `bytes_blit`, `sys_print`, `math_sqrt`, `math_isnan`,
+    /// and `itos` and `ftos`, which write a number as
     /// UTF-16 and give its length through a reference.
     pub fn with_natives(mut self, natives: &[crate::lower::Native]) -> Program<'a> {
         self.natives = natives
@@ -162,6 +163,10 @@ pub struct Heap {
     cells: Vec<Val>,
     /// The fields set by name on dynamic objects, by object and string index.
     dynamic: HashMap<(usize, usize), Val>,
+    /// What the program printed with `sys_print`.
+    pub output: String,
+    /// The `String` type and where its bytes and length are, once [`Heap::init_constants`] knows.
+    string: Option<(usize, usize, usize)>,
     globals: Vec<Val>,
 }
 
@@ -194,6 +199,7 @@ impl Heap {
         bytes: usize,
         length: usize,
     ) -> Result<(), String> {
+        self.string = Some((ty, bytes, length));
         for (global, text) in &p.constants {
             let text = p.strings.get(*text).ok_or("a constant outside the string pool")?;
             let buf = self.bytes(
@@ -301,6 +307,54 @@ fn call(
                     .copy_from_slice(&from);
                 Ok(Val::Void)
             }
+            ("value_to_string", [value, Val::Ref(at)]) => {
+                let text = match *value {
+                    Val::I(x) => x.to_string(),
+                    Val::F(x) => x.to_string(),
+                    Val::B(x) => x.to_string(),
+                    Val::Void => "null".to_owned(),
+                    Val::Obj(h) => {
+                        let (ty, bytes, length) =
+                            heap.string.ok_or("value_to_string before the string type is known")?;
+                        if heap.objects[h].0 != ty {
+                            return Err("value_to_string of an object that is not a string".into());
+                        }
+                        heap.read_string(Val::Obj(h), bytes, length)
+                            .ok_or("a string that cannot be read")?
+                    }
+                    other => return Err(format!("value_to_string of {other:?}")),
+                };
+                let units: Vec<u16> = text.encode_utf16().collect();
+                heap.cells[*at] = Val::I(units.len() as i32);
+                Ok(heap.bytes(
+                    units
+                        .iter()
+                        .chain(std::iter::once(&0))
+                        .flat_map(|u| u.to_le_bytes())
+                        .collect(),
+                ))
+            }
+            ("sys_print", [Val::Mem(m)]) => {
+                // UTF-16 up to the terminator
+                let units: Vec<u16> = heap.memory[*m]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes(*c))
+                    .take_while(|u| *u != 0)
+                    .collect();
+                heap.output.push_str(&String::from_utf16_lossy(&units));
+                Ok(Val::Void)
+            }
+            ("bytes_fill", [Val::Mem(m), Val::I(pos), Val::I(n), Val::I(byte)]) => {
+                heap.memory[*m]
+                    .get_mut(*pos as usize..(*pos + *n) as usize)
+                    .ok_or("a fill past the end of the bytes")?
+                    .fill(*byte as u8);
+                Ok(Val::Void)
+            }
+            ("math_sqrt", [Val::F(x)]) => Ok(Val::F(x.sqrt())),
+            ("math_isnan", [Val::F(x)]) => Ok(Val::B(x.is_nan())),
             ("array_blit", [Val::Arr(dst), Val::I(dpos), Val::Arr(src), Val::I(spos), Val::I(n)]) => {
                 let (dpos, spos, n) = (*dpos as usize, *spos as usize, *n as usize);
                 let from = heap.arrays[*src]
@@ -672,6 +726,18 @@ fn call(
                         return Err("a field read on something that is not an object".into());
                     };
                     vals[dst.idx()] = Some(heap.dynamic.get(&(h, *field)).copied().unwrap_or(Val::Void));
+                }
+                Instr::Unref { dst, src } => {
+                    let Val::Ref(at) = get(&vals, *src)? else {
+                        return Err("a read through something that is not a reference".into());
+                    };
+                    vals[dst.idx()] = Some(heap.cells[at]);
+                }
+                Instr::SetRef { r, value } => {
+                    let (Val::Ref(at), v) = (get(&vals, *r)?, get(&vals, *value)?) else {
+                        return Err("a write through something that is not a reference".into());
+                    };
+                    heap.cells[at] = v;
                 }
                 Instr::CellRef { dst, cell } => {
                     let at = *cells[cell.idx()].get_or_insert_with(|| {

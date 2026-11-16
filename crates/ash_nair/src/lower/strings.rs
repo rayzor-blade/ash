@@ -127,7 +127,7 @@ impl<'m, 'a> FnLower<'m, 'a> {
     }
 
     /// A register whose address is taken, which lives in memory for as long as the function runs.
-    fn new_cell(&mut self, ty: TypeIx) -> CellId {
+    pub(super) fn new_cell(&mut self, ty: TypeIx) -> CellId {
         let t = TypeRef(ty as u32);
         let reg = self.f.new_reg(t);
         let id = CellId(self.f.cells.len() as u32);

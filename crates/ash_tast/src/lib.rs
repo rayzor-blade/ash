@@ -10,6 +10,10 @@
 //! requirement, so a memory-mapped file is read as `&[Record]` directly. One
 //! validation pass checks every cross-reference; after it, ids are trusted.
 
+// The zerocopy derives on the records in `format` name their output with
+// identifiers that newer toolchains report under this lint.
+#![allow(uncommon_codepoints)]
+
 pub mod builder;
 pub mod dump;
 pub mod format;

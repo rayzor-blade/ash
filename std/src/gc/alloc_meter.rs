@@ -227,6 +227,8 @@ mod tests {
         });
     }
 
+    // Registering a thread is a target with real threads' business.
+    #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
     #[test]
     fn the_totals_count_another_threads_open_region_and_keep_it_when_the_thread_ends() {
         if !tlab_enabled() {

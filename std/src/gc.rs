@@ -9157,15 +9157,6 @@ mod tests {
         }
     }
 
-    /// The bump allocator and the sweep must agree where a line begins.
-    ///
-    /// One finds the boundary from the absolute address (`p & (LINE_SIZE-1)`)
-    /// and the other from the offset into the heap, so they agree only while
-    /// the base is a multiple of `LINE_SIZE`. Every platform with a real
-    /// `mmap` gets that from page alignment; a platform served by the plain
-    /// allocator gets whatever it asked for, and asking for too little cost a
-    /// wasm build a live array's contents with no crash and no diagnostic.
-
     #[test]
     fn explicit_collections_do_not_widen_the_interval() {
         // Back to back: each pause is nearly all of the time since the last.
@@ -9212,6 +9203,15 @@ mod tests {
         gc.sweep(&[], false, 0);
         assert_eq!(gc.heap.pending_handback.len(), RESIDENT_FREE_BLOCKS);
     }
+
+    /// The bump allocator and the sweep must agree where a line begins.
+    ///
+    /// One finds the boundary from the absolute address (`p & (LINE_SIZE-1)`)
+    /// and the other from the offset into the heap, so they agree only while
+    /// the base is a multiple of `LINE_SIZE`. Every platform with a real
+    /// `mmap` gets that from page alignment; a platform served by the plain
+    /// allocator gets whatever it asked for, and asking for too little cost a
+    /// wasm build a live array's contents with no crash and no diagnostic.
     #[test]
     fn the_heap_base_is_line_aligned() {
         let heap = HeapMemory::new(BLOCK_SIZE * 4);

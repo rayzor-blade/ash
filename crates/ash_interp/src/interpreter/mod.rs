@@ -1401,7 +1401,13 @@ impl HLInterpreter {
             worker_beads: Mutex::new(HashMap::new()),
             hot_bounds: Mutex::new(HashMap::new()),
             loops_proposed: Mutex::new(HashSet::new()),
-            loop_threshold: config.opt_threshold,
+            // Loop iterations before a function is proposed for the top tier.
+            // ASH_LOOP_THRESHOLD overrides the configured value; safe at any value.
+            loop_threshold: std::env::var("ASH_LOOP_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(config.loop_threshold)
+                .unwrap_or(config.opt_threshold),
             adapter: Arc::downgrade(&adapter),
             worker_compile_lock: Mutex::new(()),
             worker_closure_deps: Mutex::new(HashMap::new()),

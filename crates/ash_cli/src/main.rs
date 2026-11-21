@@ -1621,6 +1621,12 @@ fn run() -> Result<()> {
                     Some(p) if !arg_given("--opt-threshold") => p.opt_threshold,
                     _ => cli.opt_threshold,
                 },
+                // A typed --opt-threshold sets loops too; only the preset's own
+                // loop threshold is kept apart from it.
+                loop_threshold: match &preset_cfg {
+                    Some(p) if !arg_given("--opt-threshold") => p.loop_threshold,
+                    _ => None,
+                },
                 max_jit_args: cli.jit_max_args,
                 min_ops_for_promotion: cli.jit_min_ops,
                 log_promotions: cli.jit_log,

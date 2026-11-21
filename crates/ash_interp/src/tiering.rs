@@ -92,6 +92,13 @@ pub struct TieredConfig {
     /// applications keep ordinary UI work in Cranelift, while throughput and
     /// frame-budget presets reach the optimising tier sooner.
     pub opt_threshold: u64,
+    /// Loop iterations before a function is proposed for the optimising tier,
+    /// when that should differ from `opt_threshold`. `None` follows it.
+    ///
+    /// A call count says a function is busy; an iteration count says a loop
+    /// is. They are not the same demand, and a low iteration count sends
+    /// loops that are merely warm, such as a tree walk, to LLVM.
+    pub loop_threshold: Option<u64>,
     /// Cap on how wide a signature may be to promote.
     ///
     /// Calls beyond the inline eight use the backend's uniform entry. Keep a
@@ -112,6 +119,7 @@ impl Default for TieredConfig {
             compiled_only: false,
             jit_threshold: 100,
             opt_threshold: 250,
+            loop_threshold: None,
             max_jit_args: 32,
             // 0 disables the static opcode-size gate; promotion hotness is call-count based.
             min_ops_for_promotion: 0,
@@ -129,7 +137,7 @@ impl Default for TieredConfig {
 /// |---------------|-----|-------|---------------------------------------------|
 /// | `Script`      |  20 | 2 000 | one-shot CLI work; optimise only if the run lasts |
 /// | `Application` | 100 | 10 000 | ordinary UI work stays in Cranelift         |
-/// | `Game`        |  10 |   200 | frame budgets: compile during load, not play |
+/// | `Game`        |  10 |   200 | frame budgets: calls reach LLVM early, loops after 10 000 iterations |
 /// | `Server`      |  50 |   250 | long-lived processes; compile cost amortises |
 /// | `Benchmark`   |   2 |    10 | drive everything through every tier          |
 /// | `Development` | 100 | 5 000 | favours iteration over peak                 |
@@ -208,10 +216,13 @@ impl TierPreset {
             // middle of frame 400: a function called once per frame passes 10
             // in the first sixth of a second and 200 within a few seconds, so
             // both tiers are reached during startup rather than during play.
+            // Loops wait for 10 000 iterations: LLVM pays off on dense loops,
+            // and at 200 it was also taking pointer-chasing ones.
             TierPreset::Game => TieredConfig {
                 enabled: true,
                 jit_threshold: 10,
                 opt_threshold: 200,
+                loop_threshold: Some(10_000),
                 ..base
             },
             TierPreset::Server => TieredConfig {

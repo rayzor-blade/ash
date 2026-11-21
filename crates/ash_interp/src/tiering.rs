@@ -1142,6 +1142,19 @@ fn forget_refusals() {
     }
 }
 
+/// Findexes named in `ASH_LLVM_SKIP_FINDEXES` (comma separated). They stay at
+/// the Cranelift tier, to find which LLVM body is the slow one; safe at any
+/// value, and ignored outside the Auto ladder.
+fn llvm_skipped_by_env(findex: usize) -> bool {
+    static SKIP: OnceLock<Vec<usize>> = OnceLock::new();
+    SKIP.get_or_init(|| {
+        std::env::var("ASH_LLVM_SKIP_FINDEXES")
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    })
+    .contains(&findex)
+}
+
 fn gate_rejected(findex: usize) -> bool {
     GATE_REJECTED
         .lock()
@@ -1404,6 +1417,14 @@ fn tiered_compile_tier_inner(
         // re-proposed deltablue's 21 gated functions 1051664 times, so the
         // decision has to be remembered, just not there.
         if gate_rejected(findex) {
+            return std::ptr::null_mut();
+        }
+        if llvm_skipped_by_env(findex) {
+            remember_gate_rejection(findex);
+            record_decline(findex, "skipped by ASH_LLVM_SKIP_FINDEXES");
+            if ctx.tier_log {
+                eprintln!("[tier] skip findex={findex} tier=llvm reason=env");
+            }
             return std::ptr::null_mut();
         }
         #[cfg(feature = "llvm")]

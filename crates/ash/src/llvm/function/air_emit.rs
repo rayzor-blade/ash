@@ -23,6 +23,7 @@ use crate::types::{HLFunction, TypeRef};
 use anyhow::{Result, anyhow};
 
 use super::fiber_polls_enabled;
+use super::nested_strip::{NestedPlan, NestedStrip, nested_strip_enabled};
 
 impl<'ctx> JITModule<'ctx> {
     /// Lower a verified AIR v2 function directly to LLVM.
@@ -394,6 +395,24 @@ impl<'ctx> JITModule<'ctx> {
                 });
             }
         }
+        // Counted loops with nothing that calls in them keep their poll in an
+        // outer loop, so the inner one can be vectorized: see `nested_strip`.
+        let mut nested_plans: std::collections::HashMap<u32, NestedPlan> =
+            std::collections::HashMap::new();
+        if nested_strip_enabled() {
+            for test in &air.strip_tests {
+                let bi = test.header.idx();
+                if !(poll_headers[bi] && back_edge_poll[bi]) {
+                    continue;
+                }
+                let Some(lp) = loops.loops.iter().find(|l| l.header == test.header) else {
+                    continue;
+                };
+                if let Some(plan) = self.nested_strip_plan(air, lp, reg_types) {
+                    nested_plans.insert(test.header.0, plan);
+                }
+            }
+        }
         let has_polls = poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
         let mut poll_entries = vec![None; air.blocks.len()];
@@ -409,13 +428,16 @@ impl<'ctx> JITModule<'ctx> {
                     .context
                     .append_basic_block(function, &format!("air_b{bi}_fiber_poll"));
                 poll_entries[bi] = Some(poll);
-                if !back_edge_poll[bi] {
+                if !back_edge_poll[bi] || nested_plans.contains_key(&(bi as u32)) {
                     entries[bi] = Some(poll);
                 }
             }
         }
         for lp in &loops.loops {
-            if poll_headers[lp.header.idx()] && back_edge_poll[lp.header.idx()] {
+            if poll_headers[lp.header.idx()]
+                && back_edge_poll[lp.header.idx()]
+                && !nested_plans.contains_key(&lp.header.0)
+            {
                 for latch in &lp.latches {
                     back_edges.insert((latch.0, lp.header.0));
                 }
@@ -474,6 +496,16 @@ impl<'ctx> JITModule<'ctx> {
             None
         };
 
+        let mut nested: std::collections::HashMap<u32, NestedStrip<'ctx>> =
+            std::collections::HashMap::new();
+        for (&header, &plan) in &nested_plans {
+            let BasicTypeEnum::IntType(int_ty) = reg_types[plan.phi.idx()] else {
+                continue;
+            };
+            let end = self.builder.build_alloca(int_ty, "air_strip_end_slot")?;
+            nested.insert(header, NestedStrip { plan, end });
+        }
+
         let first = entries
             .get(entry_target.idx())
             .copied()
@@ -506,7 +538,12 @@ impl<'ctx> JITModule<'ctx> {
             // iteration skips straight to the join. On the back edge the
             // stepped value is what is defined; in front of the header, the
             // phi, whose slot the edge has already written.
-            if let Some(test) = air.strip_tests.iter().find(|t| t.header.0 == bi as u32) {
+            if let Some(test) = air
+                .strip_tests
+                .iter()
+                .find(|t| t.header.0 == bi as u32)
+                .filter(|_| !nested.contains_key(&(bi as u32)))
+            {
                 let value = if back_edge_poll[bi] {
                     test.stepped
                 } else {
@@ -592,9 +629,24 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.build_unconditional_branch(join)?;
 
             self.builder.position_at_end(join);
+            if let Some(strip) = nested.get(&(bi as u32)) {
+                self.emit_strip_end(strip, registers, reg_types)?;
+            }
             self.builder.build_unconditional_branch(body)?;
             poll_blocks[bi].push(poll_entry);
             poll_blocks[bi].extend(blocks_after(function, poll_before));
+        }
+
+        // A nested loop's latch goes straight to the header: the poll is on
+        // the way in and between strips, not on every trip.
+        let mut direct: std::collections::HashMap<(u32, u32), BasicBlock<'ctx>> =
+            std::collections::HashMap::new();
+        for lp in &loops.loops {
+            if nested.contains_key(&lp.header.0) {
+                for latch in &lp.latches {
+                    direct.insert((latch.0, lp.header.0), blocks[lp.header.idx()][0]);
+                }
+            }
         }
 
         let barrier_free = air::v2::analysis::barrier_free_stores(air);
@@ -1147,6 +1199,8 @@ impl<'ctx> JITModule<'ctx> {
                 &entries,
                 &poll_entries,
                 &back_edges,
+                &nested,
+                &direct,
                 lowering,
                 registers,
                 reg_types,
@@ -1506,7 +1560,7 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Emit copies for one ordinary CFG edge's phi nodes.
-    fn emit_air_phi_edge(
+    pub(super) fn emit_air_phi_edge(
         &mut self,
         air: &AirFunction,
         from: AirBlockId,
@@ -1713,6 +1767,8 @@ impl<'ctx> JITModule<'ctx> {
         entries: &[Option<BasicBlock<'ctx>>],
         poll_entries: &[Option<BasicBlock<'ctx>>],
         back_edges: &std::collections::HashSet<(u32, u32)>,
+        nested: &std::collections::HashMap<u32, NestedStrip<'ctx>>,
+        direct: &std::collections::HashMap<(u32, u32), BasicBlock<'ctx>>,
         lowering: &HLFunction,
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
@@ -1721,6 +1777,9 @@ impl<'ctx> JITModule<'ctx> {
         // A back edge enters its header through the fiber poll; every other
         // edge goes straight in.
         let block = |id: AirBlockId| -> Result<BasicBlock<'ctx>> {
+            if let Some(target) = direct.get(&(bid.0, id.0)) {
+                return Ok(*target);
+            }
             let polled = back_edges
                 .contains(&(bid.0, id.0))
                 .then(|| poll_entries.get(id.idx()).copied().flatten())
@@ -1761,6 +1820,28 @@ impl<'ctx> JITModule<'ctx> {
             AirTerminator::Jump { target } => {
                 self.emit_air_phi_edge(air, bid, *target, registers, reg_types)?;
                 self.builder.build_unconditional_branch(block(*target)?)?;
+            }
+            AirTerminator::CondJump {
+                if_true, if_false, ..
+            } if nested.contains_key(&bid.0) => {
+                let strip = &nested[&bid.0];
+                let (stay, leave) = if strip.plan.exit_on_true {
+                    (*if_false, *if_true)
+                } else {
+                    (*if_true, *if_false)
+                };
+                let poll = entries[bid.idx()]
+                    .ok_or_else(|| anyhow!("nested loop b{} has no poll block", bid.0))?;
+                self.emit_nested_header_branch(
+                    air,
+                    bid,
+                    strip,
+                    (stay, block(stay)?),
+                    (leave, block(leave)?),
+                    poll,
+                    registers,
+                    reg_types,
+                )?;
             }
             AirTerminator::CondJump {
                 cond,

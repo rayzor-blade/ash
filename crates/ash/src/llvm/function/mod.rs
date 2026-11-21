@@ -61,6 +61,7 @@ mod enums;
 mod exports;
 mod memory;
 mod natives;
+mod nested_strip;
 mod objects;
 mod simd;
 

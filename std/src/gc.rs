@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use std::{
@@ -25,6 +25,8 @@ use windows_sys::Win32::System::Memory::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+
+mod alloc_meter;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const RESIDENT_FREE_BLOCKS: usize = 16; // Keep 512 KiB warm between idle bursts.
@@ -336,10 +338,10 @@ thread_local! {
     /// Same shape as the fix in `gc_thread_token` above, for the same reason.
     static TLAB: Tlab = const {
         Tlab {
-            cur: Cell::new(0),
+            cur: AtomicUsize::new(0),
             limit: Cell::new(0),
             block: Cell::new(usize::MAX),
-            noptr_cur: Cell::new(0),
+            noptr_cur: AtomicUsize::new(0),
             noptr_limit: Cell::new(0),
             noptr_block: Cell::new(usize::MAX),
             objects: Cell::new(std::ptr::null()),
@@ -347,6 +349,8 @@ thread_local! {
             registered: Cell::new(false),
             polls: AtomicU64::new(0),
             site: AtomicU64::new(0),
+            start: AtomicUsize::new(0),
+            noptr_start: AtomicUsize::new(0),
         }
     };
 }
@@ -357,8 +361,10 @@ thread_local! {
 /// [`hlp_inline_alloc_layout`]), so the field offsets are an ABI.
 #[repr(C)]
 struct Tlab {
-    /// Bump cursor and the end of the region.
-    cur: Cell<usize>,
+    /// Bump cursor and the end of the region. The cursor is atomic so that
+    /// `hl.Gc.stats()` can read another thread's; the owner still bumps it
+    /// with a relaxed load and store, which compile to plain moves.
+    cur: AtomicUsize,
     limit: Cell<usize>,
     /// Heap offset of the block this thread is bumping through, so a refill
     /// can hand the previous one back to the sweep.
@@ -366,7 +372,7 @@ struct Tlab {
     /// The same three for pointer-free allocations, which bump through their
     /// own blocks. After `cur`/`limit`/`block` so compiled code's offsets to
     /// those hold.
-    noptr_cur: Cell<usize>,
+    noptr_cur: AtomicUsize,
     noptr_limit: Cell<usize>,
     noptr_block: Cell<usize>,
     /// Stable side table, shared atomically with the stopped-world marker.
@@ -386,6 +392,11 @@ struct Tlab {
     /// because the allocation fast path reads it: keeping it in its own
     /// `thread_local!` made every allocation pay a second TLS lookup.
     registered: Cell<bool>,
+    /// Where the current region of each kind began, so the bytes bumped out of
+    /// it are `cur - start`. Written only under the GC lock, when a region is
+    /// adopted or retired; after the fields compiled code addresses.
+    start: AtomicUsize,
+    noptr_start: AtomicUsize,
 }
 
 /// Largest object the bump region serves. At one line, nothing in the
@@ -537,6 +548,10 @@ struct MutatorRecord {
     polls_at_stop: u64,
     /// Where this thread last entered a place it could wait. See `mark_site`.
     site: usize,
+    /// This thread's `Tlab`, so `hl.Gc.stats()` can add up the bytes its
+    /// current bump regions have handed out. Valid until the record is
+    /// removed, which happens before the thread's storage goes.
+    tlab: usize,
     /// Since when this thread has been idle: blocking, with only short turns
     /// between waits. What the idle collector waits on; see `world_idle`.
     idle_since: Option<Instant>,
@@ -609,6 +624,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
             polls: TLAB.with(|t| &t.polls as *const AtomicU64 as usize),
             polls_at_stop: 0,
             site: TLAB.with(|t| &t.site as *const AtomicU64 as usize),
+            tlab: TLAB.with(|t| t as *const Tlab as usize),
             idle_since: None,
             ran: Duration::ZERO,
             waits: 0,
@@ -693,6 +709,13 @@ pub(crate) fn gc_unregister_current_os_thread() {
 fn unregister_current_mutator() {
     let thread = thread_self_fast();
     let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    // The bytes move from this thread's regions to the retired total while a
+    // reader of either is excluded, so a read never sees them in both places
+    // or in neither.
+    TLAB.with(|t| {
+        alloc_meter::retire(t, false);
+        alloc_meter::retire(t, true);
+    });
     world.mutators.retain(|m| m.thread != thread);
     TLAB.with(|t| t.registered.set(false));
     MUTATOR_WORLD.changed.notify_all();
@@ -1414,7 +1437,7 @@ fn gc_alloc_kind(size: usize, noptr: bool) -> Option<NonNull<u8>> {
             } else {
                 (&t.cur, &t.limit)
             };
-            let cur = cur_cell.get();
+            let cur = cur_cell.load(Ordering::Relaxed);
             if cur != 0 {
                 let mut p = cur;
                 if (p & (LINE_SIZE - 1)) + aligned > LINE_SIZE {
@@ -1429,7 +1452,7 @@ fn gc_alloc_kind(size: usize, noptr: bool) -> Option<NonNull<u8>> {
                         }
                         slot.store((aligned / ALLOC_QUANTUM) as u8, Ordering::Relaxed);
                     }
-                    cur_cell.set(np);
+                    cur_cell.store(np, Ordering::Relaxed);
                     return Step::Bumped(p);
                 }
             }
@@ -1455,22 +1478,35 @@ fn gc_alloc_kind(size: usize, noptr: bool) -> Option<NonNull<u8>> {
 /// Releasing the old block simply makes it ordinary again — its live objects
 /// are marked conservatively like any others; it just stops being exempt
 /// from reclamation.
-fn adopt_tlab_region(gc: &mut ImmixAllocator, block: usize, cur: usize, limit: usize, noptr: bool) {
+///
+/// `start` is where the region begins and `cur` where bumping resumes, which
+/// is past the object the refill is about to hand back.
+fn adopt_tlab_region(
+    gc: &mut ImmixAllocator,
+    block: usize,
+    start: usize,
+    cur: usize,
+    limit: usize,
+    noptr: bool,
+) {
     if noptr {
         gc.heap.noptr_tlab_blocks.insert(thread_self_fast(), block);
     } else {
         gc.heap.tlab_blocks.insert(thread_self_fast(), block);
     }
     TLAB.with(|t| {
+        alloc_meter::retire(t, noptr);
         t.objects.set(gc.heap.objects.as_ptr());
         t.heap_base.set(gc.heap.memory.as_ptr() as usize);
         if noptr {
             t.noptr_block.set(block);
-            t.noptr_cur.set(cur);
+            t.noptr_start.store(start, Ordering::Relaxed);
+            t.noptr_cur.store(cur, Ordering::Relaxed);
             t.noptr_limit.set(limit);
         } else {
             t.block.set(block);
-            t.cur.set(cur);
+            t.start.store(start, Ordering::Relaxed);
+            t.cur.store(cur, Ordering::Relaxed);
             t.limit.set(limit);
         }
     });
@@ -1481,11 +1517,15 @@ fn release_tlab_region(gc: &mut ImmixAllocator) {
     gc.heap.tlab_blocks.remove(&thread_self_fast());
     gc.heap.noptr_tlab_blocks.remove(&thread_self_fast());
     TLAB.with(|t| {
+        alloc_meter::retire(t, false);
+        alloc_meter::retire(t, true);
         t.block.set(usize::MAX);
-        t.cur.set(0);
+        t.cur.store(0, Ordering::Relaxed);
+        t.start.store(0, Ordering::Relaxed);
         t.limit.set(0);
         t.noptr_block.set(usize::MAX);
-        t.noptr_cur.set(0);
+        t.noptr_cur.store(0, Ordering::Relaxed);
+        t.noptr_start.store(0, Ordering::Relaxed);
         t.noptr_limit.set(0);
     });
 }
@@ -1904,6 +1944,7 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
             adopt_tlab_region(
                 &mut gc,
                 rblock,
+                base as usize,
                 base as usize + aligned,
                 base as usize + span_bytes,
                 noptr,
@@ -1936,6 +1977,7 @@ fn tlab_refill_then_alloc(aligned: usize, noptr: bool) -> Option<NonNull<u8>> {
     adopt_tlab_region(
         &mut gc,
         block,
+        base as usize,
         base as usize + aligned,
         base as usize + BLOCK_SIZE,
         noptr,
@@ -3436,6 +3478,11 @@ struct ImmixHeap {
     tlab_blocks: HashMap<u64, usize>,
     /// The block each thread bumps pointer-free allocations through.
     noptr_tlab_blocks: HashMap<u64, usize>,
+    /// Bytes and objects a registered mutator was handed by the locked
+    /// allocator and for large objects, which no bump region serves. Under the
+    /// GC lock, so no atomic. See `alloc_meter`.
+    locked_bytes: u64,
+    locked_objects: u64,
     /// True once the interpreter has registered scan ranges. The interpreter
     /// roots its bytecode registers via a SNAPSHOT (sync_gc_scan_roots) that
     /// is complete only at the moment it is published — values written to
@@ -4421,6 +4468,8 @@ impl ImmixAllocator {
             pending_handback: HashSet::new(),
             tlab_blocks: HashMap::new(),
             noptr_tlab_blocks: HashMap::new(),
+            locked_bytes: 0,
+            locked_objects: 0,
             safepoint_mode: false,
             collect_pending: false,
         };
@@ -4803,6 +4852,10 @@ impl ImmixAllocator {
         }
         self.heap.alloc_count += 1;
         self.heap.bytes_since_gc += aligned_size;
+        if current_mutator_registered() {
+            self.heap.locked_bytes += aligned_size as u64;
+            self.heap.locked_objects += 1;
+        }
         GC_STATS
             .bytes_allocated
             .fetch_add(aligned_size as u64, Ordering::Relaxed);
@@ -4852,6 +4905,10 @@ impl ImmixAllocator {
                     clear_marks(&self.blocks[block / BLOCK_SIZE]);
                 }
                 self.heap.bytes_since_gc += blocks_needed * BLOCK_SIZE;
+                if current_mutator_registered() {
+                    self.heap.locked_bytes += size as u64;
+                    self.heap.locked_objects += 1;
+                }
                 GC_STATS
                     .bytes_allocated
                     .fetch_add((blocks_needed * BLOCK_SIZE) as u64, Ordering::Relaxed);
@@ -7925,24 +7982,20 @@ fn idle_collector() {
 /// `hl.Gc.stats()` as `totalAllocated` / `allocationCount` / `currentMemory`.
 /// Doubles because the byte totals outrun an i32 within seconds of running.
 ///
-/// Two of the three are ash's own numbers; the third is one ash does not have.
+/// All three are ash's own accounting, which differs from upstream's.
 ///
-/// * `total_allocated` — [`GC_STATS`]`.bytes_allocated`, cumulative and never
-///   reset, the same figure the `ASH_GC_STATS` report prints. Like upstream's
-///   it counts bytes the collector HANDED OUT rather than bytes requested;
-///   ash's is coarser, because a TLAB refill charges its whole 32KB region
-///   when the region is carved instead of per object bumped out of it.
-///   Memory charged through [`hlp_gc_track_external`] is excluded: it is
-///   allocation pressure from off-heap buffers, not GC heap, and folding it
-///   in would make this number disagree with the same field in the report.
-/// * `allocation_count` — 0, because ash counts no allocations. The TLAB fast
-///   path is a thread-local pointer bump that deliberately touches no shared
-///   counter (an atomic there was the cost the TLAB exists to remove), and
-///   `heap.alloc_count` counts refills and locked allocations only and resets
-///   at every collection: it is the trigger's input, not a census. Reporting
-///   it here would undercount by orders of magnitude AND shrink between two
-///   samples, so a caller differencing successive stats calls would read the
-///   allocation rate as negative. A constant zero is visibly not an answer.
+/// * `total_allocated` — bytes handed out to the program: see [`alloc_meter`]
+///   for what it adds up and why it starts at the first read, so only the
+///   difference between two reads means anything. It is not the figure the
+///   `ASH_GC_STATS` report prints. That one is pressure on the collector and
+///   charges a whole 32KB region when it is carved, so it moves in blocks;
+///   this one moves by what the program allocated, at each object's size
+///   rounded up to 16 bytes. Another thread's allocations are counted as that
+///   thread bumps them. Memory charged through [`hlp_gc_track_external`] is
+///   excluded: it is allocation pressure from off-heap buffers, not GC heap.
+/// * `allocation_count` — objects handed out, counted the same way and from
+///   the same first read. It is not `heap.alloc_count`, which counts refills
+///   and locked allocations only and resets at every collection.
 /// * `current_memory` — blocks currently handed out, at block granularity.
 ///   Upstream reports the total size of the pages it has mapped; ash reserves
 ///   its entire heap up front and commits on first touch, so the reservation
@@ -7969,14 +8022,17 @@ pub(crate) unsafe extern "C" fn gc_stats(
     current_memory: *mut f64,
 ) {
     unsafe {
-        if !total_allocated.is_null() {
-            *total_allocated = GC_STATS.bytes_allocated.load(Ordering::Relaxed) as f64;
-        }
-        if !allocation_count.is_null() {
-            *allocation_count = 0.0;
+        let gc = gc_locked_init();
+        if !total_allocated.is_null() || !allocation_count.is_null() {
+            let (bytes, objects) = alloc_meter::total(&gc);
+            if !total_allocated.is_null() {
+                *total_allocated = bytes as f64;
+            }
+            if !allocation_count.is_null() {
+                *allocation_count = objects as f64;
+            }
         }
         if !current_memory.is_null() {
-            let gc = gc_locked_init();
             *current_memory = (gc.heap.used_blocks.len() * BLOCK_SIZE) as f64;
         }
     }
@@ -8760,6 +8816,7 @@ mod tests {
                 &mut gc,
                 block,
                 base + block,
+                base + block,
                 base + block + BLOCK_SIZE,
                 false,
             );
@@ -9319,17 +9376,10 @@ mod tests {
             "current_memory not written: {current0}"
         );
 
-        // Documented as honestly unavailable: ash counts no allocations, and
-        // the doc comment on `hlp_gc_stats` says why reporting
-        // `heap.alloc_count` would be a worse answer than none — it shrinks at
-        // every collection, so a caller differencing two samples would read
-        // the allocation rate as negative. Asserted as the DOCUMENTED constant
-        // so that implementing it for real fails here, and whoever does it
-        // updates the contract on purpose.
-        assert_eq!(
-            count0, 0.0,
-            "allocation_count is documented as a constant 0.0"
-        );
+        // A census of objects handed out, counted from the first read, so it
+        // is not asserted to be any particular value here: only that it never
+        // runs backwards, below.
+        assert!(count0 >= 0.0, "allocation_count is negative: {count0}");
 
         // ── NULL is legal for any out-param ───────────────────────────────
         // An HDLL caller that wants one field passes NULL for the others; that
@@ -9341,7 +9391,7 @@ mod tests {
             assert!(one.is_finite(), "total_allocated alone: {one}");
             let mut one = f64::NAN;
             hlp_gc_stats(ptr::null_mut(), &mut one, ptr::null_mut());
-            assert_eq!(one, 0.0, "allocation_count alone: {one}");
+            assert!(one.is_finite() && one >= 0.0, "allocation_count alone: {one}");
             let mut one = f64::NAN;
             hlp_gc_stats(ptr::null_mut(), ptr::null_mut(), &mut one);
             assert!(one.is_finite(), "current_memory alone: {one}");
@@ -9360,14 +9410,17 @@ mod tests {
 
         let (mut total1, mut count1, mut current1) = (f64::NAN, f64::NAN, f64::NAN);
         unsafe { hlp_gc_stats(&mut total1, &mut count1, &mut current1) };
-        assert_eq!(
-            count1, 0.0,
-            "allocation_count is documented as a constant 0.0"
+        // Every chunk is an object of its own on the locked path.
+        assert!(
+            count1 - count0 >= (LIVE_BYTES / CHUNK) as f64,
+            "{} objects moved allocation_count by only {}",
+            LIVE_BYTES / CHUNK,
+            count1 - count0
         );
-        // The contract is non-decreasing: the counter is cumulative and never
-        // reset. No exact byte total is asserted — the allocator charges in
-        // 32KB regions on the TLAB path, and other threads add to the same
-        // counter — only that this much allocation moved it at least this far.
+        // The contract is non-decreasing: the counters are cumulative and
+        // never reset. Other threads add to the same counters, so no exact
+        // total is asserted, only that this much allocation moved them at
+        // least this far.
         assert!(
             total1 >= total0,
             "total_allocated went backwards: {total0} -> {total1}"
@@ -9437,9 +9490,9 @@ mod tests {
 
         let (mut total2, mut count2, mut current2) = (f64::NAN, f64::NAN, f64::NAN);
         unsafe { hlp_gc_stats(&mut total2, &mut count2, &mut current2) };
-        assert_eq!(
-            count2, 0.0,
-            "allocation_count is documented as a constant 0.0"
+        assert!(
+            count2 >= count1,
+            "a collection must not reset allocation_count: {count1} -> {count2}"
         );
         assert!(
             total2 >= total1,

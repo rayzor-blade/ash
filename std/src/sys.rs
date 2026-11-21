@@ -1850,6 +1850,15 @@ pub unsafe extern "C" fn hlp_sys_load_plugin(_file: *mut crate::hl::vbyte) -> bo
     false
 }
 
+/// Which statics of `t` a hot reload added, as word `word` of a bitmask. Always
+/// 0, as upstream answers when no reload engine installed
+/// `hl_setup.hot_sync_statics`: ash applies its own reloads itself and has
+/// nothing to report through this entry.
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_hot_sync_statics(_t: *mut crate::hl::hl_type, _word: i32) -> i32 {
+    0
+}
+
 /// Resolve a type through the embedder's hook. Always null, for the same
 /// reason `hlp_sys_load_plugin` is always false: upstream returns NULL when
 /// `hl_setup.resolve_type` is unset.

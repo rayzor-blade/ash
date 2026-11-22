@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795365656,"nonce":"W1SNIl/Mhd9fxHclZKJz8pawE48=","message":"Landed in da7a63b20c830ab53d43f53a62961ffd01c0ad29 (pushed to main). Value-array data now starts on a 16-byte boundary; regression test is crates/ash_cli/tests/value_array_gc.rs.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1795365657,"nonce":"4OQSOGzPqcIKEZoA1YeEVkDBQFg=","status":2}]}

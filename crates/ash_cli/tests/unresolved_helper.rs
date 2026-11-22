@@ -20,6 +20,7 @@ use std::process::Command;
 /// iteration and promotes early, where a short program never gets there.
 const HELPER: &str = "hlp_alloc_obj_sized_flags";
 const FIXTURE: &str = "test_mandelbrot_small.hl";
+const ATTEMPTS: usize = 10;
 
 fn run(hl: &str, forced: Option<&str>) -> (String, String, Option<i32>) {
     let path = tests_dir().join(hl);
@@ -42,20 +43,28 @@ fn an_unresolved_runtime_helper_refuses_the_promotion_instead_of_panicking() {
     let (baseline, _, base_code) = run(FIXTURE, None);
     assert_eq!(base_code, Some(0), "baseline run did not exit cleanly");
 
-    let (stdout, stderr, code) = run(FIXTURE, Some(HELPER));
-
+    // The program can exit before the promoter reaches the helper, so the
+    // refusal is looked for over several runs. Every run must still finish
+    // cleanly with the right answer.
+    let mut last_stderr = String::new();
+    let named = (0..ATTEMPTS).any(|_| {
+        let (stdout, stderr, code) = run(FIXTURE, Some(HELPER));
+        assert!(
+            !stderr.contains("panicked"),
+            "a missing helper still panics a thread:\n{stderr}"
+        );
+        assert_eq!(code, Some(0), "run did not exit cleanly:\n{stderr}");
+        assert_eq!(
+            stdout, baseline,
+            "answer changed when {HELPER} was made unresolvable"
+        );
+        let named = stderr.contains(HELPER);
+        last_stderr = stderr;
+        named
+    });
     assert!(
-        !stderr.contains("panicked"),
-        "a missing helper still panics a thread:\n{stderr}"
-    );
-    assert_eq!(code, Some(0), "run did not exit cleanly:\n{stderr}");
-    assert_eq!(
-        stdout, baseline,
-        "answer changed when {HELPER} was made unresolvable"
-    );
-    assert!(
-        stderr.contains(HELPER),
-        "the refusal should name the helper it could not resolve:\n{stderr}"
+        named,
+        "the refusal should name the helper it could not resolve:\n{last_stderr}"
     );
 }
 

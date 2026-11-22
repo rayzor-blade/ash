@@ -477,7 +477,7 @@ pub unsafe extern "C" fn hlp_parse_int(bytes: *mut vbyte, pos: c_int, len: c_int
                 return ptr::null_mut();
             }
             if sign == b'-' as u16 {
-                h = -h;
+                h = h.wrapping_neg();
             }
         } else {
             // Decimal parsing
@@ -495,7 +495,7 @@ pub unsafe extern "C" fn hlp_parse_int(bytes: *mut vbyte, pos: c_int, len: c_int
                 dp = dp.add(1);
             }
             if negative {
-                h = -h;
+                h = h.wrapping_neg();
             }
         }
 
@@ -677,5 +677,31 @@ mod format_g_tests {
         assert_eq!(format_g(-f64::NAN, 17), "-nan");
         assert_eq!(format_g(f64::INFINITY, 17), "inf");
         assert_eq!(format_g(f64::NEG_INFINITY, 17), "-inf");
+    }
+}
+
+#[cfg(test)]
+mod parse_int_tests {
+    use super::*;
+
+    /// Parses `s` the way the primitive is called: UTF-16, NUL terminated.
+    fn parse(s: &str) -> Option<i32> {
+        let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            crate::gc::hlp_gc_init();
+            let boxed = hlp_parse_int(units.as_ptr() as *mut vbyte, 0, units.len() as c_int - 1);
+            (!boxed.is_null()).then(|| (*boxed).v.i)
+        }
+    }
+
+    /// The most negative int is its own negation, so reading it must wrap
+    /// rather than overflow.
+    #[test]
+    fn the_lowest_int_parses_in_decimal_and_in_hex() {
+        assert_eq!(parse("-2147483648"), Some(i32::MIN));
+        assert_eq!(parse("-0x80000000"), Some(i32::MIN));
+        assert_eq!(parse("-5"), Some(-5));
+        assert_eq!(parse("2147483647"), Some(i32::MAX));
+        assert_eq!(parse("-0x10"), Some(-16));
     }
 }

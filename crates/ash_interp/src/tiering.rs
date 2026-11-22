@@ -1811,11 +1811,6 @@ unsafe extern "C" fn loops_hot(arg: usize, findex: usize) {
         .lock()
         .expect("llvm_done mutex poisoned")
         .contains(&findex)
-        || !ctx
-            .loops_proposed
-            .lock()
-            .expect("loops_proposed mutex poisoned")
-            .insert(findex)
     {
         return;
     }
@@ -1831,7 +1826,14 @@ unsafe extern "C" fn loops_hot(arg: usize, findex: usize) {
     let Some(adapter) = ctx.adapter.upgrade() else {
         return;
     };
-    if bound.generation() != 0 {
+    // The one proposal per function; a function that already has a top-tier
+    // promote queued or installed is refused by the adapter below.
+    if !ctx
+        .loops_proposed
+        .lock()
+        .expect("loops_proposed mutex poisoned")
+        .insert(findex)
+    {
         return;
     }
     let promote_ctx = Arc::clone(&ctx);

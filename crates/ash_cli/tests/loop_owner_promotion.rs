@@ -66,3 +66,29 @@ fn a_function_called_from_compiled_code_is_promoted_by_its_loops() {
         "mulSmall never reached the top tier\n{stderr}"
     );
 }
+
+/// A function whose loops the interpreter probed has OSR entries attached to
+/// its baseline code. Called only from compiled code afterwards, it is still
+/// promoted by its loops. `TestLoopsHot.hx` is the source of the fixture.
+#[test]
+fn a_function_with_probed_loops_called_from_compiled_code_is_promoted_by_its_loops() {
+    let mut command = Command::new(ash_cli_bin());
+    command
+        .arg("--jit-log")
+        .arg(tests_dir().join("test_loops_hot.hl"));
+    let result = run_with_timeout(command, Duration::from_secs(120));
+    assert!(
+        !result.timed_out && result.output.status.success(),
+        "{}",
+        render_output(&result.output)
+    );
+    let stdout = String::from_utf8_lossy(&result.output.stdout);
+    assert!(stdout.contains("done true"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&result.output.stderr);
+    assert!(
+        stderr.lines().any(|l| l.starts_with("[tier] install ")
+            && l.contains("TestLoopsHot.kernel ")
+            && l.contains("tier=llvm")),
+        "the kernel never reached the top tier\n{stderr}"
+    );
+}

@@ -11,6 +11,18 @@ pub unsafe extern "C" fn hlp_array_type(a: *mut varray) -> *mut hl_type {
     unsafe { (*a).at }
 }
 
+/// The width of one vector access. Element data of at least this many bytes
+/// starts on a boundary of this size.
+const VECTOR_BYTES: usize = 16;
+
+/// Bytes from the start of a value array's allocation to the array. Element
+/// data begins `size_of::<varray>()` bytes into the array and allocations are
+/// 16-byte aligned, so starting the array this far in puts the data on a
+/// vector boundary. The collector resolves the interior pointer to its
+/// allocation.
+const VALUE_ARRAY_LEAD: usize =
+    (VECTOR_BYTES - std::mem::size_of::<varray>() % VECTOR_BYTES) % VECTOR_BYTES;
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut varray {
     unsafe {
@@ -19,17 +31,27 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
         }
 
         let esize = hlp_type_size(at);
-        let total_size = std::mem::size_of::<varray>() + (esize as usize) * (size as usize);
+        let payload = (esize as usize) * (size as usize);
+        let total_size = std::mem::size_of::<varray>() + payload;
 
         // A value array holds no heap pointer: its header names types, which
         // live outside the heap. Same split as upstream's MEM_KIND_NOPTR.
         let a = if crate::types::hl_is_ptr(at) {
             crate::rt::gc_alloc(total_size)
+                .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
+                .as_ptr()
         } else {
-            crate::rt::gc_alloc_noptr(total_size)
-        }
-        .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
-        .as_ptr() as *mut varray;
+            // Only data a vector access can cover is worth the lead.
+            let lead = if payload >= VECTOR_BYTES {
+                VALUE_ARRAY_LEAD
+            } else {
+                0
+            };
+            crate::rt::gc_alloc_noptr(lead + total_size)
+                .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
+                .as_ptr()
+                .add(lead)
+        } as *mut varray;
 
         (*a).t = crate::types::hlt_array();
         (*a).at = at;
@@ -300,6 +322,38 @@ mod array_bytes_tests {
             let empty = hlp_alloc_array(hlt_i32(), 0);
             assert!(!empty.is_null());
             assert_eq!(hlp_array_bytes(empty) as usize, empty as usize + HEADER);
+
+            // A value array's element data starts on a vector boundary, so a
+            // vector access over it never straddles one. Each array is checked
+            // as it is made: no collection is forced here, so nothing holds it.
+            let kinds = [hlt_i32(), crate::types::hlt_f32(), hlt_f64()];
+            for (k, n) in [4usize, 5, 8, 33, 1024, 4096, 70_000, 4097]
+                .into_iter()
+                .enumerate()
+            {
+                let at = kinds[k % kinds.len()];
+                let a = hlp_alloc_array(at, n as i32);
+                assert_eq!((*a).size, n as i32);
+                assert_eq!((*a).at, at);
+                let bytes = n * hlp_type_size(at) as usize;
+                if bytes >= 16 {
+                    assert_eq!(
+                        hl_aptr::<u8>(a) as usize % 16,
+                        0,
+                        "{n} elements of kind {k}: data is not 16-byte aligned"
+                    );
+                }
+                std::ptr::write_bytes(hl_aptr::<u8>(a), k as u8 + 1, bytes);
+                let data = std::slice::from_raw_parts(hl_aptr::<u8>(a), bytes);
+                assert!(
+                    data.iter().all(|b| *b == k as u8 + 1),
+                    "array {k} not intact"
+                );
+            }
+
+            // Pointer arrays are scanned, so they stay at the allocation start.
+            let p = hlp_alloc_array(hlt_bytes(), 16);
+            assert_eq!(p as usize % 16, 0);
         }
     }
 

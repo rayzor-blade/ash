@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795379342,"nonce":"2USyCJRwyeVOvXXmubXgqP7hjbI=","message":"Landed in 40d5ae23fd334a2366cd224723f5fb670622c2f4 (pushed to main). The test looks for the refusal over up to ten runs; every run must still exit cleanly with the baseline answer.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1795379342,"nonce":"4Ga5aDaB3GG7GWzRqu6JOLBihoo=","status":2}]}

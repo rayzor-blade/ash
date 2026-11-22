@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1795360082,"nonce":"ZlQMWH02o1UlUQdl+h7iz/DMSpI=","added":["bug","area:std"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795360651,"nonce":"0tqrG1rPAkFqpkQClEHuKqUz1Tc=","message":"Fix committed locally as 6f3e90d9 (not pushed), with a unit test that parses -2147483648 and -0x80000000. Left open until it lands on origin/main.","files":null}]}

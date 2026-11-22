@@ -62,12 +62,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 sha2 = "0.10"
-# Same wasmtime git rev as beadie-cranelift pins, so exactly ONE cranelift
-# resolves into the graph. A crates.io copy alongside the git one compiles as
-# a second, incompatible crate and none of beadie's cranelift types match.
-cranelift-codegen  = { git = "https://github.com/bytecodealliance/wasmtime", rev = "bc2f967927f9f0e839095a752bf554c4a09fdd13" }
-cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "bc2f967927f9f0e839095a752bf554c4a09fdd13" }
-cranelift-module   = { git = "https://github.com/bytecodealliance/wasmtime", rev = "bc2f967927f9f0e839095a752bf554c4a09fdd13" }
+# The same release beadie-cranelift uses, so one copy of these crates meets
+# beadie's types. A second release would compile as an incompatible crate.
+cranelift-codegen  = "0.138"
+cranelift-frontend = "0.138"
+cranelift-module   = "0.138"
 
 # NOTE: profiles live in the workspace root Cargo.toml. Cargo ignores a
 # [profile.*] table in a non-root package and only warns about it, which is how

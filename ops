@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795365657,"nonce":"Q8TCOqOr1qY5WiBVXYp07+UD6q8=","message":"Landed in b2f6730c1e63f65a9e5459a82f92e65664f0997d (pushed to main). loops_hot no longer refuses a function that has OSR entries; regression test is in crates/ash_cli/tests/loop_owner_promotion.rs.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1795365657,"nonce":"DE8Qu5IEK2gq6HNfn8tyT39cqB4=","status":2}]}

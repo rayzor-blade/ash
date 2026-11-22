@@ -2,9 +2,12 @@
 //! a re-tier exit.
 //!
 //! The promote that would follow is postponed for a function entered once,
-//! because nothing is going to call it again. When something does, it is
-//! entered from the interpreter a second time, and this ledger is how that
-//! entry finds the promote it is owed.
+//! because nothing is going to call it again. When something does, the
+//! ledger is how that call finds the promote it is owed. It sees the call
+//! when the interpreter enters the function a second time, when compiled code
+//! enters it through the stub bridge, and when its hand-off frame returns
+//! into a compiled caller. Compiled callers reach it after that without
+//! entering the interpreter at all.
 use super::{TieredSharedCtx, tiered_compile_tier};
 use beadie::{TieredAdapter, TieredBound};
 use std::collections::HashMap;
@@ -39,8 +42,8 @@ impl HandoffLedger {
         }
     }
 
-    /// The interpreter entered `findex` a second time. Returns true when a
-    /// postponed promote is owed to it; the debt is cleared.
+    /// `findex` was entered again, or will be. Returns true when a postponed
+    /// promote is owed to it; the debt is cleared.
     pub(crate) fn note_reentry(&self, findex: usize) -> bool {
         let mut states = self.states.lock().expect("handoff mutex poisoned");
         states.insert(findex, State::Reentered) == Some(State::Owed)
@@ -51,9 +54,9 @@ impl HandoffLedger {
     }
 }
 
-/// Called on the interpreter's second entry into `findex`. Queues the
-/// top-tier promote that the function's hand-off postponed, if one is owed.
-/// Returns whether a promote was queued.
+/// Called when `findex` is entered again. Queues the top-tier promote that
+/// the function's hand-off postponed, if one is owed. Returns whether a
+/// promote was queued.
 pub(crate) fn pay_owed_promote(
     ctx: &Arc<TieredSharedCtx>,
     adapter: &TieredAdapter,

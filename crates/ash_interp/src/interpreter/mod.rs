@@ -225,6 +225,7 @@ const RELOAD_SPARE_SLOTS: usize = 8192;
 /// Demand bits in `HLInterpreter::demand_local`.
 const DEMAND_LIVE_FRAME: u8 = 1;
 const DEMAND_UNDER_LOOP: u8 = 2;
+const DEMAND_FROM_COMPILED: u8 = 4;
 
 /// Index into `bytecode.functions` for a findex, if it names one.
 ///
@@ -413,6 +414,7 @@ impl std::fmt::Display for HLExceptionPropagation {
 impl std::error::Error for HLExceptionPropagation {}
 
 mod compare;
+mod compiled_entry;
 mod instrument;
 mod natives;
 mod ops;
@@ -3363,6 +3365,7 @@ impl HLInterpreter {
                 if let Some(caller) = caller {
                     interp.jit_bridge_callers.push(caller);
                 }
+                interp.note_entered_from_compiled(findex);
                 let result = interp.call_function(bytecode, resolver, findex, &vals);
                 if caller.is_some() {
                     interp.jit_bridge_callers.pop();
@@ -4516,6 +4519,7 @@ impl HLInterpreter {
         }
 
         ash_core::profile::count("osr transfers", 1);
+        self.settle_hand_off(bytecode, findex);
         let raw = raw.ok_or_else(|| anyhow!("osr trap boundary did not run findex {findex}"))?;
         Ok(Some(self.wrap_native_result(raw, ret_kind)))
     }

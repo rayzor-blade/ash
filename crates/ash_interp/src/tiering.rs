@@ -2676,6 +2676,8 @@ pub(crate) fn compile_with_llvm(
         // and its later calls come from callers that are compiled by now.
         // `calls` is the count when the promote was queued; the ledger holds
         // the entries since, and owes the postponed promote to the next one.
+        // A compiled caller counts as one, whether it entered the function
+        // through the stub bridge or the hand-off frame returned into it.
         if published > 0
             && tier == 1
             && !ctx.compiled_only

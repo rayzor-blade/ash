@@ -106,9 +106,82 @@ pub fn defines_native(defined: Option<&HashSet<String>>, name: &str) -> bool {
     defined.is_some_and(|d| d.contains(&format!("hlp_{}", name.trim_start_matches("hlp_"))))
 }
 
+/// Which of a program's HDLL libraries the linked archives stand in for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LibraryCoverage {
+    /// Libraries with at least one primitive an archive defines.
+    pub linked: Vec<String>,
+    /// Libraries no archive touches, which still have to be loaded.
+    pub loaded: Vec<String>,
+}
+
+impl LibraryCoverage {
+    /// Whether the program can take every library from the archives. A
+    /// primitive its own archive lacks stays unresolved and raises when it is
+    /// reached, as it does on a phone.
+    pub fn is_complete(&self) -> bool {
+        !self.linked.is_empty() && self.loaded.is_empty()
+    }
+}
+
+/// Classify the `(library, primitive)` pairs of a program's natives, leaving
+/// out the runtime's own libraries.
+pub fn library_coverage<'a>(
+    natives: impl IntoIterator<Item = (&'a str, &'a str)>,
+    defined: &HashSet<String>,
+) -> LibraryCoverage {
+    let mut libraries: Vec<(&str, bool)> = Vec::new();
+    for (lib, name) in natives {
+        if crate::native_lib::is_runtime_lib(lib) {
+            continue;
+        }
+        let linked = defines_native(Some(defined), name);
+        match libraries.iter_mut().find(|(known, _)| *known == lib) {
+            Some(entry) => entry.1 |= linked,
+            None => libraries.push((lib, linked)),
+        }
+    }
+    let mut coverage = LibraryCoverage::default();
+    for (lib, linked) in libraries {
+        let list = if linked {
+            &mut coverage.linked
+        } else {
+            &mut coverage.loaded
+        };
+        list.push(lib.trim_start_matches('?').to_string());
+    }
+    coverage
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_library_with_one_primitive_in_an_archive_is_linked() {
+        let defined: HashSet<String> = ["hlp_toy_add".to_string()].into();
+        let natives = [("toy", "toy_add"), ("toy", "toy_absent"), ("std", "hlp_x")];
+        let coverage = library_coverage(natives, &defined);
+        assert_eq!(coverage.linked, ["toy"]);
+        assert!(coverage.is_complete());
+    }
+
+    #[test]
+    fn a_library_no_archive_touches_still_loads() {
+        let defined: HashSet<String> = ["hlp_toy_add".to_string()].into();
+        let natives = [("toy", "toy_add"), ("fmt", "png_decode")];
+        let coverage = library_coverage(natives, &defined);
+        assert_eq!(coverage.linked, ["toy"]);
+        assert_eq!(coverage.loaded, ["fmt"]);
+        assert!(!coverage.is_complete());
+    }
+
+    #[test]
+    fn no_archives_and_no_libraries_are_not_a_static_program() {
+        let none = HashSet::new();
+        assert!(!library_coverage([("toy", "toy_add")], &none).is_complete());
+        assert!(!library_coverage([("std", "hlp_x")], &none).is_complete());
+    }
 
     #[test]
     fn a_native_is_defined_by_the_hlp_symbol_of_its_name() {

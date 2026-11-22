@@ -311,7 +311,11 @@ fn driver_for(triple: &str, os: &str) -> Result<Driver> {
         if cross {
             if name.contains("clang") {
                 args.push(format!("--target={triple}"));
-                args.push("-fuse-ld=lld".into());
+                // Apple's linker links either architecture of macOS; lld is
+                // only needed to leave it.
+                if !(os == "macos" && cfg!(target_os = "macos")) {
+                    args.push("-fuse-ld=lld".into());
+                }
             } else if name == "zig" {
                 if args.first().map(String::as_str) != Some("cc") {
                     args.insert(0, "cc".into());
@@ -1044,6 +1048,10 @@ pub fn link_executable(
             .map(String::as_str)
             .chain(HOST_LOOP_SYMBOLS)
         {
+            cmd.arg(format!("-Wl,-U,_{symbol}"));
+        }
+    } else if os == "macos" {
+        for symbol in native_symbols {
             cmd.arg(format!("-Wl,-U,_{symbol}"));
         }
     }

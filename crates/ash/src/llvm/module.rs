@@ -396,7 +396,7 @@ fn timing_enabled() -> bool {
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
         let abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
-        Self::build(context, path, false, abi, &[], &[], &[], &[], false)
+        Self::build(context, path, false, abi, &[], &[], &[], &[], false, None)
             .expect("Failed to build JIT module")
     }
 
@@ -408,11 +408,11 @@ impl<'ctx> JITModule<'ctx> {
     /// the switch would already have an address baked into it.
     pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::host()?;
-        Self::build(context, path, true, abi, &[], &[], &[], &[], false)
+        Self::build(context, path, true, abi, &[], &[], &[], &[], false, None)
     }
 
     pub fn new_aot_for_target(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
-        Self::new_aot_with_host(context, path, triple, &[], &[], &[], &[])
+        Self::new_aot_with_host(context, path, triple, &[], &[], &[], &[], None)
     }
 
     /// An AOT module that also defines `exports` and adapts `closures`, both
@@ -425,6 +425,7 @@ impl<'ctx> JITModule<'ctx> {
         closures: &[crate::host_export::HostClosure],
         object_tails: &[(String, usize)],
         object_drops: &[String],
+        library_symbols: Option<&std::collections::HashSet<String>>,
     ) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
         Self::build(
@@ -437,6 +438,7 @@ impl<'ctx> JITModule<'ctx> {
             object_tails,
             object_drops,
             false,
+            library_symbols,
         )
     }
 
@@ -445,19 +447,20 @@ impl<'ctx> JITModule<'ctx> {
     /// does for a program the CLI runs.
     pub fn new_aot_standalone(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
-        Self::build(context, path, true, abi, &[], &[], &[], &[], true)
+        Self::build(context, path, true, abi, &[], &[], &[], &[], true, None)
     }
 
     fn build(
         context: &'ctx Context,
         path: &Path,
         aot: bool,
-        target_abi: crate::target_abi::TargetAbi,
+        mut target_abi: crate::target_abi::TargetAbi,
         exports: &[crate::host_export::HostExport],
         closures: &[crate::host_export::HostClosure],
         object_tails: &[(String, usize)],
         object_drops: &[String],
         fuse: bool,
+        library_symbols: Option<&std::collections::HashSet<String>>,
     ) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
@@ -486,7 +489,27 @@ impl<'ctx> JITModule<'ctx> {
         // copy of the runtime unless this object shares one. Known here,
         // before a single symbol is declared, because declaring them is what
         // commits to a linkage. A native the host links is not an HDLL.
+        //
+        // A desktop program whose archives stand in for every such library
+        // links them as a phone does, and so takes the static runtime.
+        let linked_statically = aot
+            && target_abi.can_link_natives_statically()
+            && library_symbols.is_some_and(|defined| {
+                crate::archive::library_coverage(
+                    bytecode
+                        .natives
+                        .iter()
+                        .filter(|n| crate::native_lib::host_link(&n.lib, &n.name).is_none())
+                        .map(|n| (n.lib.as_str(), n.name.as_str())),
+                    defined,
+                )
+                .is_complete()
+            });
+        if linked_statically {
+            target_abi.link_natives_statically();
+        }
         let aot_shared_runtime = aot
+            && !linked_statically
             && bytecode.natives.iter().any(|n| {
                 !crate::native_lib::is_runtime_lib(&n.lib)
                     && crate::native_lib::host_link(&n.lib, &n.name).is_none()

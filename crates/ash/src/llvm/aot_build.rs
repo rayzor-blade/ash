@@ -193,6 +193,10 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
         && object_drops.is_empty()
         && crate::tree_fusion::enabled();
     let began = std::time::Instant::now();
+    // What the archives the program links define, for a library whose
+    // primitives they stand in for.
+    let library_symbols =
+        (!language_objects.is_empty()).then(|| crate::archive::defined_symbols(&language_objects));
     let mut jit = if standalone {
         crate::llvm::module::JITModule::new_aot_standalone(context, file, &triple)?
     } else {
@@ -204,6 +208,7 @@ pub fn emit_aot_with_options(request: AotRequest<'_>, options: crate::aot_option
             &closures,
             &object_tails,
             &object_drops,
+            library_symbols.as_ref(),
         )?
     };
 

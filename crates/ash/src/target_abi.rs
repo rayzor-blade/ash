@@ -141,6 +141,19 @@ impl TargetAbi {
         !t.starts_with("wasm") && !t.contains("windows")
     }
 
+    /// Whether a program for this target can take its libraries' primitives
+    /// from archives it links, binding each by a weak `hlp_<name>` reference
+    /// as a phone does, instead of loading an HDLL at run time.
+    pub fn can_link_natives_statically(&self) -> bool {
+        self.native_dynamic_loading && desktop_links_natives_statically(Some(&self.triple))
+    }
+
+    /// Link this program's library primitives from archives, as a phone's.
+    pub fn link_natives_statically(&mut self) {
+        self.static_natives = true;
+        self.native_dynamic_loading = false;
+    }
+
     pub fn triple(&self) -> &str {
         &self.triple
     }
@@ -231,6 +244,23 @@ impl TargetAbi {
 
     pub fn hl_runtime_obj_size(&self) -> u64 {
         if self.pointer_bytes == 8 { 112 } else { 76 }
+    }
+}
+
+/// Whether a desktop build for `triple`, or for this machine when none is
+/// named, can link archives' primitives by weak `hlp_<name>` reference. A
+/// phone always does, and wasm has its own path; Windows object files have no
+/// such reference, so a Windows program keeps loading its HDLLs.
+pub fn desktop_links_natives_statically(triple: Option<&str>) -> bool {
+    match triple {
+        None => !cfg!(windows),
+        Some(t) => {
+            let t = t.to_ascii_lowercase();
+            !t.starts_with("wasm")
+                && !t.contains("windows")
+                && !t.contains("android")
+                && !t.contains("apple-ios")
+        }
     }
 }
 

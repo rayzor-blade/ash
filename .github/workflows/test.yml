@@ -197,7 +197,7 @@ jobs:
 
       - name: AOT binaries match the JIT
         shell: bash
-        run: cargo test -p ash --test aot_smoke --test aot_distribution --test aot_dynamic_throw -- --nocapture
+        run: cargo test -p ash --test aot_smoke --test aot_distribution --test aot_dynamic_throw --test desktop_native_lib -- --nocapture
 
   hdll-callbacks:
     # The corpus links real shared libraries, resolves primitives by name from

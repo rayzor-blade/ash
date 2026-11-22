@@ -1325,13 +1325,28 @@ fn run() -> Result<()> {
             .target
             .as_deref()
             .and_then(|t| ash_core::target_abi::TargetAbi::for_triple_str(t).ok());
-        let target_loads_libraries = abi.as_ref().is_none_or(|abi| abi.native_dynamic_loading);
+        let wasm = cli.target.as_deref().is_some_and(|t| t.starts_with("wasm"));
+        // A desktop program whose `--native-lib` archives stand in for every
+        // library it names links them as a phone does, and loads no HDLL.
+        let desktop_static = !wasm
+            && abi.as_ref().is_none_or(|abi| !abi.static_natives)
+            && !cli.native_libs.is_empty()
+            && ash_core::target_abi::desktop_links_natives_statically(cli.target.as_deref())
+            && ash_core::archive::library_coverage(
+                bytecode
+                    .natives
+                    .iter()
+                    .map(|n| (n.lib.as_str(), n.name.as_str())),
+                &ash_core::archive::defined_symbols(&cli.native_libs),
+            )
+            .is_complete();
+        let target_loads_libraries =
+            !desktop_static && abi.as_ref().is_none_or(|abi| abi.native_dynamic_loading);
         // A phone program links its libraries from `--native-lib` archives, so
         // a primitive one of them defines is not missing.
         // A wasm program links its libraries from `--native-lib` archives too, and calls each
         // primitive they define by its symbol.
-        let wasm = cli.target.as_deref().is_some_and(|t| t.starts_with("wasm"));
-        let defined = if abi.as_ref().is_some_and(|abi| abi.static_natives) {
+        let defined = if desktop_static || abi.as_ref().is_some_and(|abi| abi.static_natives) {
             Some(ash_core::archive::defined_symbols(&cli.native_libs))
         } else if wasm && !cli.native_libs.is_empty() {
             Some(ash_core::archive::defined_wasm_functions(&cli.native_libs))

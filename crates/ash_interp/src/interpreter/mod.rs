@@ -1394,6 +1394,7 @@ impl HLInterpreter {
             hot_loop_pcs: Mutex::new(HashMap::new()),
             live_frame: Mutex::new(std::collections::HashSet::new()),
             called_from_loop: Mutex::new(std::collections::HashSet::new()),
+            handoff: Default::default(),
             vtable_slots: Mutex::new(None),
             pending_osr: Mutex::new(HashMap::new()),
             osr_image_regs: Mutex::new(HashMap::new()),
@@ -4874,6 +4875,9 @@ impl HLInterpreter {
             let bound = tiered.beads[findex].as_ref()?;
             let ctx = Arc::clone(&tiered.shared_ctx);
             let calls = tiered.calls[findex];
+            if is_call && calls == 2 {
+                crate::tiering::pay_owed_promote(&ctx, &tiered.adapter, bound, findex, calls);
+            }
             tiered.adapter.on_invoke(bound, move |tier, bead| {
                 tiered_compile_tier(&ctx, tier, findex, bead, true, calls)
             })?

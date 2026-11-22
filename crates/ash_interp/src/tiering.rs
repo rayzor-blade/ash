@@ -8,6 +8,9 @@
 
 #![allow(dead_code)]
 
+mod handoff;
+pub(crate) use handoff::pay_owed_promote;
+
 #[cfg(feature = "llvm")]
 use crate::interpreter::retier_abandoned;
 use anyhow::Result;
@@ -663,6 +666,9 @@ pub(crate) struct TieredSharedCtx {
     /// reaches is part of that work. bench_method_call's `step` is exactly
     /// this shape -- eleven opcodes, no loop, 100M calls from one frame.
     pub(crate) called_from_loop: Mutex<std::collections::HashSet<usize>>,
+    /// Promotes postponed after an OSR hand-off, and which of those
+    /// functions the interpreter has since entered a second time.
+    pub(crate) handoff: handoff::HandoffLedger,
     /// `findex -> [(type index, vtable slot)]`, over every HOBJ/HSTRUCT
     /// type whose vtable names the findex (own protos and inherited ones —
     /// `pindex` is absolute across the super chain, and every subclass's
@@ -941,6 +947,7 @@ impl TieredSharedCtx {
             .lock()
             .expect("called_from_loop mutex poisoned")
             .clear();
+        self.handoff.clear();
         self.pending_osr
             .lock()
             .expect("pending_osr mutex poisoned")
@@ -2667,12 +2674,15 @@ pub(crate) fn compile_with_llvm(
         // for again. So is one entered once so far but seen called from a
         // loop or beneath its own frame: `calls` counts interpreted entries,
         // and its later calls come from callers that are compiled by now.
+        // `calls` is the count when the promote was queued; the ledger holds
+        // the entries since, and owes the postponed promote to the next one.
         if published > 0
             && tier == 1
             && !ctx.compiled_only
             && calls <= 1
             && !entered_again(ctx, findex)
             && !named_by_several_call_sites(ctx, findex)
+            && ctx.handoff.postpone(findex)
         {
             return Ok(None);
         }

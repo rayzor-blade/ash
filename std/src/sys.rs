@@ -1553,7 +1553,25 @@ pub unsafe extern "C" fn hlp_sys_has_debugger() -> bool {
 /// which is the figure a profiler weighs against the machine's RAM.
 #[unsafe(no_mangle)]
 pub extern "C" fn hlp_sys_process_memory() -> f64 {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    #[allow(deprecated)] // libc points at the mach2 crate; one read is not worth a dependency
+    unsafe {
+        // libproc is not part of the iOS SDK, so the Mach task's own
+        // accounting answers instead.
+        let mut info: libc::mach_task_basic_info = std::mem::zeroed();
+        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        let got = libc::task_info(
+            libc::mach_task_self_,
+            libc::MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as libc::task_info_t,
+            &mut count,
+        );
+        if got != 0 {
+            return 0.0;
+        }
+        info.resident_size as f64
+    }
+    #[cfg(target_os = "macos")]
     unsafe {
         let mut ti: libc::proc_taskinfo = std::mem::zeroed();
         let want = std::mem::size_of::<libc::proc_taskinfo>() as i32;

@@ -62,24 +62,36 @@ fn has_legacy_hash(name: &str) -> bool {
     body[..body.len() - 16].ends_with("17h") && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// An NDK tool, found beside the compiler driver.
-fn ndk_tool(tools: &Tools<'_>, name: &str) -> Result<PathBuf> {
-    let bin = Path::new(tools.program)
+/// The tool that rewrites an ELF object's symbol table: the one beside the
+/// compiler driver, as in the NDK, else one on the search path.
+fn objcopy_tool(tools: &Tools<'_>) -> Result<PathBuf> {
+    let beside = Path::new(tools.program)
         .parent()
-        .ok_or_else(|| anyhow!("no directory beside {}", tools.program))?;
-    let tool = bin.join(name);
-    if tool.is_file() {
-        Ok(tool)
-    } else {
-        bail!(
-            "{name} is not beside {}, which isolating a Rust library needs",
+        .map(|bin| bin.join("llvm-objcopy"))
+        .filter(|tool| tool.is_file());
+    let on_path = || {
+        let path = std::env::var_os("PATH")?;
+        ["llvm-objcopy", "objcopy"].into_iter().find_map(|name| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .find(|tool| tool.is_file())
+        })
+    };
+    beside.or_else(on_path).ok_or_else(|| {
+        anyhow!(
+            "no llvm-objcopy or objcopy beside {} or on the search path, which isolating a Rust library needs",
             tools.program
         )
-    }
+    })
+}
+
+/// Whether the target's objects are Mach-O: an iOS app or a macOS program.
+fn mach_o(tools: &Tools<'_>) -> bool {
+    tools.os == "ios" || tools.os == "macos"
 }
 
 fn prefix(tools: &Tools<'_>) -> &'static str {
-    if tools.os == "ios" { "_" } else { "" }
+    if mach_o(tools) { "_" } else { "" }
 }
 
 /// Merge `archive` into the object `out`, keeping only its interface global.
@@ -105,7 +117,7 @@ fn isolate(archive: &Path, out: &Path, tools: &Tools<'_>) -> Result<Option<()>> 
 
     let mut merge = Command::new(tools.program);
     merge.args(tools.args).arg("-nostdlib");
-    if tools.os == "ios" {
+    if mach_o(tools) {
         // Mach-O's linker makes every global outside the list local in a
         // relocatable output.
         merge
@@ -124,8 +136,8 @@ fn isolate(archive: &Path, out: &Path, tools: &Tools<'_>) -> Result<Option<()>> 
     }
     merge.arg("-o").arg(out);
     run(&mut merge, "merging a Rust library")?;
-    if tools.os != "ios" {
-        let mut objcopy = Command::new(ndk_tool(tools, "llvm-objcopy")?);
+    if !mach_o(tools) {
+        let mut objcopy = Command::new(objcopy_tool(tools)?);
         objcopy
             .arg(format!("--keep-global-symbols={}", list.display()))
             .arg(out);

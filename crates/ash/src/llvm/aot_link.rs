@@ -471,14 +471,16 @@ fn platform_args(dialect: Dialect, os: &str, triple: &str) -> Result<Vec<String>
     Ok(args)
 }
 
-/// How one link input is passed. A static library on a phone is the app's own
-/// natives, each reached by a weak reference, which pulls no archive member:
-/// the whole archive goes in.
-fn object_args(object: &Path, os: &str) -> Vec<std::ffi::OsString> {
+/// How one link input is passed. A static library of a program that links its
+/// natives is the program's own, each reached by a weak reference, which pulls
+/// no archive member: the whole archive goes in. A phone always links its
+/// natives; a desktop program does when `linked_natives` says so.
+fn object_args(object: &Path, os: &str, linked_natives: bool) -> Vec<std::ffi::OsString> {
     let archive = object.extension().is_some_and(|e| e == "a");
-    match (archive, os) {
-        (true, "ios") => vec![format!("-Wl,-force_load,{}", object.display()).into()],
-        (true, "android") => vec![
+    let whole = archive && (os == "ios" || os == "android" || linked_natives && os != "windows");
+    match (whole, os) {
+        (true, "ios" | "macos") => vec![format!("-Wl,-force_load,{}", object.display()).into()],
+        (true, _) => vec![
             "-Wl,--whole-archive".into(),
             object.into(),
             "-Wl,--no-whole-archive".into(),
@@ -1013,8 +1015,10 @@ pub fn link_executable(
         );
     }
 
+    // A program whose natives come from archives names them for the link.
+    let linked_natives = !native_symbols.is_empty();
     // Rust libraries beside the runtime each carry their own standard library.
-    let isolated = if super::mobile_sdk::os(triple).is_some() {
+    let isolated = if super::mobile_sdk::os(triple).is_some() || linked_natives {
         Some(super::rust_isolate::prepare(
             objects,
             &runtime,
@@ -1036,7 +1040,7 @@ pub fn link_executable(
     let mut cmd = Command::new(&driver.program);
     cmd.args(&driver.args);
     for object in objects {
-        cmd.args(object_args(object, os));
+        cmd.args(object_args(object, os, linked_natives));
     }
     cmd.arg(&runtime);
     // The program weakly references these resolvers, and the window host's

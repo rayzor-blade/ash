@@ -6,7 +6,7 @@
 //! A library no archive touches still has to be found as an HDLL.
 #![cfg(all(feature = "llvm", unix))]
 mod common;
-use common::{ash_cli_bin, render_output, repo_root, run_with_timeout, tests_dir};
+use common::{ash_cli_bin, render_output, run_with_timeout, tests_dir};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -55,16 +55,15 @@ fn build(out: &Path, archive: &Path, cross: Option<(&str, &Path)>) -> Result<(),
     }
 }
 
-#[test]
-fn a_program_takes_its_library_from_the_archive_and_needs_no_hdll() {
-    let dir = tempfile::tempdir().unwrap();
-    let toy = tests_dir().join("static_native/toy.c");
-    let archive = c_archive(dir.path(), "toy", &toy, &[]);
-    let out = dir.path().join("native");
-    build(&out, &archive, None).unwrap_or_else(|e| panic!("{e}"));
+/// The toy program built from `archive` into `dir`, and run: one executable
+/// with no HDLL and no shared runtime beside it, that prints what the library
+/// computes.
+fn assert_links_and_runs(dir: &Path, archive: &Path) {
+    let out = dir.join("native");
+    build(&out, archive, None).unwrap_or_else(|e| panic!("{e}"));
 
     // One executable: no HDLL, and no shared runtime staged beside it.
-    let beside: Vec<String> = std::fs::read_dir(dir.path())
+    let beside: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with("libhl") || n.ends_with(".hdll"))
@@ -85,6 +84,50 @@ fn a_program_takes_its_library_from_the_archive_and_needs_no_hdll() {
         "{}",
         render_output(&run)
     );
+}
+
+#[test]
+fn a_program_takes_its_library_from_the_archive_and_needs_no_hdll() {
+    let dir = tempfile::tempdir().unwrap();
+    let toy = tests_dir().join("static_native/toy.c");
+    let archive = c_archive(dir.path(), "toy", &toy, &[]);
+    assert_links_and_runs(dir.path(), &archive);
+}
+
+/// A Rust library carries its own copy of `std`, which the runtime has too:
+/// the two must not collide, and the library's primitives must still be there.
+#[test]
+fn a_rust_library_with_its_own_std_links_beside_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("toyrs.rs");
+    std::fs::write(
+        &source,
+        r#"use std::os::raw::{c_char, c_void};
+extern "C" fn add(a: i32, b: i32) -> i32 { std::panic::catch_unwind(|| a + b).unwrap_or(0) }
+extern "C" fn scale(x: f64, k: f64) -> f64 { std::panic::catch_unwind(|| x * k).unwrap_or(0.0) }
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_toy_add(sign: *mut *const c_char) -> *const c_void {
+    unsafe { *sign = c"ii_i".as_ptr() };
+    add as *const c_void
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_toy_scale(sign: *mut *const c_char) -> *const c_void {
+    unsafe { *sign = c"dd_d".as_ptr() };
+    scale as *const c_void
+}
+"#,
+    )
+    .unwrap();
+    let archive = dir.path().join("libtoyrs.a");
+    let built = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
+        .args(["--edition", "2024", "--crate-type", "staticlib"])
+        .args(["-C", "opt-level=1", "--crate-name", "toyrs", "-o"])
+        .arg(&archive)
+        .arg(&source)
+        .status()
+        .expect("no rustc");
+    assert!(built.success(), "rustc could not build the library");
+    assert_links_and_runs(dir.path(), &archive);
 }
 
 #[test]
@@ -117,7 +160,7 @@ fn a_macos_program_cross_builds_for_the_other_architecture_from_an_archive() {
     } else {
         ("aarch64-apple-darwin", "arm64", 0x0100_000cu32)
     };
-    let runtime = repo_root()
+    let runtime = common::repo_root()
         .join("target")
         .join(triple)
         .join("release/libash_std.a");

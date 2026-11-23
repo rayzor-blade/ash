@@ -17,10 +17,11 @@
 # The first directory holds the wasm runtime objects (release.yml's
 # wasm-assets job); its contents go beside the binary, where
 # `ash --build x.wasm` looks for them. The second holds one directory per
-# phone target, each with that target's libash_std.a (the ios-assets and
-# android-assets jobs); they go beside the binary the same way, for
+# target, each with that target's libash_std.a (the ios-assets, android-assets
+# and desktop-assets jobs); they go beside the binary the same way, for
 # `ash --build --target <triple>`. iOS ones are packaged on macOS only, the
-# one host that can link for iOS.
+# one host that can link for iOS. A macOS tarball carries the runtime of the
+# other macOS architecture, never its own: the binary already bundles that.
 set -euo pipefail
 
 TARGET="${1:?usage: package_release.sh <target-name> [wasm-assets-dir [mobile-assets-dir]]}"
@@ -179,6 +180,9 @@ if [[ -n "$MOBILE_ASSETS" && -d "$MOBILE_ASSETS" ]]; then
     triple="$(basename "$dir")"
     case "$triple" in
       *apple-ios*) [[ "$(uname -s)" == "Darwin" ]] || continue ;;
+      *apple-darwin)
+        [[ "$(uname -s)" == "Darwin" ]] || continue
+        [[ "$triple" != "$(uname -m | sed 's/^arm64$/aarch64/')-apple-darwin" ]] || continue ;;
     esac
     mkdir -p "$DIST/$triple"
     cp "${dir}libash_std.a" "$DIST/$triple/"

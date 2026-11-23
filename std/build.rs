@@ -158,6 +158,27 @@ fn ios_clang_args(target: &str) -> Vec<String> {
     vec![format!("--target={clang}"), format!("--sysroot={path}")]
 }
 
+/// The clang arguments for a macOS target built from a Mac of the other
+/// architecture: Xcode's macOS SDK, whichever architecture the triple names.
+fn macos_clang_args(target: &str) -> Vec<String> {
+    let arch = if target.starts_with("x86_64") { "x86_64" } else { "arm64" };
+    let path = std::process::Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "building ash_std for {target} needs the macOS SDK, and `xcrun --sdk macosx \
+                 --show-sdk-path` found none. Install Xcode and select it with \
+                 `sudo xcode-select -s /Applications/Xcode.app`"
+            )
+        });
+    vec![format!("--target={arch}-apple-darwin"), format!("--sysroot={path}")]
+}
+
 /// The NDK, found the way Android's own tools find it: a variable that names
 /// it, then the newest one under an SDK the environment names, then under
 /// Android Studio's default SDK location.
@@ -302,6 +323,9 @@ fn cross_clang_args(target: &str, host: &str) -> Vec<String> {
     // and those tools say where.
     if target.contains("apple-ios") {
         return ios_clang_args(target);
+    }
+    if target.contains("apple-darwin") {
+        return macos_clang_args(target);
     }
     if target.contains("android") {
         return android_clang_args(target);

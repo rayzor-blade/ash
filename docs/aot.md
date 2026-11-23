@@ -290,6 +290,46 @@ build one (below) and put it there or name it with `--runtime`.
   --release --crate-type staticlib`, because the library's shared build would
   need the NDK as cargo's linker. The headers come from the same SDK.
 
+## Native libraries on a desktop
+
+A desktop program that names an HDLL loads it when the program runs, and it
+takes the shared runtime. To ship one executable instead, pass each library as
+`--native-lib libfoo.a` (repeatable):
+
+```sh
+ash --build app --native-lib libgreeter.a app.hl
+```
+
+If the archives define a primitive of every library the program names, ash
+links the whole archive into the program and uses the static runtime. The
+program finds each primitive through the library's `hlp_<name>` entry, as on a
+phone. No `.hdll` and no `libhl` sit beside the executable.
+
+- A library that no archive defines a primitive for stays an HDLL. In that
+  case ash keeps the shared runtime and ignores the archives.
+- If an archive lacks a primitive that the program names, calling it raises an
+  error. A program that never calls it runs normally.
+- A Rust static library is merged first, exactly as on a phone. On Linux this
+  needs `llvm-objcopy` or `objcopy` on the search path.
+- Windows keeps loading HDLLs.
+
+## The other macOS architecture
+
+A Mac links for either macOS architecture with Apple's linker. The macOS
+tarballs carry the runtime for the other architecture beside the binary, so
+this needs no other flag:
+
+```sh
+ash --build app --target x86_64-apple-darwin app.hl
+```
+
+On an arm64 Mac the tarball holds `x86_64-apple-darwin/libash_std.a`. On an
+Intel Mac it holds `aarch64-apple-darwin/libash_std.a`. A source build has
+neither. Build the runtime with
+`cargo build --release -p ash_std --target x86_64-apple-darwin`, and put it
+there or name it with `--runtime`. Pass `--native-lib` archives built for the
+same architecture as the program.
+
 ## WebAssembly
 
 ```sh

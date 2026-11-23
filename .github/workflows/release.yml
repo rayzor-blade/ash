@@ -134,6 +134,47 @@ jobs:
           path: ios-assets
           if-no-files-found: error
 
+  # What `ash --build --target <the other macOS triple>` links against: the
+  # runtime for each macOS architecture, so the arm64 tarball can build for
+  # Intel and the Intel one for arm64 with no `--runtime`. Both are built on
+  # the arm64 runner; the Intel one is a cross build. A failed build leaves
+  # them out of the tarballs rather than stopping the release.
+  desktop-assets:
+    name: build (macOS runtimes)
+    runs-on: macos-15
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-desktop-assets
+
+      # ash_std's build runs bindgen, which needs libclang.
+      - uses: ./.github/actions/llvm21
+
+      - name: Build and strip the runtimes
+        run: |
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo rustc -p ash_std --target "$triple" --release --crate-type staticlib
+            mkdir -p "desktop-assets/$triple"
+            cp "target/$triple/release/libash_std.a" "desktop-assets/$triple/"
+            strip -S "desktop-assets/$triple/libash_std.a"
+          done
+          find desktop-assets -type f -exec ls -la {} \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-assets
+          path: desktop-assets
+          if-no-files-found: error
+
   # The same for Android, which any host can link for with the NDK. The
   # runner image carries the NDK; ash finds it the way a developer's machine
   # does (ANDROID_NDK_HOME).
@@ -177,7 +218,7 @@ jobs:
 
   build:
     name: build (${{ matrix.target }})
-    needs: [wasm-assets, ios-assets, android-assets]
+    needs: [wasm-assets, ios-assets, android-assets, desktop-assets]
     runs-on: ${{ matrix.os }}
     # A retired or saturated runner image must fail this leg, not stall the
     # release behind it.
@@ -296,6 +337,14 @@ jobs:
           name: ios-assets
           path: mobile-assets
 
+      - name: Fetch the macOS runtimes
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-assets
+          path: mobile-assets
+
       - name: Package
         run: |
           ./scripts/package_release.sh "${{ matrix.target }}" wasm-assets mobile-assets
@@ -331,6 +380,21 @@ jobs:
             "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/basic-ios" --target aarch64-apple-ios-sim \
               crates/ash/test/tests/test_basic.hl
             test -s "$RUNNER_TEMP/basic-ios"
+          fi
+          # And for the other macOS architecture: Apple's linker links either,
+          # and the runtime comes from beside the binary.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            if [[ "$(uname -m)" == "arm64" ]]; then
+              other=x86_64-apple-darwin; arch=x86_64
+            else
+              other=aarch64-apple-darwin; arch=arm64
+            fi
+            if [[ -d "$RUNNER_TEMP/$other" ]]; then
+              "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/basic-other" --target "$other" \
+                crates/ash/test/tests/test_basic.hl
+              test -s "$RUNNER_TEMP/basic-other"
+              file "$RUNNER_TEMP/basic-other" | grep -q "Mach-O 64-bit executable $arch"
+            fi
           fi
           if [[ -d "$RUNNER_TEMP/aarch64-linux-android" && -n "${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]]; then
             "$RUNNER_TEMP/ash" --build "$RUNNER_TEMP/basic-android" --target aarch64-linux-android \
@@ -579,7 +643,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [wasm-assets, ios-assets, android-assets, build, windows]
+    needs: [wasm-assets, ios-assets, android-assets, desktop-assets, build, windows]
 
     # `always()` so one platform failing still publishes the others -- the
     # "at least one tarball" step below is what makes an empty release an

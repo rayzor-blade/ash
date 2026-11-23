@@ -420,6 +420,7 @@ mod natives;
 mod ops;
 mod ssa;
 pub mod stack;
+mod wide_native;
 
 use instrument::CompileBlocking;
 

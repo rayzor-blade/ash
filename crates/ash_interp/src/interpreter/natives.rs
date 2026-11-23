@@ -21,9 +21,10 @@ use crate::values::NanBoxedValue;
 
 use super::{FnGetObjRt, HLInterpreter, HlpName, func_of, kind_u32, native_of, run_with_hl_trap};
 
-/// The most words a native call takes by the integer dispatch: its context,
-/// when it has one, and its arguments.
-const MAX_NATIVE_WORDS: usize = 12;
+/// The most words a native call takes by the register dispatch: its context,
+/// when it has one, and its arguments. A wider call goes through a thunk the
+/// compiler lowers (`wide_native`).
+const MAX_NATIVE_WORDS: usize = 8;
 
 impl HLInterpreter {
     /// Call a native function via FFI.
@@ -242,6 +243,7 @@ impl HLInterpreter {
         // throws longjmps straight back here, leaving the frames it pushed
         // behind.
         let stack_depth = self.stack.len();
+        let wide = usize::from(context != 0) + args.len() > MAX_NATIVE_WORDS;
 
         if record {
             // By record: every argument as the word `value_to_i64` gives,
@@ -270,7 +272,7 @@ impl HLInterpreter {
             return Ok(self.wrap_native_result(raw, ret_kind));
         }
 
-        if ret_is_float || float_mask != 0 {
+        if !wide && (ret_is_float || float_mask != 0) {
             let mut raw = None;
             let mut recovered_signal = false;
             let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
@@ -374,13 +376,35 @@ impl HLInterpreter {
         // the arguments.
         let lead = usize::from(context != 0);
         let len = lead + args.len();
-        if len > MAX_NATIVE_WORDS {
-            return Err(anyhow!("Native call with {len} args not yet supported"));
-        }
+        // Past the registers the callee's arguments are on the stack, laid out
+        // as the platform says, so the call is made through a thunk.
+        let wide_call = if wide {
+            let kind_of = |i: usize| arg_kinds.get(i).copied().unwrap_or(0);
+            let mut words: Vec<u64> = Vec::with_capacity(len);
+            if lead == 1 {
+                words.push(context as u64);
+            }
+            for (i, arg) in args.iter().enumerate() {
+                words.push(if is_float_kind(kind_of(i)) {
+                    arg.as_f64().to_bits()
+                } else {
+                    extract_arg(i) as u64
+                });
+            }
+            let kinds: Vec<hl::hl_type_kind> = (0..args.len()).map(kind_of).collect();
+            let thunk =
+                super::wide_native::thunk_for(func_ptr as usize, lead == 1, &kinds, ret_kind)?;
+            Some((thunk, words))
+        } else {
+            None
+        };
         let mut buffer = [0i64; MAX_NATIVE_WORDS];
-        buffer[0] = context as i64;
-        for (slot, arg) in buffer[lead..len].iter_mut().zip(0..) {
-            *slot = extract_arg(arg);
+        let len = if wide { 0 } else { len };
+        if !wide {
+            buffer[0] = context as i64;
+            for (slot, arg) in buffer[lead..len].iter_mut().zip(0..) {
+                *slot = extract_arg(arg);
+            }
         }
         let words = &buffer[..len];
         let word = |i: usize| words[i];
@@ -389,6 +413,13 @@ impl HLInterpreter {
         // (e.g., macOS GL driver bugs) is caught and turned into a recoverable error.
         let mut raw_result = None;
         let mut recovered_signal = false;
+        // The ladder's rung, or the thunk for a call past the registers.
+        const WIDE: usize = usize::MAX;
+        let arity = if wide_call.is_some() {
+            WIDE
+        } else {
+            words.len()
+        };
         let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
             let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
             if recovered != 0 {
@@ -399,7 +430,7 @@ impl HLInterpreter {
 
             // Dispatch based on argument count, using type-aware extraction and wrapping.
             raw_result = Some(unsafe {
-                match words.len() {
+                match arity {
                     0 => {
                         let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
                         f()
@@ -460,113 +491,9 @@ impl HLInterpreter {
                             word(7),
                         )
                     }
-                    9 => {
-                        let f: unsafe extern "C" fn(
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                        ) -> i64 = std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                            word(4),
-                            word(5),
-                            word(6),
-                            word(7),
-                            word(8),
-                        )
-                    }
-                    10 => {
-                        let f: unsafe extern "C" fn(
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                        ) -> i64 = std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                            word(4),
-                            word(5),
-                            word(6),
-                            word(7),
-                            word(8),
-                            word(9),
-                        )
-                    }
-                    11 => {
-                        let f: unsafe extern "C" fn(
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                        ) -> i64 = std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                            word(4),
-                            word(5),
-                            word(6),
-                            word(7),
-                            word(8),
-                            word(9),
-                            word(10),
-                        )
-                    }
-                    12 => {
-                        let f: unsafe extern "C" fn(
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                            i64,
-                        ) -> i64 = std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                            word(4),
-                            word(5),
-                            word(6),
-                            word(7),
-                            word(8),
-                            word(9),
-                            word(10),
-                            word(11),
-                        )
+                    WIDE => {
+                        let (thunk, wide_words) = wide_call.as_ref().expect("a wide call");
+                        thunk(wide_words.as_ptr()) as i64
                     }
                     _ => 0i64, // arg count is pre-validated above
                 }

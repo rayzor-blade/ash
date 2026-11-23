@@ -449,26 +449,88 @@ pub fn compile_uniform_entry(
         .ok_or_else(|| anyhow!("no function type"))?;
     let ret_class = entry_return_class(bytecode.types[tf.ret.0].kind);
 
-    let mut sig = backend.make_signature();
-    sig.params.push(AbiParam::new(types::I64)); // the argument buffer
-    sig.returns.push(AbiParam::new(types::I64)); // always one raw word
-    let name = backend.unique_name(findex, "uniform");
-    let mut def = backend
-        .new_def(sig, &name)
-        .map_err(|e| anyhow!("declare_function({name}): {e}"))?;
-
     // The callee's real signature, built from the same classes the ordinary
     // entry is compiled with, so the two agree by construction.
-    let mut target_sig = backend.make_signature();
     let mut arg_types = Vec::with_capacity(tf.args.len());
     for a in &tf.args {
         let ty = argument_abi_class(ctx.type_kind(a.0)?)
             .clif_type()
             .ok_or_else(|| anyhow!("void argument in uniform entry signature"))?;
-        target_sig.params.push(AbiParam::new(ty));
         arg_types.push(ty);
     }
-    if let Some(ty) = ret_class.clif_type() {
+    let name = backend.unique_name(findex, "uniform");
+    compile_buffer_thunk(
+        backend,
+        bead,
+        &name,
+        target,
+        &arg_types,
+        ret_class.clif_type(),
+        Some(findex),
+    )
+}
+
+/// A buffer-in entry for a native, so the interpreter can call one that takes
+/// more words than its register dispatch covers. The compiler lowers the call,
+/// so stack arguments, float registers and a platform's packing of narrow
+/// stack arguments are the ones compiled code uses. `context` is the host
+/// native's leading context word. The buffer holds one word per parameter, and
+/// the result is one word, floats as `f64` bits.
+pub fn compile_native_thunk(
+    backend: &AshCraneliftBackend,
+    bead: &std::sync::Arc<beadie::Bead>,
+    target: usize,
+    context: bool,
+    arg_kinds: &[hl::hl_type_kind],
+    ret_kind: hl::hl_type_kind,
+) -> Result<usize> {
+    let mut arg_types = Vec::with_capacity(arg_kinds.len() + 1);
+    if context {
+        arg_types.push(backend.pointer_type());
+    }
+    for &kind in arg_kinds {
+        arg_types.push(
+            argument_abi_class(kind)
+                .clif_type()
+                .ok_or_else(|| anyhow!("void argument in a native thunk signature"))?,
+        );
+    }
+    let name = backend.unique_name(target, "native_thunk");
+    compile_buffer_thunk(
+        backend,
+        bead,
+        &name,
+        target,
+        &arg_types,
+        abi_class(ret_kind).clif_type(),
+        None,
+    )
+}
+
+/// The entry both of the above emit: one parameter, a buffer of 8-byte words,
+/// unpacked into `arg_types` for an ABI-correct call to `target`, whose result
+/// comes back as one raw word. `dump` names the function for `clif_dump_wanted`.
+fn compile_buffer_thunk(
+    backend: &AshCraneliftBackend,
+    bead: &std::sync::Arc<beadie::Bead>,
+    name: &str,
+    target: usize,
+    arg_types: &[types::Type],
+    ret: Option<types::Type>,
+    dump: Option<usize>,
+) -> Result<usize> {
+    let mut sig = backend.make_signature();
+    sig.params.push(AbiParam::new(types::I64)); // the argument buffer
+    sig.returns.push(AbiParam::new(types::I64)); // always one raw word
+    let mut def = backend
+        .new_def(sig, name)
+        .map_err(|e| anyhow!("declare_function({name}): {e}"))?;
+
+    let mut target_sig = backend.make_signature();
+    for &ty in arg_types {
+        target_sig.params.push(AbiParam::new(ty));
+    }
+    if let Some(ty) = ret {
         target_sig.returns.push(AbiParam::new(ty));
     }
 
@@ -521,7 +583,9 @@ pub fn compile_uniform_entry(
         b.finalize(fcfg);
     }
 
-    if super::lower::clif_dump_wanted(findex) {
+    if let Some(findex) = dump
+        && super::lower::clif_dump_wanted(findex)
+    {
         eprintln!(
             "=== CLIF (uniform entry) findex={findex} nargs={} ===\n{}",
             arg_types.len(),

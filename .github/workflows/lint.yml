@@ -99,6 +99,33 @@ jobs:
           cargo clippy -p ash_browser --all-targets --target wasm32-unknown-unknown -- -D warnings
           cargo clippy -p ash_wasm_emit --all-targets --target wasm32-unknown-unknown -- -D warnings
 
+  # The release builds the runtime for the phones on a schedule, and its iOS
+  # job may fail without stopping the release, so a dependency bump that breaks
+  # the iOS runtime shows up there a day late. Lint it here instead. The build
+  # script runs bindgen against the iOS SDK, which only a Mac has.
+  clippy-ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-ios
+
+      # ash_std's build runs bindgen, which needs libclang.
+      - uses: ./.github/actions/llvm21
+
+      - name: Clippy for iOS
+        run: |
+          cargo clippy -p ash_std --target aarch64-apple-ios -- -D warnings
+          cargo clippy -p ash_std --target aarch64-apple-ios-sim -- -D warnings
+
   # Compile and link the full CLI against real Windows headers on every push.
   # Checking ash_std alone missed ash_interp's MSVC enum width and Unix API
   # regressions; cargo check would also miss unavailable CRT symbols at link

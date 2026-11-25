@@ -102,7 +102,7 @@ fn inherited(bc: &DecodedBytecode, t: usize) -> usize {
 }
 
 /// The name of field `index` of `t`, counting every ancestor's fields first.
-fn field_name(bc: &DecodedBytecode, t: usize, index: usize) -> Option<&str> {
+pub(super) fn field_name(bc: &DecodedBytecode, t: usize, index: usize) -> Option<&str> {
     let mut chain = ancestors(bc, t);
     chain.reverse();
     chain.push(t);

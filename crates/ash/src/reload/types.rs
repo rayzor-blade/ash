@@ -10,6 +10,7 @@
 //! Types are matched by what survives an edit: a class, an enum and an
 //! abstract by name, the rest by what they are made of.
 
+use super::fields;
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
 use crate::opcodes::Opcode;
@@ -164,6 +165,62 @@ fn renumber(t: &mut HLType, at: &dyn Fn(usize) -> usize) {
     }
 }
 
+/// The names of the functions the class at `t` binds as statics, sorted. A
+/// binding names a field counting every ancestor's first, and a `$` object
+/// inherits some.
+fn bound_statics(bc: &DecodedBytecode, t: usize) -> Vec<String> {
+    let Some(obj) = bc.types.get(t).and_then(|t| t.obj.as_ref()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = obj
+        .bindings
+        .iter()
+        .step_by(2)
+        .map(|&at| {
+            usize::try_from(at)
+                .ok()
+                .and_then(|at| fields::field_name(bc, t, at))
+                .map_or_else(|| format!("field {at}"), str::to_string)
+        })
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Why the class at `n` of `new` does not bind the static functions that the
+/// one at `o` of `old` does. Names are compared because a static variable
+/// moves the field index of the functions after it; a changed `$` object is
+/// the field pass's to refuse.
+fn rebound(old: &DecodedBytecode, o: usize, new: &DecodedBytecode, n: usize) -> Option<String> {
+    let (was, now) = (bound_statics(old, o), bound_statics(new, n));
+    if was == now {
+        return None;
+    }
+    let only_in = |a: &[String], b: &[String]| -> Vec<String> {
+        let mut names: Vec<String> = a.iter().filter(|x| !b.contains(x)).cloned().collect();
+        names.dedup();
+        names
+    };
+    let mut said = Vec::new();
+    for (verb, names) in [
+        ("added", only_in(&now, &was)),
+        ("removed", only_in(&was, &now)),
+    ] {
+        if !names.is_empty() {
+            said.push(format!("{verb} {}", names.join(", ")));
+        }
+    }
+    let which = if said.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", said.join(" and "))
+    };
+    let name = &old.types[o].obj.as_ref()?.name;
+    Some(format!(
+        "{name} binds different statics; a static function was added or removed{which}"
+    ))
+}
+
 /// Why `new` cannot stand for `old`, two types matched by name that are laid
 /// out differently.
 fn incompatible(old: &HLType, new: &HLType) -> Option<String> {
@@ -178,17 +235,8 @@ fn incompatible(old: &HLType, new: &HLType) -> Option<String> {
                 o.name
             ));
         }
-        // The methods of a class are the slot pass's to match; the statics a
-        // class binds are fields of its `$` object, which is laid out like any.
-        let statics = |o: &crate::types::HLTypeObj| -> Vec<i32> {
-            o.bindings.iter().step_by(2).copied().collect()
-        };
-        if statics(o) != statics(n) {
-            return Some(format!(
-                "{} binds different statics; a static function was added or removed",
-                o.name
-            ));
-        }
+        // The methods of a class are the slot pass's to match, and the statics
+        // it binds are `rebound`'s.
     }
     if let (Some(o), Some(n)) = (&old.tenum, &new.tenum) {
         let same = o.constructs.len() == n.constructs.len()
@@ -229,6 +277,12 @@ pub fn remap_types(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<R
             }
         })
         .collect();
+    // Read on each program's own numbering, and said after the layout checks.
+    let statics = map
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| **slot < old.types.len())
+        .find_map(|(i, &slot)| rebound(old, slot, new, i));
     if map.iter().enumerate().all(|(i, &m)| i == m) && new.types.len() == old.types.len() {
         // Nothing moves. Each type still has to be laid out as the running one.
         for (running, t) in old.types.iter().zip(&new.types) {
@@ -236,7 +290,7 @@ pub fn remap_types(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<R
                 return Err(why);
             }
         }
-        return Ok(Retyped::default());
+        return statics.map_or_else(|| Ok(Retyped::default()), Err);
     }
     let at = |t: usize| map.get(t).copied().unwrap_or(t);
 
@@ -265,6 +319,9 @@ pub fn remap_types(old: &DecodedBytecode, new: &mut DecodedBytecode) -> Result<R
                 return Err(why);
             }
         }
+    }
+    if let Some(why) = statics {
+        return Err(why);
     }
     let dropped: Vec<usize> = (0..old.types.len()).filter(|&i| table[i].is_none()).collect();
     new.types = table
@@ -456,6 +513,64 @@ mod tests {
         );
         assert_eq!(remap_types(&old, &mut new).unwrap(), Retyped::default());
         assert_eq!(new.types[1].obj.as_ref().unwrap().fields.len(), 2);
+    }
+
+    /// A program with the `$` object of a class, which inherits a field as a
+    /// compiled one does: `fields` are its own in order, and each of `bound`
+    /// is one of them holding a static function.
+    fn statics_program(fields: &[&str], bound: &[&str]) -> DecodedBytecode {
+        let base = class("hl.Class", &[("__name__", I32)]);
+        let mut t = class("$S", &fields.iter().map(|f| (*f, I32)).collect::<Vec<_>>());
+        let obj = t.obj.as_mut().unwrap();
+        obj.super_ = Some(TypeRef(1));
+        obj.bindings = bound
+            .iter()
+            .enumerate()
+            .flat_map(|(findex, b)| {
+                let own = fields.iter().position(|f| f == b).unwrap();
+                [1 + own as i32, findex as i32]
+            })
+            .collect();
+        program(vec![prim(hl::hl_type_kind_HI32), base, t], &[2], &[])
+    }
+
+    /// A variable declared ahead of a bound function moves the function's
+    /// field, which is not a function added or removed.
+    #[test]
+    fn a_static_variable_ahead_of_a_bound_function_is_not_a_function_change() {
+        let old = statics_program(&["n", "label", "tick"], &["label", "tick"]);
+        let mut new = statics_program(&["n", "extra", "label", "tick"], &["label", "tick"]);
+        assert_eq!(remap_types(&old, &mut new).unwrap(), Retyped::default());
+    }
+
+    #[test]
+    fn a_static_function_added_is_named() {
+        let old = statics_program(&["n", "label"], &["label"]);
+        let mut new = statics_program(&["n", "label", "more"], &["label", "more"]);
+        let why = remap_types(&old, &mut new).unwrap_err();
+        assert!(
+            why.contains("a static function was added or removed (added more)"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_static_function_removed_is_named() {
+        let old = statics_program(&["n", "label", "more"], &["label", "more"]);
+        let mut new = statics_program(&["n", "label"], &["label"]);
+        let why = remap_types(&old, &mut new).unwrap_err();
+        assert!(
+            why.contains("a static function was added or removed (removed more)"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_static_function_renamed_in_place_is_named_both_ways() {
+        let old = statics_program(&["label"], &["label"]);
+        let mut new = statics_program(&["title"], &["title"]);
+        let why = remap_types(&old, &mut new).unwrap_err();
+        assert!(why.contains("(added title and removed label)"), "{why}");
     }
 
     #[test]

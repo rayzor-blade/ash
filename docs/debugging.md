@@ -522,8 +522,8 @@ was:
 |---------|-----|
 | `Class.method is new and Sub already declares a method of that name` | the new method and the subclass's would have to share a slot |
 | `Class.method moves from slot a to b, the slot of the method it now overrides` | frames that began before the reload call the old slot |
-| `Class binds different statics; a static function was added or removed` | statics are fields of the `$Class` object, which is laid out like any |
-| `the statics of Name changed` | a class's statics are fields of a `$Name` object, so a static added to a class that was running, which includes the first use of a function of the standard library, adds a field to that object, and nothing sets it up |
+| `Class binds different statics; a static function was added or removed (added f, removed g)` | statics are fields of the `$Class` object, which is laid out like any. The functions the two programs bind are compared by name, and the message names the ones that differ |
+| `the statics of Name changed` | a class's statics are fields of a `$Name` object. A static added to a class that was running adds a field to that object, and nothing sets it up. The first use of a function of the standard library does the same. A static variable gets this message wherever it is declared, including ahead of a bound function |
 | `field f of Name changed its type` | live objects have the field where it was, with the old size |
 | `Name gained f, and Sub extends it, so its fields would move` (or `lost f`) | the fields of a subclass follow its parent's |
 | `Name gained f, and a CArray of it lays its objects out one after another` | the size of the class is the stride of the array |

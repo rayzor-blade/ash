@@ -58,6 +58,11 @@ const FIELDS: Family = Family {
     main: "TestHotReloadFields",
 };
 
+const STATICS: Family = Family {
+    dir: "statics",
+    main: "TestHotReloadStatics",
+};
+
 impl Family {
     fn fixtures(self) -> PathBuf {
         repo_root().join("crates/ash/test/hot_reload").join(self.dir)
@@ -911,4 +916,48 @@ fn a_dropped_field_that_comes_back_set_to_a_computation_is_refused() {
         said.contains("Widget.items is set by a constructor with something that is not a constant, and an earlier reload dropped the field"),
         "{said}"
     );
+}
+
+/// A static function's body is edited: the class keeps its statics object, and
+/// the new body is the one called.
+#[test]
+fn a_static_function_body_is_edited() {
+    check(
+        STATICS,
+        "v1",
+        "v2",
+        &["reloaded", "label v2", "tick 2"],
+        "reloaded 1 changed function",
+    );
+}
+
+/// A static variable declared ahead of a bound function moves the function's
+/// field. No function was added, so the refusal is about the statics object.
+#[test]
+fn a_static_variable_ahead_of_a_function_is_refused_as_a_layout_change() {
+    let said = refusal(STATICS, "v1", "v3");
+    assert!(said.contains("the statics of Systems changed"), "{said}");
+    assert!(
+        !said.contains("a static function was added or removed"),
+        "{said}"
+    );
+}
+
+/// A static function added to a running class is refused, and the reason names
+/// the function.
+#[test]
+fn a_static_function_added_to_a_running_class_is_refused_by_name() {
+    let said = refusal(STATICS, "v1", "v4");
+    assert!(
+        said.contains("a static function was added or removed (added more)"),
+        "{said}"
+    );
+}
+
+/// A static variable after the last function moves no binding, and the
+/// statics object still changed.
+#[test]
+fn a_static_variable_after_the_functions_is_refused_as_a_layout_change() {
+    let said = refusal(STATICS, "v1", "v5");
+    assert!(said.contains("the statics of Systems changed"), "{said}");
 }

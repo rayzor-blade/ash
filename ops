@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795702830,"nonce":"ALRT1A4jjihUN3UNbu1DdkyKKcY=","message":"CI is green on 24dce67f4ad2faf4d8f105d78dd675fa65012233, which holds 9827a94c2ad644bed6fd96ed94fef6e05118bfcb. The four-library test passes on macOS and on Linux x86_64 and arm64.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1795702831,"nonce":"s17Dwz+Fv1lepR2nhkNq1GWbSiQ=","status":2}]}

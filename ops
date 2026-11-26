@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795702831,"nonce":"Q3HtrR1oSLtBoeYmToYGQtI+M/A=","message":"CI is green on 24dce67f4ad2faf4d8f105d78dd675fa65012233. The four-library test, which failed on both Linux jobs before the fix, passes on Linux x86_64 and arm64 and on macOS.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1795702831,"nonce":"6eW6BEzGtck1jTbu4Ti965BGz6A=","status":2}]}

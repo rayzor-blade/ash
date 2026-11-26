@@ -10,13 +10,21 @@
 //! The symbols are read from the archive directly, because Apple's `nm`
 //! cannot read the bitcode rustc leaves in a library's members. The merge uses
 //! the compiler driver, and on Android the NDK's `llvm-objcopy` finishes it.
+//!
+//! On Mach-O the unwinding personality is the one internal the libraries share:
+//! compact unwind has room for only a few personalities in an image, so each
+//! object offers its copy as a weak private external and the link keeps one.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Result, anyhow, bail};
+use object::macho::{LC_SYMTAB, MH_MAGIC_64, N_EXT, N_PEXT, N_SECT, N_STAB, N_TYPE, N_WEAK_DEF};
 
 use crate::archive::defined_in;
+
+/// The unwinding personality a Rust library defines, by its Mach-O name.
+const PERSONALITY: &str = "_rust_eh_personality";
 
 /// How to run the platform's tools.
 pub(crate) struct Tools<'a> {
@@ -112,6 +120,10 @@ fn isolate(archive: &Path, out: &Path, tools: &Tools<'_>) -> Result<Option<()>> 
     if keep.is_empty() {
         bail!("{} exports nothing but Rust internals", archive.display());
     }
+    let shares_personality = mach_o(tools) && defined.iter().any(|d| d.name == PERSONALITY);
+    if shares_personality {
+        keep.push(PERSONALITY);
+    }
     let list = out.with_extension("keep");
     std::fs::write(&list, keep.join("\n") + "\n")?;
 
@@ -143,7 +155,65 @@ fn isolate(archive: &Path, out: &Path, tools: &Tools<'_>) -> Result<Option<()>> 
             .arg(out);
         run(&mut objcopy, "isolating a Rust library")?;
     }
+    if shares_personality {
+        let mut object =
+            std::fs::read(out).map_err(|e| anyhow!("could not read {}: {e}", out.display()))?;
+        share_personality(&mut object)
+            .map_err(|e| anyhow!("isolating {}: {e}", archive.display()))?;
+        std::fs::write(out, object)
+            .map_err(|e| anyhow!("could not write {}: {e}", out.display()))?;
+    }
     Ok(Some(()))
+}
+
+/// Mark the exported personality of a 64-bit Mach-O object as a weak private
+/// external definition, which a link merges with the other copies and does not
+/// export from the image.
+fn share_personality(object: &mut [u8]) -> Result<()> {
+    let truncated = || anyhow!("the merged object is truncated");
+    let word = |object: &[u8], at: usize| -> Result<u32> {
+        let bytes = object.get(at..at + 4).ok_or_else(truncated)?;
+        Ok(u32::from_le_bytes(bytes.try_into()?))
+    };
+    if word(object, 0)? != MH_MAGIC_64 {
+        bail!("the merged object is not a 64-bit Mach-O object");
+    }
+    // The load commands follow the 32-byte header, each led by its kind and size.
+    let mut command = 32;
+    let mut symbols = None;
+    for _ in 0..word(object, 16)? {
+        if word(object, command)? == LC_SYMTAB {
+            symbols = Some([
+                word(object, command + 8)? as usize,
+                word(object, command + 12)? as usize,
+                word(object, command + 16)? as usize,
+            ]);
+        }
+        command += word(object, command + 4)? as usize;
+    }
+    let [table, count, strings] =
+        symbols.ok_or_else(|| anyhow!("the merged object has no symbol table"))?;
+    let mut marked = false;
+    // Each entry: name offset (4), type (1), section (1), description (2), value (8).
+    for entry in (0..count).map(|i| table + i * 16) {
+        let name = strings + word(object, entry)? as usize;
+        let kind = *object.get(entry + 4).ok_or_else(truncated)?;
+        let exported = kind & N_STAB == 0 && kind & N_TYPE == N_SECT && kind & N_EXT != 0;
+        let named = object
+            .get(name..=name + PERSONALITY.len())
+            .is_some_and(|n| n.strip_suffix(&[0]) == Some(PERSONALITY.as_bytes()));
+        if exported && named {
+            let desc = object.get_mut(entry + 6..entry + 8).ok_or_else(truncated)?;
+            let weak = u16::from_le_bytes([desc[0], desc[1]]) | N_WEAK_DEF;
+            desc.copy_from_slice(&weak.to_le_bytes());
+            object[entry + 4] |= N_PEXT;
+            marked = true;
+        }
+    }
+    if !marked {
+        bail!("the merged object does not export {PERSONALITY}");
+    }
+    Ok(())
 }
 
 fn run(command: &mut Command, what: &str) -> Result<()> {
@@ -206,6 +276,65 @@ pub(crate) fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 64-bit Mach-O object that is only a symbol table: each of `symbols`
+    /// as a name and a type byte, defined in section 1.
+    fn object(symbols: &[(&str, u8)]) -> Vec<u8> {
+        let table = 32 + 24;
+        let strings = table + symbols.len() * 16;
+        let mut names = vec![0u8];
+        let mut entries = Vec::new();
+        for (name, kind) in symbols {
+            entries.extend((names.len() as u32).to_le_bytes());
+            entries.extend([*kind, 1, 0, 0]);
+            entries.extend(0u64.to_le_bytes());
+            names.extend(name.as_bytes());
+            names.push(0);
+        }
+        let mut out = Vec::new();
+        for word in [MH_MAGIC_64, 0, 0, 1, 1, 24, 0, 0] {
+            out.extend(word.to_le_bytes());
+        }
+        for word in [
+            LC_SYMTAB,
+            24,
+            table as u32,
+            symbols.len() as u32,
+            strings as u32,
+            names.len() as u32,
+        ] {
+            out.extend(word.to_le_bytes());
+        }
+        out.extend(entries);
+        out.extend(names);
+        out
+    }
+
+    #[test]
+    fn only_the_exported_personality_becomes_a_weak_private_external() {
+        let exported = N_SECT | N_EXT;
+        let before = object(&[
+            ("_hlp_toy_add", exported),
+            (PERSONALITY, N_SECT),
+            (PERSONALITY, exported),
+        ]);
+        let mut after = before.clone();
+        share_personality(&mut after).unwrap();
+        let entry = |i: usize| 32 + 24 + i * 16;
+        // The other symbol and the local copy are as they were.
+        assert_eq!(after[entry(0)..entry(2)], before[entry(0)..entry(2)]);
+        assert_eq!(after[entry(2) + 4], exported | N_PEXT);
+        assert_eq!(after[entry(2) + 6..entry(2) + 8], N_WEAK_DEF.to_le_bytes());
+    }
+
+    #[test]
+    fn an_object_without_the_personality_is_refused() {
+        let mut other = object(&[("_hlp_toy_add", N_SECT | N_EXT)]);
+        let why = share_personality(&mut other).unwrap_err().to_string();
+        assert!(why.contains("does not export"), "{why}");
+        let why = share_personality(&mut [0u8; 40]).unwrap_err().to_string();
+        assert!(why.contains("not a 64-bit Mach-O"), "{why}");
+    }
 
     #[test]
     fn rust_internals_are_named_by_mangling_and_shim_prefixes() {

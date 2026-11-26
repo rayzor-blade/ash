@@ -36,17 +36,35 @@ fn c_archive(dir: &Path, name: &str, source: &Path, flags: &[&str]) -> PathBuf {
     archive
 }
 
+/// `source` built by rustc as `lib<name>.a`, a static library with its own
+/// copy of `std`.
+fn rust_archive(dir: &Path, name: &str, source: &str) -> PathBuf {
+    let file = dir.join(format!("{name}.rs"));
+    std::fs::write(&file, source).unwrap();
+    let archive = dir.join(format!("lib{name}.a"));
+    let built = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
+        .args(["--edition", "2024", "--crate-type", "staticlib"])
+        .args(["-C", "opt-level=1", "--crate-name", name, "-o"])
+        .arg(&archive)
+        .arg(&file)
+        .status()
+        .expect("no rustc");
+    assert!(built.success(), "rustc could not build {name}");
+    archive
+}
+
 /// `ash --build` of the toy program, for `cross` = (triple, runtime) when
 /// the target is not this machine.
-fn build(out: &Path, archive: &Path, cross: Option<(&str, &Path)>) -> Result<(), String> {
+fn build(out: &Path, archives: &[&Path], cross: Option<(&str, &Path)>) -> Result<(), String> {
     let mut cmd = Command::new(ash_cli_bin());
     cmd.arg("--quiet").arg("--build").arg(out);
     if let Some((triple, runtime)) = cross {
         cmd.args(["--target", triple]).arg("--runtime").arg(runtime);
     }
-    cmd.arg("--native-lib")
-        .arg(archive)
-        .arg(tests_dir().join("test_static_native.hl"));
+    for archive in archives {
+        cmd.arg("--native-lib").arg(archive);
+    }
+    cmd.arg(tests_dir().join("test_static_native.hl"));
     let result = run_with_timeout(cmd, Duration::from_secs(300));
     if !result.timed_out && result.output.status.success() {
         Ok(())
@@ -55,12 +73,12 @@ fn build(out: &Path, archive: &Path, cross: Option<(&str, &Path)>) -> Result<(),
     }
 }
 
-/// The toy program built from `archive` into `dir`, and run: one executable
+/// The toy program built from `archives` into `dir`, and run: one executable
 /// with no HDLL and no shared runtime beside it, that prints what the library
 /// computes.
-fn assert_links_and_runs(dir: &Path, archive: &Path) {
+fn assert_links_and_runs(dir: &Path, archives: &[&Path]) {
     let out = dir.join("native");
-    build(&out, archive, None).unwrap_or_else(|e| panic!("{e}"));
+    build(&out, archives, None).unwrap_or_else(|e| panic!("{e}"));
 
     // One executable: no HDLL, and no shared runtime staged beside it.
     let beside: Vec<String> = std::fs::read_dir(dir)
@@ -91,7 +109,7 @@ fn a_program_takes_its_library_from_the_archive_and_needs_no_hdll() {
     let dir = tempfile::tempdir().unwrap();
     let toy = tests_dir().join("static_native/toy.c");
     let archive = c_archive(dir.path(), "toy", &toy, &[]);
-    assert_links_and_runs(dir.path(), &archive);
+    assert_links_and_runs(dir.path(), &[&archive]);
 }
 
 /// A Rust library carries its own copy of `std`, which the runtime has too:
@@ -99,9 +117,9 @@ fn a_program_takes_its_library_from_the_archive_and_needs_no_hdll() {
 #[test]
 fn a_rust_library_with_its_own_std_links_beside_the_runtime() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("toyrs.rs");
-    std::fs::write(
-        &source,
+    let archive = rust_archive(
+        dir.path(),
+        "toyrs",
         r#"use std::os::raw::{c_char, c_void};
 extern "C" fn add(a: i32, b: i32) -> i32 { std::panic::catch_unwind(|| a + b).unwrap_or(0) }
 extern "C" fn scale(x: f64, k: f64) -> f64 { std::panic::catch_unwind(|| x * k).unwrap_or(0.0) }
@@ -116,18 +134,69 @@ pub extern "C" fn hlp_toy_scale(sign: *mut *const c_char) -> *const c_void {
     scale as *const c_void
 }
 "#,
-    )
-    .unwrap();
-    let archive = dir.path().join("libtoyrs.a");
-    let built = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()))
-        .args(["--edition", "2024", "--crate-type", "staticlib"])
-        .args(["-C", "opt-level=1", "--crate-name", "toyrs", "-o"])
-        .arg(&archive)
-        .arg(&source)
-        .status()
-        .expect("no rustc");
-    assert!(built.success(), "rustc could not build the library");
-    assert_links_and_runs(dir.path(), &archive);
+    );
+    assert_links_and_runs(dir.path(), &[&archive]);
+}
+
+/// Each Rust library brings its own unwinding personality, and a Mach-O image
+/// has room for only a few. Four of them link beside the runtime, and every
+/// panic is caught: three in libraries the toy calls, and one of its own that
+/// unwinds through a frame with a destructor.
+#[test]
+fn several_rust_libraries_link_and_each_catches_its_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let toy = rust_archive(
+        dir.path(),
+        "toyrs",
+        r#"use std::os::raw::{c_char, c_void};
+use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+unsafe extern "C" {
+    safe fn probe_two() -> i32;
+    safe fn probe_three() -> i32;
+    safe fn probe_four() -> i32;
+}
+static DROPPED: AtomicI32 = AtomicI32::new(0);
+struct Counted;
+impl Drop for Counted {
+    fn drop(&mut self) {
+        DROPPED.fetch_add(1, Relaxed);
+    }
+}
+#[inline(never)]
+fn fail() {
+    let _counted = Counted;
+    panic!("deliberate");
+}
+extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
+/// `x * k` once every panic was caught and the destructor ran.
+extern "C" fn scale(x: f64, k: f64) -> f64 {
+    let caught = std::panic::catch_unwind(fail).is_err()
+        && DROPPED.load(Relaxed) == 1
+        && probe_two() + probe_three() + probe_four() == 3;
+    if caught { x * k } else { 0.0 }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_toy_add(sign: *mut *const c_char) -> *const c_void {
+    unsafe { *sign = c"ii_i".as_ptr() };
+    add as *const c_void
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn hlp_toy_scale(sign: *mut *const c_char) -> *const c_void {
+    unsafe { *sign = c"dd_d".as_ptr() };
+    scale as *const c_void
+}
+"#,
+    );
+    let mut archives = vec![toy];
+    for name in ["two", "three", "four"] {
+        let source = format!(
+            "#[unsafe(no_mangle)]\npub extern \"C\" fn probe_{name}() -> i32 {{\n    \
+             i32::from(std::panic::catch_unwind(|| panic!(\"deliberate\")).is_err())\n}}\n"
+        );
+        archives.push(rust_archive(dir.path(), name, &source));
+    }
+    let archives: Vec<&Path> = archives.iter().map(PathBuf::as_path).collect();
+    assert_links_and_runs(dir.path(), &archives);
 }
 
 #[test]
@@ -140,7 +209,7 @@ fn a_library_no_archive_touches_is_still_required_as_an_hdll() {
     )
     .unwrap();
     let archive = c_archive(dir.path(), "other", &other, &[]);
-    let err = build(&dir.path().join("native"), &archive, None).unwrap_err();
+    let err = build(&dir.path().join("native"), &[&archive], None).unwrap_err();
     assert!(
         err.contains("Required library 'toy' not found"),
         "an archive that defines none of the library's primitives must not stand in for it:\n{err}"
@@ -171,7 +240,7 @@ fn a_macos_program_cross_builds_for_the_other_architecture_from_an_archive() {
     let toy = tests_dir().join("static_native/toy.c");
     let archive = c_archive(dir.path(), "toy", &toy, &["-arch", arch]);
     let out = dir.path().join("native");
-    build(&out, &archive, Some((triple, &runtime))).unwrap_or_else(|e| panic!("{e}"));
+    build(&out, &[&archive], Some((triple, &runtime))).unwrap_or_else(|e| panic!("{e}"));
 
     let bytes = std::fs::read(&out).unwrap();
     let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());

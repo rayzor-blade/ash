@@ -9,7 +9,7 @@
 //!
 //! The symbols are read from the archive directly, because Apple's `nm`
 //! cannot read the bitcode rustc leaves in a library's members. The merge uses
-//! the compiler driver, and on Android the NDK's `llvm-objcopy` finishes it.
+//! the compiler driver, and for ELF targets an `objcopy` finishes it.
 //!
 //! On Mach-O the unwinding personality is the one internal the libraries share:
 //! compact unwind has room for only a few personalities in an image, so each
@@ -20,6 +20,8 @@ use std::process::Command;
 
 use anyhow::{Result, anyhow, bail};
 use object::macho::{LC_SYMTAB, MH_MAGIC_64, N_EXT, N_PEXT, N_SECT, N_STAB, N_TYPE, N_WEAK_DEF};
+use object::read::elf::{FileHeader, SectionHeader, Sym};
+use object::{Endianness, SymbolIndex, elf};
 
 use crate::archive::defined_in;
 
@@ -154,16 +156,64 @@ fn isolate(archive: &Path, out: &Path, tools: &Tools<'_>) -> Result<Option<()>> 
             .arg(format!("--keep-global-symbols={}", list.display()))
             .arg(out);
         run(&mut objcopy, "isolating a Rust library")?;
+        rewrite(out, archive, keep_local_groups)?;
     }
     if shares_personality {
-        let mut object =
-            std::fs::read(out).map_err(|e| anyhow!("could not read {}: {e}", out.display()))?;
-        share_personality(&mut object)
-            .map_err(|e| anyhow!("isolating {}: {e}", archive.display()))?;
-        std::fs::write(out, object)
-            .map_err(|e| anyhow!("could not write {}: {e}", out.display()))?;
+        rewrite(out, archive, share_personality)?;
     }
     Ok(Some(()))
+}
+
+/// Apply `patch` to the object merged from `archive`.
+fn rewrite(out: &Path, archive: &Path, patch: fn(&mut [u8]) -> Result<()>) -> Result<()> {
+    let mut object =
+        std::fs::read(out).map_err(|e| anyhow!("could not read {}: {e}", out.display()))?;
+    patch(&mut object).map_err(|e| anyhow!("isolating {}: {e}", archive.display()))?;
+    std::fs::write(out, object).map_err(|e| anyhow!("could not write {}: {e}", out.display()))
+}
+
+/// Stop a linker treating the groups with a local signature as COMDAT. Such a
+/// group is this library's own copy, such as the one that names its unwinding
+/// personality. A linker that still matches it by name keeps one library's and
+/// discards the others', which their unwind tables refer to. `llvm-objcopy`
+/// clears the flag when it makes the signature local; GNU `objcopy` does not.
+fn keep_local_groups(object: &mut [u8]) -> Result<()> {
+    let flags = match object.get(4) {
+        Some(&elf::ELFCLASS32) => local_group_flags::<elf::FileHeader32<Endianness>>(object)?,
+        Some(&elf::ELFCLASS64) => local_group_flags::<elf::FileHeader64<Endianness>>(object)?,
+        _ => bail!("the merged object is not an ELF object"),
+    };
+    for at in flags {
+        // `GRP_COMDAT` is the one flag a group's first word carries.
+        object
+            .get_mut(at..at + 4)
+            .ok_or_else(|| anyhow!("the merged object is truncated"))?
+            .fill(0);
+    }
+    Ok(())
+}
+
+/// Where the flag word of each section group with a local signature starts.
+fn local_group_flags<Elf: FileHeader<Endian = Endianness>>(object: &[u8]) -> Result<Vec<usize>> {
+    let unreadable = |e: object::read::Error| anyhow!("reading the merged object: {e}");
+    let header = Elf::parse(object).map_err(unreadable)?;
+    let endian = header.endian().map_err(unreadable)?;
+    let sections = header.sections(endian, object).map_err(unreadable)?;
+    let symbols = sections
+        .symbols(endian, object, elf::SHT_SYMTAB)
+        .map_err(unreadable)?;
+    let mut flags = Vec::new();
+    for section in sections.iter() {
+        if section.sh_type(endian) != elf::SHT_GROUP {
+            continue;
+        }
+        let signature = SymbolIndex(section.sh_info(endian) as usize);
+        if symbols.symbol(signature).map_err(unreadable)?.st_bind() == elf::STB_LOCAL {
+            let at: u64 = section.sh_offset(endian).into();
+            flags.push(usize::try_from(at)?);
+        }
+    }
+    Ok(flags)
 }
 
 /// Mark the exported personality of a 64-bit Mach-O object as a weak private
@@ -325,6 +375,63 @@ mod tests {
         assert_eq!(after[entry(0)..entry(2)], before[entry(0)..entry(2)]);
         assert_eq!(after[entry(2) + 4], exported | N_PEXT);
         assert_eq!(after[entry(2) + 6..entry(2) + 8], N_WEAK_DEF.to_le_bytes());
+    }
+
+    /// A little-endian ELF64 object with two COMDAT groups, the first signed by
+    /// a local symbol and the second by a global one. Returns it with where
+    /// each group's flag word is.
+    fn elf_with_two_groups() -> (Vec<u8>, [usize; 2]) {
+        let (header, section) = (64usize, 64usize);
+        // Two groups of two words, three symbols, and one empty string table.
+        let groups = [header, header + 8];
+        let symtab = header + 16;
+        let strtab = symtab + 3 * 24;
+        let table = strtab + 8;
+        let mut out = vec![0u8; table + 5 * section];
+        out[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', elf::ELFCLASS64, 1, 1]);
+        out[16] = 1; // relocatable
+        out[20] = 1; // version
+        out[0x28..0x30].copy_from_slice(&(table as u64).to_le_bytes());
+        for (at, value) in [(0x34, 64u16), (0x3a, 64), (0x3c, 5), (0x3e, 4)] {
+            out[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for at in groups {
+            out[at..at + 4].copy_from_slice(&elf::GRP_COMDAT.to_le_bytes());
+        }
+        // The second and third symbols: local, then global.
+        out[symtab + 24 + 4] = elf::STB_LOCAL << 4;
+        out[symtab + 48 + 4] = elf::STB_GLOBAL << 4;
+        // Each section: type, offset, size, link, info.
+        let sections = [
+            (elf::SHT_GROUP, groups[0], 8, 3, 1),
+            (elf::SHT_GROUP, groups[1], 8, 3, 2),
+            (elf::SHT_SYMTAB, symtab, 72, 4, 2),
+            (elf::SHT_STRTAB, strtab, 1, 0, 0),
+        ];
+        for (i, (kind, offset, size, link, info)) in sections.into_iter().enumerate() {
+            let at = table + (i + 1) * section;
+            out[at + 4..at + 8].copy_from_slice(&kind.to_le_bytes());
+            out[at + 24..at + 32].copy_from_slice(&(offset as u64).to_le_bytes());
+            out[at + 32..at + 40].copy_from_slice(&(size as u64).to_le_bytes());
+            out[at + 40..at + 44].copy_from_slice(&(link as u32).to_le_bytes());
+            out[at + 44..at + 48].copy_from_slice(&(info as u32).to_le_bytes());
+            if kind == elf::SHT_SYMTAB {
+                out[at + 56..at + 64].copy_from_slice(&24u64.to_le_bytes());
+            }
+        }
+        (out, groups)
+    }
+
+    #[test]
+    fn only_a_group_with_a_local_signature_stops_being_comdat() {
+        let (before, [local, global]) = elf_with_two_groups();
+        let mut after = before.clone();
+        keep_local_groups(&mut after).unwrap();
+        assert_eq!(after[local..local + 4], 0u32.to_le_bytes());
+        assert_eq!(after[global..global + 4], elf::GRP_COMDAT.to_le_bytes());
+        // Nothing but that word changed.
+        assert_eq!(after[..local], before[..local]);
+        assert_eq!(after[local + 4..], before[local + 4..]);
     }
 
     #[test]

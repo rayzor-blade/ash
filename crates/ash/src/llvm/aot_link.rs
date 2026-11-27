@@ -939,6 +939,65 @@ fn link_wasm_module(
 /// that a program without the host still links.
 const HOST_LOOP_SYMBOLS: [&str; 2] = ["xwindow_run_turns", "xwindow_set_turn_yield"];
 
+/// What Android looks up by name in an app's shared library: the entry a
+/// NativeActivity calls, and the functions Java binds through JNI.
+const ANDROID_EXPORTS: [&str; 3] = ["ANativeActivity_*", "JNI_On*", "Java_*"];
+
+/// Whether `out` is the shared library an Android app loads: an Android output
+/// named `.so`.
+fn android_library(os: &str, out: &Path) -> bool {
+    os == "android" && out.extension().is_some_and(|e| e == "so")
+}
+
+/// The arguments that make an Android link a shared library exporting only
+/// [`ANDROID_EXPORTS`], as the version script written to `script` lists them.
+/// Every other reference resolves at link time, not on the device.
+fn android_library_args(out: &Path, script: &Path) -> Result<Vec<String>> {
+    let name = out
+        .file_name()
+        .ok_or_else(|| anyhow!("{} names no file", out.display()))?
+        .to_string_lossy();
+    // Patterns, not names: a library need not define every one of them.
+    let exports: String = ANDROID_EXPORTS.iter().map(|p| format!("{p}; ")).collect();
+    std::fs::write(script, format!("{{ global: {exports}local: *; }};\n"))?;
+    Ok(vec![
+        "-shared".into(),
+        format!("-Wl,-soname,{name}"),
+        format!("-Wl,--version-script={}", script.display()),
+        "-Wl,--no-undefined".into(),
+        // The log and the activity, window and asset calls of the platform.
+        "-llog".into(),
+        "-landroid".into(),
+    ])
+}
+
+/// Fail when `library` exports nothing Android can call, which is what a link
+/// without the window host produces.
+fn require_android_entry(library: &Path) -> Result<()> {
+    use object::{Object, ObjectSymbol};
+
+    let data =
+        std::fs::read(library).map_err(|e| anyhow!("could not read {}: {e}", library.display()))?;
+    let file = object::File::parse(&*data)
+        .map_err(|e| anyhow!("{} is not an object file: {e}", library.display()))?;
+    let callable = file.dynamic_symbols().any(|s| {
+        s.is_definition()
+            && s.name().is_ok_and(|name| {
+                ANDROID_EXPORTS
+                    .iter()
+                    .any(|p| name.starts_with(p.trim_end_matches('*')))
+            })
+    });
+    if !callable {
+        bail!(
+            "{} exports nothing Android can call, so no app could start it. Pass the \
+             window host that defines ANativeActivity_onCreate as --native-lib",
+            library.display()
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn link_executable(
     objects: &[PathBuf],
@@ -1068,7 +1127,20 @@ pub fn link_executable(
         }
     }
     cmd.args(platform_args(driver.dialect, os, triple)?);
+    // The version script stays on disk until the linker has run.
+    let library = android_library(os, out)
+        .then(tempfile::tempdir)
+        .transpose()?;
+    if let Some(dir) = &library {
+        cmd.args(android_library_args(out, &dir.path().join("exports.map"))?);
+    }
     run(&mut cmd, &format!("{} (link)", driver.program))?;
+    if library.is_some()
+        && let Err(unusable) = require_android_entry(out)
+    {
+        let _ = std::fs::remove_file(out);
+        return Err(unusable);
+    }
 
     if kind == Runtime::Shared {
         stage_runtime(&runtime, out, abi, quiet, os)?;
@@ -1121,6 +1193,27 @@ mod cross_link_tests {
         let android = platform_args(Dialect::Unix, "android", "aarch64-linux-android").unwrap();
         assert!(android.contains(&"-ldl".into()));
         assert!(!android.contains(&"-lpthread".into()));
+    }
+
+    #[test]
+    fn only_an_android_output_named_so_is_a_library() {
+        assert!(android_library("android", Path::new("out/libmain.so")));
+        assert!(!android_library("android", Path::new("out/app")));
+        assert!(!android_library("linux", Path::new("libmain.so")));
+        assert!(!android_library("ios", Path::new("libmain.so")));
+    }
+
+    #[test]
+    fn an_android_library_exports_only_what_android_looks_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("exports.map");
+        let args = android_library_args(Path::new("build/libmain.so"), &script).unwrap();
+        assert!(args.contains(&"-shared".into()));
+        assert!(args.contains(&"-Wl,-soname,libmain.so".into()));
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            "{ global: ANativeActivity_*; JNI_On*; Java_*; local: *; };\n"
+        );
     }
 
     #[test]

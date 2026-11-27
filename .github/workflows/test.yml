@@ -199,6 +199,18 @@ jobs:
         shell: bash
         run: cargo test -p ash --test aot_smoke --test aot_distribution --test aot_dynamic_throw --test desktop_native_lib --test wide_native -- --nocapture
 
+      # The runner image carries an NDK; the runtime is built for the one
+      # ABI the check links.
+      - name: Android shared library
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        env:
+          ASH_ANDROID_TEST: required
+        run: |
+          rustup target add x86_64-linux-android
+          cargo rustc -p ash_std --target x86_64-linux-android --release --crate-type staticlib
+          cargo test -p ash --test android_library -- --nocapture
+
   hdll-callbacks:
     # The corpus links real shared libraries, resolves primitives by name from
     # an export table, and drives real collections -- every one of which the

@@ -282,11 +282,32 @@ build one (below) and put it there or name it with `--runtime`.
   exits with its status. A program that links no window host runs on the main
   thread as it does on every other target. On Android, hlwindow's
   `android_main` calls the `xwindow_main` that ash defines, and the program
-  runs on the activity's thread.
+  runs on the activity's thread. When the program's entry returns,
+  `xwindow_main` returns, and the host then finishes the activity. Android can
+  call `android_main` again in the same process, and the runtime cannot start a
+  second time. In that case the process exits, and Android starts the activity
+  again in a new process. `Sys.exit` also ends the process, so Android starts an
+  activity that is in front again. To quit an app, return from the entry.
 - ash writes an executable, which runs under `xcrun simctl spawn` and
-  `adb shell`. It does not write an app bundle or an APK. A UIKit app needs a
-  bundle: put the executable and an `Info.plist` in a `.app` directory and
-  install it with `xcrun simctl install`.
+  `adb shell`, or an Android shared library (below). It does not write an app
+  bundle or an APK. A UIKit app needs a bundle: put the executable and an
+  `Info.plist` in a `.app` directory and install it with
+  `xcrun simctl install`.
+- An Android app loads a shared library, not an executable. For an Android
+  target, give `--build` a name that ends in `.so`:
+
+  ```sh
+  ash --build libmain.so --target aarch64-linux-android \
+    --native-lib libhost.a app.hl
+  ```
+
+  The window host in `libhost.a` must define `ANativeActivity_onCreate` and an
+  `android_main` that calls `xwindow_main`. The library exports only the names
+  that Android looks up: `ANativeActivity_*`, `JNI_On*` and `Java_*`. If it
+  exports none of them, the build fails. ash links `liblog` and `libandroid`.
+  Name other system libraries in `ASH_LINK_ARGS`. For a `NativeActivity` app,
+  put the file in the APK as `lib/<abi>/libmain.so` and name it `main` in the
+  manifest.
 - Build a runtime per target with
   `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
   Android with `cargo rustc -p ash_std --target aarch64-linux-android

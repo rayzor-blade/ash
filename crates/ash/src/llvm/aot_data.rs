@@ -2027,17 +2027,48 @@ impl<'ctx> JITModule<'ctx> {
 
     /// `xwindow_main`, the program entry hlwindow's `android_main` calls on the
     /// activity's thread once it has kept the activity. It runs the same
-    /// startup and program as `main`, with no arguments.
+    /// startup and program as `main`, with no arguments, and returns when the
+    /// program does. Android can call `android_main` again in the same process,
+    /// where the runtime cannot start a second time, so a second call ends the
+    /// process and Android starts the activity again in a new one.
     fn emit_xwindow_main(&mut self, main: FunctionValue<'ctx>) -> Result<()> {
+        let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let entry = self.module.add_function(
-            "xwindow_main",
-            self.context.void_type().fn_type(&[], false),
-            None,
-        );
+        let void_type = self.context.void_type();
+        let entered = self.module.add_global(i8_type, None, "ash_xwindow_entered");
+        entered.set_linkage(Linkage::Internal);
+        entered.set_initializer(&i8_type.const_zero());
+        let entry = self
+            .module
+            .add_function("xwindow_main", void_type.fn_type(&[], false), None);
         let block = self.context.append_basic_block(entry, "entry");
+        let first = self.context.append_basic_block(entry, "first");
+        let again = self.context.append_basic_block(entry, "again");
         self.builder.position_at_end(block);
+        let before = self.builder.build_atomicrmw(
+            inkwell::AtomicRMWBinOp::Xchg,
+            entered.as_pointer_value(),
+            i8_type.const_int(1, false),
+            inkwell::AtomicOrdering::SequentiallyConsistent,
+        )?;
+        let is_first = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            before,
+            i8_type.const_zero(),
+            "first_call",
+        )?;
+        self.builder
+            .build_conditional_branch(is_first, first, again)?;
+
+        self.builder.position_at_end(again);
+        let exit_ty = void_type.fn_type(&[i32_type.into()], false);
+        let exit = self.aot_symbol("hlp_sys_exit", exit_ty);
+        self.builder
+            .build_indirect_call(exit_ty, exit, &[i32_type.const_zero().into()], "")?;
+        self.builder.build_return(None)?;
+
+        self.builder.position_at_end(first);
         self.builder.build_call(
             main,
             &[i32_type.const_zero().into(), ptr_type.const_null().into()],

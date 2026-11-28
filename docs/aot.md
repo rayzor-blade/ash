@@ -305,9 +305,11 @@ build one (below) and put it there or name it with `--runtime`.
   `android_main` that calls `xwindow_main`. The library exports only the names
   that Android looks up: `ANativeActivity_*`, `JNI_On*` and `Java_*`. If it
   exports none of them, the build fails. ash links `liblog` and `libandroid`.
-  Name other system libraries in `ASH_LINK_ARGS`. For a `NativeActivity` app,
-  put the file in the APK as `lib/<abi>/libmain.so` and name it `main` in the
-  manifest.
+  Name other system libraries in `ASH_LINK_ARGS`. If your host uses
+  `android-activity`, set `ASH_ANDROID_API=26`. The crate calls a function from
+  API level 26. At the default level, 24, the link fails. For a `NativeActivity`
+  app, put the file in the APK as `lib/<abi>/libmain.so` and name it `main` in
+  the manifest.
 - Build a runtime per target with
   `cargo build --release -p ash_std --target aarch64-apple-ios-sim`, and for
   Android with `cargo rustc -p ash_std --target aarch64-linux-android

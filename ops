@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1795828624,"nonce":"1dflmLWQf+Za50Kg0jIQsMkitpg=","status":2}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1795828654,"nonce":"pM8ArDaUiJzpc2kXiut0h6mKWOk=","message":"The hxn session reports that the same library path also runs its Vulkan GPU and 2D checks as APKs on a physical Pixel 10 Pro with Android 17, with no crash and no restart loop. Not verified here.","files":null}]}
